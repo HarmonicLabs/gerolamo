@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg viewBox="0 0 500 500" xmlns="http://www.w3.org/2000/svg" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Background -->
+    <rect width="500" height="500" fill="#0A0A0A"/>
+    
+    <!-- Fibonacci Circles -->
+    <circle cx="250" cy="250" r="144" stroke="#FFD700" stroke-width="4"/>
+    <circle cx="250" cy="250" r="89" stroke="#FFD700" stroke-width="3"/>
+    <circle cx="250" cy="250" r="55" stroke="#FFD700" stroke-width="2.5"/>
+    <circle cx="250" cy="250" r="34" stroke="#FFD700" stroke-width="2"/>
+    <circle cx="250" cy="250" r="21" stroke="#FFD700" stroke-width="1.5"/>
+    
+    <!-- Node Connection Points -->
+    <circle cx="340" cy="137" r="6" fill="#FFD700"/>
+    <circle cx="250" cy="394" r="6" fill="#FFD700"/>
+    <circle cx="106" cy="250" r="6" fill="#FFD700"/>
+    
+    <!-- Inner Circle Nodes -->
+    <circle cx="265" cy="235" r="4" fill="#FFD700"/>
+    <circle cx="235" cy="265" r="4" fill="#FFD700"/>
+    
+    <!-- Third Circle Node -->
+    <circle cx="305" cy="250" r="4" fill="#FFD700"/>
+    
+    <!-- Fourth Circle Nodes -->
+    <circle cx="250" cy="339" r="4" fill="#FFD700"/>
+    <circle cx="161" cy="250" r="4" fill="#FFD700"/>
+</svg>

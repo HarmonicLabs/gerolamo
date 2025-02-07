@@ -68,7 +68,8 @@ function gen()
     const r = triangleR;
     const rotationDegrees = 45;
     return `
-    <path d="${generateHypocycloidPath(k, r, 100, rotationDegrees, 1)}" stroke="#627EEA" stroke-width="2"></path>
+    <path d="${generateHypocycloidPath(k, r, 100, rotationDegrees, 1)}"
+    stroke="#627EEA" stroke-width="2"></path>
     ${placeDots(k, r, k, rotationDegrees, 1)}
     `;
 }
@@ -79,7 +80,8 @@ function genReverse()
     const r = 7.5;
     const rotationDegrees = 90;
     return `
-    <path d="${generateHypocycloidPath(k, r, 100, rotationDegrees, 1)}" stroke="#627EEA" stroke-width="2"></path>
+    <path d="${generateHypocycloidPath(k, r, 100, rotationDegrees, 1)}"
+    stroke="#627EEA" stroke-width="2"></path>
     ${placeDots(k, r, k, rotationDegrees, 1)}
     `;
 }
@@ -91,7 +93,13 @@ void async function main() {
     await writeFile(
         "./assets/gerolamo-logo.svg",
 `<svg xmlns="http://www.w3.org/2000/svg" width="400" height="400" viewBox="-100 -100 200 200" fill="none" version="1.1" xmlns:xlink="http://www.w3.org/1999/xlink">
-<circle cx="0" cy="0" r="70" fill="#FCFDFE"></circle>
+ <defs>
+    <radialGradient id="bgGradient" cx="50%" cy="50%" r="50%" fx="50%" fy="50%">
+        <stop offset="50%" style="stop-color:#F5F7FF;stop-opacity:1" />
+        <stop offset="200%" style="stop-color:#bdf;stop-opacity:1" />
+    </radialGradient>
+</defs>
+<circle cx="0" cy="0" r="70" fill="url(#bgGradient)"></circle>
 ${gen()}
 ${genReverse()}
 </svg>`  

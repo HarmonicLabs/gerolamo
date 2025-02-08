@@ -1,30 +1,26 @@
-import { Multiplexer, HandshakeClient, HandshakeAcceptVersion } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { Multiplexer, HandshakeClient, CardanoNetworkMagic, HandshakeAcceptVersion, HandshakeQueryReply, HandshakeRefuse } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "./logger";
 
-export async function performHandshake( mplexers: Multiplexer[], networkMagic: number ): Promise<Multiplexer[]>
+export function performHandshake(
+    mplexers: Multiplexer[],
+    networkMagic: number = CardanoNetworkMagic.Preprod
+): Promise<(HandshakeAcceptVersion | HandshakeRefuse | HandshakeQueryReply)[]>
 {
-    const results = await Promise.all(
-        mplexers.map(mplexer => {
-            const remoteAddress = (mplexer.socket.unwrap() as any).remoteAddress;
-            return new Promise<Multiplexer | undefined>(async (resolve) => {
-                
-                mplexer.once("error", err => {
-                    logger.warn("could not connect to remote socket.", remoteAddress);
-                    logger.error(err);
-                    resolve(undefined);
-                });
-                
-                const client = new HandshakeClient(mplexer);
-                const result = client.propose(networkMagic);
-                if(!(result instanceof HandshakeAcceptVersion))
-                {
-                    logger.warn("could not connect to remote socket.", remoteAddress);
-                    resolve(undefined);
-                }
+    return Promise.all(
+        mplexers.map( (mplexer, i) => {
+            const client = new HandshakeClient( mplexer );
 
-                resolve(mplexer);
+            logger.info(`Performing handshake`);
+
+            return client.propose({
+                networkMagic,
+                query: false
+            })
+            .then( result => {
+                logger.debug(i, "Handshake result: ", result);
+                client.terminate();
+                return result;
             });
         })
     );
-    return results.filter( result => result !== undefined && !result.socket.isClosed() ) as Multiplexer[];
 }

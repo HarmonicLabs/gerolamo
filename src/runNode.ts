@@ -1,8 +1,6 @@
 import { BlockFetchClient, BlockFetchNoBlocks, ChainPoint, ChainSyncClient, ChainSyncIntersectFound, ChainSyncRollBackwards, ChainSyncRollForward, MiniProtocol, Multiplexer, MultiplexerHeader, RealPoint, isRealPoint, unwrapMultiplexerMessages } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "./logger";
-import { connect, Socket } from "net";
-import { existsSync, mkdir, mkdirSync, writeFile, writeFileSync } from "fs";
-import { appendFile } from "fs/promises";
+import { Socket } from "net";
 import { fromHex, toHex, uint8ArrayEq } from "@harmoniclabs/uint8array-utils";
 import { MultiEraHeader } from "../lib/ledgerExtension/multi-era/MultiEraHeader";
 import { pointFromHeader } from "../lib/utils/pointFromHeadert";
@@ -10,42 +8,10 @@ import { ClientNext, getUniqueExtensions } from "../lib/consensus/ChainDb/Volati
 import { downloadExtensions, downloadForks } from "../lib/consensus/ChainDb/VolatileDb/downloadBlocks";
 import { ChainDb } from "../lib/consensus/ChainDb/ChainDb";
 import { ChainFork, ChainForkHeaders, VolatileDb, forkHeadersToPoints } from "../lib/consensus/ChainDb/VolatileDb";
-import { Topology } from "../lib/topology";
-import { performHandshake } from "./performHandshake";
 
-export interface NodeArguments {
-    topology: Topology,
-    networkMagic: number,
-}
-
-export async function runNode({
-    topology,
-    networkMagic
-}: NodeArguments): Promise<void>
+export async function runNode( connections: Multiplexer[], batch_size: number ): Promise<void>
 {
-    const connections: Multiplexer[] = await performHandshake(
-        topology.localRoots.concat( topology.publicRoots )
-        .map( root =>
-            root.accessPoints.map( accessPoint => {
-                const mplexer = new Multiplexer({
-                    connect: () => 
-                        connect({
-                            host: accessPoint.address,
-                            port: accessPoint.port
-                        }),
-                    protocolType: "node-to-node"
-                });
-                return mplexer;
-            })
-        )
-        .flat( 1 ),
-        networkMagic
-    );
-
-    logger.info("connected to", connections.length, "peers");
-
-    if( connections.length === 0 ) return;
-
+    logger.info("running node");
     // temporarily just consider 2 connections
     // while( connections.length > 1 ) connections.pop();
 
@@ -58,16 +24,24 @@ export async function runNode({
         })
     );
 
-    for( const { chainSync, blockFetch } of peers ) {
-        chainSync.once("awaitReply", () =>
+    peers.forEach( ({ chainSync: client }) => {
+        client.once("awaitReply", () =>
             logger.info(
                 "reached tip on peer",
-                (chainSync.mplexer.socket.unwrap() as Socket).remoteAddress
+                (client.mplexer.socket.unwrap() as Socket).remoteAddress
             )
         );
-        chainSync .on("error", justLogErr );
-        blockFetch.on("error", justLogErr );
-    }
+        client.on("error", err => {
+            logger.error( err );
+            throw err;
+        });
+    });
+    peers.forEach( ({ blockFetch: client }) => {
+        client.on("error", err => {
+            logger.error( err );
+            throw err;
+        });
+    });
 
     const startPoint = new RealPoint({ 
         blockHeader: {
@@ -126,6 +100,7 @@ export async function runNode({
         chainSelectionForForks( volaitileDb, forks );
     }
 }
+
 
 async function chainSelectionForExtensions(
     volaitileDb: VolatileDb,
@@ -219,15 +194,4 @@ function chainSelectionForForks(
             volaitileDb.trySwitchToForkSync( volaitileDb.forks.indexOf( fork ) );
         }
     }
-}
-
-function logAndThrow( err: any )
-{
-    logger.error( err );
-    throw err;
-}
-
-function justLogErr( err: any )
-{
-    logger.error( err );
 }

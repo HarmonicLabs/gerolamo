@@ -1,5 +1,4 @@
-import { Cbor, LazyCborArray, CborUInt, CborBytes } from "@harmoniclabs/cbor";
-import { LazyCborTag } from "@harmoniclabs/cbor/dist/LazyCborObj/LazyCborTag";
+import { Cbor, LazyCborArray, CborUInt, CborBytes, LazyCborTag } from "@harmoniclabs/cbor";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { logger } from "../../../src/logger";
 

@@ -1,4 +1,4 @@
-import color from "picocolors";
+import color from "chalk";
 
 export enum LoggerPriority {
     Info = 0,

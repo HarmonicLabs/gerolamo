@@ -23,24 +23,28 @@ export async function runNode({
     networkMagic
 }: NodeArguments): Promise<void>
 {
-    const connections: Multiplexer[] = 
-    topology.localRoots.concat( topology.publicRoots )
-    .map( root =>
-        root.accessPoints.map( accessPoint => {
-            const mplexer = new Multiplexer({
-                connect: () => 
-                    connect({
-                        host: accessPoint.address,
-                        port: accessPoint.port
-                    }),
-                protocolType: "node-to-node"
-            });
-            return mplexer;
-        })
-    )
-    .flat( 1 );
+    const connections: Multiplexer[] = await performHandshake(
+        topology.localRoots.concat( topology.publicRoots )
+        .map( root =>
+            root.accessPoints.map( accessPoint => {
+                const mplexer = new Multiplexer({
+                    connect: () => 
+                        connect({
+                            host: accessPoint.address,
+                            port: accessPoint.port
+                        }),
+                    protocolType: "node-to-node"
+                });
+                return mplexer;
+            })
+        )
+        .flat( 1 ),
+        networkMagic
+    );
 
-    void await performHandshake( connections, networkMagic );
+    logger.info("connected to", connections.length, "peers");
+
+    if( connections.length === 0 ) return;
 
     // temporarily just consider 2 connections
     // while( connections.length > 1 ) connections.pop();
@@ -54,24 +58,16 @@ export async function runNode({
         })
     );
 
-    peers.forEach( ({ chainSync: client }) => {
-        client.once("awaitReply", () =>
+    for( const { chainSync, blockFetch } of peers ) {
+        chainSync.once("awaitReply", () =>
             logger.info(
                 "reached tip on peer",
-                (client.mplexer.socket.unwrap() as Socket).remoteAddress
+                (chainSync.mplexer.socket.unwrap() as Socket).remoteAddress
             )
         );
-        client.on("error", err => {
-            logger.error( err );
-            throw err;
-        });
-    });
-    peers.forEach( ({ blockFetch: client }) => {
-        client.on("error", err => {
-            logger.error( err );
-            throw err;
-        });
-    });
+        chainSync .on("error", justLogErr );
+        blockFetch.on("error", justLogErr );
+    }
 
     const startPoint = new RealPoint({ 
         blockHeader: {
@@ -223,4 +219,15 @@ function chainSelectionForForks(
             volaitileDb.trySwitchToForkSync( volaitileDb.forks.indexOf( fork ) );
         }
     }
+}
+
+function logAndThrow( err: any )
+{
+    logger.error( err );
+    throw err;
+}
+
+function justLogErr( err: any )
+{
+    logger.error( err );
 }

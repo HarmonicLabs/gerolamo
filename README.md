@@ -18,6 +18,8 @@
 
 ## Roadmap
 
+### Q1 (Before end of March)
+
   - [x] [ouroboros mini-protocols](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts) necessary for chain syncronization
     - [x] [chain-sync](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts/tree/main/src/protocols/chain-sync)
     - [x] [block-fetch](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts/tree/main/src/protocols/block-fetch)
@@ -36,6 +38,9 @@
     - [ ] chain selection
     - [ ] volatile DB
     - [ ] rollback handling
+
+### Q2 (Before end of June)
+
   - [ ] peer worker (currently on main thread)
   - [ ] mempool
     - [x] [shared mempool](https://github.com/HarmonicLabs/shared-cardano-mempool-ts)

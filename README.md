@@ -16,7 +16,45 @@
 
 # Gerolamo
 
-### Cardano Node implementation in Typesript
+## Roadmap
+
+  - [x] [ouroboros mini-protocols](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts) necessary for chain syncronization
+    - [x] [chain-sync](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts/tree/main/src/protocols/chain-sync)
+    - [x] [block-fetch](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts/tree/main/src/protocols/block-fetch)
+  - [ ] ledger data
+    - [x] headers
+    - [ ] blocks
+  - [ ] ledger state
+    - [x] `lmdb` scheme (this will be `indexedDb` in the browser)
+    - [ ] worker (same as chain selection)
+    - [ ] read-only interface
+    - [ ] read-write interface
+  - [ ] header validation logic
+    - [x] [vrf](https://github.com/HarmonicLabs/crypto/blob/main/src/vrf.ts)
+    - [ ] ledger state integration
+  - [ ] consensus (Praos)
+    - [ ] chain selection
+    - [ ] volatile DB
+    - [ ] rollback handling
+  - [ ] peer worker (currently on main thread)
+  - [ ] mempool
+    - [x] [shared mempool](https://github.com/HarmonicLabs/shared-cardano-mempool-ts)
+    - [ ] tx validation (depends on ledger state)
+    - [x] [tx-submission](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts/tree/main/src/protocols/tx-submission) mini protocol
+  - [ ] node-to-client
+    - [x] [miniprotocols](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts)
+    - [ ] local socket
+    - [ ] CIP integration for browsers
+  - [ ] immutable DB (not for browsers)
+
+## Contribution Guidelines
+For more details on how to contribute, please refer to the [CONTRIBUTING.md](CONTRIBUTING.md) file.
+
+## Communication
+Join our community discussions and stay updated on our progress through our [GitHub Issues](https://github.com/HarmonicLabs/gerolamo/issues) and [Twitter](https://twitter.com/hlabs_tech).
+
+## License
+This project is licensed under the terms of the [LICENSE](LICENSE) file.
 
 ## Why?
 

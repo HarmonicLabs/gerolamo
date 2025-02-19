@@ -151,22 +151,23 @@ export class BabbageHeader
 
         const vrfResult = vrfCertFromCborObj( cVrfResult );
 
+        _originalBytes = _originalBytes ?? cbor.subCborRef?.toBuffer();
         const originalWerePresent = _originalBytes instanceof Uint8Array;
         _originalBytes = _originalBytes instanceof Uint8Array ? _originalBytes : Cbor.encode( cbor ).toBuffer();
         
         const hdr = new BabbageHeader({
             hash: blake2b_256( _originalBytes ) as U8Arr32,
-            prevHash: cPrevHash.buffer as U8Arr32,
+            prevHash: cPrevHash.bytes as U8Arr32,
             slotNo: cSlotNo.num,
             isEBB: false,
             blockNo: cBlockNo.num,
-            issuerVkey: cIssuerVkey.buffer as U8Arr32,
-            vrfVkey: cVrfVkey.buffer as U8Arr32,
+            issuerVkey: cIssuerVkey.bytes as U8Arr32,
+            vrfVkey: cVrfVkey.bytes as U8Arr32,
             blockBodySize: cBlockBodySize.num,
-            blockBodyHash: cBlockBodyHash.buffer as U8Arr32,
+            blockBodyHash: cBlockBodyHash.bytes as U8Arr32,
             operationalCert: opCertFromCborObj( cOpCert ),
             protocolVersion: protocolVersionFromCborObj( cProtVer ),
-            bodySignature: cBodySignature.buffer,
+            bodySignature: cBodySignature.bytes,
             vrfResult,
         });
 

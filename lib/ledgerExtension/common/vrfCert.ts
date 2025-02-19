@@ -21,11 +21,11 @@ export function vrfCertFromCborObj( vrfCert: CborObj ): VrfCert
         vrfCert.array.length >= 2 &&
         vrfCert.array[0] instanceof CborBytes &&
         vrfCert.array[1] instanceof CborBytes &&
-        vrfCert.array[1].buffer.length === 80
+        vrfCert.array[1].bytes.length === 80
     )) throw new Error("invalid cbor for 'VrfCert'");
 
     return [
-        vrfCert.array[0].buffer,
-        vrfCert.array[1].buffer as U8Arr<80>,
+        vrfCert.array[0].bytes,
+        vrfCert.array[1].bytes as U8Arr<80>,
     ];
 }

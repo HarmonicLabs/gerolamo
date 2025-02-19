@@ -22,16 +22,16 @@
   },
   "dependencies": {
     "@harmoniclabs/cardano-ledger-ts": "^0.3.2",
-    "@harmoniclabs/cbor": "^1.6.1",
+    "@harmoniclabs/cbor": "^1.6.2",
+    "@harmoniclabs/crypto": "^0.3.0-dev0",
     "@harmoniclabs/obj-utils": "^1.0.0",
     "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.5-dev2",
     "@harmoniclabs/shared-cardano-mempool-ts": "^0.0.0-dev0",
     "@harmoniclabs/shared-header-pool-ts": "^0.0.0-dev1",
     "@harmoniclabs/uint8array-utils": "^1.0.3",
-    "@types/blake2": "^4.0.4",
     "@types/node": "^20.1.7",
-    "blake2": "^5.0.0",
     "chalk": "^5.4.1",
+    "lmdb": "^3.2.6",
     "picocolors": "^1.0.0"
   },
   "devDependencies": {

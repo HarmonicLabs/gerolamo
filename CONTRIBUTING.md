@@ -80,7 +80,7 @@ First off, thanks for your interest in contributing to Gerolamo! This is an open
   Look for issues labeled “good first issue” if you’re just getting started. These are simpler tasks that are ideal for newcomers.
 
 - **Roadmap:**  
-  Check out our roadmap file or GitHub Projects board (if we have one) to see what’s planned. This can give you a sense of what’s coming next and where you might contribute.
+  Check out our roadmap file or GitHub Projects board to see what’s planned. This can give you a sense of what’s coming next and where you might contribute.
 
 ## Communication
 

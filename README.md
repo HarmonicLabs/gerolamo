@@ -43,6 +43,9 @@
 
   - [ ] peer worker (currently on main thread)
   - [ ] mithril bootstrap
+  - [ ] network comunications
+    - [ ] browser-to-fullnode
+    - [ ] browser-to-browser via WebRTC
   - [ ] mempool
     - [x] [shared mempool](https://github.com/HarmonicLabs/shared-cardano-mempool-ts)
     - [ ] tx validation (depends on ledger state)

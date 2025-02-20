@@ -42,6 +42,7 @@
 ### Q2 (Before end of June)
 
   - [ ] peer worker (currently on main thread)
+  - [ ] mithril bootstrap
   - [ ] mempool
     - [x] [shared mempool](https://github.com/HarmonicLabs/shared-cardano-mempool-ts)
     - [ ] tx validation (depends on ledger state)

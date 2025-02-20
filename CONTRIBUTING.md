@@ -46,12 +46,12 @@ First off, thanks for your interest in contributing to Gerolamo! This is an open
 
 ## Code Style & Standards
 
-- **TypeScript & Linting:**  
-  We rely on ESLint and Prettier to keep the code consistent. Run `npm run lint` before submitting a PR.  
-  Please use TypeScript features (types, interfaces, generics) whenever possible to keep the codebase robust.
+- **HLabs best practices:**
+
+  [here](https://github.com/HarmonicLabs/ts-best-practices) you'll find some best practices we try to apply when writing our code, in particular, when creating a pull request, make sure to follow the [styling suggestions](https://github.com/HarmonicLabs/ts-best-practices/tree/main/styling)
 
 - **Testing:**  
-  If you’re adding a new feature or fixing a bug, add or update tests. This helps ensure we don’t break something unintentionally. We use [Jest](https://jestjs.io/) (or another testing framework if specified in the repo), so check the `tests/` directory for examples.
+  If you’re adding a new feature or fixing a bug, add or update tests. This helps ensure we don’t break something unintentionally. We use [Jest](https://jestjs.io/), so check the `__tests__/` directory for examples.
 
 ## Pull Requests
 
@@ -80,7 +80,7 @@ First off, thanks for your interest in contributing to Gerolamo! This is an open
   Look for issues labeled “good first issue” if you’re just getting started. These are simpler tasks that are ideal for newcomers.
 
 - **Roadmap:**  
-  Check out our roadmap file or GitHub Projects board to see what’s planned. This can give you a sense of what’s coming next and where you might contribute.
+  Check out our [roadmap](https://github.com/HarmonicLabs/gerolamo?tab=readme-ov-file#roadmap) or GitHub Projects board to see what’s planned. This can give you a sense of what’s coming next and where you might contribute.
 
 ## Communication
 
@@ -89,7 +89,7 @@ Consider opening an issue or propose a pull request if you:
 - Want to propose a new feature
 - Think something can be improved
 
-For everything else consider using the [Cardano stack exchange](https://cardano.stackexchange.com/) using the `gerolamo` tag alongside other tags relevant to your question (e.g. `on-chain`, `off-chain`, `smart-contract`, etc. )
+For everything else consider using the [Discord](https://discord.gg/Zh8bBynQ4W)
 
 **Pull Request and Issue Comments:**  
   Don’t hesitate to ask for help or clarification in comments. We’re all here to help each other out.

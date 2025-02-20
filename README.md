@@ -56,18 +56,18 @@
 For more details on how to contribute, please refer to the [CONTRIBUTING.md](CONTRIBUTING.md) file.
 
 ## Communication
-Join our community discussions and stay updated on our progress through our [GitHub Issues](https://github.com/HarmonicLabs/gerolamo/issues) and [Twitter](https://twitter.com/hlabs_tech).
+Join our community discussions on [Discord](https://discord.gg/Zh8bBynQ4W) and stay updated on our progress through our [GitHub Issues](https://github.com/HarmonicLabs/gerolamo/issues) and [Twitter](https://twitter.com/hlabs_tech).
 
 ## License
 This project is licensed under the terms of the [LICENSE](LICENSE) file.
 
 ## Why?
 
-1) Open core development to a wider spectrum of developers, with a considerable impact on the decentralization of Cardano
+1) Educational purposes, opening core development to a wider spectrum of developers.
 
-2) serve as a base to then extract the "runtime indipendent" code and have a passive node running in browsers
+2) serve as a base for nodes running in browsers
 
-3) be the example project for future, purpose specific nodes, that don't require all the work that a full node does, some examples could be:
+3) Extensibility, be the base for purpose specific nodes, that don't require all the work that a full node does, some examples could be:
 
     - light weight node following only the tip of the chain (example usages: some mini-protocols servers or ad-hoc chain indexer saving blocks elsewhere)
     - node that only keeps the ledger state, for optimal UTxO queries

@@ -1,64 +1,39 @@
-import { BlockFetchClient, BlockFetchNoBlocks, ChainPoint, ChainSyncClient, ChainSyncIntersectFound, ChainSyncRollBackwards, ChainSyncRollForward, MiniProtocol, Multiplexer, MultiplexerHeader, RealPoint, isRealPoint, unwrapMultiplexerMessages } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { RealPoint } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "./logger";
-import { Socket } from "net";
-import { fromHex, toHex, uint8ArrayEq } from "@harmoniclabs/uint8array-utils";
-import { MultiEraHeader } from "../lib/ledgerExtension/multi-era/MultiEraHeader";
-import { pointFromHeader } from "../lib/utils/pointFromHeadert";
-import { ClientNext, getUniqueExtensions } from "../lib/consensus/ChainDb/VolatileDb/getUniqueExtensions";
-import { downloadExtensions, downloadForks } from "../lib/consensus/ChainDb/VolatileDb/downloadBlocks";
+import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ChainDb } from "../lib/consensus/ChainDb/ChainDb";
-import { ChainFork, ChainForkHeaders, VolatileDb, forkHeadersToPoints } from "../lib/consensus/ChainDb/VolatileDb";
+import { parseTopology } from "./parseTopology";
+import { getMaxWorkers } from "./utils/getMaxWorkers";
+import { Worker, MessageChannel } from "node:worker_threads";
+import { WorkerInfo } from "./workers/messages/main/data/WokerInfo";
+import { MempoolSize, SharedMempool } from "@harmoniclabs/shared-cardano-mempool-ts";
+import { PeerWorkerSetup } from "./workers/messages/main/messages/PeerWorkerSetup";
+import { MainMessageKind } from "./workers/messages/main/messages/MainMessageKind";
+import { LedgerStateChainSelWorkerSetup } from "./workers/messages/main/messages/LedgerStateChainSelWorkerSetup";
+import { NodeConfig } from "./NodeConfig";
 
-export async function runNode( connections: Multiplexer[], batch_size: number ): Promise<void>
+export async function runNode(): Promise<void>
 {
-    logger.info("running node");
-    // temporarily just consider 2 connections
-    // while( connections.length > 1 ) connections.pop();
-
-    const chainDB = new ChainDb("./db");
-
-    const peers = connections.map( mplexer => 
-        ({ 
-            chainSync: new ChainSyncClient( mplexer ),
-            blockFetch: new BlockFetchClient( mplexer )
-        })
-    );
-
-    peers.forEach( ({ chainSync: client }) => {
-        client.once("awaitReply", () =>
-            logger.info(
-                "reached tip on peer",
-                (client.mplexer.socket.unwrap() as Socket).remoteAddress
-            )
-        );
-        client.on("error", err => {
-            logger.error( err );
-            throw err;
-        });
-    });
-    peers.forEach( ({ blockFetch: client }) => {
-        client.on("error", err => {
-            logger.error( err );
-            throw err;
-        });
-    });
-
-    const startPoint = new RealPoint({ 
+    const networkMagic = 1; // preprod
+    
+    // const startPoint = new RealPoint({ 
+    //     blockHeader: {
+    //         hash: fromHex("2261deffac038cae805da9cc892087ea00cc61ed77a63d6605a510eb502128f1"),
+    //         slotNumber: 51233094 
+    //     }
+    // });
+    const startPoint = new RealPoint({
         blockHeader: {
-            hash: fromHex("2261deffac038cae805da9cc892087ea00cc61ed77a63d6605a510eb502128f1"),
-            slotNumber: 51233094 
+            hash: fromHex("5da6ba37a4a07df015c4ea92c880e3600d7f098b97e73816f8df04bbb5fad3b7"),
+            slotNumber: 69638382
         }
     });
 
-    await Promise.all(
-        peers.map(
-            async ({ chainSync: client }) => {
-                await client.findIntersect([ startPoint ]);
-                // rollback
-                await client.requestNext();
-            }
-        )
-    );
+    const { lStateWorker, peerWorkers } = setupWorkers( networkMagic, startPoint );
+
+    logger.info("running node");
+
+    const chainDB = new ChainDb("./db");
 
     const volaitileDb = chainDB.volatileDb;
 
@@ -75,123 +50,100 @@ export async function runNode( connections: Multiplexer[], batch_size: number ):
             clearInterval( chainLenInterval );
         }
     }, 10_000 );
-
-    while( true )
-    {
-        const nextHeaders = await Promise.all(
-            peers.map( async peer => {
-                return {
-                    next: await peer.chainSync.requestNext(),
-                    peer
-                } as ClientNext;
-            })
-        );
-
-        const { extensions, forks } = await getUniqueExtensions( nextHeaders );
-
-        // only adds to volatileDb
-        // does not do chain selection (aka. no extensions nor switch to fork)
-        void await Promise.all([
-            downloadExtensions( volaitileDb, extensions ),
-            downloadForks( volaitileDb, forks )
-        ]);
-
-        await chainSelectionForExtensions( volaitileDb, extensions.map(({ header }) => header ) );
-        chainSelectionForForks( volaitileDb, forks );
-    }
 }
 
+interface SetupWorkersResult {
+    lStateWorker: Worker;
+    peerWorkers: Worker[];
+}
 
-async function chainSelectionForExtensions(
-    volaitileDb: VolatileDb,
-    extensions: MultiEraHeader[]
-): Promise<void>
+function setupWorkers(
+    networkMagic: number,
+    startPoint: RealPoint
+): SetupWorkersResult
 {
-    // assumption 4.1 ouroboros-consensus report
-    // always prefer extension
-    //
-    // aka. if we have two chains of the same legth we stay on our own
+    const maxWorkers = getMaxWorkers();
+    const topology = parseTopology("./topology.json");
+    const initialPeersConnections = topology.localRoots.concat( topology.publicRoots );
 
-    let currTip = volaitileDb.tip;
-    let currTipHash = currTip.blockHeader.hash;
+    const mempoolBuffer = SharedMempool.initMemory( MempoolSize.kb256 );
 
-    // we get extensions via roll forwards by peers we are synced with
-    // so either extends main or extends forks
-    // we can omit checks for rollbacks
+    const lStateWorker = new Worker("./workers/ledgerState.js");
+    const lStateId = 1; // main is 0
 
-    // we process the main extension first (if present)
-    // so that we can check fork extensions later using strict >
-    const mainExtension = extensions.find( hdr => uint8ArrayEq( hdr.prevHash, currTipHash ) );
-    if( mainExtension )
+    // const aviabaleWorkers = maxWorkers - 2; // main and lState for now
+    const nPeersWorkers  = 1; // aviabaleWorkers; // Math.ceil(  nPeers / peersPerWorker  );
+
+    const peerWorkers = new Array<Worker>( nPeersWorkers );
+    for( let i = 0; i < nPeersWorkers; i++ ) peerWorkers[ i ] = new Worker("./workers/peer.js");
+
+    const workerInfos: WorkerInfo[][] = new Array( nPeersWorkers ); 
+    const lstateWorkersInfos = new Array<WorkerInfo>( nPeersWorkers );
+    for( let i = 0; i < nPeersWorkers; i++ ) workerInfos[i] = new Array( nPeersWorkers );
+
+    for( let workerIdx = 0; workerIdx < nPeersWorkers; workerIdx++ )
     {
-        await volaitileDb.extendMain( mainExtension );
-        void extensions.splice( extensions.indexOf( mainExtension ), 1 );
+        // workerId is 0 is main
+        // workerId is 1 is ledger state
+        // workerId is 2 is first peer worker
+        const workerId = workerIdx + 2;
+        const lStateChannel = new MessageChannel();
+        // lState => worker
+        lstateWorkersInfos[workerIdx] = { id: workerId, port: lStateChannel.port1 };
+        // worker => lState
+        workerInfos[workerIdx][0] = { id: lStateId, port: lStateChannel.port2 };
+
+        for(let j = workerIdx + 1; j < nPeersWorkers; j++)
+        {
+            const otherWorkerId = j + 2;
+            const peerChannel = new MessageChannel();
+            // this => other
+            workerInfos[workerIdx][j] = { id: otherWorkerId, port: peerChannel.port1 };
+            // other => this
+            workerInfos[j][workerIdx] = { id: workerId, port: peerChannel.port2 };
+        }
     }
 
-    if( extensions.length === 0 ) return;
+    const config: NodeConfig = {
+        networkMagic,
+        immutableDbPath: "./db/immutable",
+        volatileDbPath: "./db/volatile",
+        ledgerStatePath: "./db/ledgerState",
+        startPoint: startPoint.toJSON() as any
+    };
 
-    const forks = volaitileDb.forks;
+    lStateWorker.postMessage({
+        kind: MainMessageKind.LedgerStateChainSelWorkerSetup,
+        data: {
+            config,
+            mempoolBuffer,
+            peerWorkers: lstateWorkersInfos,
+        }
+    } as LedgerStateChainSelWorkerSetup,
+    lstateWorkersInfos.map( info => info.port ) // transfer ports
+    );
 
-    for( const fork of forks )
+    for( let i = 0; i < nPeersWorkers; i++ )
     {
-        const { fragment, intersection } = fork;
-        currTip = fragment.length === 0 ? intersection : fragment[ fragment.length - 1 ];
-        currTipHash = currTip.blockHeader.hash;
-
-        for( const extension of extensions )
-        {
-            if( uint8ArrayEq( extension.prevHash, currTipHash ) )
-            {
-                logger.info("fork extended");
-                fragment.push( pointFromHeader( extension ) );
-
-                // so we don't check it later
-                extensions.splice( extensions.indexOf( extension ), 1 );
-
-                const mainDistance = volaitileDb.getDistanceFromTipSync( intersection );
-                if( !mainDistance )
-                {
-                    logger.error("fork intersection missing");
-                    forks.splice( forks.indexOf( fork ), 1 );
-                    volaitileDb.orphans.push( ...fragment );
-                    break;
-                }
-                else if( mainDistance < fragment.length )
-                {
-                    volaitileDb.trySwitchToForkSync( forks.indexOf( fork ) );
-                }
-
-                break;
+        const [ lStateInfos, ...otherPeerWorkers ] = workerInfos[i];
+        peerWorkers[i].postMessage({
+            kind: MainMessageKind.PeerWorkerSetup,
+            data: {
+                workerId: i + 2,
+                config,
+                initialPeersConnections,
+                ledgerStateChainSelWorker: lStateInfos,
+                mempoolBuffer,
+                otherPeerWorkers: otherPeerWorkers,
             }
-        }
-
-        // no need to check other forks
-        if( extensions.length === 0 ) break;
+        } as PeerWorkerSetup,
+        workerInfos[i].map( info => info.port ) // transfer ports
+        );
     }
+
+    return {
+        lStateWorker,
+        peerWorkers
+    };
 }
 
-function chainSelectionForForks(
-    volaitileDb: VolatileDb,
-    forks: ChainForkHeaders[]
-)
-{
-    const forksPoint = forks.map( forkHeadersToPoints );
-    volaitileDb.forks.push( ...forksPoint );
-
-    for( const fork of forksPoint )
-    {
-        const { fragment, intersection } = fork;
-        const mainDistance = volaitileDb.getDistanceFromTipSync( intersection );
-        if( !mainDistance )
-        {
-            logger.error("fork intersection missing");
-            volaitileDb.forks.splice( volaitileDb.forks.indexOf( fork ), 1 );
-            volaitileDb.orphans.push( ...fragment );
-            break;
-        }
-        else if( mainDistance < fragment.length )
-        {
-            volaitileDb.trySwitchToForkSync( volaitileDb.forks.indexOf( fork ) );
-        }
-    }
-}

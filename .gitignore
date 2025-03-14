@@ -21,3 +21,10 @@ src/offchain/tx/builder/rollup-out/
 
 # output of program
 db/
+
+# Nix stuff
+*.nix
+.devenv
+.direnv
+.envrc
+flake.lock

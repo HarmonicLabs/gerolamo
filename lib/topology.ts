@@ -1,3 +1,5 @@
+// Mark for diff against ./_topology.ts
+
 import { hasOwn, isObject } from "@harmoniclabs/obj-utils"
 
 export interface TopologyAccessPoint {
@@ -126,3 +128,4 @@ export function legacyAccessPointToTopologyRoot( ap: LegacyAccessPoint ): Topolo
         valency: ap.valency
     };
 }
+

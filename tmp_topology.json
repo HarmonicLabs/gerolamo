@@ -1,48 +1,48 @@
 {
-  "localRoots": [
-    {
-      "accessPoints": [],
-      "advertise": false,
-      "valency": 1
-    }
-  ],
-  "publicRoots": [
-    {
-      "accessPoints": [
+    "localRoots": [
         {
-          "address": "preprod-node.play.dev.cardano.org",
-          "port": 3001
+            "accessPoints": [],
+            "advertise": false,
+            "valency": 1
         }
-      ],
-      "advertise": false
-    },
-    {
-      "accessPoints": [
+    ],
+    "publicRoots": [
         {
-          "address": "ppe-testnet-relay.cardanistas.io",
-          "port": 3002
-        }
-      ],
-      "advertise": false
-    },
-    {
-      "accessPoints": [
+            "accessPoints": [
+                {
+                    "address": "preprod-node.play.dev.cardano.org",
+                    "port": 3001
+                }
+            ],
+            "advertise": false
+        },
         {
-          "address": "relay1.preprod.stakepool.quebec",
-          "port": 5000
-        }
-      ],
-      "advertise": false
-    },
-    {
-      "accessPoints": [
+            "accessPoints": [
+                {
+                    "address": "ppe-testnet-relay.cardanistas.io",
+                    "port": 3002
+                }
+            ],
+            "advertise": false
+        },
         {
-          "address": "preprod.ada.chicando.net",
-          "port": 3001
+            "accessPoints": [
+                {
+                    "address": "relay1.preprod.stakepool.quebec",
+                    "port": 5000
+                }
+            ],
+            "advertise": false
+        },
+        {
+            "accessPoints": [
+                {
+                    "address": "preprod.ada.chicando.net",
+                    "port": 3001
+                }
+            ],
+            "advertise": false
         }
-      ],
-      "advertise": false
-    }
-  ],
-  "useLedgerAfterSlot": 42855241
+    ],
+    "useLedgerAfterSlot": 42855241
 }

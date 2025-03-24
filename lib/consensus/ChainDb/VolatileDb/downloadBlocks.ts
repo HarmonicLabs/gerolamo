@@ -4,37 +4,40 @@ import { ChainFork, ChainForkHeaders, VolatileDb } from "./VolatileDb";
 import { HeaderAndPeer, Peer } from "./getUniqueExtensions";
 import { logger } from "../../../../src/logger";
 
-export async function downloadExtensions( volatileDb: VolatileDb, extensions: HeaderAndPeer[] ): Promise<void>
-{
-    if( extensions.length === 0 ) return;
-    for( const { header, peer } of extensions )
-    {
-        const point = pointFromHeader( header );
-        const blockResponse = await peer.blockFetch.request( point );
-        
-        if( blockResponse instanceof BlockFetchNoBlocks )
-        {
+export async function downloadExtensions(
+    volatileDb: VolatileDb,
+    extensions: HeaderAndPeer[],
+): Promise<void> {
+    if (extensions.length === 0) return;
+    for (const { header, peer } of extensions) {
+        const point = pointFromHeader(header);
+        const blockResponse = await peer.blockFetch.request(point);
+
+        if (blockResponse instanceof BlockFetchNoBlocks) {
             logger.warn("couldn't find block of extension");
             return;
         }
-    
-        await volatileDb.putBlock( header, blockResponse.toCborBytes() );
+
+        await volatileDb.putBlock(header, blockResponse.toCborBytes());
     }
 }
 
-export async function downloadForks( volatileDb: VolatileDb, forks: (ChainForkHeaders & Record<"peer", Peer>)[] ): Promise<void>
-{
-    if( forks.length === 0 ) return;
+export async function downloadForks(
+    volatileDb: VolatileDb,
+    forks: (ChainForkHeaders & Record<"peer", Peer>)[],
+): Promise<void> {
+    if (forks.length === 0) return;
     logger.info("downloading forks");
-    if( forks.length === 0 ) return;
+    if (forks.length === 0) return;
     await Promise.all(
-        forks.map( async ({ fragment, intersection, peer }) => {
+        forks.map(async ({ fragment, intersection, peer }) => {
+            const forkTip = pointFromHeader(fragment[fragment.length - 1]);
+            const blockResponse = await peer.blockFetch.requestRange(
+                intersection,
+                forkTip,
+            );
 
-            const forkTip = pointFromHeader( fragment[ fragment.length - 1 ] );
-            const blockResponse = await peer.blockFetch.requestRange( intersection, forkTip );
-
-            if( blockResponse instanceof BlockFetchNoBlocks )
-            {
+            if (blockResponse instanceof BlockFetchNoBlocks) {
                 logger.warn("couldn't find block of fork");
                 return;
             }
@@ -42,11 +45,11 @@ export async function downloadForks( volatileDb: VolatileDb, forks: (ChainForkHe
             void blockResponse.shift();
 
             await Promise.all(
-                blockResponse.map( ( b, i ) => {
+                blockResponse.map((b, i) => {
                     const bytes = b.toCborBytes();
-                    return volatileDb.putBlock( fragment[ i ], bytes );
-                })
+                    return volatileDb.putBlock(fragment[i], bytes);
+                }),
             );
-        })
-    )
+        }),
+    );
 }

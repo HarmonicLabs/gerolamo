@@ -4,42 +4,38 @@ export enum LoggerPriority {
     Info = 0,
     Debug = 1,
     Warning = 2,
-    Error = 3
+    Error = 3,
 }
 
-Object.freeze( LoggerPriority );
+Object.freeze(LoggerPriority);
 
 export const logger = {
     minPriority: LoggerPriority.Info,
-    info( ...args: any[] )
-    {
-        if( logger.minPriority <= LoggerPriority.Info )
-        console.log(
-            color.gray(`[Info   ][${new Date().toUTCString()}]:`),
-            ...args
-        );
+    info(...args: any[]) {
+        if (logger.minPriority <= LoggerPriority.Info)
+            console.log(
+                color.gray(`[Info   ][${new Date().toUTCString()}]:`),
+                ...args,
+            );
     },
-    debug( ...args: any[] )
-    {
-        if( logger.minPriority <= LoggerPriority.Debug )
-        console.log(
-            color.cyan(`[Debug  ][${new Date().toUTCString()}]:`),
-            ...args
-        );
+    debug(...args: any[]) {
+        if (logger.minPriority <= LoggerPriority.Debug)
+            console.log(
+                color.cyan(`[Debug  ][${new Date().toUTCString()}]:`),
+                ...args,
+            );
     },
-    warn( ...args: any[] )
-    {
-        if( logger.minPriority <= LoggerPriority.Warning )
-        console.warn(
-            color.yellow(`[Warning][${new Date().toUTCString()}]:`),
-            ...args
-        );
+    warn(...args: any[]) {
+        if (logger.minPriority <= LoggerPriority.Warning)
+            console.warn(
+                color.yellow(`[Warning][${new Date().toUTCString()}]:`),
+                ...args,
+            );
     },
-    error( ...args: any[] )
-    {
+    error(...args: any[]) {
         console.error(
             color.red(`[Error  ][${new Date().toUTCString()}]:`),
-            ...args
+            ...args,
         );
-    }
+    },
 };

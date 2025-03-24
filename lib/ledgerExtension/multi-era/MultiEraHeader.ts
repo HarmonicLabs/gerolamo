@@ -1,4 +1,9 @@
-import { CanBeCborString, Cbor, CborObj, forceCborString } from "@harmoniclabs/cbor";
+import {
+    CanBeCborString,
+    Cbor,
+    CborObj,
+    forceCborString,
+} from "@harmoniclabs/cbor";
 import { AllegraHeader } from "../allegra";
 import { AlonzoHeader } from "../alonzo/AlonzoHeader";
 import { BabbageHeader } from "../babbage/BabbageHeader";
@@ -19,13 +24,13 @@ export enum EraIndex {
     Allegra = 2,
     Mary = 3,
     Alonzo = 4,
-    Babbage = 5
+    Babbage = 5,
 }
 
-Object.freeze( EraIndex );
+Object.freeze(EraIndex);
 
-export type AnyEraHeader
-    = ByronEbbHeader
+export type AnyEraHeader =
+    | ByronEbbHeader
     | ByronHeader
     | ShelleyHeader
     | AllegraHeader
@@ -33,14 +38,19 @@ export type AnyEraHeader
     | AlonzoHeader
     | BabbageHeader;
 
-export type RealHeader<EraIdx extends EraIndex> =
-    EraIdx extends EraIndex.Byron         ? ByronHeader | ByronEbbHeader :
-    EraIdx extends EraIndex.Shelley          ? ShelleyHeader :
-    EraIdx extends EraIndex.Allegra          ? AllegraHeader :
-    EraIdx extends EraIndex.Mary             ? MaryHeader :
-    EraIdx extends EraIndex.Alonzo           ? AlonzoHeader :
-    EraIdx extends EraIndex.Babbage          ? BabbageHeader :
-    never
+export type RealHeader<EraIdx extends EraIndex> = EraIdx extends EraIndex.Byron
+    ? ByronHeader | ByronEbbHeader
+    : EraIdx extends EraIndex.Shelley
+      ? ShelleyHeader
+      : EraIdx extends EraIndex.Allegra
+        ? AllegraHeader
+        : EraIdx extends EraIndex.Mary
+          ? MaryHeader
+          : EraIdx extends EraIndex.Alonzo
+            ? AlonzoHeader
+            : EraIdx extends EraIndex.Babbage
+              ? BabbageHeader
+              : never;
 
 export interface IMultiEraHeader<EraIdx extends EraIndex = EraIndex> {
     readonly eraIndex: EraIdx;
@@ -53,105 +63,126 @@ export class MultiEraHeader<EraIdx extends EraIndex = EraIndex>
     readonly eraIndex: EraIdx;
     readonly header: RealHeader<EraIdx>;
 
-    get hash(): U8Arr32 { return this.header.hash }
-    get prevHash(): U8Arr32 { return this.header.prevHash }
-    get slotNo(): bigint { return this.header.slotNo }
-    get isEBB(): boolean { return this.header.isEBB }
-    get blockNo(): bigint | undefined
-    {
-        if(
+    get hash(): U8Arr32 {
+        return this.header.hash;
+    }
+    get prevHash(): U8Arr32 {
+        return this.header.prevHash;
+    }
+    get slotNo(): bigint {
+        return this.header.slotNo;
+    }
+    get isEBB(): boolean {
+        return this.header.isEBB;
+    }
+    get blockNo(): bigint | undefined {
+        if (
             this.header instanceof ByronEbbHeader ||
             this.header instanceof ByronHeader
-        ) return undefined;
-        return  this.header.blockNo;
+        )
+            return undefined;
+        return this.header.blockNo;
     }
 
-    constructor({ eraIndex, header }: IMultiEraHeader<EraIdx>)
-    {
-        Object.defineProperties(
-            this, {
-                eraIndex: { value: eraIndex, ...roDescr },
-                header: { value: header, ...roDescr },
-            }
-        );
+    constructor({ eraIndex, header }: IMultiEraHeader<EraIdx>) {
+        Object.defineProperties(this, {
+            eraIndex: { value: eraIndex, ...roDescr },
+            header: { value: header, ...roDescr },
+        });
     }
 
-    toCborBytes()
-    {
+    toCborBytes() {
         return this.header.toCborBytes();
     }
 
-    static fromCbor( cbor: CanBeCborString ): MultiEraHeader
-    {
-        const bytes = cbor instanceof Uint8Array ? cbor : forceCborString( cbor ).toBuffer();
-        return MultiEraHeader.fromCborObj( Cbor.parse( bytes ), bytes );
+    static fromCbor(cbor: CanBeCborString): MultiEraHeader {
+        const bytes =
+            cbor instanceof Uint8Array
+                ? cbor
+                : forceCborString(cbor).toBuffer();
+        return MultiEraHeader.fromCborObj(Cbor.parse(bytes), bytes);
     }
-    static fromCborObj( cbor: CborObj, _originalBytes?: Uint8Array ): MultiEraHeader
-    {
-        if(!( _originalBytes instanceof Uint8Array ))
-        {
-            _originalBytes = Cbor.encode( cbor ).toBuffer();
+    static fromCborObj(
+        cbor: CborObj,
+        _originalBytes?: Uint8Array,
+    ): MultiEraHeader {
+        if (!(_originalBytes instanceof Uint8Array)) {
+            _originalBytes = Cbor.encode(cbor).toBuffer();
         }
-        const { eraIdx, headerBytes } = getEraIdxAndHeaderBytes( _originalBytes );
+        const { eraIdx, headerBytes } = getEraIdxAndHeaderBytes(_originalBytes);
         let header: AnyEraHeader;
-        switch( eraIdx )
-        {
+        switch (eraIdx) {
             case EraIndex.Byron: {
                 try {
-                    header = ByronEbbHeader.fromCbor( headerBytes );
+                    header = ByronEbbHeader.fromCbor(headerBytes);
                 } catch (e) {
                     try {
-                        header = ByronHeader.fromCbor( headerBytes );
+                        header = ByronHeader.fromCbor(headerBytes);
                     } catch (b) {
-                        logger.error( eraIdx, toHex( headerBytes ) );
+                        logger.error(eraIdx, toHex(headerBytes));
                         throw b;
                     }
                 }
                 break;
             }
-            case EraIndex.Shelley:          header = ShelleyHeader.fromCbor( headerBytes ); break;
-            case EraIndex.Allegra:          header = AllegraHeader.fromCbor( headerBytes ); break;
-            case EraIndex.Mary:             header = MaryHeader.fromCbor( headerBytes );    break;
-            case EraIndex.Alonzo:           header = AlonzoHeader.fromCbor( headerBytes );  break;
-            case EraIndex.Babbage:          header = BabbageHeader.fromCbor( headerBytes ); break;
-            default: throw new Error("invalid era index: " + eraIdx.toString());
+            case EraIndex.Shelley:
+                header = ShelleyHeader.fromCbor(headerBytes);
+                break;
+            case EraIndex.Allegra:
+                header = AllegraHeader.fromCbor(headerBytes);
+                break;
+            case EraIndex.Mary:
+                header = MaryHeader.fromCbor(headerBytes);
+                break;
+            case EraIndex.Alonzo:
+                header = AlonzoHeader.fromCbor(headerBytes);
+                break;
+            case EraIndex.Babbage:
+                header = BabbageHeader.fromCbor(headerBytes);
+                break;
+            default:
+                throw new Error("invalid era index: " + eraIdx.toString());
         }
         return new MultiEraHeader({
             eraIndex: eraIdx,
-            header
+            header,
         });
     }
 
-    static isByronEBB( hdr: MultiEraHeader ): hdr is MultiEraHeader<EraIndex.Byron>
-    {
+    static isByronEBB(
+        hdr: MultiEraHeader,
+    ): hdr is MultiEraHeader<EraIndex.Byron> {
         return (
-            hdr.eraIndex === EraIndex.Byron
-        ) && (
+            hdr.eraIndex === EraIndex.Byron &&
             hdr.header instanceof ByronEbbHeader
         );
     }
-    static isByron( hdr: MultiEraHeader ): hdr is MultiEraHeader<EraIndex.Byron>
-    {
-        return hdr.eraIndex === EraIndex.Byron && hdr.header instanceof ByronHeader;
+    static isByron(hdr: MultiEraHeader): hdr is MultiEraHeader<EraIndex.Byron> {
+        return (
+            hdr.eraIndex === EraIndex.Byron && hdr.header instanceof ByronHeader
+        );
     }
-    static isShelley( hdr: MultiEraHeader ): hdr is MultiEraHeader<EraIndex.Shelley>
-    {
+    static isShelley(
+        hdr: MultiEraHeader,
+    ): hdr is MultiEraHeader<EraIndex.Shelley> {
         return hdr.eraIndex === EraIndex.Shelley;
     }
-    static isAllegra( hdr: MultiEraHeader ): hdr is MultiEraHeader<EraIndex.Allegra>
-    {
+    static isAllegra(
+        hdr: MultiEraHeader,
+    ): hdr is MultiEraHeader<EraIndex.Allegra> {
         return hdr.eraIndex === EraIndex.Allegra;
     }
-    static isMary( hdr: MultiEraHeader ): hdr is MultiEraHeader<EraIndex.Mary>
-    {
+    static isMary(hdr: MultiEraHeader): hdr is MultiEraHeader<EraIndex.Mary> {
         return hdr.eraIndex === EraIndex.Mary;
     }
-    static isAlonzo( hdr: MultiEraHeader ): hdr is MultiEraHeader<EraIndex.Alonzo>
-    {
+    static isAlonzo(
+        hdr: MultiEraHeader,
+    ): hdr is MultiEraHeader<EraIndex.Alonzo> {
         return hdr.eraIndex === EraIndex.Alonzo;
     }
-    static isBabbage( hdr: MultiEraHeader ): hdr is MultiEraHeader<EraIndex.Babbage>
-    {
+    static isBabbage(
+        hdr: MultiEraHeader,
+    ): hdr is MultiEraHeader<EraIndex.Babbage> {
         return hdr.eraIndex === EraIndex.Babbage;
     }
 }

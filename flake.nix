@@ -12,6 +12,8 @@
     nix2container.url = "github:nlewo/nix2container";
     nix2container.inputs.nixpkgs.follows = "nixpkgs";
     mk-shell-bin.url = "github:rrbutani/nix-mk-shell-bin";
+
+    treefmt-nix.url = "github:numtide/treefmt-nix";
   };
 
   nixConfig = {
@@ -21,8 +23,9 @@
 
   outputs = inputs@{ flake-parts, devenv-root, ... }:
     flake-parts.lib.mkFlake { inherit inputs; } {
-      imports = [
-        inputs.devenv.flakeModule
+      imports = with inputs; [
+        devenv.flakeModule
+        treefmt-nix.flakeModule
       ];
       systems = [ "x86_64-linux" "i686-linux" "x86_64-darwin" "aarch64-linux" "aarch64-darwin" ];
 
@@ -30,6 +33,20 @@
         # Per-system attributes can be defined here. The self' and inputs'
         # module parameters provide easy access to attributes of the same
         # system.
+
+        treefmt = {
+          programs = {
+            nixpkgs-fmt.enable = true;
+            biome = {
+              enable = true;
+              settings.formatter = {
+                indentStyle = "space";
+                indentWidth = 4;
+              };
+            };
+          };
+        };
+
         devenv.shells.default = {
           devenv.root =
             let

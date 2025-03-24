@@ -8,35 +8,34 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 export function initialChaiSel() {}
 
 /**
- * 
- * @param headerBlockNo 
- * @param isEBB 
- * @param latestImmutableBlockNo 
+ *
+ * @param headerBlockNo
+ * @param isEBB
+ * @param latestImmutableBlockNo
  * @returns {boolean} `true` when the header used to get `headerBlockNo` should be ignored
  * because it is too old, i.e., we wouldn't be able to swithch to a chain containing the
  * corresponding block because its block number is more than `k` block or exactly `k`
  * blocks back
- * 
+ *
  * Special case: the header corresponds to an EBB which has the same
  * block number as the block `k` blocks back (the most recent immutable block).
  * AsEBBs shyare their block number with the block before them the EBB is not
- * too old in that case and can be adopted as part of our chain 
+ * too old in that case and can be adopted as part of our chain
  */
 export function isOlderThanK(
     headerBlockNo: number,
     isEBB: boolean,
-    latestImmutableBlockNo: number | "origin"
-): boolean
-{
+    latestImmutableBlockNo: number | "origin",
+): boolean {
     // latest is origin => not older than k
-    if(!( typeof latestImmutableBlockNo === "number" )) return false;
-    if( isEBB ) return latestImmutableBlockNo == headerBlockNo;
+    if (!(typeof latestImmutableBlockNo === "number")) return false;
+    if (isEBB) return latestImmutableBlockNo == headerBlockNo;
 
-    return headerBlockNo <= latestImmutableBlockNo
+    return headerBlockNo <= latestImmutableBlockNo;
 }
 
 /**
- * 
+ *
  * @returns {ChainPoint} the new tip
  */
 /*

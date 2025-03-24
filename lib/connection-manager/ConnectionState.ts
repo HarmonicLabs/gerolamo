@@ -5,11 +5,11 @@ export enum ConnectionState {
     Unnegotiated_In,
     Unnegotiated_Out,
     /** **TO AVOID**
-     * 
+     *
      * Outgoing connection; inbound idle with timeout */
     Outgoing_T_HalfDuplex,
     /** **TO AVOID**
-     * 
+     *
      * Outgoing connection; inbound idle with timeout */
     Outgoing_T_FullDuplex,
     /** Outgoing connection; inbound timeout expired */
@@ -34,5 +34,5 @@ export enum ConnectionState {
     /** connection closed, de-allocating resources */
     Terminating,
     /** connection closed and all resources de-allocated */
-    Terminated
+    Terminated,
 }

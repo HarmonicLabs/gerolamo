@@ -13,7 +13,7 @@ export function performHandshake(
     networkMagic: number = CardanoNetworkMagic.Preprod,
 ): Promise<(HandshakeAcceptVersion | HandshakeRefuse | HandshakeQueryReply)[]> {
     return Promise.all(
-        mplexers.map((mplexer, i) => {
+        mplexers.map(async (mplexer, i) => {
             const client = new HandshakeClient(mplexer);
 
             logger.info(`Performing handshake`);

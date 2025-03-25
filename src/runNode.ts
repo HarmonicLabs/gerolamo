@@ -5,7 +5,7 @@ import { ChainDb } from "../lib/consensus/ChainDb/ChainDb";
 import { parseTopology } from "./parseTopology";
 import { getMaxWorkers } from "./utils/getMaxWorkers";
 import { Worker, MessageChannel } from "node:worker_threads";
-import { WorkerInfo } from "./workers/messages/main/data/WokerInfo";
+import { WorkerInfo } from "./workers/messages/main/data/WorkerInfo";
 import {
     MempoolSize,
     SharedMempool,
@@ -17,13 +17,6 @@ import { NodeConfig } from "./NodeConfig";
 
 export async function runNode(): Promise<void> {
     const networkMagic = 1; // preprod
-
-    // const startPoint = new RealPoint({
-    //     blockHeader: {
-    //         hash: fromHex("2261deffac038cae805da9cc892087ea00cc61ed77a63d6605a510eb502128f1"),
-    //         slotNumber: 51233094
-    //     }
-    // });
     const startPoint = new RealPoint({
         blockHeader: {
             hash: fromHex(
@@ -33,31 +26,12 @@ export async function runNode(): Promise<void> {
         },
     });
 
-    const { lStateWorker, peerWorkers } = setupWorkers(
+    setupWorkers(
         networkMagic,
         startPoint,
     );
 
     logger.info("running node");
-
-    const chainDB = new ChainDb("./db");
-
-    const volaitileDb = chainDB.volatileDb;
-
-    volaitileDb.main.push(startPoint);
-
-    // remove first block since not in file system
-    // only temporary workaround
-    setTimeout(() => {
-        volaitileDb.main.shift();
-    }, 20_000);
-
-    let chainLenInterval = setInterval(() => {
-        logger.info("main chain length: ", volaitileDb.main.length);
-        if (volaitileDb.main.length >= chainDB.cfg.k) {
-            clearInterval(chainLenInterval);
-        }
-    }, 10_000);
 }
 
 interface SetupWorkersResult {

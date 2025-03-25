@@ -1,8 +1,10 @@
 import { MessagePort, parentPort } from "node:worker_threads";
-import { LoadTracker } from "./utils/LoadTracker";
-import { isPeerWorkerSetupKind } from "./messages/main/messages/PeerWorkerSetup";
+import {
+    isPeerWorkerSetupKind,
+    PeerWorkerSetupData,
+} from "./messages/main/messages/PeerWorkerSetup";
 import { SharedMempool } from "@harmoniclabs/shared-cardano-mempool-ts";
-import { WorkerInfo } from "./messages/main/data/WokerInfo";
+import { WorkerInfo } from "./messages/main/data/WorkerInfo";
 import { NodeConfig } from "../NodeConfig";
 import {
     BlockFetchClient,
@@ -15,111 +17,99 @@ import { connect, Socket } from "node:net";
 import { performHandshake } from "../performHandshake";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { MultiEraHeader } from "../../lib/ledgerExtension/multi-era/MultiEraHeader";
+import { TopologyAccessPoint } from "../../lib/topology";
+import { startupSnapshot } from "node:v8";
 
-const loadTracker = new LoadTracker();
+const accessPointToMultiplexer = (aPoint: TopologyAccessPoint) =>
+    new Multiplexer({
+        connect: () => {
+            logger.info(
+                `Attempt connection to ${aPoint.address}:${aPoint.port}`,
+            );
+            return connect({
+                host: aPoint.address,
+                port: aPoint.port,
+            });
+        },
+        protocolType: "node-to-node",
+        initialListeners: { error: [logger.error] },
+    });
 
-let workerId = -1;
-let _initialized = false;
-let mempool!: SharedMempool;
-let lStatePort!: MessagePort;
-const otherPeerWorkers: WorkerInfo[] = [];
-const config: NodeConfig = {} as NodeConfig;
+const multiplexerToClients = (multiplexer: Multiplexer) => {
+    return {
+        chainSync: new ChainSyncClient(multiplexer),
+        blockFetch: new BlockFetchClient(multiplexer),
+    };
+};
 
-const peers = new Array();
+const chainSyncAddCallbacks = (chainSync: ChainSyncClient) => {
+    chainSync.on("error", (err) => {
+        logger.error(err);
+        throw err;
+    });
+
+    chainSync.once("awaitReply", () =>
+        logger.info(
+            "reached tip on peer",
+            chainSync.mplexer.socket.unwrap<Socket>().remoteAddress,
+        ),
+    );
+
+    chainSync.on("rollForward", async (forward) => {
+        // const hdr = MultiEraHeader.fromCbor(forward.getDataBytes());
+
+        // TODO: first setup ledger-state as done in amaru
+        // await validateMultiEraHeader(lState, hdr);
+
+        logger.info("ChainSyncRollForward request:", forward);
+        return chainSync.requestNext();
+    });
+    chainSync.on("rollBackwards", async (rollback) => {
+        logger.warn("rollback to", rollback.point.toString());
+    });
+};
+
+const blockFetchAddCallbacks = (blockFetch: BlockFetchClient) => {
+    blockFetch.on("error", (err) => {
+        logger.error(err);
+        throw err;
+    });
+};
+
+const chainSyncNext =
+    (startPoint: RealPoint) => async (client: ChainSyncClient) => {
+        await client.findIntersect([startPoint]);
+        await client.requestNext();
+    }
 
 parentPort?.on("message", async (message) => {
     if (isPeerWorkerSetupKind(message)) {
-        const {
-            workerId: _workerId,
-            initialPeersConnections: peersInfos,
-            config: _cfg,
-            otherPeerWorkers: otherPeers,
-            ledgerStateChainSelWorker,
-            mempoolBuffer,
-        } = message.data;
+        const data = message.data as PeerWorkerSetupData;
+        const conns = data.initialPeersConnections
+            .map((root) => root.accessPoints.map(accessPointToMultiplexer))
+            .flat();
 
-        mempool = new SharedMempool(mempoolBuffer);
-        lStatePort = ledgerStateChainSelWorker.port;
-        otherPeerWorkers.push(...otherPeers);
-        Object.assign(config, _cfg);
-        Object.freeze(config);
-        workerId = _workerId;
+        await performHandshake(conns, data.config.networkMagic);
 
-        const startPoint = new RealPoint({
-            blockHeader: {
-                hash: fromHex(config.startPoint.blockHeader.hash),
-                slotNumber: config.startPoint.blockHeader.slot,
-            },
-        });
-
-        const connections: Multiplexer[] = peersInfos
-            .map((root) =>
-                root.accessPoints.map((accessPoint) => {
-                    const mplexer = new Multiplexer({
-                        connect: () => {
-                            logger.info(
-                                `Attempt connection to ${accessPoint.address}:${accessPoint.port}`,
-                            );
-                            return connect({
-                                host: accessPoint.address,
-                                port: accessPoint.port,
-                            });
-                        },
-                        protocolType: "node-to-node",
-                        initialListeners: {
-                            error: [logger.error],
-                        },
-                    });
-                    return mplexer;
-                }),
-            )
-            .flat(1);
-
-        void (await performHandshake(connections, config.networkMagic));
-
-        const peers = connections.map((mplexer) => ({
-            chainSync: new ChainSyncClient(mplexer),
-            blockFetch: new BlockFetchClient(mplexer),
-        }));
-
+        const peers = conns.map(multiplexerToClients);
         for (const { chainSync, blockFetch } of peers) {
-            chainSync.on("error", (err) => {
-                logger.error(err);
-                throw err;
-            });
-            blockFetch.on("error", (err) => {
-                logger.error(err);
-                throw err;
-            });
-
-            chainSync.once("awaitReply", () =>
-                logger.info(
-                    "reached tip on peer",
-                    (chainSync.mplexer.socket.unwrap() as Socket).remoteAddress,
-                ),
-            );
-
-            chainSync.on("rollForward", async (forward) => {
-                const hdr = MultiEraHeader.fromCbor(forward.getDataBytes());
-
-                // TODO: first setup ledger-state as done in amaru
-                await validateMultiEraHeader(lState, hdr);
-
-                chainSync.requestNext();
-            });
-            chainSync.on("rollBackwards", async (rollback) => {
-                logger.warn("rollback to", rollback.point.toString());
-            });
+            chainSyncAddCallbacks(chainSync);
+            blockFetchAddCallbacks(blockFetch);
         }
 
-        await Promise.all(
-            peers.map(async ({ chainSync: client }) => {
-                await client.findIntersect([startPoint]);
-                // rollback
-                await client.requestNext();
-            }),
+        const csNext = chainSyncNext(
+            new RealPoint({
+                blockHeader: {
+                    hash: fromHex(
+                        (data.config as NodeConfig).startPoint.blockHeader.hash,
+                    ),
+                    slotNumber: (data.config as NodeConfig).startPoint.blockHeader.slot,
+                },
+            })
         );
 
-        _initialized = true;
+        await Promise.all(
+            peers.map(({ chainSync }) => csNext(chainSync)),
+        );
     }
 });

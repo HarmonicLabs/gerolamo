@@ -56,24 +56,6 @@
     - [ ] CIP integration for browsers
   - [ ] immutable DB (not for browsers)
 
-## Usage
-
-### Option #1: Use the Nix flake.
-
-This is the easiest way to get started, especially if you're already familiar with Nix.
-
-However, if you're not used to it, we make it a point to _not_ force you into it.
-
-### Option #2: Install system dependencies and use Ubuntu.
-
-You'll need the following dependencies:
-- GNU build essentials (`build-essential` on Ubuntu)
-  - Python 3 (which may or may not be included)
-- Some recent version of Node.js and NPM (will specify minimum-required Node version later on in the project)
-- Typescript language server if you're contributing
-
-After that, you can just `npm i` and use the build/run tasks as specified in `package.json`.
-
 ## Contribution Guidelines
 For more details on how to contribute, please refer to the [CONTRIBUTING.md](CONTRIBUTING.md) file.
 

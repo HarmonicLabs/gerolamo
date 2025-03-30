@@ -48,7 +48,8 @@ So, starting from Shelley, you should read them sequencially.
 
 ## Consensus (Chain selecion and storage)
 
-- [technical report](https://ouroboros-consensus.cardano.intersectmbo.org/pdfs/report.pdf)
+- [technical report (Praos)](https://ouroboros-consensus.cardano.intersectmbo.org/pdfs/report.pdf)
+- [leios research paper](./formal_spec/ouroboros-leios-paper.pdf)
 
 ### Optional
 

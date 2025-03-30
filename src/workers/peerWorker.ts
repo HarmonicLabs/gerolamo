@@ -48,7 +48,7 @@ parentPort?.on("message", async (message) => {
             }
         });
 
-         const connections: Multiplexer[] = peersInfos
+        const connections: Multiplexer[] = peersInfos
         .map( root =>
             root.accessPoints.map( accessPoint => {
                 const mplexer = new Multiplexer({

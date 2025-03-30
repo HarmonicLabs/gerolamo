@@ -68,7 +68,7 @@ function setupWorkers(
 
     const mempoolBuffer = SharedMempool.initMemory( MempoolSize.kb256 );
 
-    const lStateWorker = new Worker("./workers/ledgerState.js");
+    const lStateWorker = new Worker("./workers/lState/index.js");
     const lStateId = 1; // main is 0
 
     // const aviabaleWorkers = maxWorkers - 2; // main and lState for now

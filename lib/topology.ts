@@ -80,9 +80,14 @@ export function isTopologyAccessPoint( stuff: any ): stuff is TopologyAccessPoin
 
 export function isLegacyTopology( stuff: any ): stuff is LegacyTopology
 {
-    if( !isObject( stuff ) ) return false;
+    if(
+        !isObject( stuff )
+        || !hasOwn( stuff, "Producers" )
+    ) return false;
 
-    return hasOwn( stuff, "Producers" ) && Array.isArray( stuff.Producers ) && stuff.Producers.every( isLegacyAccessPoint );
+    const Producers = stuff.Producers;
+
+    return  Array.isArray( Producers ) && Producers.every( isLegacyAccessPoint );
 }
 
 export function isLegacyAccessPoint( stuff: any ): stuff is LegacyAccessPoint

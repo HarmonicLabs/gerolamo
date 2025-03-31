@@ -1,120 +1,127 @@
-import { RealPoint, ChainSyncRollForward, isRealPoint, ChainSyncRollBackwards, ChainSyncClient, BlockFetchClient } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import {
+    RealPoint,
+    ChainSyncRollForward,
+    isRealPoint,
+    ChainSyncRollBackwards,
+    ChainSyncClient,
+    BlockFetchClient,
+} from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { uint8ArrayEq } from "@harmoniclabs/uint8array-utils";
 import { MultiEraHeader } from "../../../ledgerExtension/multi-era/MultiEraHeader";
 import { eqChainPoint } from "../../../utils/eqChainPoint";
 import { pointFromHeader } from "../../../utils/pointFromHeadert";
 import { logger } from "../../../../src/logger";
-import { ChainFork, ChainForkHeaders, eqChainFork, eqChainForkHeaders, forkHeadersToPoints } from "./VolatileDb";
+import {
+    ChainFork,
+    ChainForkHeaders,
+    eqChainFork,
+    eqChainForkHeaders,
+    forkHeadersToPoints,
+} from "./VolatileDb";
 import { Socket } from "net";
 
 export interface Peer {
-    chainSync: ChainSyncClient,
-    blockFetch: BlockFetchClient
+    chainSync: ChainSyncClient;
+    blockFetch: BlockFetchClient;
 }
 
 export interface ClientNext {
-    next: ChainSyncRollForward | ChainSyncRollBackwards,
-    peer: Peer
+    next: ChainSyncRollForward | ChainSyncRollBackwards;
+    peer: Peer;
 }
 
 export interface HeaderAndPeer {
-    header: MultiEraHeader,
-    peer: Peer
+    header: MultiEraHeader;
+    peer: Peer;
 }
 
-export async function getUniqueExtensions(
-    nextHeaders: ClientNext[]
-): Promise<{
-    extensions: HeaderAndPeer[],
-    forks: (ChainForkHeaders & Record<"peer", Peer>)[]
-}>
-{
+export async function getUniqueExtensions(nextHeaders: ClientNext[]): Promise<{
+    extensions: HeaderAndPeer[];
+    forks: (ChainForkHeaders & Record<"peer", Peer>)[];
+}> {
     const extensions: HeaderAndPeer[] = [];
     const forks: (ChainForkHeaders & Record<"peer", Peer>)[] = [];
 
     await Promise.all(
-        nextHeaders.map( async ({ next, peer }) =>
-        {
+        nextHeaders.map(async ({ next, peer }) => {
             const client = peer.chainSync;
 
-            if( next instanceof ChainSyncRollForward )
-            {
-                const header = MultiEraHeader.fromCbor( next.getDataBytes() )
-                if(
-                    !extensions.some( 
-                        hdr => uint8ArrayEq( hdr.header.hash, header.hash )
+            if (next instanceof ChainSyncRollForward) {
+                const header = MultiEraHeader.fromCbor(next.getDataBytes());
+                if (
+                    !extensions.some((hdr) =>
+                        uint8ArrayEq(hdr.header.hash, header.hash),
                     )
-                ) extensions.push({ header, peer });
+                )
+                    extensions.push({ header, peer });
                 return;
             }
-            
+
             // else if( next instanceof ChainSyncRollBackwards )
 
-            logger.warn( "peer", peer.chainSync.mplexer.socket.unwrap<Socket>().remoteAddress, "rolled back" );
+            logger.warn(
+                "peer",
+                peer.chainSync.mplexer.socket.unwrap<Socket>().remoteAddress,
+                "rolled back",
+            );
 
             const intersection = next.point;
             const peerTip = next.tip.point;
-            if(!(
-                isRealPoint( peerTip ) &&
-                isRealPoint( intersection )
-            )) throw new Error("invalid peer tip");
+            if (!(isRealPoint(peerTip) && isRealPoint(intersection)))
+                throw new Error("invalid peer tip");
 
-            if( eqChainPoint( intersection, peerTip ) )
-            {
+            if (eqChainPoint(intersection, peerTip)) {
                 const fork = {
                     intersection,
                     fragment: [],
-                    peer
+                    peer,
                 };
-    
-                if(
-                    !forks.some( 
-                        frk => eqChainForkHeaders( frk, fork )
-                    )
-                )
-                forks.push( fork );
+
+                if (!forks.some((frk) => eqChainForkHeaders(frk, fork)))
+                    forks.push(fork);
                 return;
             }
 
             const fragment: MultiEraHeader[] = [];
-            
+
             // in theory we should stop right before receiving "msgAwaitReply"
             // if we receive it we missed the tip; and the loop would continue forever
             // we add a listener to "awaitReply" to avoid this scenario
             let unnoticedTip: boolean = false;
-            const setUnnoticedTip = () => { unnoticedTip = true; };
+            const setUnnoticedTip = () => {
+                unnoticedTip = true;
+            };
             client.once("awaitReply", () => {
                 logger.error("unnoticed tip");
                 logger.error(
-                    "intersection:", JSON.stringify( intersection.toJson() ),
-                    "peerTip:", JSON.stringify( peerTip.toJson() ),
-                    "fragment:", JSON.stringify( fragment.map( hdr => pointFromHeader( hdr ).toJson() ) ),
+                    "intersection:",
+                    JSON.stringify(intersection.toJson()),
+                    "peerTip:",
+                    JSON.stringify(peerTip.toJson()),
+                    "fragment:",
+                    JSON.stringify(
+                        fragment.map((hdr) => pointFromHeader(hdr).toJson()),
+                    ),
                 );
                 setUnnoticedTip();
             });
-            
+
             let forward: ChainSyncRollForward;
             let hdr: MultiEraHeader;
 
             do {
-                forward = await client.requestNext() as ChainSyncRollForward;
-                if( unnoticedTip ) throw new Error("unnoticed tip");
-                
-                if( forward instanceof ChainSyncRollBackwards )
-                {
+                forward = (await client.requestNext()) as ChainSyncRollForward;
+                if (unnoticedTip) throw new Error("unnoticed tip");
+
+                if (forward instanceof ChainSyncRollBackwards) {
                     logger.error("unexpected sequential rollback");
                     throw new Error("unexpected sequential rollback");
                 }
-                
-                hdr = MultiEraHeader.fromCbor( forward.getDataBytes() );
 
-                fragment.push( hdr );
-            } while(
-                !eqChainPoint(
-                    pointFromHeader( hdr.header ),
-                    peerTip
-                )
-            );
+                hdr = MultiEraHeader.fromCbor(forward.getDataBytes());
+
+                fragment.push(hdr);
+            } while (!eqChainPoint(pointFromHeader(hdr.header), peerTip));
 
             // no longer needed listener
             client.removeEventListener("awaitReply", setUnnoticedTip);
@@ -122,20 +129,16 @@ export async function getUniqueExtensions(
             const fork = {
                 intersection,
                 fragment,
-                peer
+                peer,
             };
 
-            if(
-                !forks.some( 
-                    frk => eqChainForkHeaders( frk, fork )
-                )
-            )
-            forks.push( fork );
-        })
+            if (!forks.some((frk) => eqChainForkHeaders(frk, fork)))
+                forks.push(fork);
+        }),
     );
 
     return {
         extensions,
-        forks
+        forks,
     };
 }

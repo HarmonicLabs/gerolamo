@@ -7,21 +7,20 @@ const MIN_WORKERS = 4;
 // https://nodejs.org/api/globals.html#navigator_1
 const hasNavgator = typeof globalThis.navigator === "object";
 
-let _os_availableParallelism: number | undefined = hasNavgator ? globalThis.navigator.hardwareConcurrency : undefined;
+let _os_availableParallelism: number | undefined = hasNavgator
+    ? globalThis.navigator.hardwareConcurrency
+    : undefined;
 
-async function setOsAviableParallelism()
-{
-    if(
+async function setOsAviableParallelism() {
+    if (
         _os_availableParallelism === MIN_WORKERS ||
-        (
-            typeof _os_availableParallelism === "number" &&
-            Number.isSafeInteger( _os_availableParallelism ) &&
-            _os_availableParallelism === (_os_availableParallelism >>> 0)
-        )
-    ) return; // already set
+        (typeof _os_availableParallelism === "number" &&
+            Number.isSafeInteger(_os_availableParallelism) &&
+            _os_availableParallelism === _os_availableParallelism >>> 0)
+    )
+        return; // already set
 
-    if( hasNavgator )
-    {
+    if (hasNavgator) {
         _os_availableParallelism = globalThis.navigator.hardwareConcurrency;
         return;
     }
@@ -62,14 +61,14 @@ async function setOsAviableParallelism()
     return;
 }
 
-if( !hasNavgator )
-{
+if (!hasNavgator) {
     void setOsAviableParallelism();
 }
 
-export function getMaxWorkers(): number
-{
-    let realNum =  hasNavgator ? globalThis.navigator.hardwareConcurrency : _os_availableParallelism;
-    realNum = typeof realNum === 'number' ? realNum : MIN_WORKERS;
-    return Math.max( realNum, MIN_WORKERS ) >>> 0;
+export function getMaxWorkers(): number {
+    let realNum = hasNavgator
+        ? globalThis.navigator.hardwareConcurrency
+        : _os_availableParallelism;
+    realNum = typeof realNum === "number" ? realNum : MIN_WORKERS;
+    return Math.max(realNum, MIN_WORKERS) >>> 0;
 }

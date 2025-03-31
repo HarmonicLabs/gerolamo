@@ -1,6 +1,5 @@
-
 export enum MainMessageKind {
     PeerWorkerSetup,
     LedgerStateChainSelWorkerSetup,
 }
-Object.freeze( MainMessageKind );
+Object.freeze(MainMessageKind);

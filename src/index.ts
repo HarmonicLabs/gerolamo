@@ -5,7 +5,6 @@ import { performHandshake } from "./performHandshake";
 import { runNode } from "./runNode";
 import { logger } from "./logger";
 
-void async function main()
-{
-    void await runNode();
-}();
+void (async function main() {
+    void (await runNode());
+})();

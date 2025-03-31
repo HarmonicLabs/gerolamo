@@ -14,26 +14,54 @@ First off, thanks for your interest in contributing to Gerolamo! This is an open
 
 ## Setting Up Your Environment
 
-1. **Clone the Repo:**  
+### Using Nix
+
+Simply run:
+
+```bash
+# Clone the repo
+nix flake clone github:HarmonicLabs/gerolamo --dest ./gerolamo
+cd gerolamo
+
+# Enter devshell
+nix develop .# --accept-flake-config --no-pure-eval
+```
+
+Then, go from Step (4) onwards in the Ubuntu steps, using NPM as required.
+
+Later, we'll introduce more sophisticated Nix machinery.
+
+### Using Ubuntu
+
+You can adapt the same steps to MacOS or any distro based on RHEL or Arch.
+
+1. **Install System Dependencies**
+  ```bash
+  sudo apt install build-essential python3
+  ```
+
+2. **Clone the Repo:**  
    ```bash
    git clone https://github.com/HarmonicLabs/gerolamo.git
    cd gerolamo
    ```
 
-2. **Install Dependencies:**  
+3. **Install JS Dependencies:**  
    We use Node.js and npm. Make sure you have Node.js (LTS recommended) installed, then run:  
    ```bash
    npm install
    ```
 
-3. **Run the Project:**  
+  Try `npm i -f` if you encounter any dependency versioning issues.
+
+4. **Run the Project:**  
    Check the README for instructions on running the node. Typically:  
    ```bash
    npm run build
    npm run start
    ```
 
-4. **Explore the Docs:**  
+5. **Explore the Docs:**  
    See the `docs/` folder (if available) or the wiki for internal architecture, design decisions, and additional setup notes.
 
 ## How We Work
@@ -46,17 +74,22 @@ First off, thanks for your interest in contributing to Gerolamo! This is an open
 
 ## Code Style & Standards
 
-- **HLabs best practices:**
+### HLabs best-practices
 
-  [here](https://github.com/HarmonicLabs/ts-best-practices) you'll find some best practices we try to apply when writing our code, in particular, when creating a pull request, make sure to follow the [styling suggestions](https://github.com/HarmonicLabs/ts-best-practices/tree/main/styling)
+[Here](https://github.com/HarmonicLabs/ts-best-practices) you'll find some best practices we try to apply when writing our code, in particular, when creating a pull request, make sure to follow the [styling suggestions](https://github.com/HarmonicLabs/ts-best-practices/tree/main/styling).
 
-- **Testing:**  
-  If you’re adding a new feature or fixing a bug, add or update tests. This helps ensure we don’t break something unintentionally. We use [Jest](https://jestjs.io/), so check the `__tests__/` directory for examples.
+We plan to fix these suggestions in code to the extent possible using the [Biome](https://biomejs.dev) code formatter.
+
+We're still testing this functionality, so right now, it's only available with Nix using `nix fmt`. Later, we'll bring it to non-Nix users as well.
+
+### Testing  
+
+If you’re adding a new feature or fixing a bug, add or update tests. This helps ensure we don’t break something unintentionally. We use [Jest](https://jestjs.io/), so check the `__tests__/` directory for examples.
 
 ## Pull Requests
 
 - **Branching:**  
-  Create a feature branch from `main` to keep the commit history clean.
+  Create a feature branch from `develop` to keep the commit history clean. Issues get merged from `<feat-branch>` to `develop`, and `develop` periodically gets merged to `main`.
 
 - **Commit Messages:**  
   Write clear, concise commit messages. Something like:  

@@ -4,9 +4,10 @@ import { WorkerInfo } from "../data/WokerInfo";
 import { IMainWorkerMessage } from "../IMainWorkerMessage";
 import { MainMessageKind } from "./MainMessageKind";
 
-export interface PeerWorkerSetup extends IMainWorkerMessage<MainMessageKind.PeerWorkerSetup> {
+export interface PeerWorkerSetup
+    extends IMainWorkerMessage<MainMessageKind.PeerWorkerSetup> {
     readonly kind: MainMessageKind.PeerWorkerSetup;
-    readonly data: PeerWorkerSetupData; 
+    readonly data: PeerWorkerSetupData;
 }
 
 export interface PeerWorkerSetupData {
@@ -22,7 +23,8 @@ export interface PeerWorkerSetupData {
     readonly mempoolBuffer: SharedArrayBuffer;
 }
 
-export function isPeerWorkerSetupKind( message: any ): message is PeerWorkerSetup
-{
+export function isPeerWorkerSetupKind(
+    message: any,
+): message is PeerWorkerSetup {
     return message.kind === MainMessageKind.PeerWorkerSetup;
 }

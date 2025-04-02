@@ -1,18 +1,19 @@
 import { RealPoint } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "./logger";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
-import { ChainDb } from "../lib/consensus/ChainDb/ChainDb";
 import { parseTopology } from "./parseTopology";
 import { getMaxWorkers } from "./utils/getMaxWorkers";
 import { Worker, MessageChannel } from "node:worker_threads";
-import { WorkerInfo } from "./workers/messages/main/data/WorkerInfo";
 import {
     MempoolSize,
     SharedMempool,
 } from "@harmoniclabs/shared-cardano-mempool-ts";
-import { PeerWorkerSetup } from "./workers/messages/main/messages/PeerWorkerSetup";
-import { MainMessageKind } from "./workers/messages/main/messages/MainMessageKind";
-import { LedgerStateChainSelWorkerSetup } from "./workers/messages/main/messages/LedgerStateChainSelWorkerSetup";
+import {
+    PeerWorkerSetup,
+    MainMessageKind,
+    LedgerStateChainSelWorkerSetup,
+    WorkerInfo,
+} from "./workers/messages";
 import { NodeConfig } from "./NodeConfig";
 
 export async function runNode(): Promise<void> {
@@ -26,10 +27,7 @@ export async function runNode(): Promise<void> {
         },
     });
 
-    setupWorkers(
-        networkMagic,
-        startPoint,
-    );
+    setupWorkers(networkMagic, startPoint);
 
     logger.info("running node");
 }

@@ -1,10 +1,5 @@
-import { MessagePort, parentPort } from "node:worker_threads";
-import {
-    isPeerWorkerSetupKind,
-    PeerWorkerSetupData,
-} from "./messages/main/messages/PeerWorkerSetup";
-import { SharedMempool } from "@harmoniclabs/shared-cardano-mempool-ts";
-import { WorkerInfo } from "./messages/main/data/WorkerInfo";
+import { parentPort } from "node:worker_threads";
+import { isPeerWorkerSetupKind, PeerWorkerSetupData } from "./messages";
 import { NodeConfig } from "../NodeConfig";
 import {
     BlockFetchClient,
@@ -14,14 +9,14 @@ import {
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "../logger";
 import { connect, Socket } from "node:net";
-import { performHandshake } from "../performHandshake";
+import { performHandshake } from "./performHandshake";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
-import { MultiEraHeader } from "../../lib/ledgerExtension/multi-era/MultiEraHeader";
 import { TopologyAccessPoint } from "../../lib/topology";
-import { startupSnapshot } from "node:v8";
 
-const accessPointToMultiplexer = (aPoint: TopologyAccessPoint) =>
-    new Multiplexer({
+let _initialized = false;
+
+function accessPointToMultiplexer(aPoint: TopologyAccessPoint): Multiplexer {
+    return new Multiplexer({
         connect: () => {
             logger.info(
                 `Attempt connection to ${aPoint.address}:${aPoint.port}`,
@@ -34,15 +29,16 @@ const accessPointToMultiplexer = (aPoint: TopologyAccessPoint) =>
         protocolType: "node-to-node",
         initialListeners: { error: [logger.error] },
     });
+}
 
-const multiplexerToClients = (multiplexer: Multiplexer) => {
+function multiplexerToClients(multiplexer: Multiplexer) {
     return {
         chainSync: new ChainSyncClient(multiplexer),
         blockFetch: new BlockFetchClient(multiplexer),
     };
-};
+}
 
-const chainSyncAddCallbacks = (chainSync: ChainSyncClient) => {
+function chainSyncAddCallbacks(chainSync: ChainSyncClient) {
     chainSync.on("error", (err) => {
         logger.error(err);
         throw err;
@@ -50,7 +46,7 @@ const chainSyncAddCallbacks = (chainSync: ChainSyncClient) => {
 
     chainSync.once("awaitReply", () =>
         logger.info(
-            "reached tip on peer",
+            "Reached tip on peer:",
             chainSync.mplexer.socket.unwrap<Socket>().remoteAddress,
         ),
     );
@@ -65,31 +61,34 @@ const chainSyncAddCallbacks = (chainSync: ChainSyncClient) => {
         return chainSync.requestNext();
     });
     chainSync.on("rollBackwards", async (rollback) => {
-        logger.warn("rollback to", rollback.point.toString());
+        logger.warn("ChainSyncRollBack request:", rollback.point.toString());
     });
-};
+}
 
-const blockFetchAddCallbacks = (blockFetch: BlockFetchClient) => {
+function blockFetchAddCallbacks(blockFetch: BlockFetchClient) {
     blockFetch.on("error", (err) => {
         logger.error(err);
         throw err;
     });
-};
+}
 
-const chainSyncNext =
-    (startPoint: RealPoint) => async (client: ChainSyncClient) => {
-        await client.findIntersect([startPoint]);
-        await client.requestNext();
-    }
+async function chainSyncInit(startPoint: RealPoint, client: ChainSyncClient) {
+    await client.findIntersect([startPoint]);
+    await client.requestNext();
+}
 
 parentPort?.on("message", async (message) => {
-    if (isPeerWorkerSetupKind(message)) {
+    if (!_initialized && isPeerWorkerSetupKind(message)) {
         const data = message.data as PeerWorkerSetupData;
         const conns = data.initialPeersConnections
             .map((root) => root.accessPoints.map(accessPointToMultiplexer))
             .flat();
 
-        await performHandshake(conns, data.config.networkMagic);
+        await Promise.all(
+            conns.map((conn) =>
+                performHandshake(data.config.networkMagic, conn),
+            ),
+        );
 
         const peers = conns.map(multiplexerToClients);
         for (const { chainSync, blockFetch } of peers) {
@@ -97,19 +96,20 @@ parentPort?.on("message", async (message) => {
             blockFetchAddCallbacks(blockFetch);
         }
 
-        const csNext = chainSyncNext(
-            new RealPoint({
-                blockHeader: {
-                    hash: fromHex(
-                        (data.config as NodeConfig).startPoint.blockHeader.hash,
-                    ),
-                    slotNumber: (data.config as NodeConfig).startPoint.blockHeader.slot,
-                },
-            })
-        );
+        const startPoint = new RealPoint({
+            blockHeader: {
+                hash: fromHex(
+                    (data.config as NodeConfig).startPoint.blockHeader.hash,
+                ),
+                slotNumber: (data.config as NodeConfig).startPoint.blockHeader
+                    .slot,
+            },
+        });
 
         await Promise.all(
-            peers.map(({ chainSync }) => csNext(chainSync)),
+            peers.map(({ chainSync }) => chainSyncInit(startPoint, chainSync)),
         );
+
+        _initialized = true;
     }
 });

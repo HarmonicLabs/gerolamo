@@ -21,3 +21,5 @@ src/offchain/tx/builder/rollup-out/
 
 # output of program
 db/
+
+**/.devenv/

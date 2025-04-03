@@ -52,11 +52,13 @@ export class BlockHeaderValidator {
         const headerHash = await sha2_256(headerBytes);
         const header = BabbageHeader.fromCbor(headerBytes);
 
-        const slot = header.slotNo;
-        const issuerVkey = header.issuerVkey;
-        const poolId = issuerVkeyToPoolId(issuerVkey);
+        // const slot = header.slotNo;
+        // const issuerVkey = header.issuerVkey;
+        // const poolId = issuerVkeyToPoolId(issuerVkey);
 
-        const vrfKey = header.vrfVkey;
-        const vrf = header.vrfResult;
+        // const vrfKey = header.vrfVkey;
+        // const vrf = header.vrfResult;
+
+        return false;
     }
 }

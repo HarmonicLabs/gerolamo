@@ -10,7 +10,7 @@ export function isWorkerInfo(message: any): message is WorkerInfo {
     return (
         isObject(message) &&
         typeof message.id === "number" &&
-            typeof globalThis.MessagePort !== "undefined" &&
+        typeof globalThis.MessagePort !== "undefined" &&
         message.port instanceof globalThis.MessagePort
     );
 }

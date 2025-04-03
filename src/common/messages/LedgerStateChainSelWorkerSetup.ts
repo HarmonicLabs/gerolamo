@@ -1,5 +1,5 @@
-import { NodeConfig } from "../../../../NodeConfig";
-import { WorkerInfo } from "../data/WokerInfo";
+import { NodeConfig } from "../../../../node/NodeConfig";
+import { WorkerInfo } from "../data/WorkerInfo";
 import { IMainWorkerMessage } from "../IMainWorkerMessage";
 import { MainMessageKind } from "./MainMessageKind";
 

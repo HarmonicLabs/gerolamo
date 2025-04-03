@@ -15,7 +15,7 @@ import { getCborBytesDescriptor } from "../../utils/getCborBytesDescriptor";
 import { roDescr } from "../../utils/roDescr";
 import { blake2b_256 } from "../../crypto";
 import { type EpochId } from "./ByronHeader";
-import { logger } from "../../../src/logger";
+import { logger } from "../../../src/utils/logger";
 
 export interface IByronEbbConsData {
     epochId: EpochId;

@@ -11,7 +11,7 @@ import {
     HeaderPoolWriteResult,
 } from "@harmoniclabs/shared-header-pool-ts";
 import { Socket } from "net";
-import { logger } from "../logger";
+import { logger } from "../utils/logger";
 import { MultiEraHeader } from "../../lib/ledgerExtension/multi-era/MultiEraHeader";
 
 /**

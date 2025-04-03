@@ -6,7 +6,7 @@ import {
     LazyCborTag,
 } from "@harmoniclabs/cbor";
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import { logger } from "../../../src/logger";
+import { logger } from "../../../src/utils/logger";
 
 export function getEraIdxAndHeaderBytes(multiEraHeaderBytes: Uint8Array): {
     eraIdx: number;

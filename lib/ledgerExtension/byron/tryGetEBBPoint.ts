@@ -7,7 +7,7 @@ import {
 } from "@harmoniclabs/cbor";
 import { RealPoint } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { blake2b_256 } from "../../crypto";
-import { logger } from "../../../src/logger";
+import { logger } from "../../../src/utils/logger";
 
 export function tryGetEBBPoint(headerBytes: Uint8Array): RealPoint | undefined {
     const lazyHead = Cbor.parseLazy(headerBytes);

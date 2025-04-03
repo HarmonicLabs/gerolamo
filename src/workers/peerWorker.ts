@@ -1,13 +1,12 @@
-import { parentPort } from "node:worker_threads";
-import { isPeerWorkerSetupKind, PeerWorkerSetupData } from "./messages";
-import { NodeConfig } from "../NodeConfig";
+import { PeerWorkerSetupData } from "../common";
+import { NodeConfig } from "../node/NodeConfig";
 import {
     BlockFetchClient,
     ChainSyncClient,
     Multiplexer,
     RealPoint,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { logger } from "../logger";
+import { logger } from "../utils/logger";
 import { connect, Socket } from "node:net";
 import { performHandshake } from "./performHandshake";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
@@ -77,9 +76,9 @@ async function chainSyncInit(startPoint: RealPoint, client: ChainSyncClient) {
     await client.requestNext();
 }
 
-parentPort?.on("message", async (message) => {
-    if (!_initialized && isPeerWorkerSetupKind(message)) {
-        const data = message.data as PeerWorkerSetupData;
+// parentPort?.on("message", async (message) => {
+export async function initWorker(data: PeerWorkerSetupData) {
+    if (!_initialized) {
         const conns = data.initialPeersConnections
             .map((root) => root.accessPoints.map(accessPointToMultiplexer))
             .flat();
@@ -112,4 +111,4 @@ parentPort?.on("message", async (message) => {
 
         _initialized = true;
     }
-});
+}

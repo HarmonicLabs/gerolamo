@@ -1,8 +1,11 @@
-import { RealPoint } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { logger } from "./logger";
+import {
+    CardanoNetworkMagic,
+    RealPoint,
+} from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { logger } from "../utils/logger";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { parseTopology } from "./parseTopology";
-import { getMaxWorkers } from "./utils/getMaxWorkers";
+import { getMaxWorkers } from "../utils/getMaxWorkers";
 import { Worker, MessageChannel } from "node:worker_threads";
 import {
     MempoolSize,
@@ -13,22 +16,22 @@ import {
     MainMessageKind,
     LedgerStateChainSelWorkerSetup,
     WorkerInfo,
-} from "./workers/messages";
+} from "../common";
 import { NodeConfig } from "./NodeConfig";
 
+const networkMagic = CardanoNetworkMagic.Preprod; // preprod
+const spHash =
+    "5da6ba37a4a07df015c4ea92c880e3600d7f098b97e73816f8df04bbb5fad3b7";
+const spSlotNo = 69638382;
+const startPoint = new RealPoint({
+    blockHeader: {
+        hash: fromHex(spHash),
+        slotNumber: spSlotNo,
+    },
+});
+
 export async function runNode(): Promise<void> {
-    const networkMagic = 1; // preprod
-    const startPoint = new RealPoint({
-        blockHeader: {
-            hash: fromHex(
-                "5da6ba37a4a07df015c4ea92c880e3600d7f098b97e73816f8df04bbb5fad3b7",
-            ),
-            slotNumber: 69638382,
-        },
-    });
-
     setupWorkers(networkMagic, startPoint);
-
     logger.info("running node");
 }
 

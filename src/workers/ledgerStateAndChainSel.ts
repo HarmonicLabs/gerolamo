@@ -1,8 +1,8 @@
 import { open, RootDatabaseOptionsWithPath } from "lmdb";
 import { parentPort } from "node:worker_threads";
-import { LedgerStateChainSelWorkerSetupData } from "./messages";
+import { LedgerStateChainSelWorkerSetupData } from "../common";
 
-import { logger } from "../logger";
+import { logger } from "../utils/logger";
 
 /*
 Ledger State
@@ -90,7 +90,6 @@ const governanceState = lstateDb.openDB({ name: "governance-state" });
 /* epoch pots (deposits, fees, donations) */
 const epochPots = lstateDb.openDB({ name: "epoch-pots" });
 
-parentPort?.on("message", async (message) => {
-    const data = message.data as LedgerStateChainSelWorkerSetupData;
+export async function initWorker(_data: LedgerStateChainSelWorkerSetupData) {
     logger.info("Started ledger state and chain selection thread");
-});
+}

@@ -3,7 +3,7 @@ import {
     HandshakeClient,
     CardanoNetworkMagic,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { logger } from "../logger";
+import { logger } from "../utils/logger";
 
 export const performHandshake = async (
     networkMagic: number = CardanoNetworkMagic.Preprod,

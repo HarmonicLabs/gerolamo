@@ -4,7 +4,7 @@ import {
     adaptLegacyTopology,
     isLegacyTopology,
     isTopology,
-} from "../lib/topology";
+} from "../../lib/topology";
 
 export function parseTopology(path: string): Topology {
     if (!existsSync(path)) throw new Error("missing topology file at " + path);

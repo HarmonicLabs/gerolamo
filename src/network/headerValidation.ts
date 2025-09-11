@@ -12,13 +12,14 @@ import {
     ShelleyHeader,
     VrfCert,
 } from "@harmoniclabs/cardano-ledger-ts";
-import { logger } from "../utils/logger";
+import { logger } from "./utils/logger";
 import {
     calculateCardanoEpoch,
     calculatePreProdCardanoEpoch,
-} from "./utils/epochCalculations"; // Assume separate module
+} from "./utils/epochCalculations";
 import { validateHeader } from "../consensus/BlockHeaderValidator";
 import { RawNewEpochState } from "../rawNES";
+import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 
 export async function headerValidation(blockHeader: any) {
     const tipSlot = blockHeader.tip.point.blockHeader.slotNumber;
@@ -79,12 +80,18 @@ export async function headerValidation(blockHeader: any) {
     });
     // logger.debug("MultiEraHeader: ", multiEraHeader);
 
-    const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
-    const headerEpoch = calculatePreProdCardanoEpoch(
-        Number(multiEraHeader.header.body.slot),
-    );
-
-    const slot = multiEraHeader.header.body.slot;
+	const blockHeaderHash = blake2b_256( blockHeaderParsed.data.bytes );
+	const headerEpoch = calculatePreProdCardanoEpoch(Number(multiEraHeader.header.body.slot));
+	const epochNonce = await blockFrostFetchEra(headerEpoch as number);
+	const slot = multiEraHeader.header.body.slot;
+	const opCert = multiEraHeader.header.body.opCert;
+	const lState = RawNewEpochState.init();
+	const slotCoeff = 0.05; // Assume a default value or fetch from config
+	
+    logger.log("opcert: ", opCert);
+    
+    // validateHeader(multiEraHeader, lState, opCert, slot, epochNonce);
+    
     logger.debug(
         `Validated - Era: ${blcokHeaderBodyEra} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
             ((Number(slot) / Number(tipSlot)) * 100).toFixed(2)

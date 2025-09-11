@@ -88,9 +88,10 @@ export async function headerValidation(blockHeader: any) {
 	const lState = RawNewEpochState.init();
 	const slotCoeff = 0.05; // Assume a default value or fetch from config
 	
-    logger.log("opcert: ", opCert);
+    // logger.log("opcert: ", opCert);
     
-    // validateHeader(multiEraHeader, lState, opCert, slot, epochNonce);
+    const validateHeaderRes = validateHeader(multiEraHeader, lState, opCert, slotCoeff, epochNonce);
+    logger.debug("Header validation result: ", validateHeaderRes);
     
     logger.debug(
         `Validated - Era: ${blcokHeaderBodyEra} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
@@ -102,4 +103,4 @@ export async function headerValidation(blockHeader: any) {
     if (!validateHeaderres) return null;
 
     return ({ slot, blockHeaderHash, multiEraHeader });
-}
+};

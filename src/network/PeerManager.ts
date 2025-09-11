@@ -236,8 +236,9 @@ export class PeerManager {
             )
         )
         */
-        const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
+        // const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
         // logger.debug(block)
+        /*
         if (block) {
             logger.debug(
                 `Fetched block for hash ${blockHeaderHash} from peer ${peerId} Block: `,
@@ -253,8 +254,9 @@ export class PeerManager {
                 `Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`,
             );
         }
-    }
-}
+        */
+    };
+};
 
 // Initialize the peer manager
 const peerManager = new PeerManager();

@@ -10,7 +10,7 @@ import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { putHeader, putBlock } from "./lmdbWorkers/lmdb";
+import { putHeader, putBlock } from "./sqlWorkers/sql";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;

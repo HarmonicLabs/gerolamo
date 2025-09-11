@@ -1,0 +1,11 @@
+{
+    "p2p": "enabled",
+    "topologyFile": "./src/network/topology.json",
+    "syncFromTip": false,
+    "syncFromGenesis": false,
+    "genesisBlockHash": "1d031daf47281f69cd95ab929c269fd26b1434a56a5bbbd65b7afe85ef96b233",
+    "syncFromPoint": true,
+    "syncFromPointSlot": 68774372,
+    "syncFromPointBlockHash": "36f5b4a370c22fd4a5c870248f26ac72c0ac0ecc34a42e28ced1a4e15136efa4",
+    "logLevel": "Error"
+}

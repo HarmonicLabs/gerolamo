@@ -3,16 +3,16 @@ import {
     PeerAddress,
     PeerAddressIPv4,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { MultiEraHeader, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
+import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { logger } from "../utils/logger";
-import { parseTopology } from "../node";
-import { TopologyRoot } from "../../lib/topology";
+import { parseTopology } from "../utils/parseTopology";
+import { TopologyRoot } from "../utils/topology";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { getHeader, putBlock, putHeader } from "./lmdbWorkers/lmdb";
+import { putHeader } from "./lmdbWorkers/lmdb";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;

@@ -5,9 +5,9 @@ import {
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { MultiEraHeader, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
-import { logger } from "../utils/logger";
-import { parseTopology } from "../node";
-import { TopologyRoot } from "../../lib/topology";
+import { logger } from "./utils/logger";
+import { parseTopology } from "./topology/parseTopology";
+import { TopologyRoot } from "./topology/topology";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";

@@ -1,9 +1,7 @@
-import {
-    ChainPoint,
-    PeerAddress,
-    PeerAddressIPv4,
-} from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
+import { ChainPoint } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/types/index.js";
+import { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/peer-sharing/PeerAddress/PeerAddress.js";
+import { PeerAddressIPv4 } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv4.js";
+import { NetworkT } from "@harmoniclabs/cardano-ledger-ts/dist/ledger/Network.js";
 import { PeerClient } from "./PeerClient";
 import { logger } from "../utils/logger";
 import { parseTopology } from "../utils/parseTopology";
@@ -12,7 +10,7 @@ import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { putHeader } from "./lmdbWorkers/lmdb";
+import { putHeader, putBlock } from "./lmdbWorkers/lmdb";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
@@ -228,14 +226,14 @@ export class PeerManager {
          * Calculating block_body_hash
          *
          * blake2b_256(
-            concatUint8Arr(
-                blake2b_256( tx_bodies ),
-                blake2b_256( tx_witnesses ),
-                blake2b_256( tx_metadatas ),
-                blake2b_256( tx_invalidTxsIdxs ),
-            )
-        )
-        */
+         *     concatUint8Arr(
+         *         blake2b_256( tx_bodies ),
+         *         blake2b_256( tx_witnesses ),
+         *         blake2b_256( tx_metadatas ),
+         *         blake2b_256( tx_invalidTxsIdxs ),
+         *     )
+         * )
+         */
         const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
         // logger.debug(block)
         if (block) {
@@ -244,7 +242,7 @@ export class PeerManager {
                 block.toCborBytes(),
             );
             // Assuming block is Uint8Array/Buffer, store as binary using worker
-            // await putBlock(blockHeaderHash, block.toCborBytes());
+            await putBlock(blockHeaderHash, block.toCborBytes());
             logger.debug(
                 `Stored block for hash ${blockHeaderHash} from peer ${peerId}`,
             );

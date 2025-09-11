@@ -18,6 +18,7 @@ import {
     calculatePreProdCardanoEpoch,
 } from "./utils/epochCalculations"; // Assume separate module
 import { validateHeader } from "../consensus/BlockHeaderValidator";
+import { RawNewEpochState } from "../rawNES";
 
 export async function headerValidation(blockHeader: any) {
     const tipSlot = blockHeader.tip.point.blockHeader.slotNumber;
@@ -90,7 +91,8 @@ export async function headerValidation(blockHeader: any) {
         }% \n`,
     );
 
-    const validateHeaderres: boolean = true;
+    // For now, skip detailed validation and just check if header parsed successfully
+    const validateHeaderres: boolean = true; // TODO: Implement proper header validation
     if (!validateHeaderres) return null;
 
     return ({ slot, blockHeaderHash, multiEraHeader });

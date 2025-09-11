@@ -7,10 +7,10 @@ import {
     KeepAliveClient,
     KeepAliveResponse,
     Multiplexer,
-    PeerAddress,
     PeerSharingClient,
     PeerSharingResponse,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/peer-sharing/PeerAddress/PeerAddress.js";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { connect } from "node:net";
 import { logger } from "../utils/logger";

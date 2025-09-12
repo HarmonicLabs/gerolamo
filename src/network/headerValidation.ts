@@ -1,4 +1,4 @@
-import { Cbor, CborBytes, CborTag, LazyCborArray, CborObj, LazyCborObj, CborArray } from "@harmoniclabs/cbor";
+import { Cbor, CborBytes, CborTag, LazyCborArray } from "@harmoniclabs/cbor";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, MultiEraHeader, ShelleyHeader } from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
@@ -10,15 +10,10 @@ import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
 import { RawNewEpochState } from "../rawNES";
 
-export async function headerValidation(blockHeader: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig, lState) {
+export async function headerValidation(blockHeader: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig, lState: RawNewEpochState) {
     const tipSlot = blockHeader.tip.point.blockHeader?.slotNumber;
-
-    const blockHeaderData: Uint8Array = blockHeader.toCborBytes ?
-    rollForwardBytesToBlockData( blockHeader.toCborBytes(), blockHeader.data ) : 
-    Cbor.encode(blockHeader.data).toBuffer();
-    
-    // const blockHeaderData: Uint8Array = Cbor.encode(blockHeader.data).toBuffer();
-
+    const blockHeaderData: Uint8Array = Cbor.encode(blockHeader.data).toBuffer();
+    logger.debug("Block Header Data: ", blockHeaderData);
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
     if (!(lazyHeader instanceof LazyCborArray)) {
         throw new Error("invalid CBOR for header");
@@ -88,35 +83,3 @@ export async function headerValidation(blockHeader: ChainSyncRollForward, shelle
 
     return ({ slot, blockHeaderHash, multiEraHeader });
 };
-
-function rollForwardBytesToBlockData( bytes: Uint8Array, defaultCborObj: CborObj ): Uint8Array
-{
-    let cbor: CborObj | LazyCborObj
-    
-    try 
-	{
-        cbor = Cbor.parse( bytes );
-    }
-    catch 
-	{
-        return Cbor.encode( defaultCborObj ).toBuffer();
-    }
-    
-    if(!(
-        cbor instanceof CborArray &&
-        cbor.array[1] instanceof CborTag && 
-        cbor.array[1].data instanceof CborBytes
-    ))
-    {
-        return Cbor.encode( defaultCborObj ).toBuffer();
-    }
-
-    cbor = Cbor.parseLazy( cbor.array[1].data.buffer );
-
-    if(!( cbor instanceof LazyCborArray ))
-    {
-        return Cbor.encode( defaultCborObj ).toBuffer();
-    }
-
-    return cbor.array[1];
-}

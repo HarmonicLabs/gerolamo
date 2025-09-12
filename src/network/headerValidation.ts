@@ -1,31 +1,23 @@
-import { Cbor, CborBytes, CborTag, LazyCborArray } from "@harmoniclabs/cbor";
+import { Cbor, CborBytes, CborTag, LazyCborArray, CborObj, LazyCborObj, CborArray } from "@harmoniclabs/cbor";
 import { blake2b_256 } from "@harmoniclabs/crypto";
-import {
-    AllegraHeader,
-    AlonzoHeader,
-    BabbageHeader,
-    CanBeHash32,
-    ConwayHeader,
-    Epoch,
-    MaryHeader,
-    MultiEraHeader,
-    ShelleyHeader,
-    VrfCert,
-} from "@harmoniclabs/cardano-ledger-ts";
+import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, MultiEraHeader, ShelleyHeader } from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "./utils/logger";
-import {
-    calculateCardanoEpoch,
-    calculatePreProdCardanoEpoch,
-} from "./utils/epochCalculations";
+import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
 import { validateHeader } from "../consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
+import { RawNewEpochState } from "../rawNES";
 
-export async function headerValidation(blockHeader: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig) {
+export async function headerValidation(blockHeader: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig, lState) {
     const tipSlot = blockHeader.tip.point.blockHeader?.slotNumber;
-    const blockHeaderData: Uint8Array = Cbor.encode(blockHeader.data).toBuffer();
+
+    const blockHeaderData: Uint8Array = blockHeader.toCborBytes ?
+    rollForwardBytesToBlockData( blockHeader.toCborBytes(), blockHeader.data ) : 
+    Cbor.encode(blockHeader.data).toBuffer();
+    
+    // const blockHeaderData: Uint8Array = Cbor.encode(blockHeader.data).toBuffer();
 
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
     if (!(lazyHeader instanceof LazyCborArray)) {
@@ -34,18 +26,15 @@ export async function headerValidation(blockHeader: ChainSyncRollForward, shelle
 
     const blockHeaderParsed = Cbor.parse(lazyHeader.array[1]);
     // logger.debug("Block Header Parsed: ", blockHeaderParsed);
-    if (
-        !(
-            blockHeaderParsed instanceof CborTag &&
-            blockHeaderParsed.data instanceof CborBytes
-        )
-    ) throw new Error("invalid CBOR for header body");
+    if (!(
+        blockHeaderParsed instanceof CborTag &&
+        blockHeaderParsed.data instanceof CborBytes
+    )) throw new Error("invalid CBOR for header body");
+
     const blockHeaderBodyLazy = Cbor.parseLazy(blockHeaderParsed.data.bytes);
-    if (
-        !(
-            blockHeaderBodyLazy instanceof LazyCborArray
-        )
-    ) throw new Error("invalid CBOR for header body");
+    if (!(
+        blockHeaderBodyLazy instanceof LazyCborArray
+    )) throw new Error("invalid CBOR for header body");
 
     const blcokHeaderBodyEra = lazyHeader.array[0][0];
     // logger.debug("Header Era: ", blcokHeaderBodyEra);
@@ -86,7 +75,7 @@ export async function headerValidation(blockHeader: ChainSyncRollForward, shelle
 	const epochNonce = await blockFrostFetchEra(headerEpoch as number);
 	const slot = multiEraHeader.header.body.slot;
 	    
-    const validateHeaderRes = await validateHeader(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis);
+    const validateHeaderRes = await validateHeader(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis, lState);
     logger.debug("Header validation result: ", validateHeaderRes);
     
     logger.debug(
@@ -95,8 +84,39 @@ export async function headerValidation(blockHeader: ChainSyncRollForward, shelle
         }% \n`,
     );
 
-    const validateHeaderres: boolean = true;
-    if (!validateHeaderres) return null;
+    if (!validateHeaderRes) return null;
 
     return ({ slot, blockHeaderHash, multiEraHeader });
 };
+
+function rollForwardBytesToBlockData( bytes: Uint8Array, defaultCborObj: CborObj ): Uint8Array
+{
+    let cbor: CborObj | LazyCborObj
+    
+    try 
+	{
+        cbor = Cbor.parse( bytes );
+    }
+    catch 
+	{
+        return Cbor.encode( defaultCborObj ).toBuffer();
+    }
+    
+    if(!(
+        cbor instanceof CborArray &&
+        cbor.array[1] instanceof CborTag && 
+        cbor.array[1].data instanceof CborBytes
+    ))
+    {
+        return Cbor.encode( defaultCborObj ).toBuffer();
+    }
+
+    cbor = Cbor.parseLazy( cbor.array[1].data.buffer );
+
+    if(!( cbor instanceof LazyCborArray ))
+    {
+        return Cbor.encode( defaultCborObj ).toBuffer();
+    }
+
+    return cbor.array[1];
+}

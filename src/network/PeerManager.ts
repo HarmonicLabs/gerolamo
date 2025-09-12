@@ -16,6 +16,7 @@ import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
 import { getHeader, putBlock, putHeader } from "./lmdbWorkers/lmdb";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
+import { RawNewEpochState } from "../rawNES";
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly topologyFile: string;
@@ -29,17 +30,33 @@ export interface GerolamoConfig {
     readonly shelleyGenesisFile: string;
 }
 
-export class PeerManager {
-    private allPeers = new Map<string, PeerClient>();
-    private hotPeers: PeerClient[] = [];
-    private warmPeers: PeerClient[] = [];
-    private coldPeers: PeerClient[] = [];
-    private newPeers: PeerClient[] = [];
-    private bootstrapPeers: PeerClient[] = [];
-    private config!: GerolamoConfig;
-    private topology: Topology;
-    private chainPoint: ChainPoint | null = null;
-    private shelleyGenesisConfig: ShelleyGenesisConfig;
+export interface IPeerManager { 
+    allPeers: Map<string, PeerClient>;
+    hotPeers: PeerClient[];
+    warmPeers: PeerClient[];
+    coldPeers: PeerClient[];
+    newPeers: PeerClient[];
+    bootstrapPeers: PeerClient[];
+    config: GerolamoConfig;
+    topology: Topology;
+    chainPoint: ChainPoint | null;
+    shelleyGenesisConfig: ShelleyGenesisConfig;
+    lState: RawNewEpochState;
+}
+
+export class PeerManager implements IPeerManager
+{
+    allPeers = new Map<string, PeerClient>();
+    hotPeers: PeerClient[] = [];
+    warmPeers: PeerClient[] = [];
+    coldPeers: PeerClient[] = [];
+    newPeers: PeerClient[] = [];
+    bootstrapPeers: PeerClient[] = [];
+    config: GerolamoConfig;
+    topology: Topology;
+    chainPoint: ChainPoint | null = null;
+    shelleyGenesisConfig: ShelleyGenesisConfig;
+    lState: RawNewEpochState;
 
     constructor() {}
 
@@ -51,6 +68,7 @@ export class PeerManager {
         // logger.debug("Parsed topology:", this.topology);
         const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile)
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
+        this.lState = RawNewEpochState.init();
 
         const chainPointFrom = new ChainPoint({
             blockHeader: {
@@ -166,9 +184,9 @@ export class PeerManager {
                     `Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync`,
                 );
                 peer.startSyncLoop(this.syncEventCallback.bind(this));
-                const peersAddresses = await peer.askForPeers();
-                console.log("peersAddresses: ", peersAddresses);
-                this.addNewSharedPeers(peersAddresses);
+                // const peersAddresses = await peer.askForPeers();
+                // console.log("peersAddresses: ", peersAddresses);
+                // this.addNewSharedPeers(peersAddresses);
             } catch (error) {
                 logger.error(
                     `Failed to initialize hot peer ${peer.peerId}:`,
@@ -217,7 +235,7 @@ export class PeerManager {
         // For rollForward
         if(!( data instanceof ChainSyncRollForward) ) return;
         
-        const validateHeaderRes = await headerValidation(data, this.shelleyGenesisConfig);
+        const validateHeaderRes = await headerValidation(data, this.shelleyGenesisConfig, this.lState);
         if (!validateHeaderRes) return;
 
         const { slot, blockHeaderHash, multiEraHeader } = validateHeaderRes;

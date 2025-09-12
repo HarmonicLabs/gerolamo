@@ -180,10 +180,9 @@ function getEraHeader(h: MultiEraHeader): BabbageHeader | ConwayHeader {
 export async function validateHeader(
     h: MultiEraHeader,
     nonce: Uint8Array,
-    shelleyGenesis: ShelleyGenesisConfig
+    shelleyGenesis: ShelleyGenesisConfig,
+    lState: RawNewEpochState
 ): Promise<boolean> {
-    const lState = RawNewEpochState.init();
-
     const header = getEraHeader(h);
     const opCerts: PoolOperationalCert = header.body.opCert;
     const activeSlotCoeff = shelleyGenesis.activeSlotsCoeff;

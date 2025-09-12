@@ -18,12 +18,11 @@ src/offchain/tx/builder/rollup-out/
 
 # output of program
 db/
-.lmdb
-.sqlite
-
+**/*.lmdb
 **/.devenv/
+**/*.sqlite
+**/*.sql
 
 # gerolamo stuff
-
 snapshots/
 output/

@@ -2,12 +2,14 @@ import {
     ChainPoint,
     PeerAddress,
     PeerAddressIPv4,
+    ChainSyncRollForward,
+    ChainSyncRollBackwards
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { MultiEraHeader, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { logger } from "./utils/logger";
 import { parseTopology } from "./topology/parseTopology";
-import { TopologyRoot } from "./topology/topology";
+import { TopologyRoot, Topology } from "./topology/topology";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
@@ -35,7 +37,7 @@ export class PeerManager {
     private newPeers: PeerClient[] = [];
     private bootstrapPeers: PeerClient[] = [];
     private config!: GerolamoConfig;
-    private topology: any;
+    private topology: Topology;
     private chainPoint: ChainPoint | null = null;
     private shelleyGenesisConfig: ShelleyGenesisConfig;
 
@@ -177,7 +179,8 @@ export class PeerManager {
         }));
     }
 
-    private addNewSharedPeers(peersAddresses: PeerAddress[]) {
+    private addNewSharedPeers(peersAddresses: PeerAddress[])
+    {
         logger.log("Adding new shared peers from network...");
         peersAddresses.forEach((address) => {
             if (address instanceof PeerAddressIPv4) {
@@ -194,22 +197,26 @@ export class PeerManager {
                 );
             }
         });
-    }
+    };
 
-    private async syncEventCallback(
+    private async syncEventCallback
+    (
         peerId: string,
         type: "rollForwards" | "rollBackwards",
-        data: any,
-    ) {
-        if (type === "rollBackwards") {
+        data: ChainSyncRollForward | ChainSyncRollBackwards,
+    )
+    {
+        if (type === "rollBackwards" && data instanceof ChainSyncRollBackwards) {
             // Handle rollback logic here if needed (e.g., remove entries from DB after rollback point)
             // For now, just log
             logger.debug(`Rollback event for peer ${peerId}`);
             // TODO: Implement DB cleanup if required
             return;
-        }
+        };
 
         // For rollForward
+        if(!( data instanceof ChainSyncRollForward) ) return;
+        
         const validateHeaderRes = await headerValidation(data, this.shelleyGenesisConfig);
         if (!validateHeaderRes) return;
 
@@ -228,7 +235,10 @@ export class PeerManager {
 
         /**
          * Calculating block_body_hash
-         *
+         * The block_body_hash is not a simple blake2b_256 hash of the entire serialized block body. 
+         * Instead, it is a Merkle root-like hash (often referred to as a "Merkle triple root" or quadruple root, depending on the era) of the key components of the block body. 
+         * This design allows for efficient verification of the block's contents (transactions, witnesses, metadata, etc.) without re-serializing the entire body, 
+         * while enabling segregated witness handling (introduced in the Alonzo era and carried forward).
          * blake2b_256(
             concatUint8Arr(
                 blake2b_256( tx_bodies ),

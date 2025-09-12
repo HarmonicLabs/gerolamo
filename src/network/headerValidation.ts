@@ -12,6 +12,7 @@ import {
     ShelleyHeader,
     VrfCert,
 } from "@harmoniclabs/cardano-ledger-ts";
+import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "./utils/logger";
 import {
     calculateCardanoEpoch,
@@ -20,11 +21,11 @@ import {
 import { validateHeader } from "../consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
 
-export async function headerValidation(blockHeader: any, shelleyGenesis: any) {
-    const tipSlot = blockHeader.tip.point.blockHeader.slotNumber;
-    const blockHeaderData: Uint8Array = Cbor.encode(blockHeader.data)
-        .toBuffer();
+export async function headerValidation(blockHeader: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig) {
+    const tipSlot = blockHeader.tip.point.blockHeader?.slotNumber;
+    const blockHeaderData: Uint8Array = Cbor.encode(blockHeader.data).toBuffer();
 
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
     if (!(lazyHeader instanceof LazyCborArray)) {

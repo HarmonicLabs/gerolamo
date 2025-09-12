@@ -10,6 +10,9 @@ import {
     PeerAddress,
     PeerSharingClient,
     PeerSharingResponse,
+    ChainSyncRollForward,
+    ChainSyncRollBackwards,
+    BlockFetchBlock
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { connect } from "node:net";
@@ -190,27 +193,27 @@ export class PeerClient implements IPeerClient {
         syncCallback: (
             peerId: string,
             type: "rollForwards" | "rollBackwards",
-            data: any,
+            data:  ChainSyncRollForward | ChainSyncRollBackwards,
         ) => void,
     ): Promise<any> {
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
 
-        this.chainSyncClient.on("rollForward", async (rollForward: any) => {
+        this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
             const multiEraHeader = rollForward || null;
             logger.debug(
                 `Rolled forward for peer ${this.peerId}`,
-                multiEraHeader.tip.point.blockHeader.slotNumber,
+                multiEraHeader.tip.point.blockHeader?.slotNumber,
             );
             syncCallback(this.peerId, "rollForwards", multiEraHeader);
             await this.chainSyncClient.requestNext();
         });
 
-        this.chainSyncClient.on("rollBackwards", async (rollBack: any) => {
+        this.chainSyncClient.on("rollBackwards", async (rollBack: ChainSyncRollBackwards) => {
             if (!rollBack.point.blockHeader) return;
             const tip = rollBack.tip.point;
             logger.debug(
                 `Rolled back tip for peer ${this.peerId}`,
-                tip.blockHeader.slotNumber,
+                tip.blockHeader?.slotNumber,
             );
             // Optionally update peerSlotNumber here if needed
             syncCallback(this.peerId, "rollBackwards", rollBack);

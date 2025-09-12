@@ -251,7 +251,7 @@ export async function validateHeader(
         header.kesSignature,
         maxKesEvo,
     );
-    
+    /*
     console.log({
         isKnownLeader,
         correctProof,
@@ -259,7 +259,7 @@ export async function validateHeader(
         verifyOpCertValidity,
         verifyKES
     });
-
+    */
     return (
         isKnownLeader &&
         correctProof &&

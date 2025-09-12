@@ -1,4 +1,4 @@
-import { Cbor, CborBytes, CborTag, LazyCborArray } from "@harmoniclabs/cbor";
+import { Cbor, CborArray, CborBytes, CborTag, LazyCborArray } from "@harmoniclabs/cbor";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, MultiEraHeader, ShelleyHeader } from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
@@ -11,15 +11,17 @@ import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
 import { RawNewEpochState } from "../rawNES";
 
 export async function headerValidation(data: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig, lState: RawNewEpochState) {
-    console.log("data after: ", Cbor.encode(data.data));
+    if (!(
+        data.data instanceof CborArray
+    )) throw new Error("invalid CBOR for header");
     const tipSlot = data.tip.point.blockHeader?.slotNumber;
     const blockHeaderData: Uint8Array = Cbor.encode(data.data).toBuffer();
     
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
-    if (!(lazyHeader instanceof LazyCborArray)) {
-        throw new Error("invalid CBOR for header");
-    }
-
+    if (!(
+        lazyHeader instanceof LazyCborArray
+    )) throw new Error("invalid CBOR for header");
+    
     const blockHeaderParsed = Cbor.parse(lazyHeader.array[1]);
     // logger.debug("Block Header Parsed: ", blockHeaderParsed);
     if (!(

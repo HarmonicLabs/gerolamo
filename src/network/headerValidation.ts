@@ -10,10 +10,11 @@ import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
 import { RawNewEpochState } from "../rawNES";
 
-export async function headerValidation(blockHeader: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig, lState: RawNewEpochState) {
-    const tipSlot = blockHeader.tip.point.blockHeader?.slotNumber;
-    const blockHeaderData: Uint8Array = Cbor.encode(blockHeader.data).toBuffer();
-    logger.debug("Block Header Data: ", blockHeaderData);
+export async function headerValidation(data: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig, lState: RawNewEpochState) {
+    console.log("data after: ", Cbor.encode(data.data));
+    const tipSlot = data.tip.point.blockHeader?.slotNumber;
+    const blockHeaderData: Uint8Array = Cbor.encode(data.data).toBuffer();
+    
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
     if (!(lazyHeader instanceof LazyCborArray)) {
         throw new Error("invalid CBOR for header");

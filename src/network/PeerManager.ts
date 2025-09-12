@@ -220,7 +220,7 @@ export class PeerManager implements IPeerManager
     private async syncEventCallback
     (
         peerId: string,
-        type: "rollForwards" | "rollBackwards",
+        type: "rollForward" | "rollBackwards",
         data: ChainSyncRollForward | ChainSyncRollBackwards,
     )
     {
@@ -231,10 +231,9 @@ export class PeerManager implements IPeerManager
             // TODO: Implement DB cleanup if required
             return;
         };
-
         // For rollForward
         if(!( data instanceof ChainSyncRollForward) ) return;
-        
+        // logger.debug("data before: ", data);
         const validateHeaderRes = await headerValidation(data, this.shelleyGenesisConfig, this.lState);
         if (!validateHeaderRes) return;
 

@@ -192,7 +192,7 @@ export class PeerClient implements IPeerClient {
     async startSyncLoop(
         syncCallback: (
             peerId: string,
-            type: "rollForwards" | "rollBackwards",
+            type: "rollForward" | "rollBackwards",
             data:  ChainSyncRollForward | ChainSyncRollBackwards,
         ) => void,
     ): Promise<any> {
@@ -200,11 +200,12 @@ export class PeerClient implements IPeerClient {
 
         this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
             const multiEraHeader = rollForward || null;
+
             logger.debug(
                 `Rolled forward for peer ${this.peerId}`,
                 multiEraHeader.tip.point.blockHeader?.slotNumber,
             );
-            syncCallback(this.peerId, "rollForwards", multiEraHeader);
+            syncCallback(this.peerId, "rollForward", multiEraHeader);
             await this.chainSyncClient.requestNext();
         });
 

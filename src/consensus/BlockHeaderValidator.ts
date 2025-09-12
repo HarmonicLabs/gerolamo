@@ -180,7 +180,7 @@ function getEraHeader(h: MultiEraHeader): BabbageHeader | ConwayHeader {
 export function validateHeader(
     h: MultiEraHeader,
     lState: RawNewEpochState,
-    opCerts: [string, bigint][],
+    opCerts: PoolOperationalCert,
     activeSlotCoeff: number,
     nonce: Uint8Array,
 ): boolean {
@@ -233,7 +233,7 @@ export function validateHeader(
     const verifyOpCertValidity = verifyOpCertError(
         header.body.opCert,
         new PublicKey(header.body.issuerPubKey),
-        opCerts[0][1],
+        opCerts.sequenceNumber,
     );
 
     const header_body_bytes = Cbor.encode(header.toCborObj().array[0])
@@ -246,6 +246,14 @@ export function validateHeader(
         header.kesSignature,
         BigInt(lState.maxKESEvolutions),
     );
+
+    console.log({
+        isKnownLeader,
+        correctProof,
+        verifyLeaderStake,
+        verifyOpCertValidity,
+        verifyKES
+    });
 
     return (
         isKnownLeader &&

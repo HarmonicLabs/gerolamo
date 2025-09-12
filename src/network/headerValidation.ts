@@ -18,10 +18,10 @@ import {
     calculatePreProdCardanoEpoch,
 } from "./utils/epochCalculations";
 import { validateHeader } from "../consensus/BlockHeaderValidator";
-import { RawNewEpochState } from "../rawNES";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
+import { fromHex } from "@harmoniclabs/uint8array-utils";
 
-export async function headerValidation(blockHeader: any) {
+export async function headerValidation(blockHeader: any, shelleyGenesis: any) {
     const tipSlot = blockHeader.tip.point.blockHeader.slotNumber;
     const blockHeaderData: Uint8Array = Cbor.encode(blockHeader.data)
         .toBuffer();
@@ -84,13 +84,8 @@ export async function headerValidation(blockHeader: any) {
 	const headerEpoch = calculatePreProdCardanoEpoch(Number(multiEraHeader.header.body.slot));
 	const epochNonce = await blockFrostFetchEra(headerEpoch as number);
 	const slot = multiEraHeader.header.body.slot;
-	const opCert = multiEraHeader.header.body.opCert;
-	const lState = RawNewEpochState.init();
-	const slotCoeff = 0.05; // Assume a default value or fetch from config
-	
-    // logger.log("opcert: ", opCert);
-    
-    const validateHeaderRes = validateHeader(multiEraHeader, lState, opCert, slotCoeff, epochNonce);
+	    
+    const validateHeaderRes = await validateHeader(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis);
     logger.debug("Header validation result: ", validateHeaderRes);
     
     logger.debug(

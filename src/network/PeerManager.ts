@@ -13,7 +13,7 @@ import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
 import { getHeader, putBlock, putHeader } from "./lmdbWorkers/lmdb";
-
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly topologyFile: string;
@@ -24,6 +24,7 @@ export interface GerolamoConfig {
     readonly syncFromPointSlot: bigint;
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
+    readonly shelleyGenesisFile: string;
 }
 
 export class PeerManager {
@@ -36,15 +37,18 @@ export class PeerManager {
     private config!: GerolamoConfig;
     private topology: any;
     private chainPoint: ChainPoint | null = null;
+    private shelleyGenesisConfig: ShelleyGenesisConfig;
 
     constructor() {}
 
     async init() {
-        const configFile = Bun.file("./src/network/config.json");
+        const configFile = Bun.file("./src/config/config.json");
         this.config = await configFile.json();
-        logger.debug("Reading config file: ", this.config);
+        // logger.debug("Reading config file: ", this.config);
         this.topology = await parseTopology(this.config.topologyFile);
-        logger.debug("Parsed topology:", this.topology);
+        // logger.debug("Parsed topology:", this.topology);
+        const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile)
+        this.shelleyGenesisConfig = await shelleyGenesisFile.json();
 
         const chainPointFrom = new ChainPoint({
             blockHeader: {
@@ -89,7 +93,6 @@ export class PeerManager {
                             ap.address,
                             ap.port,
                             this.config.network,
-                            this.chainPoint,
                         );
                         await peer.handShakePeer();
                         peer.startKeepAlive();
@@ -207,7 +210,7 @@ export class PeerManager {
         }
 
         // For rollForward
-        const validateHeaderRes = await headerValidation(data);
+        const validateHeaderRes = await headerValidation(data, this.shelleyGenesisConfig);
         if (!validateHeaderRes) return;
 
         const { slot, blockHeaderHash, multiEraHeader } = validateHeaderRes;
@@ -220,7 +223,6 @@ export class PeerManager {
         // logger.debug(`Retrieved header from DB for hash ${blockHeaderHash}:`, headerRes);
 
         // Fetch and store the corresponding block
-
         const blockPeer = this.allPeers.get(peerId);
         if (!blockPeer) return;
 

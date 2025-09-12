@@ -27,8 +27,8 @@ import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
 import { RawNewEpochState } from "../rawNES";
 import * as assert from "node:assert/strict";
-
 import * as wasm from "wasm-kes";
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
 
 const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
     "1157920892373161954235709850086879078532699846656405640394575840079131296399360000000000000000000000000000000000",
@@ -177,20 +177,25 @@ function getEraHeader(h: MultiEraHeader): BabbageHeader | ConwayHeader {
     return h.header;
 }
 
-export function validateHeader(
+export async function validateHeader(
     h: MultiEraHeader,
-    lState: RawNewEpochState,
-    opCerts: PoolOperationalCert,
-    activeSlotCoeff: number,
     nonce: Uint8Array,
-): boolean {
+    shelleyGenesis: ShelleyGenesisConfig
+): Promise<boolean> {
+    const lState = RawNewEpochState.init();
+
     const header = getEraHeader(h);
+    const opCerts: PoolOperationalCert = header.body.opCert;
+    const activeSlotCoeff = shelleyGenesis.activeSlotsCoeff;
+    const maxKesEvo = BigInt(shelleyGenesis.maxKESEvolutions);
+    const slotsPerKESPeriod = BigInt(shelleyGenesis.slotsPerKESPeriod);
 
     const issuer = new PoolKeyHash(header.body.issuerPubKey);
     const isKnownLeader = verifyKnownLeader(
         issuer,
         [[issuer, 0n]],
     );
+    
     const correctProof = verifyVrfProof(
         getVrfInput(header.body.slot, nonce),
         header.body.vrfResult.proofHash,
@@ -238,15 +243,16 @@ export function validateHeader(
 
     const header_body_bytes = Cbor.encode(header.toCborObj().array[0])
         .toBuffer();
+
     const verifyKES = verifyKESSignature(
-        header.body.slot / BigInt(lState.slotsPerKESPeriod),
+        header.body.slot / slotsPerKESPeriod,
         header.body.opCert.kesPeriod,
         header_body_bytes,
         header.body.opCert.kesPubKey,
         header.kesSignature,
-        BigInt(lState.maxKESEvolutions),
+        maxKesEvo,
     );
-
+    
     console.log({
         isKnownLeader,
         correctProof,

@@ -5,24 +5,22 @@ export enum LogLevel {
     INFO = 1,
     WARN = 2,
     ERROR = 3,
-    NONE = 4
+    NONE = 4,
 }
 
-Object.freeze( LogLevel );
+Object.freeze(LogLevel);
 
 export type LogLevelString = keyof typeof LogLevel & string;
 
-export function isLogLevelString( str: string ): str is LogLevelString
-{
+export function isLogLevelString(str: string): str is LogLevelString {
     return (
         typeof str === "string" &&
         typeof LogLevel[str.toUpperCase() as any] === "number"
     );
 }
 
-export function logLevelFromString( str: string ): LogLevel
-{
-    if( typeof str !== "string" ) return LogLevel.INFO;
+export function logLevelFromString(str: string): LogLevel {
+    if (typeof str !== "string") return LogLevel.INFO;
     return (
         LogLevel[str.toUpperCase() as any] as any as LogLevel | undefined
     ) ?? LogLevel.INFO;
@@ -33,93 +31,79 @@ export interface LoggerConfig {
 }
 
 const defaultLoggerConfig: LoggerConfig = {
-    logLevel: LogLevel.INFO
+    logLevel: LogLevel.INFO,
 };
 
-export class Logger
-{
+export class Logger {
     private config: LoggerConfig = { ...defaultLoggerConfig };
     private _colors: boolean = true;
 
-    constructor( config?: Partial<LoggerConfig> )
-    {
+    constructor(config?: Partial<LoggerConfig>) {
         this.config = {
             ...defaultLoggerConfig,
-            ...config
+            ...config,
         };
     }
 
-    get logLevel()
-    {
+    get logLevel() {
         return this.config.logLevel;
     }
 
-    useColors( enable: boolean = true )
-    {
+    useColors(enable: boolean = true) {
         this._colors = enable;
     }
 
-    canDebug(): boolean
-    {
+    canDebug(): boolean {
         return this.logLevel <= LogLevel.DEBUG;
     }
-    canInfo(): boolean
-    {
+    canInfo(): boolean {
         return this.logLevel <= LogLevel.INFO;
     }
-    canWarn(): boolean
-    {
+    canWarn(): boolean {
         return this.logLevel <= LogLevel.WARN;
     }
-    canError(): boolean
-    {
+    canError(): boolean {
         return this.logLevel <= LogLevel.ERROR;
     }
 
-    setLogLevel( level: LogLevel )
-    {
+    setLogLevel(level: LogLevel) {
         this.config.logLevel = level;
     }
 
-    debug( ...stuff: any[] )
-    {
-        if( !this.canDebug() ) return;
-        
-        let prefix = `[Debug][${new Date().toUTCString()}]:`;
-        if( this._colors ) prefix = color.magenta( prefix );
+    debug(...stuff: any[]) {
+        if (!this.canDebug()) return;
 
-        console.log( prefix, ...stuff );
+        let prefix = `[Debug][${new Date().toUTCString()}]:`;
+        if (this._colors) prefix = color.magenta(prefix);
+
+        console.log(prefix, ...stuff);
     }
-    log( ...stuff: any[] )
-    {
-        this.info( ...stuff );
+    log(...stuff: any[]) {
+        this.info(...stuff);
     }
-    info( ...stuff: any[] )
-    {
-        if( !this.canInfo() ) return;
+    info(...stuff: any[]) {
+        if (!this.canInfo()) return;
 
         let prefix = `[Info ][${new Date().toUTCString()}]:`;
-        if( this._colors ) prefix = color.cyan( prefix );
+        if (this._colors) prefix = color.cyan(prefix);
 
-        console.log( prefix, ...stuff );
+        console.log(prefix, ...stuff);
     }
-    warn( ...stuff: any[] )
-    {
-        if( !this.canWarn() ) return;
-        
+    warn(...stuff: any[]) {
+        if (!this.canWarn()) return;
+
         let prefix = `[Warn ][${new Date().toUTCString()}]:`;
-        if( this._colors ) prefix = color.yellow( prefix );
+        if (this._colors) prefix = color.yellow(prefix);
 
-        console.warn( prefix, ...stuff );
+        console.warn(prefix, ...stuff);
     }
-    error( ...stuff: any[] )
-    {
-        if( !this.canError() ) return;
+    error(...stuff: any[]) {
+        if (!this.canError()) return;
 
         let prefix = `[Error][${new Date().toUTCString()}]:`;
-        if( this._colors ) prefix = color.red( prefix );
+        if (this._colors) prefix = color.red(prefix);
 
-        console.error( prefix, ...stuff );
+        console.error(prefix, ...stuff);
     }
 }
 

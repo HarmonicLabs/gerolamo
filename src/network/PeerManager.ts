@@ -10,7 +10,7 @@ import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { putHeader, putBlock } from "./sqlWorkers/sql";
+import { putBlock, putHeader } from "./sqlWorkers/sql";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
@@ -253,8 +253,8 @@ export class PeerManager {
             );
         }
         */
-    };
-};
+    }
+}
 
 // Initialize the peer manager
 const peerManager = new PeerManager();

@@ -252,7 +252,7 @@ export function validateHeader(
         correctProof,
         verifyLeaderStake,
         verifyOpCertValidity,
-        verifyKES
+        verifyKES,
     });
 
     return (

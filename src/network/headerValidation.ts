@@ -80,19 +80,27 @@ export async function headerValidation(blockHeader: any) {
     });
     // logger.debug("MultiEraHeader: ", multiEraHeader);
 
-	const blockHeaderHash = blake2b_256( blockHeaderParsed.data.bytes );
-	const headerEpoch = calculatePreProdCardanoEpoch(Number(multiEraHeader.header.body.slot));
-	const epochNonce = await blockFrostFetchEra(headerEpoch as number);
-	const slot = multiEraHeader.header.body.slot;
-	const opCert = multiEraHeader.header.body.opCert;
-	const lState = RawNewEpochState.init();
-	const slotCoeff = 0.05; // Assume a default value or fetch from config
-	
+    const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
+    const headerEpoch = calculatePreProdCardanoEpoch(
+        Number(multiEraHeader.header.body.slot),
+    );
+    const epochNonce = await blockFrostFetchEra(headerEpoch as number);
+    const slot = multiEraHeader.header.body.slot;
+    const opCert = multiEraHeader.header.body.opCert;
+    const lState = RawNewEpochState.init();
+    const slotCoeff = 0.05; // Assume a default value or fetch from config
+
     // logger.log("opcert: ", opCert);
-    
-    const validateHeaderRes = validateHeader(multiEraHeader, lState, opCert, slotCoeff, epochNonce);
+
+    const validateHeaderRes = validateHeader(
+        multiEraHeader,
+        lState,
+        opCert,
+        slotCoeff,
+        epochNonce,
+    );
     logger.debug("Header validation result: ", validateHeaderRes);
-    
+
     logger.debug(
         `Validated - Era: ${blcokHeaderBodyEra} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
             ((Number(slot) / Number(tipSlot)) * 100).toFixed(2)
@@ -104,4 +112,4 @@ export async function headerValidation(blockHeader: any) {
     if (!validateHeaderres) return null;
 
     return ({ slot, blockHeaderHash, multiEraHeader });
-};
+}

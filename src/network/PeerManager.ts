@@ -17,6 +17,9 @@ import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
 import { getHeader, putBlock, putHeader } from "./lmdbWorkers/lmdb";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
+import {toHex } from "@harmoniclabs/uint8array-utils";
+import "./minibf/expressServer";
+
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly topologyFile: string;
@@ -28,7 +31,7 @@ export interface GerolamoConfig {
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
     readonly shelleyGenesisFile: string;
-}
+};
 
 export interface IPeerManager { 
     allPeers: Map<string, PeerClient>;
@@ -42,7 +45,7 @@ export interface IPeerManager {
     chainPoint: ChainPoint | null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
     lState: RawNewEpochState;
-}
+};
 
 export class PeerManager implements IPeerManager
 {
@@ -102,7 +105,7 @@ export class PeerManager implements IPeerManager
                     this.addPeer(peer, "hot");
                 }),
             );
-        }
+        };
 
         // Assign local roots as hot peers
         if (this.topology.localRoots) {
@@ -120,7 +123,7 @@ export class PeerManager implements IPeerManager
                     })
                 ),
             );
-        }
+        };
 
         // Assign public roots as warm peers (commented out in original)
         // if (this.topology.publicRoots)
@@ -135,7 +138,7 @@ export class PeerManager implements IPeerManager
         // }
 
         await this.peerSyncCurrentTasks();
-    }
+    };
 
     private addPeer(
         peer: PeerClient,
@@ -241,7 +244,7 @@ export class PeerManager implements IPeerManager
         // logger.debug("multiEraHeader: ", multiEraHeader.toCborBytes());
         // Store validated header in LMDB (as JSON) using worker
         await putHeader(slot, blockHeaderHash, multiEraHeader.toCborBytes());
-        logger.debug(`Stored header for hash ${blockHeaderHash}`);
+        // logger.debug(`Stored header for hash ${blockHeaderHash}`);
 
         // const headerRes = await getHeader(slot, blockHeaderHash);
         // logger.debug(`Retrieved header from DB for hash ${blockHeaderHash}:`, headerRes);
@@ -265,32 +268,23 @@ export class PeerManager implements IPeerManager
             )
         )
         */
-        // const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
-        // logger.debug(block)
-        /*
+        const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
+        // logger.debug("Fetched block: ", block.blockData);
         if (block) {
-            logger.debug(
-                `Fetched block for hash ${blockHeaderHash} from peer ${peerId} Block: `,
-                block.toCborBytes(),
-            );
-            // Assuming block is Uint8Array/Buffer, store as binary using worker
-            // await putBlock(blockHeaderHash, block.toCborBytes());
-            logger.debug(
-                `Stored block for hash ${blockHeaderHash} from peer ${peerId}`,
-            );
+            await putBlock(blockHeaderHash, block.blockData); // Assuming block is MultiEraBlock; adjust if needed
+            // logger.debug(`Stored block for hash ${blockHeaderHash} from peer ${peerId}`);
         } else {
-            logger.error(
-                `Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`,
-            );
+            logger.error(`Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`);
         }
-        */
+        
     };
 };
 
 // Initialize the peer manager
-const peerManager = new PeerManager();
-peerManager.init().catch((error) => {
-    logger.error("Error initializing PeerManager:", error);
-});
-
-export { peerManager };
+async function start() {
+    const peerManager = new PeerManager();
+    peerManager.init().catch((error) => {
+        logger.error("Error initializing PeerManager:", error);
+    });
+}
+start().catch((error) => console.error("Failed to start:", error));

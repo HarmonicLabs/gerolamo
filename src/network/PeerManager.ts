@@ -1,17 +1,22 @@
-import { ChainPoint } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/types/index.js";
-import { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/peer-sharing/PeerAddress/PeerAddress.js";
-import { PeerAddressIPv4 } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv4.js";
-import { NetworkT } from "@harmoniclabs/cardano-ledger-ts/dist/ledger/Network.js";
+import {
+    ChainPoint,
+    PeerAddress,
+    PeerAddressIPv4,
+    ChainSyncRollForward,
+    ChainSyncRollBackwards
+} from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { MultiEraHeader, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
-import { logger } from "../utils/logger";
-import { parseTopology } from "../utils/parseTopology";
-import { TopologyRoot } from "../utils/topology";
+import { logger } from "./utils/logger";
+import { parseTopology } from "./topology/parseTopology";
+import { TopologyRoot, Topology } from "./topology/topology";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { putBlock, putHeader } from "./sqlWorkers/sql";
-
+import { getHeader, putBlock, putHeader } from "./sqlWorkers/sql";
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
+import { RawNewEpochState } from "../rawNES";
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly topologyFile: string;
@@ -22,27 +27,48 @@ export interface GerolamoConfig {
     readonly syncFromPointSlot: bigint;
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
+    readonly shelleyGenesisFile: string;
 }
 
-export class PeerManager {
-    private allPeers = new Map<string, PeerClient>();
-    private hotPeers: PeerClient[] = [];
-    private warmPeers: PeerClient[] = [];
-    private coldPeers: PeerClient[] = [];
-    private newPeers: PeerClient[] = [];
-    private bootstrapPeers: PeerClient[] = [];
-    private config!: GerolamoConfig;
-    private topology: any;
-    private chainPoint: ChainPoint | null = null;
+export interface IPeerManager { 
+    allPeers: Map<string, PeerClient>;
+    hotPeers: PeerClient[];
+    warmPeers: PeerClient[];
+    coldPeers: PeerClient[];
+    newPeers: PeerClient[];
+    bootstrapPeers: PeerClient[];
+    config: GerolamoConfig;
+    topology: Topology;
+    chainPoint: ChainPoint | null;
+    shelleyGenesisConfig: ShelleyGenesisConfig;
+    lState: RawNewEpochState;
+}
+
+export class PeerManager implements IPeerManager
+{
+    allPeers = new Map<string, PeerClient>();
+    hotPeers: PeerClient[] = [];
+    warmPeers: PeerClient[] = [];
+    coldPeers: PeerClient[] = [];
+    newPeers: PeerClient[] = [];
+    bootstrapPeers: PeerClient[] = [];
+    config: GerolamoConfig;
+    topology: Topology;
+    chainPoint: ChainPoint | null = null;
+    shelleyGenesisConfig: ShelleyGenesisConfig;
+    lState: RawNewEpochState;
 
     constructor() {}
 
     async init() {
-        const configFile = Bun.file("./src/network/config.json");
+        const configFile = Bun.file("./src/config/config.json");
         this.config = await configFile.json();
-        logger.debug("Reading config file: ", this.config);
+        // logger.debug("Reading config file: ", this.config);
         this.topology = await parseTopology(this.config.topologyFile);
-        logger.debug("Parsed topology:", this.topology);
+        // logger.debug("Parsed topology:", this.topology);
+        const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile)
+        this.shelleyGenesisConfig = await shelleyGenesisFile.json();
+        this.lState = RawNewEpochState.init();
 
         const chainPointFrom = new ChainPoint({
             blockHeader: {
@@ -87,7 +113,6 @@ export class PeerManager {
                             ap.address,
                             ap.port,
                             this.config.network,
-                            this.chainPoint,
                         );
                         await peer.handShakePeer();
                         peer.startKeepAlive();
@@ -159,9 +184,9 @@ export class PeerManager {
                     `Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync`,
                 );
                 peer.startSyncLoop(this.syncEventCallback.bind(this));
-                const peersAddresses = await peer.askForPeers();
-                console.log("peersAddresses: ", peersAddresses);
-                this.addNewSharedPeers(peersAddresses);
+                // const peersAddresses = await peer.askForPeers();
+                // console.log("peersAddresses: ", peersAddresses);
+                // this.addNewSharedPeers(peersAddresses);
             } catch (error) {
                 logger.error(
                     `Failed to initialize hot peer ${peer.peerId}:`,
@@ -172,7 +197,8 @@ export class PeerManager {
         }));
     }
 
-    private addNewSharedPeers(peersAddresses: PeerAddress[]) {
+    private addNewSharedPeers(peersAddresses: PeerAddress[])
+    {
         logger.log("Adding new shared peers from network...");
         peersAddresses.forEach((address) => {
             if (address instanceof PeerAddressIPv4) {
@@ -189,23 +215,26 @@ export class PeerManager {
                 );
             }
         });
-    }
+    };
 
-    private async syncEventCallback(
+    private async syncEventCallback
+    (
         peerId: string,
-        type: "rollForwards" | "rollBackwards",
-        data: any,
-    ) {
-        if (type === "rollBackwards") {
+        type: "rollForward" | "rollBackwards",
+        data: ChainSyncRollForward | ChainSyncRollBackwards,
+    )
+    {
+        if (type === "rollBackwards" && data instanceof ChainSyncRollBackwards) {
             // Handle rollback logic here if needed (e.g., remove entries from DB after rollback point)
             // For now, just log
             logger.debug(`Rollback event for peer ${peerId}`);
             // TODO: Implement DB cleanup if required
             return;
-        }
-
+        };
         // For rollForward
-        const validateHeaderRes = await headerValidation(data);
+        if(!( data instanceof ChainSyncRollForward) ) return;
+        // logger.debug("data before: ", data);
+        const validateHeaderRes = await headerValidation(data, this.shelleyGenesisConfig, this.lState);
         if (!validateHeaderRes) return;
 
         const { slot, blockHeaderHash, multiEraHeader } = validateHeaderRes;
@@ -218,13 +247,15 @@ export class PeerManager {
         // logger.debug(`Retrieved header from DB for hash ${blockHeaderHash}:`, headerRes);
 
         // Fetch and store the corresponding block
-
         const blockPeer = this.allPeers.get(peerId);
         if (!blockPeer) return;
 
         /**
          * Calculating block_body_hash
-         *
+         * The block_body_hash is not a simple blake2b_256 hash of the entire serialized block body. 
+         * Instead, it is a Merkle root-like hash (often referred to as a "Merkle triple root" or quadruple root, depending on the era) of the key components of the block body. 
+         * This design allows for efficient verification of the block's contents (transactions, witnesses, metadata, etc.) without re-serializing the entire body, 
+         * while enabling segregated witness handling (introduced in the Alonzo era and carried forward).
          * blake2b_256(
          *     concatUint8Arr(
          *         blake2b_256( tx_bodies ),
@@ -234,9 +265,8 @@ export class PeerManager {
          *     )
          * )
          */
-        // const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
+        const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
         // logger.debug(block);
-        /*
         if (block) {
             logger.debug(
                 `Fetched block for hash ${blockHeaderHash} from peer ${peerId} Block: `,
@@ -252,7 +282,6 @@ export class PeerManager {
                 `Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`,
             );
         }
-        */
     }
 }
 

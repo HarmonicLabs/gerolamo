@@ -1,6 +1,7 @@
 {
     "p2p": "enabled",
-    "topologyFile": "./src/network/topology.json",
+    "topologyFile": "./src/config/topology.json",
+    "shelleyGenesisFile": "./src/config/preprod-shelley-genesis.json",
     "syncFromTip": false,
     "syncFromGenesis": false,
     "genesisBlockHash": "1d031daf47281f69cd95ab929c269fd26b1434a56a5bbbd65b7afe85ef96b233",

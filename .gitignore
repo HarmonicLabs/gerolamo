@@ -18,7 +18,8 @@ src/offchain/tx/builder/rollup-out/
 
 # output of program
 db/
-**/*.lmdb
+.lmdb*
+
 **/.devenv/
 **/*.sqlite
 **/*.sql

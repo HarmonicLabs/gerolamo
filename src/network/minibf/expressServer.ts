@@ -15,18 +15,18 @@ Bun.serve({
 				try {
 				hash = await resolveToHash(id);
 				} catch (error) {
-					return new Response(JSON.stringify({ error: "Invalid identifier" }), { status: 400 });
+					return responseError("Invalid identifier");
 				}
-				if (!hash) return new Response(JSON.stringify({ error: "Header not found" }), { status: 404 });
+				if (!hash) return responseError("Header not found");
 
 				const headerBytes = await getHeaderByHash(hash);
-				if (!headerBytes) return new Response(JSON.stringify({ error: "Header not found" }), { status: 404 });
+				if (!headerBytes) return responseError("Header not found");
 
 				const multiHeader = MultiEraHeader.fromCbor(headerBytes);
 				return Response.json(multiHeader.toJson());
 			} catch (error) {
 				logger.error("Error fetching header:", error);
-				return new Response(JSON.stringify({ error: "Internal server error" }), { status: 500 });
+				return responseError("Internal server error");
 			}
 		},
 
@@ -39,24 +39,24 @@ Bun.serve({
 					hash = await resolveToHash(id);
 					console.log("Resolved hash:", hash);
 				} catch (error) {
-					return new Response(JSON.stringify({ error: "Invalid identifier" }), { status: 400 });
+					return responseError("Invalid identifier");
 				}
-				if (!hash) return new Response(JSON.stringify({ error: "Block not found" }), { status: 404 });
+				if (!hash) return responseError("Block not found");
 
 				const blockBytes = await getBlockByHash(hash);
-				if (!blockBytes) return new Response(JSON.stringify({ error: "Block not found" }), { status: 404 });
+				if (!blockBytes) return responseError("Block not found");
 				console.log("Fetched block bytes:", blockBytes);
 
 				const multiBlock = MultiEraBlock.fromCbor(blockBytes);
 				console.log("Parsed MultiEraBlock:", multiBlock.toCbor().toString());
 				const result = {
-					block: multiBlock.toCbor().toString()
+					block:  multiBlock.toCbor().toString()
 				}
 				return Response.json(result);
 				
 			} catch (error) {
 				logger.error("Error fetching block:", error);
-				return new Response(JSON.stringify({ error: "Internal server error" }), { status: 500 });
+				return responseError("Internal server error");
 			}
 		},
 	},
@@ -67,7 +67,7 @@ Bun.serve({
 
 	error(error) {
 		logger.error("Server error:", error);
-		return new Response(JSON.stringify({ error: "Internal server error" }), { status: 500 });
+		return responseError("Internal server error" );
 	},
 });
 
@@ -79,4 +79,10 @@ function serializeBigInt(obj: any): any {
 		typeof value === "bigint" ? value.toString() : value
 	  )
 	);
-  }
+};
+function responseError( msg: string ): Response {
+    return Response.json({ error: msg }, {
+        headers: { "Content-Type": "application/json" },
+        status: 400
+    });
+}

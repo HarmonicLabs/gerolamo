@@ -1,15 +1,15 @@
 import {
     ChainPoint,
+    ChainSyncRollBackwards,
+    ChainSyncRollForward,
     PeerAddress,
     PeerAddressIPv4,
-    ChainSyncRollForward,
-    ChainSyncRollBackwards
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { MultiEraHeader, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { logger } from "./utils/logger";
 import { parseTopology } from "./topology/parseTopology";
-import { TopologyRoot, Topology } from "./topology/topology";
+import { Topology, TopologyRoot } from "./topology/topology";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
@@ -17,7 +17,7 @@ import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
 import { getHeader, putBlock, putHeader } from "./sqlWorkers/sql";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
-import {toHex } from "@harmoniclabs/uint8array-utils";
+import { toHex } from "@harmoniclabs/uint8array-utils";
 import "./minibf/expressServer";
 
 export interface GerolamoConfig {
@@ -31,9 +31,9 @@ export interface GerolamoConfig {
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
     readonly shelleyGenesisFile: string;
-};
+}
 
-export interface IPeerManager { 
+export interface IPeerManager {
     allPeers: Map<string, PeerClient>;
     hotPeers: PeerClient[];
     warmPeers: PeerClient[];
@@ -45,10 +45,9 @@ export interface IPeerManager {
     chainPoint: ChainPoint | null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
     lState: RawNewEpochState;
-};
+}
 
-export class PeerManager implements IPeerManager
-{
+export class PeerManager implements IPeerManager {
     allPeers = new Map<string, PeerClient>();
     hotPeers: PeerClient[] = [];
     warmPeers: PeerClient[] = [];
@@ -69,7 +68,7 @@ export class PeerManager implements IPeerManager
         // logger.debug("Reading config file: ", this.config);
         this.topology = await parseTopology(this.config.topologyFile);
         // logger.debug("Parsed topology:", this.topology);
-        const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile)
+        const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
         this.lState = RawNewEpochState.init();
 
@@ -105,7 +104,7 @@ export class PeerManager implements IPeerManager
                     this.addPeer(peer, "hot");
                 }),
             );
-        };
+        }
 
         // Assign local roots as hot peers
         if (this.topology.localRoots) {
@@ -123,7 +122,7 @@ export class PeerManager implements IPeerManager
                     })
                 ),
             );
-        };
+        }
 
         // Assign public roots as warm peers (commented out in original)
         // if (this.topology.publicRoots)
@@ -138,7 +137,7 @@ export class PeerManager implements IPeerManager
         // }
 
         await this.peerSyncCurrentTasks();
-    };
+    }
 
     private addPeer(
         peer: PeerClient,
@@ -200,8 +199,7 @@ export class PeerManager implements IPeerManager
         }));
     }
 
-    private addNewSharedPeers(peersAddresses: PeerAddress[])
-    {
+    private addNewSharedPeers(peersAddresses: PeerAddress[]) {
         logger.log("Adding new shared peers from network...");
         peersAddresses.forEach((address) => {
             if (address instanceof PeerAddressIPv4) {
@@ -218,26 +216,30 @@ export class PeerManager implements IPeerManager
                 );
             }
         });
-    };
+    }
 
-    private async syncEventCallback
-    (
+    private async syncEventCallback(
         peerId: string,
         type: "rollForward" | "rollBackwards",
         data: ChainSyncRollForward | ChainSyncRollBackwards,
-    )
-    {
-        if (type === "rollBackwards" && data instanceof ChainSyncRollBackwards) {
+    ) {
+        if (
+            type === "rollBackwards" && data instanceof ChainSyncRollBackwards
+        ) {
             // Handle rollback logic here if needed (e.g., remove entries from DB after rollback point)
             // For now, just log
             logger.debug(`Rollback event for peer ${peerId}`);
             // TODO: Implement DB cleanup if required
             return;
-        };
+        }
         // For rollForward
-        if(!( data instanceof ChainSyncRollForward) ) return;
+        if (!(data instanceof ChainSyncRollForward)) return;
         // logger.debug("data before: ", data);
-        const validateHeaderRes = await headerValidation(data, this.shelleyGenesisConfig, this.lState);
+        const validateHeaderRes = await headerValidation(
+            data,
+            this.shelleyGenesisConfig,
+            this.lState,
+        );
         if (!validateHeaderRes) return;
 
         const { slot, blockHeaderHash, multiEraHeader } = validateHeaderRes;
@@ -255,9 +257,9 @@ export class PeerManager implements IPeerManager
 
         /**
          * Calculating block_body_hash
-         * The block_body_hash is not a simple blake2b_256 hash of the entire serialized block body. 
-         * Instead, it is a Merkle root-like hash (often referred to as a "Merkle triple root" or quadruple root, depending on the era) of the key components of the block body. 
-         * This design allows for efficient verification of the block's contents (transactions, witnesses, metadata, etc.) without re-serializing the entire body, 
+         * The block_body_hash is not a simple blake2b_256 hash of the entire serialized block body.
+         * Instead, it is a Merkle root-like hash (often referred to as a "Merkle triple root" or quadruple root, depending on the era) of the key components of the block body.
+         * This design allows for efficient verification of the block's contents (transactions, witnesses, metadata, etc.) without re-serializing the entire body,
          * while enabling segregated witness handling (introduced in the Alonzo era and carried forward).
          * blake2b_256(
             concatUint8Arr(
@@ -274,11 +276,12 @@ export class PeerManager implements IPeerManager
             await putBlock(blockHeaderHash, block.blockData); // Assuming block is MultiEraBlock; adjust if needed
             // logger.debug(`Stored block for hash ${blockHeaderHash} from peer ${peerId}`);
         } else {
-            logger.error(`Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`);
+            logger.error(
+                `Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`,
+            );
         }
-        
-    };
-};
+    }
+}
 
 // Initialize the peer manager
 async function start() {

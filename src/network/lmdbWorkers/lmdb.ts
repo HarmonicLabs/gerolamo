@@ -105,7 +105,9 @@ function isHex(str: string): boolean {
 }
 
 // Export for API use: Resolve identifier to hash (slot or hex hash string)
-export async function resolveToHash(identifier: string): Promise<Uint8Array | undefined> {
+export async function resolveToHash(
+    identifier: string,
+): Promise<Uint8Array | undefined> {
     if (isHex(identifier)) {
         return fromHex(identifier);
     } else {

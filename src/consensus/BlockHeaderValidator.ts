@@ -28,7 +28,7 @@ import { Cbor } from "@harmoniclabs/cbor";
 import { RawNewEpochState } from "../rawNES";
 import * as assert from "node:assert/strict";
 import * as wasm from "wasm-kes";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 
 const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
     "1157920892373161954235709850086879078532699846656405640394575840079131296399360000000000000000000000000000000000",
@@ -181,7 +181,7 @@ export async function validateHeader(
     h: MultiEraHeader,
     nonce: Uint8Array,
     shelleyGenesis: ShelleyGenesisConfig,
-    lState: RawNewEpochState
+    lState: RawNewEpochState,
 ): Promise<boolean> {
     const header = getEraHeader(h);
     const opCerts: PoolOperationalCert = header.body.opCert;
@@ -194,7 +194,7 @@ export async function validateHeader(
         issuer,
         [[issuer, 0n]],
     );
-    
+
     const correctProof = verifyVrfProof(
         getVrfInput(header.body.slot, nonce),
         header.body.vrfResult.proofHash,

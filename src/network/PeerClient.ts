@@ -1,7 +1,10 @@
 import {
+    BlockFetchBlock,
     BlockFetchClient,
     ChainPoint,
     ChainSyncClient,
+    ChainSyncRollBackwards,
+    ChainSyncRollForward,
     HandshakeAcceptVersion,
     HandshakeClient,
     KeepAliveClient,
@@ -9,9 +12,6 @@ import {
     Multiplexer,
     PeerSharingClient,
     PeerSharingResponse,
-    ChainSyncRollForward,
-    ChainSyncRollBackwards,
-    BlockFetchBlock
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/peer-sharing/PeerAddress/PeerAddress.js";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
@@ -193,33 +193,39 @@ export class PeerClient implements IPeerClient {
         syncCallback: (
             peerId: string,
             type: "rollForward" | "rollBackwards",
-            data:  ChainSyncRollForward | ChainSyncRollBackwards,
+            data: ChainSyncRollForward | ChainSyncRollBackwards,
         ) => void,
     ): Promise<any> {
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
 
-        this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
-            const multiEraHeader = rollForward || null;
+        this.chainSyncClient.on(
+            "rollForward",
+            async (rollForward: ChainSyncRollForward) => {
+                const multiEraHeader = rollForward || null;
 
-            logger.debug(
-                `Rolled forward for peer ${this.peerId}`,
-                multiEraHeader.tip.point.blockHeader?.slotNumber,
-            );
-            syncCallback(this.peerId, "rollForward", multiEraHeader);
-            await this.chainSyncClient.requestNext();
-        });
+                logger.debug(
+                    `Rolled forward for peer ${this.peerId}`,
+                    multiEraHeader.tip.point.blockHeader?.slotNumber,
+                );
+                syncCallback(this.peerId, "rollForward", multiEraHeader);
+                await this.chainSyncClient.requestNext();
+            },
+        );
 
-        this.chainSyncClient.on("rollBackwards", async (rollBack: ChainSyncRollBackwards) => {
-            if (!rollBack.point.blockHeader) return;
-            const tip = rollBack.tip.point;
-            logger.debug(
-                `Rolled back tip for peer ${this.peerId}`,
-                tip.blockHeader?.slotNumber,
-            );
-            // Optionally update peerSlotNumber here if needed
-            syncCallback(this.peerId, "rollBackwards", rollBack);
-            await this.chainSyncClient.requestNext();
-        });
+        this.chainSyncClient.on(
+            "rollBackwards",
+            async (rollBack: ChainSyncRollBackwards) => {
+                if (!rollBack.point.blockHeader) return;
+                const tip = rollBack.tip.point;
+                logger.debug(
+                    `Rolled back tip for peer ${this.peerId}`,
+                    tip.blockHeader?.slotNumber,
+                );
+                // Optionally update peerSlotNumber here if needed
+                syncCallback(this.peerId, "rollBackwards", rollBack);
+                await this.chainSyncClient.requestNext();
+            },
+        );
 
         this.chainSyncClient.on("error", (error: any) => {
             logger.error(

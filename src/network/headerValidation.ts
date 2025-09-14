@@ -1,38 +1,67 @@
-import { Cbor, CborArray, CborBytes, CborTag, LazyCborArray } from "@harmoniclabs/cbor";
+import {
+    Cbor,
+    CborArray,
+    CborBytes,
+    CborTag,
+    LazyCborArray,
+} from "@harmoniclabs/cbor";
 import { blake2b_256 } from "@harmoniclabs/crypto";
-import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, MultiEraHeader, ShelleyHeader } from "@harmoniclabs/cardano-ledger-ts";
+import {
+    AllegraHeader,
+    AlonzoHeader,
+    BabbageHeader,
+    ConwayHeader,
+    MaryHeader,
+    MultiEraHeader,
+    ShelleyHeader,
+} from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "./utils/logger";
-import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
+import {
+    calculateCardanoEpoch,
+    calculatePreProdCardanoEpoch,
+} from "./utils/epochCalculations";
 import { validateHeader } from "../consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
 
-export async function headerValidation(data: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig, lState: RawNewEpochState) {
-    if (!(
-        data.data instanceof CborArray
-    )) throw new Error("invalid CBOR for header");
+export async function headerValidation(
+    data: ChainSyncRollForward,
+    shelleyGenesis: ShelleyGenesisConfig,
+    lState: RawNewEpochState,
+) {
+    if (
+        !(
+            data.data instanceof CborArray
+        )
+    ) throw new Error("invalid CBOR for header");
     const tipSlot = data.tip.point.blockHeader?.slotNumber;
     const blockHeaderData: Uint8Array = Cbor.encode(data.data).toBuffer();
-    
+
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
-    if (!(
-        lazyHeader instanceof LazyCborArray
-    )) throw new Error("invalid CBOR for header");
-    
+    if (
+        !(
+            lazyHeader instanceof LazyCborArray
+        )
+    ) throw new Error("invalid CBOR for header");
+
     const blockHeaderParsed = Cbor.parse(lazyHeader.array[1]);
     // logger.debug("Block Header Parsed: ", blockHeaderParsed);
-    if (!(
-        blockHeaderParsed instanceof CborTag &&
-        blockHeaderParsed.data instanceof CborBytes
-    )) throw new Error("invalid CBOR for header body");
+    if (
+        !(
+            blockHeaderParsed instanceof CborTag &&
+            blockHeaderParsed.data instanceof CborBytes
+        )
+    ) throw new Error("invalid CBOR for header body");
 
     const blockHeaderBodyLazy = Cbor.parseLazy(blockHeaderParsed.data.bytes);
-    if (!(
-        blockHeaderBodyLazy instanceof LazyCborArray
-    )) throw new Error("invalid CBOR for header body");
+    if (
+        !(
+            blockHeaderBodyLazy instanceof LazyCborArray
+        )
+    ) throw new Error("invalid CBOR for header body");
 
     const blcokHeaderBodyEra = lazyHeader.array[0][0];
     // logger.debug("Header Era: ", blcokHeaderBodyEra);
@@ -68,14 +97,21 @@ export async function headerValidation(data: ChainSyncRollForward, shelleyGenesi
     });
     // logger.debug("MultiEraHeader: ", multiEraHeader);
 
-	const blockHeaderHash = blake2b_256( blockHeaderParsed.data.bytes );
-	const headerEpoch = calculatePreProdCardanoEpoch(Number(multiEraHeader.header.body.slot));
-	const epochNonce = await blockFrostFetchEra(headerEpoch as number);
-	const slot = multiEraHeader.header.body.slot;
-	    
-    const validateHeaderRes = await validateHeader(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis, lState);
+    const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
+    const headerEpoch = calculatePreProdCardanoEpoch(
+        Number(multiEraHeader.header.body.slot),
+    );
+    const epochNonce = await blockFrostFetchEra(headerEpoch as number);
+    const slot = multiEraHeader.header.body.slot;
+
+    const validateHeaderRes = await validateHeader(
+        multiEraHeader,
+        fromHex(epochNonce.nonce),
+        shelleyGenesis,
+        lState,
+    );
     // logger.debug("Header validation result: ", validateHeaderRes);
-    
+
     logger.debug(
         `Validated - Era: ${blcokHeaderBodyEra} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
             ((Number(slot) / Number(tipSlot)) * 100).toFixed(2)

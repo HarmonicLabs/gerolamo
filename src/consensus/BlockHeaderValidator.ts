@@ -180,14 +180,14 @@ function getEraHeader(h: MultiEraHeader): BabbageHeader | ConwayHeader {
 export async function validateHeader(
     h: MultiEraHeader,
     nonce: Uint8Array,
-    shelleyGenesis: ShelleyGenesisConfig,
+    shelleyGenesis: Partial<ShelleyGenesisConfig>,
     lState: RawNewEpochState,
 ): Promise<boolean> {
     const header = getEraHeader(h);
     const opCerts: PoolOperationalCert = header.body.opCert;
-    const activeSlotCoeff = shelleyGenesis.activeSlotsCoeff;
-    const maxKesEvo = BigInt(shelleyGenesis.maxKESEvolutions);
-    const slotsPerKESPeriod = BigInt(shelleyGenesis.slotsPerKESPeriod);
+    const activeSlotCoeff = shelleyGenesis.activeSlotsCoeff!;
+    const maxKesEvo = BigInt(shelleyGenesis.maxKESEvolutions!);
+    const slotsPerKESPeriod = BigInt(shelleyGenesis.slotsPerKESPeriod!);
 
     const issuer = new PoolKeyHash(header.body.issuerPubKey);
     const isKnownLeader = verifyKnownLeader(
@@ -251,15 +251,6 @@ export async function validateHeader(
         header.kesSignature,
         maxKesEvo,
     );
-    /*
-    console.log({
-        isKnownLeader,
-        correctProof,
-        verifyLeaderStake,
-        verifyOpCertValidity,
-        verifyKES,
-    });
-    */
     return (
         isKnownLeader &&
         correctProof &&

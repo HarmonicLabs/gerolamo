@@ -10,6 +10,7 @@ import {
 } from "@harmoniclabs/cardano-ledger-ts";
 import { RawNewEpochState } from "../rawNES";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 
 function genTestCase(testData: unknown, i: number) {
     test(`Test case #${i}`, async () => {
@@ -38,7 +39,11 @@ function genTestCase(testData: unknown, i: number) {
         expect(testData[1].header).toBeDefined();
         const header = BabbageHeader.fromCbor(testData[1].header as string);
 
-        const lState = RawNewEpochState.init(0n, slotsPerKESPeriod, maxKESEvo);
+        const lState = RawNewEpochState.init(
+            0n,
+            BigInt(slotsPerKESPeriod),
+            BigInt(maxKESEvo),
+        );
 
         expect(testData[0].activeSlotCoeff).toBeDefined();
         const asc = testData[0].activeSlotCoeff as number;
@@ -46,12 +51,15 @@ function genTestCase(testData: unknown, i: number) {
         expect(testData[0].nonce).toBeDefined();
         const nonce = fromHex(testData[0].nonce as string);
 
-        const sum = validateHeader(
+        const sum = await validateHeader(
             new MultiEraHeader({ era: 6, header }),
-            lState,
-            ocertCounters,
-            asc,
             nonce,
+            {
+                maxKESEvolutions: maxKESEvo,
+                activeSlotsCoeff: asc,
+                slotsPerKESPeriod,
+            },
+            lState,
         );
 
         const mutation = testData[1].mutation;

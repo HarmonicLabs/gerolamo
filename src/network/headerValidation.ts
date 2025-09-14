@@ -74,8 +74,8 @@ export async function headerValidation(data: ChainSyncRollForward, shelleyGenesi
 	const slot = multiEraHeader.header.body.slot;
 	    
     const validateHeaderRes = await validateHeader(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis, lState);
-    logger.debug("Header validation result: ", validateHeaderRes);
-
+    // logger.debug("Header validation result: ", validateHeaderRes);
+    
     logger.debug(
         `Validated - Era: ${blcokHeaderBodyEra} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
             ((Number(slot) / Number(tipSlot)) * 100).toFixed(2)

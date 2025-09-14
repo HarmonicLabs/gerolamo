@@ -5,7 +5,7 @@ import {
     getBlockByHash,
     getHeaderByHash,
     resolveToHash,
-} from "../lmdbWorkers/lmdb"; // Adjust path as needed
+} from "../sqlWorkers/sql"; // Adjust path as needed
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { logger } from "../utils/logger"; // Adjust path as needed
 

@@ -80,4 +80,99 @@ parentPort!.on("message", (msg: any) => {
             parentPort!.postMessage({ type: "result", id: msg.id, data: null });
         }
     }
+    if (msg.type === "getHeaderBySlot") {
+        const getSlot = db.prepare(
+            "SELECT block_hash FROM slot_index WHERE slot = ?",
+        );
+        const slotResult = getSlot.get(Number(msg.slot)) as {
+            block_hash: Uint8Array;
+        } | undefined;
+
+        if (slotResult) {
+            const getHeader = db.prepare(
+                "SELECT header_data FROM headers WHERE id = ?",
+            );
+            const headerResult = getHeader.get(slotResult.block_hash) as {
+                header_data: Uint8Array;
+            } | undefined;
+            parentPort!.postMessage({
+                type: "result",
+                id: msg.id,
+                data: headerResult ? headerResult.header_data : undefined,
+            });
+        } else {
+            parentPort!.postMessage({
+                type: "result",
+                id: msg.id,
+                data: undefined,
+            });
+        }
+    }
+    if (msg.type === "getHeaderByHash") {
+        const getHeader = db.prepare(
+            "SELECT header_data FROM headers WHERE id = ?",
+        );
+        const headerResult = getHeader.get(msg.blockHeaderHash) as {
+            header_data: Uint8Array;
+        } | undefined;
+        parentPort!.postMessage({
+            type: "result",
+            id: msg.id,
+            data: headerResult ? headerResult.header_data : undefined,
+        });
+    }
+    if (msg.type === "getBlockBySlot") {
+        const getSlot = db.prepare(
+            "SELECT block_hash FROM slot_index WHERE slot = ?",
+        );
+        const slotResult = getSlot.get(Number(msg.slot)) as {
+            block_hash: Uint8Array;
+        } | undefined;
+
+        if (slotResult) {
+            const getBlock = db.prepare(
+                "SELECT block_data FROM blocks WHERE id = ?",
+            );
+            const blockResult = getBlock.get(slotResult.block_hash) as {
+                block_data: Uint8Array;
+            } | undefined;
+            parentPort!.postMessage({
+                type: "result",
+                id: msg.id,
+                data: blockResult ? blockResult.block_data : undefined,
+            });
+        } else {
+            parentPort!.postMessage({
+                type: "result",
+                id: msg.id,
+                data: undefined,
+            });
+        }
+    }
+    if (msg.type === "getBlockByHash") {
+        const getBlock = db.prepare(
+            "SELECT block_data FROM blocks WHERE id = ?",
+        );
+        const blockResult = getBlock.get(msg.blockHeaderHash) as {
+            block_data: Uint8Array;
+        } | undefined;
+        parentPort!.postMessage({
+            type: "result",
+            id: msg.id,
+            data: blockResult ? blockResult.block_data : undefined,
+        });
+    }
+    if (msg.type === "getHashBySlot") {
+        const getSlot = db.prepare(
+            "SELECT block_hash FROM slot_index WHERE slot = ?",
+        );
+        const slotResult = getSlot.get(Number(msg.slot)) as {
+            block_hash: Uint8Array;
+        } | undefined;
+        parentPort!.postMessage({
+            type: "result",
+            id: msg.id,
+            data: slotResult ? slotResult.block_hash : undefined,
+        });
+    }
 });

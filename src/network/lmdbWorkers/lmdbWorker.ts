@@ -17,12 +17,13 @@ const slotIndexDB = rootDB.openDB({ name: 'slot_to_hash', encoding: 'binary', ke
 parentPort!.on("message", async (msg: any) => {
     if (msg.type === "putHeader") {
         headersDB.put(msg.blockHeaderHash, msg.header);
-        slotIndexDB.put(Number(msg.slot), msg.blockHeaderHash);
+		slotIndexDB.put(Number(msg.slot), msg.blockHeaderHash);
+		// logger.debug(`Stored header at slot ${msg.slot}, hash ${toHex(msg.blockHeaderHash)}`);
         parentPort!.postMessage({ type: "done", id: msg.id });
 	};
     if (msg.type === "putBlock") {
-        // Fixed: Use blockHeaderHash as key (not slot, which wasn't sent)
-        blocksDB.put(msg.blockHeaderHash, msg.block);
+		blocksDB.put(msg.blockHeaderHash, msg.block);
+		// logger.debug(`Stored block with hash ${toHex(msg.blockHeaderHash)}`);
         parentPort!.postMessage({ type: "done", id: msg.id });
 	};
     if (msg.type === "getHeaderBySlot") {
@@ -51,7 +52,7 @@ parentPort!.on("message", async (msg: any) => {
 		const range = slotIndexDB.getRange({ reverse: true, limit: 1 });
 		for (const { key } of range) {
 			if (typeof key === 'number') {
-				logger.debug(`Highest slot found:`, key);
+				// logger.debug(`Highest slot found:`, key);
 				const hash = slotIndexDB.get(key);
 				parentPort!.postMessage({ type: "result", id: msg.id, data: { slot: key, hash: hash } });
 			};

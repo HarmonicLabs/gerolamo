@@ -116,7 +116,7 @@ export function SyncNode() {
                 // const config = await loadConfig(configPath);
                 const configFile = Bun.file(configPath);
                 const config = await configFile.json();
-                console.log("Config loaded:", config);
+                // console.log("Config loaded:", config);
 
                 // Initialize PeerManager
                 const peerManager = new PeerManager();

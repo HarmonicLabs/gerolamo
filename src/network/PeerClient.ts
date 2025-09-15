@@ -3,6 +3,8 @@ import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { connect } from "node:net";
 import { logger } from "../utils/logger";
 import { getLastSlot } from "./lmdbWorkers/lmdb";
+import { fromHex } from "@harmoniclabs/uint8array-utils";
+import { GerolamoConfig } from "./PeerManager";
 export interface IPeerClient {
     host: string;
     port: number | bigint;
@@ -15,7 +17,7 @@ export interface IPeerClient {
     peerSlotNumber: number | null;
     syncPointFrom?: ChainPoint | null;
     syncPointTo?: ChainPoint | null;
-    network: NetworkT;
+    config: GerolamoConfig;
 }
 
 export class PeerClient implements IPeerClient {
@@ -27,9 +29,8 @@ export class PeerClient implements IPeerClient {
     readonly blockFetchClient: BlockFetchClient;
     readonly keepAliveClient: KeepAliveClient;
     readonly peerSharingClient: PeerSharingClient;
-    readonly network: NetworkT;
+    readonly config: GerolamoConfig;
     peerSlotNumber: number | null;
-    syncPointFrom?: ChainPoint | null;
     private cookieCounter: number;
     private keepAliveInterval: NodeJS.Timeout | null;
     private isRangeSyncComplete: boolean = false;
@@ -37,16 +38,14 @@ export class PeerClient implements IPeerClient {
     constructor(
         host: string,
         port: number | bigint,
-        network: NetworkT = "testnet",
-        syncPointFrom?: ChainPoint | null,
+        config: GerolamoConfig,
     ) {
         this.host = host;
         this.port = port;
-        this.network = network;
+        this.config = config;
         const unixTimestamp = Math.floor(Date.now() / 1000);
         this.peerId = `${host}:${port}:${unixTimestamp}`; // Set after host/port
-        this.syncPointFrom = syncPointFrom;
-
+        
         this.mplexer = new Multiplexer({
             connect: () => {
                 logger.info(`Attempt connection to peer ${this.peerId}`);
@@ -128,7 +127,7 @@ export class PeerClient implements IPeerClient {
         });
 
         const handshakeResult = await handshake.propose({
-            networkMagic: this.network === "mainnet" ? 0 : 1,
+            networkMagic: this.config.network === "mainnet" ? 0 : 1,
             query: false,
         });
 
@@ -146,36 +145,49 @@ export class PeerClient implements IPeerClient {
 
     async syncToTip(): Promise<ChainPoint> {
         logger.debug(`Starting chain sync for peer ${this.peerId}...`);
-        let intersectResult = await this.chainSyncClient.findIntersect([
-            new ChainPoint({}),
-        ]);
-        const latestPoint = intersectResult.tip.point;
+        let intersectResult = await this.chainSyncClient.findIntersect([ new ChainPoint({})]);
+        let tipPoint = intersectResult.tip.point;
+        const lastPointDb = await getLastSlot();
 
-        const lastSlotDb = await getLastSlot();
-       
-        if ( lastSlotDb !== null ) { 
-            this.syncPointFrom = new ChainPoint({
+        if (
+            !this.config.syncFromTip && !this.config.syncFromGenesis && !this.config.syncFromPoint
+        ) throw new Error("Invalid sync configuration in config file");
+
+        if (this.config.syncFromGenesis) {
+            logger.debug(`Syncing from genesis for peer ${this.peerId}...`);
+            const genesisBlock = new ChainPoint({
                 blockHeader: {
-                    slotNumber: lastSlotDb.slot,
-                    hash: lastSlotDb.hash,
+                    slotNumber: 2n,
+                    hash: fromHex(this.config.genesisBlockHash),
                 },
+
             });
+            intersectResult = await this.chainSyncClient.findIntersect([ genesisBlock]);
         };
 
-        if ( this.syncPointFrom ) {
-            logger.debug(
-                `Setting initial intersect for range ${this.syncPointFrom.blockHeader?.slotNumber} for peer ${this.peerId}...`,
-            );
-            intersectResult = await this.chainSyncClient.findIntersect([
-                this.syncPointFrom,
-            ]);
-        }
-
-        if ( !this.syncPointFrom ) {
+        if (this.config.syncFromTip) {
             logger.debug(`Syncing to latest point for peer ${this.peerId}...`);
-            intersectResult = await this.chainSyncClient.findIntersect([
-                latestPoint,
-            ]);
+            logger.debug(`Last point in DB: `, lastPointDb);
+            if (lastPointDb && lastPointDb.slot < tipPoint.blockHeader?.slotNumber!) { 
+                tipPoint = new ChainPoint({
+                    blockHeader: {
+                        slotNumber: lastPointDb.slot,
+                        hash: lastPointDb.hash
+                    }
+                })
+            };
+            intersectResult = await this.chainSyncClient.findIntersect([ tipPoint ]);
+        };
+
+        if ( this.config.syncFromPoint && !this.config.syncFromTip ) {
+            logger.debug(`Syncing from configured point for peer ${this.peerId}...`, this.config.syncFromPoint);
+            const newChainPoint = new ChainPoint({
+                blockHeader: {
+                    slotNumber: this.config.syncFromPointSlot,
+                    hash: fromHex(this.config.syncFromPointBlockHash)
+                }
+            })
+            intersectResult = await this.chainSyncClient.findIntersect([newChainPoint]);
         };
 
         logger.debug(
@@ -183,7 +195,7 @@ export class PeerClient implements IPeerClient {
             intersectResult.tip.point.blockHeader?.slotNumber,
         );
         return intersectResult.tip.point;
-    }
+    };
 
     // starts sync loop for all peers in parrallel
     async startSyncLoop(
@@ -197,11 +209,7 @@ export class PeerClient implements IPeerClient {
 
         this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
             const multiEraHeader = rollForward || null;
-
-            logger.debug(
-                `Rolled forward for peer ${this.peerId}`,
-                multiEraHeader.tip.point.blockHeader?.slotNumber,
-            );
+            // logger.debug( `Rolled forward for peer ${this.peerId}`, multiEraHeader.tip.point.blockHeader?.slotNumber );
             syncCallback(this.peerId, "rollForward", multiEraHeader);
             await this.chainSyncClient.requestNext();
         });
@@ -209,20 +217,14 @@ export class PeerClient implements IPeerClient {
         this.chainSyncClient.on("rollBackwards", async (rollBack: ChainSyncRollBackwards) => {
             if (!rollBack.point.blockHeader) return;
             const tip = rollBack.tip.point;
-            logger.debug(
-                `Rolled back tip for peer ${this.peerId}`,
-                tip.blockHeader?.slotNumber,
-            );
+            // logger.debug(`Rolled back tip for peer ${this.peerId}`, tip.blockHeader?.slotNumber );
             // Optionally update peerSlotNumber here if needed
             syncCallback(this.peerId, "rollBackwards", rollBack);
             await this.chainSyncClient.requestNext();
         });
 
         this.chainSyncClient.on("error", (error: any) => {
-            logger.error(
-                `ChainSyncClient error for peer ${this.peerId}:`,
-                error,
-            );
+            logger.error( `ChainSyncClient error for peer ${this.peerId}:`, error );
             // Optionally retry or terminate; don't stop listeners here
         });
 

@@ -59,29 +59,14 @@ function genTestCase(testData: unknown, i: number) {
         shelleyGenesis.slotsPerKESPeriod = slotsPerKESPeriod;
         shelleyGenesis.maxKESEvolutions = maxKESEvo;
         shelleyGenesis.praosMaxKESEvo = maxKESEvo;
-
-        const kesPubKey = ocertCounters[0][0] as string;
-        const kesPeriod = ocertCounters[0][1] as bigint;
+        const sequenceNumber = ocertCounters[0][1] as bigint;
         
-        console.log("kesPubKey", fromHex(kesPubKey).length);
-
-
-        const originalOpCert = header.body.opCert;
-        
-        const newOpCert: PoolOperationalCert = {
-            kesPubKey: kesPubKey,
-            sequenceNumber: originalOpCert.sequenceNumber,
-            kesPeriod: kesPeriod,
-            signature: originalOpCert.signature
-        };
-
-        // preserve BabbageHeader and BabbageHeaderBody prototypes by mutating opCert in place (bypass readonly for testing)
-        (header.body as any).opCert = newOpCert;
         const sum = await validateHeader(
             new MultiEraHeader({ era: 6, header }),
             nonce,
             shelleyGenesis,
-            lState
+            lState,
+            sequenceNumber
         );
 
         const mutation = testData[1].mutation;

@@ -1,6 +1,6 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
-import { logger } from "./utils/logger";
+import { logger } from "../utils/logger";
 
 export async function fetchBlock(
     peer: PeerClient,

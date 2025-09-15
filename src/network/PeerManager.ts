@@ -7,7 +7,7 @@ import {
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { MultiEraHeader, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
-import { logger } from "./utils/logger";
+import { logger } from "../utils/logger";
 import { parseTopology } from "./topology/parseTopology";
 import { TopologyRoot, Topology } from "./topology/topology";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
@@ -18,7 +18,6 @@ import { getHeader, putBlock, putHeader } from "./lmdbWorkers/lmdb";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
 import {toHex } from "@harmoniclabs/uint8array-utils";
-import "./minibf/expressServer";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
@@ -31,7 +30,8 @@ export interface GerolamoConfig {
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
     readonly shelleyGenesisFile: string;
-};
+    readonly enableMinibf?: boolean; // Add this field
+}
 
 export interface IPeerManager { 
     allPeers: Map<string, PeerClient>;
@@ -64,8 +64,6 @@ export class PeerManager implements IPeerManager
     constructor() {}
 
     async init() {
-        const configFile = Bun.file("./src/config/config.json");
-        this.config = await configFile.json();
         // logger.debug("Reading config file: ", this.config);
         this.topology = await parseTopology(this.config.topologyFile);
         // logger.debug("Parsed topology:", this.topology);
@@ -281,10 +279,12 @@ export class PeerManager implements IPeerManager
 };
 
 // Initialize the peer manager
-async function start() {
+/*
+export async function start(config: Bun.BunFile) {
     const peerManager = new PeerManager();
-    peerManager.init().catch((error) => {
+    peerManager.init(config).catch((error) => {
         logger.error("Error initializing PeerManager:", error);
     });
 }
 start().catch((error) => console.error("Failed to start:", error));
+*/

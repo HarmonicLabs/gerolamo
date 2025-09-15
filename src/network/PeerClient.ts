@@ -16,7 +16,7 @@ import {
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { connect } from "node:net";
-import { logger } from "./utils/logger";
+import { logger } from "../utils/logger";
 export interface IPeerClient {
     host: string;
     port: number | bigint;

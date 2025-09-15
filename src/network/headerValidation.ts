@@ -2,7 +2,7 @@ import { Cbor, CborArray, CborBytes, CborTag, LazyCborArray } from "@harmoniclab
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, MultiEraHeader, ShelleyHeader } from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { logger } from "./utils/logger";
+import { logger } from "../utils/logger";
 import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
 import { validateHeader } from "../consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";

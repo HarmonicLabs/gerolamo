@@ -88,7 +88,7 @@ export async function getHeader(
     blockHeaderHash: Uint8Array, // Ignored in worker, but kept for signature
 ): Promise<Uint8Array | undefined> {
     return getHeaderBySlot(slot);
-}
+};
 
 // Helper: Get hash by slot (for internal use or queries)
 export async function getHashBySlot(
@@ -97,12 +97,30 @@ export async function getHashBySlot(
     const curId = idCounter++;
     worker.postMessage({ type: "getHashBySlot", slot, id: curId });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
-}
+};
+export async function getLastSlot(): Promise<{ slot: number, hash:Uint8Array} | null> {
+    const curId = idCounter++;
+    worker.postMessage({ type: "getLastSlot", id: curId });
+    return new Promise((resolve) => pendingPromises.set(curId, resolve));
+};
+export async function rollBackWards(
+    slot: number | bigint
+) { 
+    const curId = idCounter++;
+    worker.postMessage({ type: "rollBackwards", rollbackPoint: slot, id: curId });
+    return new Promise<boolean>((resolve) => pendingPromises.set(curId, resolve));
+};
+
+export async function closeDB(): Promise<void> {
+    const curId = idCounter++;
+    worker.postMessage({ type: "closeDB", id: curId});
+    return new Promise((resolve) => pendingPromises.set(curId, resolve));
+};
 
 // Utility to check if a string is a valid 64-char hex hash32
 function isHex(str: string): boolean {
     return /^[0-9a-fA-F]{64}$/.test(str);
-}
+};
 
 // Export for API use: Resolve identifier to hash (slot or hex hash string)
 export async function resolveToHash(identifier: string): Promise<Uint8Array | undefined> {
@@ -112,4 +130,4 @@ export async function resolveToHash(identifier: string): Promise<Uint8Array | un
         const slot = BigInt(identifier);
         return getHashBySlot(slot);
     }
-}
+};

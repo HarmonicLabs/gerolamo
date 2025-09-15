@@ -1,10 +1,4 @@
-import {
-    ChainPoint,
-    PeerAddress,
-    PeerAddressIPv4,
-    ChainSyncRollForward,
-    ChainSyncRollBackwards
-} from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { ChainPoint, PeerAddress, PeerAddressIPv4, ChainSyncRollForward, ChainSyncRollBackwards } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { MultiEraHeader, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { logger } from "../utils/logger";
@@ -14,11 +8,11 @@ import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { getHeader, putBlock, putHeader } from "./lmdbWorkers/lmdb";
+import { rollBackWards, putBlock, putHeader, closeDB } from "./lmdbWorkers/lmdb";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
 import {toHex } from "@harmoniclabs/uint8array-utils";
-
+// import { handleRollback } from "./lmdbWorkers/lmdbWorker";
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly topologyFile: string;
@@ -226,11 +220,23 @@ export class PeerManager implements IPeerManager
     )
     {
         if (type === "rollBackwards" && data instanceof ChainSyncRollBackwards) {
-            // Handle rollback logic here if needed (e.g., remove entries from DB after rollback point)
-            // For now, just log
-            logger.debug(`Rollback event for peer ${peerId}`);
-            // TODO: Implement DB cleanup if required
-            return;
+            const slotNumber = data.tip.point.blockHeader?.slotNumber;
+            if (slotNumber === undefined) {
+                logger.error(`Rollback failed for peer ${peerId}: missing slot number in rollback point`);
+                return;
+            }
+            logger.debug(`Received rollback to slot ${slotNumber} from peer ${peerId}`);
+            
+            // Need to make sure that it's not syncing before rollbacks are implemented
+            /*
+            const success = await rollBackWards(slotNumber);
+            if (!success) {
+                logger.error(`Rollback failed for peer ${peerId}`);
+                this.shutdown(); // Disconnect peer on failure
+            }
+            */
+            
+            return;            
         };
         // For rollForward
         if(!( data instanceof ChainSyncRollForward) ) return;
@@ -270,11 +276,24 @@ export class PeerManager implements IPeerManager
         // logger.debug("Fetched block: ", block.blockData);
         if (block) {
             await putBlock(blockHeaderHash, block.blockData); // Assuming block is MultiEraBlock; adjust if needed
-            // logger.debug(`Stored block for hash ${blockHeaderHash} from peer ${peerId}`);
+            logger.debug(`Stored block for hash ${blockHeaderHash} from peer ${peerId}`);
         } else {
             logger.error(`Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`);
         }
         
+    };
+
+    async shutdown() {
+        logger.debug('Shutting down PeerManager');
+        for (const peer of this.allPeers.values()) {
+            peer.terminate();
+        }
+        try {
+            await closeDB();
+            logger.debug('LMDB worker closed');
+        } catch (error) {
+            logger.error(`Error closing LMDB worker: ${error}`);
+        }
     };
 };
 

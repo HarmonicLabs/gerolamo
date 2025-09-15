@@ -1,22 +1,8 @@
-import {
-    BlockFetchClient,
-    ChainPoint,
-    ChainSyncClient,
-    HandshakeAcceptVersion,
-    HandshakeClient,
-    KeepAliveClient,
-    KeepAliveResponse,
-    Multiplexer,
-    PeerAddress,
-    PeerSharingClient,
-    PeerSharingResponse,
-    ChainSyncRollForward,
-    ChainSyncRollBackwards,
-    BlockFetchBlock
-} from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { BlockFetchClient, ChainPoint, ChainSyncClient, HandshakeAcceptVersion, HandshakeClient, KeepAliveClient, KeepAliveResponse, Multiplexer, PeerAddress, PeerSharingClient, PeerSharingResponse, ChainSyncRollForward, ChainSyncRollBackwards } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { connect } from "node:net";
 import { logger } from "../utils/logger";
+import { getLastSlot } from "./lmdbWorkers/lmdb";
 export interface IPeerClient {
     host: string;
     port: number | bigint;
@@ -165,7 +151,18 @@ export class PeerClient implements IPeerClient {
         ]);
         const latestPoint = intersectResult.tip.point;
 
-        if (this.syncPointFrom) {
+        const lastSlotDb = await getLastSlot();
+       
+        if ( lastSlotDb !== null ) { 
+            this.syncPointFrom = new ChainPoint({
+                blockHeader: {
+                    slotNumber: lastSlotDb.slot,
+                    hash: lastSlotDb.hash,
+                },
+            });
+        };
+
+        if ( this.syncPointFrom ) {
             logger.debug(
                 `Setting initial intersect for range ${this.syncPointFrom.blockHeader?.slotNumber} for peer ${this.peerId}...`,
             );
@@ -174,12 +171,12 @@ export class PeerClient implements IPeerClient {
             ]);
         }
 
-        if (!this.syncPointFrom) {
+        if ( !this.syncPointFrom ) {
             logger.debug(`Syncing to latest point for peer ${this.peerId}...`);
             intersectResult = await this.chainSyncClient.findIntersect([
                 latestPoint,
             ]);
-        }
+        };
 
         logger.debug(
             `Intersect result for peer ${this.peerId}:`,

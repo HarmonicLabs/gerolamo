@@ -126,7 +126,7 @@ export function SyncNode() {
                 console.log("PeerManager initialized");
 
                 // Start expressServer if enabled
-                if (config.enableMinibf) {
+                if (config.minibf) {
                     console.log("Starting express server...");
                     try {
                         await import("./network/minibf/expressServer");
@@ -138,8 +138,19 @@ export function SyncNode() {
                 } else {
                     console.log("Express server not started (disabled in config)");
                 }
-
                 console.log("Cardano node started successfully");
+
+                process.on('SIGINT', async () => {
+                    logger.debug('Received SIGINT, shutting down');
+                    await peerManager.shutdown();
+                    process.exit(0);
+                });
+                  
+                process.on('SIGTERM', async () => {
+                    logger.debug('Received SIGTERM, shutting down');
+                    await peerManager.shutdown();
+                    process.exit(0);
+                });
             } catch (error) {
                 console.error("Failed to start node:", error);
                 process.exit(1);

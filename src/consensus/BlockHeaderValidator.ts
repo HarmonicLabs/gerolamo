@@ -1,14 +1,19 @@
 import {
     BabbageHeader,
     ConwayHeader,
+    AlonzoHeader,
+    MaryHeader,
     isIBabbageHeader,
     isIConwayHeader,
+    isIAlonzoHeader,
+    isIMaryHeader,
     KesPubKey,
     KesSignature,
     MultiEraHeader,
     PoolKeyHash,
     PublicKey,
     VrfCert,
+    IVrfCert
 } from "@harmoniclabs/cardano-ledger-ts";
 import {
     blake2b_256,
@@ -48,7 +53,7 @@ export function verifyVrfProof(
     input: Uint8Array,
     output: Uint8Array,
     leaderPubKey: Uint8Array,
-    cert: VrfCert,
+    cert: IVrfCert | VrfCert,
 ): boolean {
     const proof = VrfProof03.fromBytes(cert.proof);
     const verify = proof.verify(leaderPubKey, input);
@@ -154,26 +159,34 @@ function verifyOpCertError(
     );
 }
 
-export function getVrfInput(slot: bigint, nonce: Uint8Array): Uint8Array {
-    return blake2b_256(
-        concatUint8Array(biguintToU64BE(slot), nonce),
-    );
+function getVrfInput(slot: bigint, nonce: Uint8Array, domain?: Uint8Array): Uint8Array {
+    const base = concatUint8Array(nonce, biguintToU64BE(slot));
+    if (domain) {
+        return blake2b_256(concatUint8Array(base, domain));
+    }
+    return blake2b_256(base);
 }
-
 function biguintToU64BE(n: bigint): Uint8Array {
     const result = new Uint8Array(8);
     writeBigUInt64BE(result, n, 0);
     return result;
-}
+};
 
-function getEraHeader(h: MultiEraHeader): BabbageHeader | ConwayHeader {
-    assert.default(h.era === 6 || h.era === 7);
+function getEraHeader(h: MultiEraHeader): MaryHeader | AlonzoHeader | BabbageHeader | ConwayHeader {
+    assert.default (h.era === 4 || h.era === 5 || h.era === 6 || h.era === 7);
 
+    if (h.era === 4) {
+        assert.default(isIMaryHeader(h.header));
+    };
+    if (h.era === 5) { 
+        assert.default(isIAlonzoHeader(h.header));
+    };
     if (h.era === 6) {
         assert.default(isIBabbageHeader(h.header));
-    } else {
+    };
+    if (h.era === 7) {
         assert.default(isIConwayHeader(h.header));
-    }
+    };
     return h.header;
 }
 
@@ -182,7 +195,7 @@ export async function validateHeader(
     nonce: Uint8Array,
     shelleyGenesis: ShelleyGenesisConfig,
     lState: RawNewEpochState,
-    sequenceNumber?: bigint,
+    sequenceNumber?: bigint, //only used for Amaru test
 ): Promise<boolean> {
     const header = getEraHeader(h);
     const opCerts: PoolOperationalCert = header.body.opCert;
@@ -196,12 +209,42 @@ export async function validateHeader(
         [[issuer, 0n]],
     );
     
-    const correctProof = verifyVrfProof(
-        getVrfInput(header.body.slot, nonce),
-        header.body.vrfResult.proofHash,
-        header.body.vrfPubKey,
-        header.body.vrfResult,
-    );
+    let correctProof: boolean = false;
+    
+    if (isIAlonzoHeader(header)) {
+        const leaderInput = getVrfInput(header.body.slot, nonce, Uint8Array.from([0x4c])); // "L"
+        const leaderCorrect = verifyVrfProof(
+            leaderInput,
+            header.body.leaderVrfResult.proofHash,
+            header.body.vrfPubKey,
+            header.body.leaderVrfResult
+        );
+        console.log("Leader VRF Input:", toHex(leaderInput));
+        console.log("Leader VRF correct:", leaderCorrect);
+
+        const nonceInput = getVrfInput(header.body.slot, nonce, Uint8Array.from([0x4e])); // "N"
+        const nonceCorrect = verifyVrfProof(
+            nonceInput,
+            header.body.nonceVrfResult.proofHash,
+            header.body.vrfPubKey,
+            header.body.nonceVrfResult
+        );
+        console.log("Nonce VRF Input:", toHex(nonceInput));
+        console.log("Nonce VRF correct:", nonceCorrect);
+
+        correctProof = leaderCorrect && nonceCorrect;
+    }
+
+    if(isIBabbageHeader(header) || isIConwayHeader(header))
+    {
+        correctProof = verifyVrfProof(
+            getVrfInput(header.body.slot, nonce),
+            header.body.vrfResult.proofHash,
+            header.body.vrfPubKey,
+            header.body.vrfResult
+        );
+    };
+
     const leaderVrfOut = concatUint8Array(
         Buffer.from("L"),
         header.body.leaderVrfOutput(),
@@ -252,7 +295,7 @@ export async function validateHeader(
         header.kesSignature,
         maxKesEvo,
     );
-    /*
+    
     console.log({
         isKnownLeader,
         correctProof,
@@ -260,7 +303,7 @@ export async function validateHeader(
         verifyOpCertValidity,
         verifyKES
     });
-    */
+    
     return (
         isKnownLeader &&
         correctProof &&

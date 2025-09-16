@@ -98,6 +98,32 @@ export async function getHashBySlot(
     worker.postMessage({ type: "getHashBySlot", slot, id: curId });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
 }
+export async function getLastSlot(): Promise<
+    { slot: number; hash: Uint8Array } | null
+> {
+    const curId = idCounter++;
+    worker.postMessage({ type: "getLastSlot", id: curId });
+    return new Promise((resolve) => pendingPromises.set(curId, resolve));
+}
+export async function rollBackWards(
+    slot: number | bigint,
+) {
+    const curId = idCounter++;
+    worker.postMessage({
+        type: "rollBackwards",
+        rollbackPoint: slot,
+        id: curId,
+    });
+    return new Promise<boolean>((resolve) =>
+        pendingPromises.set(curId, resolve)
+    );
+}
+
+export async function closeDB(): Promise<void> {
+    const curId = idCounter++;
+    worker.postMessage({ type: "closeDB", id: curId });
+    return new Promise((resolve) => pendingPromises.set(curId, resolve));
+}
 
 // Utility to check if a string is a valid 64-char hex hash32
 function isHex(str: string): boolean {

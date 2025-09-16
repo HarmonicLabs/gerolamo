@@ -7,19 +7,24 @@ import {
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { MultiEraHeader, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
-import { logger } from "./utils/logger";
+import { logger } from "../utils/logger";
 import { parseTopology } from "./topology/parseTopology";
 import { Topology, TopologyRoot } from "./topology/topology";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { getHeader, putBlock, putHeader } from "./sqlWorkers/sql";
+import {
+    closeDB,
+    putBlock,
+    putHeader,
+    rollBackWards,
+} from "./lmdbWorkers/lmdb";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import "./minibf/expressServer";
-
+import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
+// import { handleRollback } from "./lmdbWorkers/lmdbWorker";
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly topologyFile: string;
@@ -31,6 +36,7 @@ export interface GerolamoConfig {
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
     readonly shelleyGenesisFile: string;
+    readonly enableMinibf?: boolean; // Add this field
 }
 
 export interface IPeerManager {
@@ -42,7 +48,6 @@ export interface IPeerManager {
     bootstrapPeers: PeerClient[];
     config: GerolamoConfig;
     topology: Topology;
-    chainPoint: ChainPoint | null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
     lState: RawNewEpochState;
 }
@@ -56,37 +61,18 @@ export class PeerManager implements IPeerManager {
     bootstrapPeers: PeerClient[] = [];
     config: GerolamoConfig;
     topology: Topology;
-    chainPoint: ChainPoint | null = null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
     lState: RawNewEpochState;
 
     constructor() {}
 
     async init() {
-        const configFile = Bun.file("./src/config/config.json");
-        this.config = await configFile.json();
         // logger.debug("Reading config file: ", this.config);
         this.topology = await parseTopology(this.config.topologyFile);
         // logger.debug("Parsed topology:", this.topology);
         const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
         this.lState = RawNewEpochState.init();
-
-        const chainPointFrom = new ChainPoint({
-            blockHeader: {
-                slotNumber: this.config.syncFromPointSlot,
-                hash: fromHex(this.config.syncFromPointBlockHash),
-            },
-        });
-        const genesisBlock = new ChainPoint({
-            blockHeader: {
-                slotNumber: 2n,
-                hash: fromHex(this.config.genesisBlockHash),
-            },
-        });
-        this.chainPoint = this.config.syncFromPoint
-            ? chainPointFrom
-            : (this.config.syncFromGenesis ? genesisBlock : null);
 
         // Assign bootstrap peers
         if (this.topology.bootstrapPeers) {
@@ -95,8 +81,7 @@ export class PeerManager implements IPeerManager {
                     const peer = new PeerClient(
                         ap.address,
                         ap.port,
-                        this.config.network,
-                        this.chainPoint,
+                        this.config,
                     );
                     await peer.handShakePeer();
                     peer.startKeepAlive();
@@ -114,7 +99,7 @@ export class PeerManager implements IPeerManager {
                         const peer = new PeerClient(
                             ap.address,
                             ap.port,
-                            this.config.network,
+                            this.config,
                         );
                         await peer.handShakePeer();
                         peer.startKeepAlive();
@@ -206,7 +191,7 @@ export class PeerManager implements IPeerManager {
                 const newPeer = new PeerClient(
                     uint32ToIpv4(address.address),
                     address.portNumber,
-                    this.config.network,
+                    this.config,
                 );
                 this.addPeer(newPeer, "new");
                 logger.log(
@@ -226,12 +211,29 @@ export class PeerManager implements IPeerManager {
         if (
             type === "rollBackwards" && data instanceof ChainSyncRollBackwards
         ) {
-            // Handle rollback logic here if needed (e.g., remove entries from DB after rollback point)
-            // For now, just log
-            logger.debug(`Rollback event for peer ${peerId}`);
-            // TODO: Implement DB cleanup if required
+            const slotNumber = data.tip.point.blockHeader?.slotNumber;
+            if (slotNumber === undefined) {
+                logger.error(
+                    `Rollback failed for peer ${peerId}: missing slot number in rollback point`,
+                );
+                return;
+            }
+            logger.debug(
+                `Received rollback to slot ${slotNumber} from peer ${peerId}`,
+            );
+
+            // Need to make sure that it's not syncing before rollbacks are implemented
+            /*
+            const success = await rollBackWards(slotNumber);
+            if (!success) {
+                logger.error(`Rollback failed for peer ${peerId}`);
+                this.shutdown(); // Disconnect peer on failure
+            }
+            */
+
             return;
         }
+
         // For rollForward
         if (!(data instanceof ChainSyncRollForward)) return;
         // logger.debug("data before: ", data);
@@ -242,19 +244,23 @@ export class PeerManager implements IPeerManager {
         );
         if (!validateHeaderRes) return;
 
+        const tipSlot = data.tip.point.blockHeader?.slotNumber;
         const { slot, blockHeaderHash, multiEraHeader } = validateHeaderRes;
         // logger.debug("multiEraHeader: ", multiEraHeader.toCborBytes());
         // Store validated header in LMDB (as JSON) using worker
         await putHeader(slot, blockHeaderHash, multiEraHeader.toCborBytes());
         // logger.debug(`Stored header for hash ${blockHeaderHash}`);
 
-        // const headerRes = await getHeader(slot, blockHeaderHash);
-        // logger.debug(`Retrieved header from DB for hash ${blockHeaderHash}:`, headerRes);
+        const headerEpoch = calculatePreProdCardanoEpoch(Number(slot));
+        logger.debug(
+            `Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
+                ((Number(slot) / Number(tipSlot)) * 100).toFixed(2)
+            }% \n`,
+        );
 
         // Fetch and store the corresponding block
         const blockPeer = this.allPeers.get(peerId);
         if (!blockPeer) return;
-
         /**
          * Calculating block_body_hash
          * The block_body_hash is not a simple blake2b_256 hash of the entire serialized block body.
@@ -281,13 +287,28 @@ export class PeerManager implements IPeerManager {
             );
         }
     }
+
+    async shutdown() {
+        logger.debug("Shutting down PeerManager");
+        for (const peer of this.allPeers.values()) {
+            peer.terminate();
+        }
+        try {
+            await closeDB();
+            logger.debug("LMDB worker closed");
+        } catch (error) {
+            logger.error(`Error closing LMDB worker: ${error}`);
+        }
+    }
 }
 
 // Initialize the peer manager
-async function start() {
+/*
+export async function start(config: Bun.BunFile) {
     const peerManager = new PeerManager();
-    peerManager.init().catch((error) => {
+    peerManager.init(config).catch((error) => {
         logger.error("Error initializing PeerManager:", error);
     });
 }
 start().catch((error) => console.error("Failed to start:", error));
+*/

@@ -16,7 +16,7 @@ import {
     ShelleyHeader,
 } from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { logger } from "./utils/logger";
+import { logger } from "../utils/logger";
 import {
     calculateCardanoEpoch,
     calculatePreProdCardanoEpoch,
@@ -111,12 +111,6 @@ export async function headerValidation(
         lState,
     );
     // logger.debug("Header validation result: ", validateHeaderRes);
-
-    logger.debug(
-        `Validated - Era: ${blcokHeaderBodyEra} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
-            ((Number(slot) / Number(tipSlot)) * 100).toFixed(2)
-        }% \n`,
-    );
 
     if (!validateHeaderRes) return null;
 

@@ -5,13 +5,14 @@ import * as path from "node:path";
 import * as zlib from "node:zlib";
 import * as streamPromises from "node:stream/promises";
 import { Cbor } from "@harmoniclabs/cbor";
-
 import { RawNewEpochState } from "./rawNES";
+import { GerolamoConfig, PeerManager } from "./network/PeerManager";
 // import { Database } from "bun:sqlite";
 // import "./types/polyfills";
-// import { logger } from "./utils/logger";
+import { logger } from "./utils/logger";
 
 async function fetchLedgerState(cborDirPath: string) {
+    console.log("Downloading ledger state snapshots to", cborDirPath);
     try {
         await fsPromises.stat(cborDirPath);
     } catch {
@@ -66,6 +67,7 @@ export async function getCbor(cborFile: string, outputDirPath: string) {
 }
 
 export function Main() {
+    console.log("Starting CLI");
     program.name("cardano-node-ts");
 
     program
@@ -97,3 +99,68 @@ export function Main() {
     program.command("init-node", "Initialize the node").action(() => undefined);
     program.parse(process.argv);
 }
+
+export function SyncNode() {
+    console.log("SyncNode function called with args:", process.argv);
+    program.name("cardano-node-ts");
+
+    program
+        .command("start-node")
+        .description("Start the Cardano node with the specified config file")
+        .argument(
+            "<configPath>",
+            "Path to the config file (e.g., ./config.json)",
+        )
+        .action(async (configPath: string) => {
+            console.log("Starting node with configPath:", configPath);
+            try {
+                // Load and validate config
+                // const config = await loadConfig(configPath);
+                const configFile = Bun.file(configPath);
+                const config = await configFile.json();
+                // console.log("Config loaded:", config);
+
+                // Initialize PeerManager
+                const peerManager = new PeerManager();
+                peerManager.config = config;
+                console.log("Initializing PeerManager...");
+                await peerManager.init();
+                console.log("PeerManager initialized");
+
+                // Start expressServer if enabled
+                if (config.minibf) {
+                    console.log("Starting express server...");
+                    try {
+                        await import("./network/minibf/expressServer");
+                        console.log("Express server started on port 3000");
+                    } catch (error) {
+                        console.error("Failed to start express server:", error);
+                        throw error;
+                    }
+                } else {
+                    console.log(
+                        "Express server not started (disabled in config)",
+                    );
+                }
+                console.log("Cardano node started successfully");
+
+                process.on("SIGINT", async () => {
+                    logger.debug("Received SIGINT, shutting down");
+                    await peerManager.shutdown();
+                    process.exit(0);
+                });
+
+                process.on("SIGTERM", async () => {
+                    logger.debug("Received SIGTERM, shutting down");
+                    await peerManager.shutdown();
+                    process.exit(0);
+                });
+            } catch (error) {
+                console.error("Failed to start node:", error);
+                process.exit(1);
+            }
+        });
+}
+
+SyncNode();
+program.parse(process.argv);

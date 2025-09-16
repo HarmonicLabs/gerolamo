@@ -141,7 +141,7 @@ function verifyOpCertError(
 ): boolean {
     return latestSeqNum === undefined || (
         latestSeqNum <= cert.sequenceNumber &&
-        cert.sequenceNumber - latestSeqNum <= 1 &&
+        cert.sequenceNumber - BigInt(latestSeqNum) <= 1 &&
         verifyEd25519Signature_sync(
             cert.signature,
             concatUint8Array(
@@ -180,8 +180,9 @@ function getEraHeader(h: MultiEraHeader): BabbageHeader | ConwayHeader {
 export async function validateHeader(
     h: MultiEraHeader,
     nonce: Uint8Array,
-    shelleyGenesis: Partial<ShelleyGenesisConfig>,
+    shelleyGenesis: ShelleyGenesisConfig,
     lState: RawNewEpochState,
+    sequenceNumber?: bigint,
 ): Promise<boolean> {
     const header = getEraHeader(h);
     const opCerts: PoolOperationalCert = header.body.opCert;
@@ -237,7 +238,7 @@ export async function validateHeader(
     const verifyOpCertValidity = verifyOpCertError(
         header.body.opCert,
         new PublicKey(header.body.issuerPubKey),
-        opCerts.sequenceNumber,
+        sequenceNumber ? sequenceNumber : opCerts.sequenceNumber,
     );
 
     const header_body_bytes = Cbor.encode(header.toCborObj().array[0])

@@ -26,27 +26,21 @@ import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
-
-export async function headerValidation(
-    data: ChainSyncRollForward,
-    shelleyGenesis: ShelleyGenesisConfig,
-    lState: RawNewEpochState,
-) {
-    if (
-        !(
-            data.data instanceof CborArray
-        )
-    ) throw new Error("invalid CBOR for header");
+import { toHex } from "@harmoniclabs/uint8array-utils";
+export async function headerValidation(data: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig, lState: RawNewEpochState) {
+    // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
+    if (!(
+        data.data instanceof CborArray
+    )) throw new Error("invalid CBOR for header");
     const tipSlot = data.tip.point.blockHeader?.slotNumber;
     const blockHeaderData: Uint8Array = Cbor.encode(data.data).toBuffer();
-
+    // logger.debug("blockHeaderData", toHex(blockHeaderData));
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
-    if (
-        !(
-            lazyHeader instanceof LazyCborArray
-        )
-    ) throw new Error("invalid CBOR for header");
-
+    // logger.debug("Lazy Header: ", lazyHeader);
+    if (!(
+        lazyHeader instanceof LazyCborArray
+    )) throw new Error("invalid CBOR for header");
+    
     const blockHeaderParsed = Cbor.parse(lazyHeader.array[1]);
     // logger.debug("Block Header Parsed: ", blockHeaderParsed);
     if (
@@ -57,15 +51,15 @@ export async function headerValidation(
     ) throw new Error("invalid CBOR for header body");
 
     const blockHeaderBodyLazy = Cbor.parseLazy(blockHeaderParsed.data.bytes);
-    if (
-        !(
-            blockHeaderBodyLazy instanceof LazyCborArray
-        )
-    ) throw new Error("invalid CBOR for header body");
-
-    const blcokHeaderBodyEra = lazyHeader.array[0][0];
+    if (!(
+        blockHeaderBodyLazy instanceof LazyCborArray
+    )) throw new Error("invalid CBOR for header body");
+    // logger.debug("Block Header Body Lazy: ", blockHeaderBodyLazy.array);
+    /*
+    * We add +1 to era in multiplexer because it enums starts at 0 for the HFC.
+    */
+    const blcokHeaderBodyEra = lazyHeader.array[0][0] + 1;
     // logger.debug("Header Era: ", blcokHeaderBodyEra);
-
     // Parse the header based on era
     let parsedHeader;
     switch (blcokHeaderBodyEra) {

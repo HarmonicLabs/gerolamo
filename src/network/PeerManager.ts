@@ -24,7 +24,8 @@ import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
-// import { handleRollback } from "./lmdbWorkers/lmdbWorker";
+import { Cbor, CborArray } from "@harmoniclabs/cbor";
+
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly topologyFile: string;
@@ -164,21 +165,16 @@ export class PeerManager implements IPeerManager {
     }
 
     private async peerSyncCurrentTasks() {
-        logger.debug("Starting peer sync tasks...");
+        // logger.debug("Starting peer sync tasks...");
         await Promise.all(this.hotPeers.map(async (peer) => {
             try {
-                logger.log(
-                    `Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync`,
-                );
+                logger.log(`Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync` );
                 peer.startSyncLoop(this.syncEventCallback.bind(this));
                 // const peersAddresses = await peer.askForPeers();
                 // console.log("peersAddresses: ", peersAddresses);
                 // this.addNewSharedPeers(peersAddresses);
             } catch (error) {
-                logger.error(
-                    `Failed to initialize hot peer ${peer.peerId}:`,
-                    error,
-                );
+                logger.error(`Failed to initialize hot peer ${peer.peerId}:`, error );
                 this.removePeer(peer.peerId);
             }
         }));
@@ -194,11 +190,7 @@ export class PeerManager implements IPeerManager {
                     this.config,
                 );
                 this.addPeer(newPeer, "new");
-                logger.log(
-                    `Added new peer ${newPeer.peerId} from network at ${
-                        uint32ToIpv4(address.address)
-                    }:${address.portNumber}`,
-                );
+                logger.log( `Added new peer ${newPeer.peerId} from network at ${uint32ToIpv4(address.address) }:${address.portNumber}`);
             }
         });
     }
@@ -236,14 +228,21 @@ export class PeerManager implements IPeerManager {
 
         // For rollForward
         if (!(data instanceof ChainSyncRollForward)) return;
-        // logger.debug("data before: ", data);
-        const validateHeaderRes = await headerValidation(
-            data,
-            this.shelleyGenesisConfig,
-            this.lState,
-        );
-        if (!validateHeaderRes) return;
-
+        if (!(
+            data.data instanceof CborArray
+        )) throw new Error("invalid CBOR for header");
+        // logger.debug("ChainSyncRollForward data: ", Cbor.encode(data.data).toString());     
+        const validateHeaderRes = await headerValidation(data, this.shelleyGenesisConfig, this.lState);
+        // logger.debug("Validated header res: ", validateHeaderRes);
+        
+        /*This is just tempo for quick testing
+        const blockPeerTest = this.allPeers.get(peerId);
+        if (!blockPeerTest) return;
+        const blockTest = await fetchBlock(blockPeerTest, 102379274, fromHex("9122f44b2848ff4bb91f872ee01636b666fd3418a87edbe0d9b70a2df417941d"));
+        logger.debug("Test fetch block: ", blockTest.toCbor().toString());
+        */
+        if (!validateHeaderRes)return;
+        
         const tipSlot = data.tip.point.blockHeader?.slotNumber;
         const { slot, blockHeaderHash, multiEraHeader } = validateHeaderRes;
         // logger.debug("multiEraHeader: ", multiEraHeader.toCborBytes());
@@ -252,11 +251,7 @@ export class PeerManager implements IPeerManager {
         // logger.debug(`Stored header for hash ${blockHeaderHash}`);
 
         const headerEpoch = calculatePreProdCardanoEpoch(Number(slot));
-        logger.debug(
-            `Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
-                ((Number(slot) / Number(tipSlot)) * 100).toFixed(2)
-            }% \n`,
-        );
+        logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${((Number(slot) / Number(tipSlot)) * 100).toFixed(2) }%`);
 
         // Fetch and store the corresponding block
         const blockPeer = this.allPeers.get(peerId);

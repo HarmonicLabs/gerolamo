@@ -6,8 +6,8 @@
     "syncFromGenesis": false,
     "genesisBlockHash": "1d031daf47281f69cd95ab929c269fd26b1434a56a5bbbd65b7afe85ef96b233",
     "syncFromPoint": true,
-    "syncFromPointSlot": 102286196,
-    "syncFromPointBlockHash": "059a97e9533e454650f9fb4b8550ba430882bd4ec4a5bf17aeebbc631efea5ec",
+    "syncFromPointSlot": 68774372,
+    "syncFromPointBlockHash": "36f5b4a370c22fd4a5c870248f26ac72c0ac0ecc34a42e28ced1a4e15136efa4",
     "logLevel": "Error",
     "minibf": true,
     "minibfPort": 3000

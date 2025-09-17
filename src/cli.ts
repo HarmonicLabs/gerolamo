@@ -66,9 +66,10 @@ export async function getCbor(cborFile: string, outputDirPath: string) {
     // nes.put(db);
 }
 
+program.name("gerolamo");
+
 export function Main() {
     console.log("Starting CLI");
-    program.name("cardano-node-ts");
 
     program
         .command("download-ledger-state")
@@ -102,7 +103,6 @@ export function Main() {
 
 export function SyncNode() {
     logger.debug("Starting Gerolamo with config: ", process.argv);
-    program.name("cardano-node-ts");
 
     program
         .command("start-node")

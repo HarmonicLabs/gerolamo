@@ -16,7 +16,7 @@ block	N/A	N/A	N/A
 
 PreProd Testnet: Era Block Number Absolute Slot Block Header Hash
 
-Last Byron block	45 	 	84242 45899e8002b27df291e09188bfe3aeb5397ac03546a7d0ead93aa2500860f1af 
+Last Byron block	45 	 	 84242 45899e8002b27df291e09188bfe3aeb5397ac03546a7d0ead93aa2500860f1af 
 Last Shelley block	21644 	 518360 f9d8b6c77fedd60c3caf5de0ce63a0aeb9d1753269c9c07503d9aa09d5144481 
 Last Allegra block	43242 	 950340 74c03af754bcde9cd242c5a168689edcab1756a3f7ae4d5dca1a31d86839c7b1 
 Last Mary block	 	64902 	 1382348 af5fddc7d16a349e1a2af8ba89f4f5d3273955a13095b3709ef6e3db576a0b33 

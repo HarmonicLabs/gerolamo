@@ -1,4 +1,4 @@
-import { BlockFetchClient, ChainPoint, ChainSyncClient, HandshakeAcceptVersion, HandshakeClient, KeepAliveClient, KeepAliveResponse, Multiplexer, PeerAddress, PeerSharingClient, PeerSharingResponse, ChainSyncRollForward, ChainSyncRollBackwards } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { BlockFetchClient, ChainPoint, ChainSyncClient, HandshakeAcceptVersion, HandshakeClient, KeepAliveClient, KeepAliveResponse, Multiplexer, PeerAddress, PeerSharingClient, PeerSharingResponse, ChainSyncRollForward, ChainSyncRollBackwards, ChainSyncIntersectFound, ChainSyncIntersectNotFound, ChainSyncFindIntersect } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { connect } from "node:net";
 import { logger } from "../utils/logger";
@@ -145,9 +145,9 @@ export class PeerClient implements IPeerClient {
 
     async syncToTip(): Promise<ChainPoint> {
         logger.debug(`Starting chain sync for peer ${this.peerId}...`);
-        let intersectResult = await this.chainSyncClient.findIntersect([ new ChainPoint({})]);
+        let intersectResult: ChainSyncIntersectFound | ChainSyncIntersectNotFound = await this.chainSyncClient.findIntersect([ new ChainPoint({})]);
         let tipPoint = intersectResult.tip.point;
-        const lastPointDb = await getLastSlot();
+
 
         if (
             !this.config.syncFromTip && !this.config.syncFromGenesis && !this.config.syncFromPoint
@@ -166,6 +166,8 @@ export class PeerClient implements IPeerClient {
         };
 
         if (this.config.syncFromTip) {
+            const lastPointDb = await getLastSlot();
+            logger.debug(`Last point in DB: `, lastPointDb);
             logger.debug(`Syncing to latest point for peer ${this.peerId}...`);
             logger.debug(`Last point in DB: `, lastPointDb);
             if (lastPointDb && lastPointDb.slot < tipPoint.blockHeader?.slotNumber!) { 
@@ -188,11 +190,13 @@ export class PeerClient implements IPeerClient {
                 }
             })
             intersectResult = await this.chainSyncClient.findIntersect([newChainPoint]);
+            if (intersectResult instanceof ChainSyncIntersectNotFound) {
+                throw new Error("Configured syncFromPoint not found on peer");
+            };
+            logger.debug("Sync from Point: Intersected at: ", intersectResult.point.blockHeader?.slotNumber)
         };
 
-        logger.debug(
-            `Intersect result for peer ${this.peerId}:`,
-            intersectResult.tip.point.blockHeader?.slotNumber,
+        logger.debug(`Intersect result for peer ${this.peerId}:`, intersectResult.tip.point.blockHeader?.slotNumber,
         );
         return intersectResult.tip.point;
     };
@@ -209,7 +213,7 @@ export class PeerClient implements IPeerClient {
 
         this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
             const multiEraHeader = rollForward || null;
-            // logger.debug( `Rolled forward for peer ${this.peerId}`, multiEraHeader.tip.point.blockHeader?.slotNumber );
+            logger.debug( `Rolled forward for peer ${this.peerId}`, multiEraHeader.tip.point.blockHeader?.slotNumber );
             syncCallback(this.peerId, "rollForward", multiEraHeader);
             await this.chainSyncClient.requestNext();
         });
@@ -217,7 +221,7 @@ export class PeerClient implements IPeerClient {
         this.chainSyncClient.on("rollBackwards", async (rollBack: ChainSyncRollBackwards) => {
             if (!rollBack.point.blockHeader) return;
             const tip = rollBack.tip.point;
-            // logger.debug(`Rolled back tip for peer ${this.peerId}`, tip.blockHeader?.slotNumber );
+            logger.debug(`Rolled back tip for peer ${this.peerId}`, tip.blockHeader?.slotNumber );
             // Optionally update peerSlotNumber here if needed
             syncCallback(this.peerId, "rollBackwards", rollBack);
             await this.chainSyncClient.requestNext();
@@ -242,6 +246,7 @@ export class PeerClient implements IPeerClient {
         });
         // logger.debug(`Fetching block at chain point for peer ${this.peerId}:`, chainPoint);
         const blockData = await this.blockFetchClient.request(chainPoint);
+        logger.debug(`Fetched block at slot ${slot} for peer ${this.peerId}`);
         return blockData;
     }
 

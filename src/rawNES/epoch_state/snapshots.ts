@@ -2,6 +2,8 @@ import * as assert from "node:assert/strict";
 
 import {
     Coin,
+    Credential,
+    CredentialType,
     PoolKeyHash,
     PoolParams,
     StakeCredentials,
@@ -11,10 +13,11 @@ import { CborArray, CborMap, CborObj } from "@harmoniclabs/cbor";
 import { IPoolDistr } from "../pool_distr";
 
 import { decodeCoin } from "./common";
+import { ShelleyProtocolParams } from "../../config/ShelleyGenesisTypes";
 
 const calcPoolDistrEnabled = false;
 
-type _Stake = [StakeCredentials, Coin][];
+type _Stake = [Credential<CredentialType>, Coin][];
 export interface IStake {
     get stake(): _Stake;
     set stake(s: _Stake);
@@ -30,7 +33,7 @@ export class RawStake implements IStake {
         assert.default(cborObj instanceof CborMap);
         return new RawStake(
             cborObj.map.map((entry) => [
-                StakeCredentials.fromCborObj(entry.k),
+                Credential.fromCborObj(entry.k),
                 decodeCoin(entry.v),
             ]),
         );
@@ -44,7 +47,7 @@ export class RawStake implements IStake {
     }
 }
 
-type _Delegations = [StakeCredentials, PoolKeyHash][];
+type _Delegations = [Credential<CredentialType>, PoolKeyHash][];
 
 export interface IDelegations {
     get delegations(): _Delegations;
@@ -62,7 +65,7 @@ export class RawDelegations implements IDelegations {
         assert.default(cborObj instanceof CborMap);
         return new RawDelegations(
             cborObj.map.map((entry) => [
-                StakeCredentials.fromCborObj(entry.k),
+                Credential.fromCborObj(entry.k),
                 PoolKeyHash.fromCborObj(entry.v),
             ]),
         );
@@ -254,5 +257,52 @@ export class RawSnapshots implements ISnapshots {
     }
     set fee(fee: Coin) {
         this._ssFee = fee;
+    }
+}
+
+export interface IProtocolParams {
+    get pparams(): ShelleyProtocolParams;
+    set pparams(pp: ShelleyProtocolParams);
+}
+
+export class RawProtocolParams implements IProtocolParams {
+    _pparams: ShelleyProtocolParams;
+
+    constructor(pparams: ShelleyProtocolParams) {
+        this._pparams = pparams;
+    }
+
+    static fromCborObj(cborObj: CborObj): RawProtocolParams {
+        assert.default(cborObj instanceof CborMap);
+        // Parse CBOR map into ShelleyProtocolParams structure
+        // For now, return default values - this would need full implementation
+        const defaultParams: ShelleyProtocolParams = {
+            protocolVersion: { minor: 0, major: 0 },
+            decentralisationParam: 0,
+            eMax: 0,
+            extraEntropy: { tag: "NeutralNonce" },
+            maxTxSize: 0,
+            maxBlockBodySize: 0,
+            maxBlockHeaderSize: 0,
+            minFeeA: 0,
+            minFeeB: 0,
+            minUTxOValue: 0,
+            poolDeposit: 500000000,
+            minPoolCost: 340000000,
+            keyDeposit: 2000000,
+            nOpt: 150,
+            rho: 0.003,
+            tau: 0.2,
+            a0: 0.3,
+        };
+        return new RawProtocolParams(defaultParams);
+    }
+
+    get pparams(): ShelleyProtocolParams {
+        return this._pparams;
+    }
+
+    set pparams(pp: ShelleyProtocolParams) {
+        this._pparams = pp;
     }
 }

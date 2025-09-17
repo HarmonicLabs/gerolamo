@@ -1,37 +1,43 @@
 import {
-    ConwayHeader,
-    BabbageHeader,
-    AlonzoHeader,
-    MaryHeader,
     AllegraHeader,
-    ShelleyHeader,
+    AlonzoHeader,
+    BabbageHeader,
+    ConwayHeader,
+    isIAllegraHeader,
+    isIAlonzoHeader,
     isIBabbageHeader,
     isIConwayHeader,
-    isIAlonzoHeader,
     isIMaryHeader,
-    isIAllegraHeader,
     isIShelleyHeader,
+    IVrfCert,
     KesPubKey,
     KesSignature,
+    MaryHeader,
     MultiEraHeader,
     PoolKeyHash,
     PublicKey,
+    ShelleyHeader,
     VrfCert,
-    IVrfCert
 } from "@harmoniclabs/cardano-ledger-ts";
 import {
     blake2b_256,
     verifyEd25519Signature_sync,
     VrfProof03,
 } from "@harmoniclabs/crypto";
-import { concatUint8Array, fromHex, toHex, uint8ArrayEq, writeBigUInt64BE } from "@harmoniclabs/uint8array-utils";
+import {
+    concatUint8Array,
+    fromHex,
+    toHex,
+    uint8ArrayEq,
+    writeBigUInt64BE,
+} from "@harmoniclabs/uint8array-utils";
 import { PoolOperationalCert } from "@harmoniclabs/cardano-ledger-ts";
 import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
 import { RawNewEpochState } from "../rawNES";
 import * as assert from "node:assert/strict";
 import * as wasm from "wasm-kes";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
 
 const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
@@ -46,7 +52,7 @@ function verifyKnownLeader(
         uint8ArrayEq(pkh.toCborBytes(), issuerPubKey.toCborBytes())
     )!;
     return knownLeader[1] >= 0n;
-};
+}
 
 // function checkSlotLeader(
 //     vrfOutput: Uint8Array,
@@ -145,25 +151,29 @@ function verifyVrfProof(
     output: Uint8Array,
     leaderPubKey: Uint8Array,
     cert: IVrfCert | VrfCert,
-    era: 'pre-babbage' | 'post-babbage' // Add era detection; e.g., based on block protocol version
+    era: "pre-babbage" | "post-babbage", // Add era detection; e.g., based on block protocol version
 ): boolean {
     const proof = VrfProof03.fromBytes(cert.proof); // Assuming this works for all eras (proof format is compatible)
     const verify = proof.verify(leaderPubKey, input);
-    
+
     let computedOutput: Uint8Array;
-    if (era === 'pre-babbage') {
+    if (era === "pre-babbage") {
         // Pre-Babbage: hash of full proof bytes
         computedOutput = blake2b_256(proof.toBytes());
     } else {
         // Babbage+: hash of gamma (via toHash, assuming it extracts/hashes gamma)
         computedOutput = proof.toHash();
     }
-    
+
     const out = uint8ArrayEq(computedOutput, output);
     return verify && out;
-};
+}
 
-function getVrfInput(slot: bigint, nonce: Uint8Array, domain?: Uint8Array): Uint8Array {
+function getVrfInput(
+    slot: bigint,
+    nonce: Uint8Array,
+    domain?: Uint8Array,
+): Uint8Array {
     const base = concatUint8Array(biguintToU64BE(slot), nonce);
     if (domain) {
         // logger.debug("VRF Input Domain:" , toHex(domain));
@@ -171,34 +181,45 @@ function getVrfInput(slot: bigint, nonce: Uint8Array, domain?: Uint8Array): Uint
     }
     logger.debug("VRF Input No Domain");
     return blake2b_256(base);
-};
+}
 function biguintToU64BE(n: bigint): Uint8Array {
     const result = new Uint8Array(8);
     writeBigUInt64BE(result, n, 0);
     return result;
-};
+}
 
-function getEraHeader(h: MultiEraHeader): ShelleyHeader | AllegraHeader | MaryHeader | AlonzoHeader | BabbageHeader | ConwayHeader {
-    assert.default (h.era === 2 || h.era === 3 || h.era === 4 || h.era === 5 || h.era === 6 || h.era === 7);
+function getEraHeader(
+    h: MultiEraHeader,
+):
+    | ShelleyHeader
+    | AllegraHeader
+    | MaryHeader
+    | AlonzoHeader
+    | BabbageHeader
+    | ConwayHeader {
+    assert.default(
+        h.era === 2 || h.era === 3 || h.era === 4 || h.era === 5 ||
+            h.era === 6 || h.era === 7,
+    );
 
     if (h.era === 2) {
         assert.default(isIShelleyHeader(h.header));
-    };
+    }
     if (h.era === 3) {
         assert.default(isIAllegraHeader(h.header));
-    };
+    }
     if (h.era === 4) {
         assert.default(isIMaryHeader(h.header));
-    };
-    if (h.era === 5) { 
+    }
+    if (h.era === 5) {
         assert.default(isIAlonzoHeader(h.header));
-    };
+    }
     if (h.era === 6) {
         assert.default(isIBabbageHeader(h.header));
-    };
+    }
     if (h.era === 7) {
         assert.default(isIConwayHeader(h.header));
-    };
+    }
     return h.header;
 }
 
@@ -224,49 +245,55 @@ export async function validateHeader(
         Buffer.from("L"),
         header.body.leaderVrfOutput(),
     );
-    
+
     let correctProof: boolean = false;
-    
-    if (isIAlonzoHeader(header))
-    {
+
+    if (isIAlonzoHeader(header)) {
         // logger.debug("header.body", header.body.nonceVrfResult.proofHash);
         // logger.debug("header.body.getNonceVrfOutput()", leaderVrfOut);
-        
-        const leaderInput = getVrfInput(header.body.slot, nonce, Buffer.from("L")); // "L"
+
+        const leaderInput = getVrfInput(
+            header.body.slot,
+            nonce,
+            Buffer.from("L"),
+        ); // "L"
         const leaderCorrect = verifyVrfProof(
             leaderInput,
             header.body.leaderVrfResult.proofHash,
             header.body.vrfPubKey,
             header.body.leaderVrfResult,
-            'pre-babbage'
+            "pre-babbage",
         );
         // logger.debug("Leader VRF Input:", toHex(leaderInput));
         logger.debug("Leader VRF correct:", leaderCorrect);
-        const nonceInput = getVrfInput(header.body.slot, nonce, Buffer.from("N")); // "N"
+        const nonceInput = getVrfInput(
+            header.body.slot,
+            nonce,
+            Buffer.from("N"),
+        ); // "N"
         const nonceCorrect = verifyVrfProof(
             nonceInput,
             header.body.nonceVrfResult.proofHash,
             header.body.vrfPubKey,
             header.body.nonceVrfResult,
-            'pre-babbage'
+            "pre-babbage",
         );
         // logger.debug("Nonce VRF Input:", toHex(nonceInput));
         logger.debug("Nonce VRF correct:", nonceCorrect);
         correctProof = leaderCorrect && nonceCorrect;
         correctProof = true; //temp
-    };
+    }
 
-    if(isIBabbageHeader(header) || isIConwayHeader(header))
-    {
+    if (isIBabbageHeader(header) || isIConwayHeader(header)) {
         const vrfInput = getVrfInput(header.body.slot, nonce);
         correctProof = verifyVrfProof(
             vrfInput,
             header.body.vrfResult.proofHash,
             header.body.vrfPubKey,
             header.body.vrfResult,
-            "post-babbage"
+            "post-babbage",
         );
-    };
+    }
 
     const totalActiveStake = lState.poolDistr.totalActiveStake;
     const individualStake = lState.GET_nes_pd_individual_total_pool_stake!(
@@ -288,7 +315,7 @@ export async function validateHeader(
         stakeRatio = BigDecimal.from(individualStake).div(
             BigDecimal.from(totalActiveStake),
         );
-    };
+    }
 
     const verifyLeaderStake = verifyLeaderEligibility(
         BigDecimal.from(activeSlotCoeff),
@@ -313,15 +340,7 @@ export async function validateHeader(
         header.kesSignature,
         maxKesEvo,
     );
-    
-    console.log({
-        isKnownLeader,
-        correctProof,
-        verifyLeaderStake,
-        verifyOpCertValidity,
-        verifyKES,
-    }, "\n\n");
-    
+
     return (
         isKnownLeader &&
         correctProof &&

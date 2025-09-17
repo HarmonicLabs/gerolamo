@@ -107,7 +107,10 @@ export function SyncNode() {
     program
         .command("start-node")
         .description("Start Gerolamo node with the specified config file")
-        .argument("<configPath>", "Path to the config file (e.g., ./config.json)")
+        .argument(
+            "<configPath>",
+            "Path to the config file (e.g., ./config.json)",
+        )
         .action(async (configPath: string) => {
             logger.debug("Starting node with configPath:", configPath);
             try {
@@ -135,18 +138,20 @@ export function SyncNode() {
                         throw error;
                     }
                 } else {
-                    logger.debug("Express server not started (disabled in config)");
+                    logger.debug(
+                        "Express server not started (disabled in config)",
+                    );
                 }
                 logger.debug("Gerolamo node started successfully");
 
-                process.on('SIGINT', async () => {
-                    logger.debug('Received SIGINT, Shutting down');
+                process.on("SIGINT", async () => {
+                    logger.debug("Received SIGINT, Shutting down");
                     await peerManager.shutdown();
                     process.exit(0);
                 });
-                  
-                process.on('SIGTERM', async () => {
-                    logger.debug('Received SIGTERM, Shutting down');
+
+                process.on("SIGTERM", async () => {
+                    logger.debug("Received SIGTERM, Shutting down");
                     await peerManager.shutdown();
                     process.exit(0);
                 });

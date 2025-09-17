@@ -39,6 +39,7 @@ import { RawLedgerState, RawUTxOState } from "./epoch_state/ledger_state";
 import {
     RawDelegations,
     RawPParams,
+    RawProtocolParams,
     RawSnapshot,
     RawSnapshots,
     RawStake,
@@ -85,6 +86,27 @@ export class RawNewEpochState {
         slotsPerKESPeriod: bigint = 1n,
         maxKESEvolutions: bigint = 1n,
     ): RawNewEpochState {
+        // Default protocol parameters from Shelley genesis
+        const defaultPparams = new RawProtocolParams({
+            protocolVersion: { minor: 0, major: 2 },
+            decentralisationParam: 0,
+            eMax: 18,
+            extraEntropy: { tag: "NeutralNonce" },
+            maxTxSize: 16384,
+            maxBlockBodySize: 90112,
+            maxBlockHeaderSize: 1100,
+            minFeeA: 44,
+            minFeeB: 155381,
+            minUTxOValue: 1000000,
+            poolDeposit: 500000000,
+            minPoolCost: 340000000,
+            keyDeposit: 2000000,
+            nOpt: 150,
+            rho: 0.003,
+            tau: 0.2,
+            a0: 0.3,
+        });
+
         return new RawNewEpochState(
             startEpoch,
             new RawBlocksMade([]),
@@ -118,6 +140,7 @@ export class RawNewEpochState {
                     new RawLikelihoods(new Map()),
                     0n,
                 ),
+                defaultPparams,
             ),
             undefined as unknown as RawPulsingRewUpdate,
             new RawPoolDistr([], 0n),

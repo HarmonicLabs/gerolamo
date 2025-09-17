@@ -2,6 +2,7 @@
 
 import {
     Certificate,
+    CertificateType,
     CertPoolRegistration,
     CertPoolRetirement,
     CertStakeDelegation,
@@ -10,6 +11,8 @@ import {
     ConwayTx,
     ConwayTxBody,
     ConwayUTxO,
+    Credential,
+    CredentialType,
     Hash32,
     isITxWitnessSet,
     PoolKeyHash,
@@ -125,15 +128,264 @@ export function processCert(
     // Enable certificate processing for demo - set to false to disable
     const ENABLE_CERT_PROCESSING = true;
     if (!ENABLE_CERT_PROCESSING) return;
+
+    const certType = (cert as any).certType as CertificateType;
+
+    switch (certType) {
+        case CertificateType.StakeRegistration: // Deprecated; handle for backward compatibility
+            // Add cert.stakeCredential to stake set
+            // @ts-ignore
+            const stakeCredReg = (cert as any).stakeCredential;
+            if (
+                state.epochState.snapshots.stakeSet.stake.stake.some((
+                    [sc, _],
+                ) => sc.toCbor().toBuffer().toString("hex") ===
+                    stakeCredReg.toCbor().toBuffer().toString("hex")
+                )
+            ) {
+                throw new Error(
+                    `Stake credential ${
+                        stakeCredReg.toCbor().toBuffer().toString("hex")
+                    } is already registered`,
+                );
+            }
+            state.epochState.snapshots.stakeSet.stake.stake.push([
+                stakeCredReg,
+                0n,
+            ]);
+            // Deduct keyDeposit from treasury
+            const keyDeposit = BigInt(
+                state.epochState.pparams.pparams.keyDeposit,
+            );
+            state.epochState.chainAccountState.casTreasury =
+                BigInt(state.epochState.chainAccountState.casTreasury) -
+                keyDeposit;
+            break;
+
+        case CertificateType.StakeDeRegistration: // Deprecated; handle for backward compatibility
+            // Remove cert.stakeCredential from stake set
+            // @ts-ignore
+            const stakeCredToRemove = (cert as any).stakeCredential;
+            if (
+                !state.epochState.snapshots.stakeSet.stake.stake.some((
+                    [sc, _],
+                ) => sc.toCbor().toBuffer().toString("hex") ===
+                    stakeCredToRemove.toCbor().toBuffer().toString("hex")
+                )
+            ) {
+                throw new Error(
+                    `Stake credential ${
+                        stakeCredToRemove.toCbor().toBuffer().toString("hex")
+                    } is not registered`,
+                );
+            }
+            removeStakeCredential(
+                state.epochState.snapshots.stakeSet.stake.stake as any,
+                stakeCredToRemove,
+            );
+            // Refund keyDeposit to treasury
+            const keyDepositRefund1 = BigInt(
+                state.epochState.pparams.pparams.keyDeposit,
+            );
+            state.epochState.chainAccountState.casTreasury =
+                BigInt(state.epochState.chainAccountState.casTreasury) +
+                keyDepositRefund1;
+            break;
+
+        case CertificateType.StakeDelegation: // Required for consensus
+            updateDelegationInSnapshot(
+                state.epochState.snapshots.stakeMark.delegations.delegations,
+                (cert as CertStakeDelegation).stakeCredential,
+                (cert as CertStakeDelegation).poolKeyHash,
+            );
+            break;
+
+        case CertificateType.PoolRegistration: // Required for consensus
+            // Add cert.poolParams to pool params
+            const poolParams = (cert as CertPoolRegistration).poolParams;
+            state.epochState.snapshots.stakeMark.poolParams.pparams.push([
+                (poolParams as any).poolKeyHash,
+                poolParams,
+            ]);
+            // Deduct poolDeposit from treasury
+            const poolDeposit = BigInt(
+                state.epochState.pparams.pparams.poolDeposit,
+            );
+            state.epochState.chainAccountState.casTreasury =
+                BigInt(state.epochState.chainAccountState.casTreasury) -
+                poolDeposit;
+            break;
+
+        case CertificateType.PoolRetirement: // Required for consensus
+            // Set retirement epoch for cert.poolKeyHash in pool params
+            const poolKeyHashRet = (cert as any).poolKeyHash as PoolKeyHash;
+            const poolIndex = state.epochState.snapshots.stakeMark.poolParams
+                .pparams.findIndex(([pkh, _]) =>
+                    pkh.toCborBytes() === poolKeyHashRet.toCborBytes()
+                );
+            if (poolIndex >= 0) {
+                (state.epochState.snapshots.stakeMark.poolParams
+                    .pparams[poolIndex][1] as any).retirementEpoch =
+                        (cert as any).epoch;
+            }
+            break;
+
+        case CertificateType.GenesisKeyDelegation: // Deprecated; low priority
+            // TODO: Update genesis key delegations
+            break;
+
+        case CertificateType.MoveInstantRewards: // Deprecated; low priority
+            // TODO: Move rewards between reserves/treasury
+            break;
+
+        case CertificateType.RegistrationDeposit: // Required for consensus
+            // Add cert.stakeCredential to stake set
+            const stakeCredRegDep = (cert as any).stakeCredential;
+            if (
+                !state.epochState.snapshots.stakeSet.stake.stake.some((
+                    [sc, _],
+                ) => sc.toCbor().toBuffer().toString("hex") ===
+                    stakeCredRegDep.toCbor().toBuffer().toString("hex")
+                )
+            ) {
+                state.epochState.snapshots.stakeSet.stake.stake.push([
+                    stakeCredRegDep,
+                    0n,
+                ]);
+            }
+            // Deduct cert.deposit from treasury
+            state.epochState.chainAccountState.casTreasury =
+                BigInt(state.epochState.chainAccountState.casTreasury) -
+                BigInt((cert as any).deposit);
+            break;
+
+        case CertificateType.UnRegistrationDeposit: // Required for consensus
+            // Remove cert.stakeCredential from stake set
+            const stakeCredUnRegDep = (cert as any).stakeCredential;
+            removeStakeCredential(
+                state.epochState.snapshots.stakeSet.stake.stake,
+                stakeCredUnRegDep,
+            );
+            // Refund cert.deposit to treasury
+            state.epochState.chainAccountState.casTreasury =
+                BigInt(state.epochState.chainAccountState.casTreasury) +
+                BigInt((cert as any).deposit);
+            break;
+
+        case CertificateType.UnRegistrationDeposit: // Required for consensus
+            // Remove cert.stakeCredential from stake set
+            removeStakeCredential(
+                state.epochState.snapshots.stakeSet.stake.stake,
+                (cert as any).stakeCredential,
+            );
+            // Refund cert.deposit to treasury
+            state.epochState.chainAccountState.casTreasury =
+                BigInt(state.epochState.chainAccountState.casTreasury) +
+                BigInt((cert as any).deposit);
+            break;
+
+        case CertificateType.VoteDeleg: // Governance; medium priority
+            // TODO: Update governance state for DRep delegation
+            break;
+
+        case CertificateType.StakeVoteDeleg: // Governance; medium priority
+            // TODO: Update delegations and governance state
+            break;
+
+        case CertificateType.StakeRegistrationDeleg: // Required for consensus
+            // Add cert.stakeCredential to stake set
+            if (
+                !state.epochState.snapshots.stakeSet.stake.stake.some((
+                    [sc, _],
+                ) => sc.toCbor().toBuffer().toString("hex") ===
+                    (cert as any).stakeCredential.toCbor().toBuffer().toString(
+                        "hex",
+                    )
+                )
+            ) {
+                state.epochState.snapshots.stakeSet.stake.stake.push([
+                    (cert as any).stakeCredential,
+                    0n,
+                ]);
+            }
+            // Update delegation snapshot
+            updateDelegationInSnapshot(
+                state.epochState.snapshots.stakeMark.delegations.delegations,
+                (cert as any).stakeCredential,
+                (cert as any).poolKeyHash,
+            );
+            // Deduct cert.deposit from treasury
+            state.epochState.chainAccountState.casTreasury =
+                BigInt(state.epochState.chainAccountState.casTreasury) -
+                BigInt((cert as any).deposit);
+            break;
+
+        case CertificateType.VoteRegistrationDeleg: // Governance; medium priority
+            // TODO: Update governance state
+            break;
+
+        case CertificateType.StakeVoteRegistrationDeleg: // Required for consensus
+            // Add cert.stakeCredential to stake set
+            if (
+                !state.epochState.snapshots.stakeSet.stake.stake.some((
+                    [sc, _],
+                ) => sc.toCbor().toBuffer().toString("hex") ===
+                    (cert as any).stakeCredential.toCbor().toBuffer().toString(
+                        "hex",
+                    )
+                )
+            ) {
+                state.epochState.snapshots.stakeSet.stake.stake.push([
+                    (cert as any).stakeCredential,
+                    0n,
+                ]);
+            }
+            // Update delegation and governance state
+            updateDelegationInSnapshot(
+                state.epochState.snapshots.stakeMark.delegations.delegations,
+                (cert as any).stakeCredential,
+                (cert as any).poolKeyHash,
+            );
+            // TODO: Update governance for DRep
+            // Deduct cert.deposit from treasury
+            state.epochState.chainAccountState.casTreasury =
+                BigInt(state.epochState.chainAccountState.casTreasury) -
+                BigInt((cert as any).deposit);
+            break;
+
+        case CertificateType.AuthCommitteeHot: // Governance; low priority
+            // TODO: Update committee hot key
+            break;
+
+        case CertificateType.ResignCommitteeCold: // Governance; low priority
+            // TODO: Resign committee cold key
+            break;
+
+        case CertificateType.RegistrationDrep: // Governance; medium priority
+            // TODO: Register DRep, deduct deposit
+            break;
+
+        case CertificateType.UnRegistrationDrep: // Governance; medium priority
+            // TODO: Unregister DRep, refund deposit
+            break;
+
+        case CertificateType.UpdateDrep: // Governance; low priority
+            // TODO: Update DRep metadata
+            break;
+
+        default:
+            throw new Error(`Unknown certificate type: ${certType}`);
+    }
 }
 
 // Helper function to remove stake credential from stake list
 function removeStakeCredential(
-    stakeList: [StakeCredentials, Coin][],
-    cred: StakeCredentials,
+    stakeList: [any, Coin][],
+    cred: any,
 ): void {
     const index = stakeList.findIndex(([sc, _]) =>
-        sc.toCborBytes() === cred.toCborBytes()
+        (sc as any).toCbor().toBuffer().toString("hex") ===
+            (cred as any).toCbor().toBuffer().toString("hex")
     );
     if (index >= 0) {
         stakeList.splice(index, 1);
@@ -142,12 +394,13 @@ function removeStakeCredential(
 
 // Helper function to update delegation in snapshot
 function updateDelegationInSnapshot(
-    delegations: [StakeCredentials, PoolKeyHash][],
-    cred: StakeCredentials,
+    delegations: any[],
+    cred: any,
     pool: PoolKeyHash,
 ): void {
-    const index = delegations.findIndex(([sc, _]) =>
-        sc.toCborBytes() === cred.toCborBytes()
+    const index = delegations.findIndex(([sc, _]: [any, any]) =>
+        sc.toCbor().toBuffer().toString("hex") ===
+            cred.toCbor().toBuffer().toString("hex")
     );
     if (index >= 0) {
         delegations[index][1] = pool;

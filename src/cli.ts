@@ -10,6 +10,8 @@ import { GerolamoConfig, PeerManager } from "./network/PeerManager";
 // import { Database } from "bun:sqlite";
 // import "./types/polyfills";
 import { logger } from "./utils/logger";
+import { startValidationWorker } from "./network/validatorWorkers/validator";
+import { startMinibfWorker } from "./minibfWorkers/minibf";
 
 async function fetchLedgerState(cborDirPath: string) {
     console.log("Downloading ledger state snapshots to", cborDirPath);
@@ -68,7 +70,7 @@ export async function getCbor(cborFile: string, outputDirPath: string) {
 
 export function Main() {
     console.log("Starting CLI");
-    program.name("cardano-node-ts");
+    program.name("Gerolamo");
 
     program
         .command("download-ledger-state")
@@ -102,7 +104,7 @@ export function Main() {
 
 export function SyncNode() {
     logger.debug("Starting Gerolamo with config: ", process.argv);
-    program.name("cardano-node-ts");
+    program.name("Gerolamo");
 
     program
         .command("start-node")
@@ -119,23 +121,21 @@ export function SyncNode() {
 
                 // Initialize PeerManager
                 const peerManager = new PeerManager();
-                peerManager.config = config;
                 logger.debug("Initializing PeerManager...");
-                await peerManager.init();
+                await peerManager.init(config);
                 logger.debug("PeerManager initialized");
 
-                // Start expressServer if enabled
+                // Start validation worker
+                logger.debug("Starting validation worker...");
+                await startValidationWorker();
+                logger.debug("Validation worker started");
+
+                // Start minibf worker if enabled
                 if (config.minibf) {
-                    logger.debug("Starting express server...");
-                    try {
-                        await import("./network/minibf/expressServer");
-                        logger.debug("Express server started on port 3000");
-                    } catch (error) {
-                        console.error("Failed to start express server:", error);
-                        throw error;
-                    }
+                    logger.debug("Starting minibf worker on port 3000...");
+                    await startMinibfWorker();
                 } else {
-                    logger.debug("Express server not started (disabled in config)");
+                    logger.debug("Minibf worker not started (disabled in config)");
                 }
                 logger.debug("Gerolamo node started successfully");
 

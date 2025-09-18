@@ -169,7 +169,7 @@ function getVrfInput(slot: bigint, nonce: Uint8Array, domain?: Uint8Array): Uint
         // logger.debug("VRF Input Domain:" , toHex(domain));
         return blake2b_256(concatUint8Array(base, domain));
     }
-    logger.debug("VRF Input No Domain");
+    // logger.debug("VRF Input No Domain");
     return blake2b_256(base);
 };
 function biguintToU64BE(n: bigint): Uint8Array {
@@ -206,7 +206,6 @@ export async function validateHeader(
     h: MultiEraHeader,
     nonce: Uint8Array,
     shelleyGenesis: ShelleyGenesisConfig,
-    lState: RawNewEpochState,
     sequenceNumber?: bigint, //only used for Amaru test
 ): Promise<boolean> {
     const header = getEraHeader(h);
@@ -214,6 +213,7 @@ export async function validateHeader(
     const activeSlotCoeff = shelleyGenesis.activeSlotsCoeff!;
     const maxKesEvo = BigInt(shelleyGenesis.maxKESEvolutions!);
     const slotsPerKESPeriod = BigInt(shelleyGenesis.slotsPerKESPeriod!);
+    let lState = RawNewEpochState.init();
 
     const issuer = new PoolKeyHash(header.body.issuerPubKey);
     const isKnownLeader = verifyKnownLeader(

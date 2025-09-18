@@ -1,12 +1,15 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
-import { PeerClient } from "./PeerClient";
 import { logger } from "../utils/logger";
 
 export async function fetchBlock(
-    peer: PeerClient,
+    peerId: string,
     slot: number | bigint,
     blockHeaderHash: any,
 ) {
+    // const allPeers = getPeerManager();
+    // logger.debug("allPeers: ", allPeers);
+    // const peer = allPeers.get(peerId);
+    // if (!peer) throw new Error("Peer not found");
     // console.log("peer: ", peer)
     const block = await peer.fetchBlock(
         slot,

@@ -6,7 +6,6 @@ import {
     CredentialType,
     PoolKeyHash,
     PoolParams,
-    StakeCredentials,
 } from "@harmoniclabs/cardano-ledger-ts";
 
 import { CborArray, CborMap, CborObj } from "@harmoniclabs/cbor";

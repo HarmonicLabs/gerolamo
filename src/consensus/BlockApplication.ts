@@ -1,6 +1,11 @@
 // src/consensus/BlockApplicator.ts
 
 import {
+    AlonzoTx,
+    AlonzoTxBody,
+    BabbageTx,
+    BabbageTxBody,
+    BabbageUTxO,
     Certificate,
     CertificateType,
     CertPoolRegistration,
@@ -15,7 +20,12 @@ import {
     CredentialType,
     Hash32,
     isITxWitnessSet,
+    MaryTx,
+    MaryTxBody,
+    MultiEraBlock,
     PoolKeyHash,
+    ShelleyTx,
+    ShelleyTxBody,
     StakeCredentials,
     TxOutRef,
 } from "@harmoniclabs/cardano-ledger-ts";
@@ -33,14 +43,24 @@ const EPOCH_TRANSITION_ENABLED = false;
 
 // Function to apply a block to the state and return an AnchoredVolatileState
 export function applyBlock(
-    block: ConwayBlock,
+    block: MultiEraBlock,
     state: RawNewEpochState,
     issuer: PoolKeyHash,
 ): AnchoredVolatileState {
     // Implementation
 
+    // Apply block - extract Conway block from MultiEraBlock
+    // For now, assume all blocks are Conway-era (era 7) as per test expectations
+    if (block.era !== 7) {
+        throw new Error(
+            `Unsupported era: ${block.era}. Currently only Conway-era (era 7) blocks are supported.`,
+        );
+    }
+
+    const conwayBlock = block.block as ConwayBlock;
+
     if (EPOCH_TRANSITION_ENABLED) {
-        const start_slot = block.header.body.slot;
+        const start_slot = conwayBlock.header.body.slot;
         const tip_slot = BigInt(state.lastEpochModified);
 
         const current_epoch = calculateCardanoEpoch(start_slot);
@@ -52,29 +72,28 @@ export function applyBlock(
         }
     }
 
-    // Apply block
     assert.equal(
-        block.transactionBodies.length,
-        block.transactionWitnessSets.length,
+        conwayBlock.transactionBodies.length,
+        conwayBlock.transactionWitnessSets.length,
     );
 
-    block.transactionBodies.map((tb, i: number) => {
-        assert.default(isITxWitnessSet(block.transactionWitnessSets[i]));
+    conwayBlock.transactionBodies.map((tb, i: number) => {
+        assert.default(isITxWitnessSet(conwayBlock.transactionWitnessSets[i]));
         return new ConwayTx({
             body: tb,
-            witnesses: block.transactionWitnessSets[i],
+            witnesses: conwayBlock.transactionWitnessSets[i],
         });
     }).forEach((tx) => applyTx(tx, state));
 
     // Create VolatileState from the applied block
-    const volatileState = VolatileState.fromBlock(block);
+    const volatileState = VolatileState.fromBlock(conwayBlock);
 
     // Create anchor point from block header
     // Compute block hash from header bytes using Blake2b
-    const headerBytes = block.header.toCborBytes();
+    const headerBytes = conwayBlock.header.toCborBytes();
     const blockHeaderHash = new Hash32(blake2b_256(headerBytes));
     const point: Point = {
-        slot: block.header.body.slot,
+        slot: conwayBlock.header.body.slot,
         hash: blockHeaderHash,
     };
 
@@ -139,8 +158,10 @@ export function processCert(
             if (
                 state.epochState.snapshots.stakeSet.stake.stake.some((
                     [sc, _],
-                ) => sc.toCbor().toBuffer().toString("hex") ===
-                    stakeCredReg.toCbor().toBuffer().toString("hex")
+                ) => Buffer.from(sc.toCbor().toBuffer()).toString("hex") ===
+                    Buffer.from(stakeCredReg.toCbor().toBuffer()).toString(
+                        "hex",
+                    )
                 )
             ) {
                 throw new Error(
@@ -169,8 +190,10 @@ export function processCert(
             if (
                 !state.epochState.snapshots.stakeSet.stake.stake.some((
                     [sc, _],
-                ) => sc.toCbor().toBuffer().toString("hex") ===
-                    stakeCredToRemove.toCbor().toBuffer().toString("hex")
+                ) => Buffer.from(sc.toCbor().toBuffer()).toString("hex") ===
+                    Buffer.from(stakeCredToRemove.toCbor().toBuffer()).toString(
+                        "hex",
+                    )
                 )
             ) {
                 throw new Error(
@@ -244,8 +267,10 @@ export function processCert(
             if (
                 !state.epochState.snapshots.stakeSet.stake.stake.some((
                     [sc, _],
-                ) => sc.toCbor().toBuffer().toString("hex") ===
-                    stakeCredRegDep.toCbor().toBuffer().toString("hex")
+                ) => Buffer.from(sc.toCbor().toBuffer()).toString("hex") ===
+                    Buffer.from(stakeCredRegDep.toCbor().toBuffer()).toString(
+                        "hex",
+                    )
                 )
             ) {
                 state.epochState.snapshots.stakeSet.stake.stake.push([
@@ -297,10 +322,10 @@ export function processCert(
             if (
                 !state.epochState.snapshots.stakeSet.stake.stake.some((
                     [sc, _],
-                ) => sc.toCbor().toBuffer().toString("hex") ===
-                    (cert as any).stakeCredential.toCbor().toBuffer().toString(
-                        "hex",
-                    )
+                ) => Buffer.from(sc.toCbor().toBuffer()).toString("hex") ===
+                    Buffer.from(
+                        (cert as any).stakeCredential.toCbor().toBuffer(),
+                    ).toString("hex")
                 )
             ) {
                 state.epochState.snapshots.stakeSet.stake.stake.push([
@@ -329,10 +354,10 @@ export function processCert(
             if (
                 !state.epochState.snapshots.stakeSet.stake.stake.some((
                     [sc, _],
-                ) => sc.toCbor().toBuffer().toString("hex") ===
-                    (cert as any).stakeCredential.toCbor().toBuffer().toString(
-                        "hex",
-                    )
+                ) => Buffer.from(sc.toCbor().toBuffer()).toString("hex") ===
+                    Buffer.from(
+                        (cert as any).stakeCredential.toCbor().toBuffer(),
+                    ).toString("hex")
                 )
             ) {
                 state.epochState.snapshots.stakeSet.stake.stake.push([

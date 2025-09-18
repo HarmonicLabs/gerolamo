@@ -1,28 +1,41 @@
-import { BabbageBlock, TxOutRef, Value } from "@harmoniclabs/cardano-ledger-ts";
+import {
+    MultiEraBlock,
+    TxOutRef,
+    Value,
+} from "@harmoniclabs/cardano-ledger-ts";
 import { IReadWriteNES } from "../types";
 import { MockChainState } from "./validation";
 import { RawNewEpochState } from "../rawNES";
 
 export function validateBlock(
-    block: BabbageBlock,
+    block: MultiEraBlock,
     state: RawNewEpochState,
 ): boolean {
+    // For now, assume all blocks are Babbage-era or later (era 6+) for validation
+    // This can be extended to handle different eras
+    if (block.era < 6) {
+        throw new Error(
+            `Unsupported era: ${block.era}. Block body validation currently supports Babbage-era (era 6) and later blocks.`,
+        );
+    }
+
+    const actualBlock = block.block;
     return [
-        validateTransactionCountMatch(block, state),
-        validateNoInvalidTxs(block, state),
-        validateUTxOBalance(block, state),
-        validateFeesCorrect(block, state),
-        validateValidityInterval(block, state),
-        validateMultiAssetsBalance(block, state),
-        validateCollateralValid(block, state),
-        validateCertificatesValid(block, state),
-        validateScriptsValid(block, state),
-        validateSizeLimits(block, state),
+        validateTransactionCountMatch(actualBlock, state),
+        validateNoInvalidTxs(actualBlock, state),
+        validateUTxOBalance(actualBlock, state),
+        validateFeesCorrect(actualBlock, state),
+        validateValidityInterval(actualBlock, state),
+        validateMultiAssetsBalance(actualBlock, state),
+        validateCollateralValid(actualBlock, state),
+        validateCertificatesValid(actualBlock, state),
+        validateScriptsValid(actualBlock, state),
+        validateSizeLimits(actualBlock, state),
     ].reduce((a, b) => a && b, true);
 }
 
 function validateTransactionCountMatch(
-    block: BabbageBlock,
+    block: any,
     _state: RawNewEpochState,
 ): boolean {
     // Implementation
@@ -31,7 +44,7 @@ function validateTransactionCountMatch(
 }
 
 function validateNoInvalidTxs(
-    block: BabbageBlock,
+    block: any,
     state: RawNewEpochState,
 ): boolean {
     // TODO: Figure out how to implement Phase-2 script validation
@@ -40,7 +53,7 @@ function validateNoInvalidTxs(
 }
 
 function validateUTxOBalance(
-    block: BabbageBlock,
+    block: any,
     _state: RawNewEpochState,
 ): boolean {
     let sumInputs = Value.zero;
@@ -52,11 +65,13 @@ function validateUTxOBalance(
         sumInputs = Value.add(
             sumInputs,
             txBody.inputs.map((utxo) => utxo.resolved.value)
-                .reduce(Value.add),
+                .reduce((a, b) => Value.add(a, b)),
         );
         sumOutputs = Value.add(
             sumOutputs,
-            txBody.outputs.map((utxo) => utxo.value).reduce(Value.add),
+            txBody.outputs.map((utxo) => utxo.value).reduce((a, b) =>
+                Value.add(a, b)
+            ),
         );
         sumFees = Value.add(
             sumFees,
@@ -69,49 +84,51 @@ function validateUTxOBalance(
     }
 
     return sumInputs.lovelaces >=
-        [sumOutputs, sumFees, sumDeposits].reduce(Value.add).lovelaces;
+        [sumOutputs, sumFees, sumDeposits].reduce((a, b) => Value.add(a, b))
+            .lovelaces;
 }
 
 function validateFeesCorrect(
-    block: BabbageBlock,
+    block: any,
     state: RawNewEpochState,
 ): boolean {
     // Implementation
-    return block.transactionBodies.map((txBody) =>
+    return block.transactionBodies.map((txBody: any) =>
         txBody.fee >=
             BigInt(MockChainState.protocol_parameters.txFeePerByte.valueOf()) * // min_fee_a
                         BigInt(txBody.toCborBytes().length) + // size
                 BigInt(MockChainState.protocol_parameters.txFeeFixed) // min_fee_b
-    ).reduce((a, b) => a && b);
+    ).reduce((a: boolean, b: boolean) => a && b);
 }
 
 function validateValidityInterval(
-    block: BabbageBlock,
+    block: any,
     _state: RawNewEpochState,
 ): boolean {
     // Implementation
     return block.transactionBodies.map(
-        (txBody) =>
+        (txBody: any) =>
             (txBody.validityIntervalStart === undefined ||
                 txBody.validityIntervalStart! <= block.header.body.slot) &&
             (txBody.ttl === undefined ||
                 txBody.validityIntervalStart! + txBody.ttl! >
                     block.header.body.slot),
-    ).reduce((a, b) => a && b);
+    ).reduce((a: boolean, b: boolean) => a && b);
 }
 
 // TODO: Fill in placeholder for cert deposits
 function validateMultiAssetsBalance(
-    block: BabbageBlock,
+    block: any,
     _state: RawNewEpochState,
 ): boolean {
-    return block.transactionBodies.map((txBody) => {
-        let inputValueMA = txBody.inputs.map((utxo) => utxo.resolved.value)
+    return block.transactionBodies.map((txBody: any) => {
+        let inputValueMA = txBody.inputs.map((utxo: any) => utxo.resolved.value)
             .reduce(Value.add, Value.zero);
-        let outputValueMA = txBody.outputs.map((txOut) => txOut.value).reduce(
-            Value.add,
-            Value.zero,
-        );
+        let outputValueMA = txBody.outputs.map((txOut: any) => txOut.value)
+            .reduce(
+                Value.add,
+                Value.zero,
+            );
 
         return Value.isZero(
             Value.sub(
@@ -130,11 +147,11 @@ function validateMultiAssetsBalance(
                 ),
             ),
         );
-    }).reduce((a, b) => a && b, true);
+    }).reduce((a: boolean, b: boolean) => a && b, true);
 }
 
 function validateCollateralValid(
-    block: BabbageBlock,
+    block: any,
     state: RawNewEpochState,
 ): boolean {
     // Implementation
@@ -142,7 +159,7 @@ function validateCollateralValid(
 }
 
 function validateCertificatesValid(
-    block: BabbageBlock,
+    block: any,
     state: RawNewEpochState,
 ): boolean {
     // Implementation
@@ -150,7 +167,7 @@ function validateCertificatesValid(
 }
 
 function validateScriptsValid(
-    block: BabbageBlock,
+    block: any,
     state: RawNewEpochState,
 ): boolean {
     // Implementation
@@ -158,12 +175,12 @@ function validateScriptsValid(
 }
 
 function validateSizeLimits(
-    block: BabbageBlock,
+    block: any,
     state: RawNewEpochState,
 ): boolean {
     // Implementation
-    return block.transactionBodies.map((txBody) =>
+    return block.transactionBodies.map((txBody: any) =>
         txBody.toCborBytes().length <=
             MockChainState.protocol_parameters.maxTxSize
-    ).reduce((a, b) => a && b);
+    ).reduce((a: boolean, b: boolean) => a && b);
 }

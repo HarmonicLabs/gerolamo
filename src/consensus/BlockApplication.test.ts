@@ -52,9 +52,9 @@ test("Parse and apply blocks", async () => {
         )
     );
 
-    let cBlocks: ConwayBlock[] = blocks.map((block) => {
+    // Verify blocks are Conway-era (era 7) for testing
+    blocks.forEach((block) => {
         expect(block.era).toBe(7 /*Conway-era blocks for testing*/);
-        return block.block as ConwayBlock;
     });
 
     const state = RawNewEpochState.init();
@@ -66,7 +66,7 @@ test("Parse and apply blocks", async () => {
     const mockIssuer = new PoolKeyHash(
         Buffer.from("mockpoolkeyhash12345678901234567890123456789012", "hex"),
     );
-    cBlocks.forEach((block) => applyBlock(block, state, mockIssuer));
+    blocks.forEach((block) => applyBlock(block, state, mockIssuer));
 
     // Test blocks are valid and applied successfully
     expect(state.epochState.ledgerState.UTxOState.UTxO.length).toBeGreaterThan(

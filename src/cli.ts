@@ -118,18 +118,15 @@ export function SyncNode() {
                 const configFile = Bun.file(configPath);
                 const config = await configFile.json();
                 // logger.debug("Config loaded:", config);
-
                 // Initialize PeerManager
                 const peerManager = new PeerManager();
                 logger.debug("Initializing PeerManager...");
                 await peerManager.init(config);
                 logger.debug("PeerManager initialized");
-
                 // Start validation worker
                 logger.debug("Starting validation worker...");
                 await startValidationWorker();
                 logger.debug("Validation worker started");
-
                 // Start minibf worker if enabled
                 if (config.minibf) {
                     logger.debug("Starting minibf worker on port 3000...");

@@ -10,7 +10,7 @@ export async function startValidationWorker() {
     validationWorker = new Worker("./src/network/validatorWorkers/validationWorker.ts");
 }
 
-export function validate(peerId: string, data: any, shelleyGenesis: ShelleyGenesisConfig, tip: bigint): Promise<void> {
+export function validateHeader(peerId: string, data: any, shelleyGenesis: ShelleyGenesisConfig, tip: bigint, onMessage?: (msg:any) => void): Promise<void> {
     if (!validationWorker) throw new Error("Validation worker not started");
     return new Promise((resolve, reject) => {
         const id = Math.random().toString(36);
@@ -25,11 +25,14 @@ export function validate(peerId: string, data: any, shelleyGenesis: ShelleyGenes
         const handler = (msg: any) => {
             if (msg.id === id) {
                 validationWorker!.removeListener("message", handler);
-                if (msg.type === "done") {
+                if (msg.type === "done" && onMessage) {
+                    onMessage(msg);
                     resolve();
                 } else if (msg.type === "error") {
                     reject(new Error(msg.error));
-                }
+                } else if (onMessage) {
+                    
+                }            
             }
         };
         validationWorker!.on("message", handler);

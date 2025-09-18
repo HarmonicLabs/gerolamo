@@ -6,7 +6,7 @@ import { getLastSlot } from "./lmdbWorkers/lmdb";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { GerolamoConfig } from "./PeerManager";
 import { RawNewEpochState } from "../rawNES";
-import { validate } from "./validatorWorkers/validator";
+import { validateHeader } from "./validatorWorkers/validator";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
@@ -236,7 +236,10 @@ export class PeerClient implements IPeerClient {
             if (slotNumber === undefined) {
                 slotNumber = 0n;
             }
-                validate(this.peerId, rollForward.toCbor().toString(), this.shelleyGenesisConfig, BigInt(slotNumber));
+            validateHeader(this.peerId, rollForward.toCbor().toString(), this.shelleyGenesisConfig, BigInt(slotNumber), (msg) => {
+                logger.debug("Worker message:", msg);
+                msg.status === "ok" && this.fetchBlock(msg.slot, msg.blockHeaderHash)
+            });
             await this.chainSyncClient.requestNext();
         });
 

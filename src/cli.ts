@@ -102,6 +102,7 @@ export function Main() {
     program.parse(process.argv);
 }
 
+export const peerManager = new PeerManager();
 export function SyncNode() {
     logger.debug("Starting Gerolamo with config: ", process.argv);
     program.name("Gerolamo");
@@ -118,15 +119,17 @@ export function SyncNode() {
                 const configFile = Bun.file(configPath);
                 const config = await configFile.json();
                 // logger.debug("Config loaded:", config);
-                // Initialize PeerManager
-                const peerManager = new PeerManager();
-                logger.debug("Initializing PeerManager...");
-                await peerManager.init(config);
-                logger.debug("PeerManager initialized");
+
                 // Start validation worker
                 logger.debug("Starting validation worker...");
                 await startValidationWorker();
                 logger.debug("Validation worker started");
+
+                // Initialize PeerManager
+                logger.debug("Initializing PeerManager...");
+                await peerManager.init(config);
+                logger.debug("PeerManager initialized");
+
                 // Start minibf worker if enabled
                 if (config.minibf) {
                     logger.debug("Starting minibf worker on port 3000...");

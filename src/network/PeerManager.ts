@@ -113,6 +113,10 @@ export class PeerManager implements IPeerManager {
         await this.peerSyncCurrentTasks();
     };
 
+    public getAllPeers(): ReadonlyArray<PeerClient> {
+        return Array.from(this.allPeers.values());
+    }
+
     private addPeer(
         peer: PeerClient,
         category: "hot" | "warm" | "cold" | "bootstrap" | "new",

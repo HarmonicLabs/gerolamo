@@ -94,9 +94,10 @@ parentPort!.on("message", async (msg: any) => {
             logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
             
             if (!validateHeaderRes) {
-                parentPort!.postMessage({ type: "done", id: msg.id });
+                parentPort!.postMessage({ type: "done", status: "error", id: msg.id, error: "Header validation failed"});
                 return;
             }
+            
             /*
             const block = await fetchBlock(peerId, slot, blockHeaderHash);
             // logger.debug("Fetched block: ", block.blockData);
@@ -108,8 +109,9 @@ parentPort!.on("message", async (msg: any) => {
                 logger.error(`Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`);
                 //return ({ slot, blockHeaderHash, multiEraHeader });
             }
-            parentPort!.postMessage({ type: "done", id: msg.id });
             */
+            parentPort!.postMessage({ type: "done", status: "ok", id: msg.id, slot, blockHeaderHash});
+            
         } catch (error) {
             logger.error("Validation error:", error);
             parentPort!.postMessage({ type: "error", id: msg.id, error: error.message });

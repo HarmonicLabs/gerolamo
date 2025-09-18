@@ -32,7 +32,6 @@ import {
     RawStashedAVVMAddresses,
 } from "./stashed_avvm_addresses";
 
-import * as assert from "node:assert/strict";
 import { IReadWriteNES } from "../types";
 import { RawChainAccountState } from "./epoch_state/chain_account_state";
 import { RawLedgerState, RawUTxOState } from "./epoch_state/ledger_state";
@@ -173,8 +172,8 @@ export class RawNewEpochState {
     }
 
     static fromCborObj(cborObj: CborObj) {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 7);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 7) throw new Error();
         const [
             lastEpochModified,
             prevBlocks,
@@ -183,20 +182,20 @@ export class RawNewEpochState {
             rewardsUpdate,
             poolDistr,
             stashedAVVMAddrs,
-        ] = cborObj.array;
+        ] = (cborObj as CborArray).array;
 
         // this._nesEl = LastEpochModified.fromCborObj(lastEpochModified);
-        assert.default(lastEpochModified instanceof CborUInt);
+        if (!(lastEpochModified instanceof CborUInt)) throw new Error();
         return new RawNewEpochState(
-            lastEpochModified.num,
+            (lastEpochModified as CborUInt).num,
             RawBlocksMade.fromCborObj(prevBlocks),
             RawBlocksMade.fromCborObj(currBlocks),
             RawEpochState.fromCborObj(epochState),
             RawPulsingRewUpdate.fromCborObj(rewardsUpdate),
             RawPoolDistr.fromCborObj(poolDistr),
             RawStashedAVVMAddresses.fromCborObj(stashedAVVMAddrs),
-            1, // slotsPerKESPeriod
-            1, // maxKESEvolutions
+            1n, // slotsPerKESPeriod
+            1n, // maxKESEvolutions
         );
     }
 

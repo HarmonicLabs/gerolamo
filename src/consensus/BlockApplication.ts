@@ -30,7 +30,6 @@ import { RawNewEpochState } from "../rawNES";
 import { VolatileState } from "./validation/types";
 import { AnchoredVolatileState, Point } from "./AnchoredVolatileState";
 
-import * as assert from "node:assert/strict";
 import {
     RawDelegations,
     RawPParams,
@@ -73,13 +72,15 @@ export function applyBlock(
         }
     }
 
-    assert.equal(
-        conwayBlock.transactionBodies.length,
-        conwayBlock.transactionWitnessSets.length,
-    );
+    if (
+        conwayBlock.transactionBodies.length !==
+            conwayBlock.transactionWitnessSets.length
+    ) throw new Error();
 
     conwayBlock.transactionBodies.map((tb, i: number) => {
-        assert.default(isITxWitnessSet(conwayBlock.transactionWitnessSets[i]));
+        if (!isITxWitnessSet(conwayBlock.transactionWitnessSets[i])) {
+            throw new Error();
+        }
         return new ConwayTx({
             body: tb,
             witnesses: conwayBlock.transactionWitnessSets[i],
@@ -105,7 +106,7 @@ export function applyBlock(
 // Function to apply a transaction to the state
 export function applyTx(tx: ConwayTx, state: RawNewEpochState): void {
     // Implementation
-    assert.default(validateTx(tx, state));
+    if (!validateTx(tx, state)) throw new Error();
 
     const refs = tx.body.inputs.map((utxo) => utxo.utxoRef);
     // TODO: Re-enable input validation once we have proper test blocks or genesis state

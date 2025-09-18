@@ -1,5 +1,3 @@
-import * as assert from "node:assert/strict";
-
 import { CborArray, CborObj } from "@harmoniclabs/cbor";
 
 import { ILedgerState, RawLedgerState } from "./ledger_state";
@@ -56,10 +54,10 @@ export class RawEpochState implements IEpochState {
     }
 
     static fromCborObj(cborObj: CborObj): RawEpochState {
-        assert.default(cborObj instanceof CborArray);
+        if (!(cborObj instanceof CborArray)) throw new Error();
 
         const [esChainAccountState, esLState, esSnapshots, esNonMyopic] =
-            cborObj.array;
+            (cborObj as CborArray).array;
 
         // Create default protocol parameters for now
         const defaultPparams = new RawProtocolParams({

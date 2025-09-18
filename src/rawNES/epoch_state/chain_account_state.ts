@@ -2,8 +2,6 @@ import { Coin, Epoch } from "@harmoniclabs/cardano-ledger-ts";
 import { decodeCoin } from "./common";
 import { CborArray, CborObj } from "@harmoniclabs/cbor";
 
-import * as assert from "node:assert/strict";
-
 export interface IChainAccountState {
     get casTreasury(): Coin;
     set casTreasury(t: Coin);
@@ -22,10 +20,10 @@ export class RawChainAccountState implements IChainAccountState {
     }
 
     static fromCborObj(cborObj: CborObj): RawChainAccountState {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 2);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 2) throw new Error();
 
-        const [casTreasury, casReserves] = cborObj.array;
+        const [casTreasury, casReserves] = (cborObj as CborArray).array;
         return new RawChainAccountState(
             decodeCoin(casTreasury),
             decodeCoin(casReserves),

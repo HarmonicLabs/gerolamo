@@ -4,7 +4,6 @@ import { Coin, TxOut, TxOutRef, UTxO } from "@harmoniclabs/cardano-ledger-ts";
 import { decodeCoin } from "./common";
 
 import * as Eras from "../era_dependent";
-import * as assert from "node:assert/strict";
 
 export interface IUTxOState {
     get UTxO(): UTxO[];
@@ -51,7 +50,7 @@ export class RawUTxOState implements IUTxOState {
     }
 
     static fromCborObj(cborObj: CborObj): RawUTxOState {
-        assert.default(cborObj instanceof CborArray);
+        if (!(cborObj instanceof CborArray)) throw new Error();
         const [
             utxosUTxO,
             utxosDeposited,
@@ -59,11 +58,11 @@ export class RawUTxOState implements IUTxOState {
             _govState,
             _instantStake,
             utxosDonation,
-        ] = cborObj.array;
+        ] = (cborObj as CborArray).array;
 
-        assert.default(utxosUTxO instanceof CborMap);
+        if (!(utxosUTxO instanceof CborMap)) throw new Error();
         return new RawUTxOState(
-            utxosUTxO.map.map(
+            (utxosUTxO as CborMap).map.map(
                 (entry) =>
                     new UTxO({
                         utxoRef: TxOutRef.fromCborObj(entry.k),
@@ -142,9 +141,9 @@ export class RawLedgerState implements ILedgerState {
     }
 
     static fromCborObj(cborObj: CborObj): RawLedgerState {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 2);
-        const [_lsCertState, lsUTxOState] = cborObj.array;
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 2) throw new Error();
+        const [_lsCertState, lsUTxOState] = (cborObj as CborArray).array;
 
         return new RawLedgerState(
             RawUTxOState.fromCborObj(lsUTxOState),

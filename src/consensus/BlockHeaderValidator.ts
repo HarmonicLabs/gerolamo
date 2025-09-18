@@ -35,7 +35,6 @@ import { PoolOperationalCert } from "@harmoniclabs/cardano-ledger-ts";
 import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
 import { RawNewEpochState } from "../rawNES";
-import * as assert from "node:assert/strict";
 import * as wasm from "wasm-kes";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
@@ -176,10 +175,8 @@ function getVrfInput(
 ): Uint8Array {
     const base = concatUint8Array(biguintToU64BE(slot), nonce);
     if (domain) {
-        // logger.debug("VRF Input Domain:" , toHex(domain));
         return blake2b_256(concatUint8Array(base, domain));
     }
-    logger.debug("VRF Input No Domain");
     return blake2b_256(base);
 }
 function biguintToU64BE(n: bigint): Uint8Array {
@@ -197,28 +194,30 @@ function getEraHeader(
     | AlonzoHeader
     | BabbageHeader
     | ConwayHeader {
-    assert.default(
-        h.era === 2 || h.era === 3 || h.era === 4 || h.era === 5 ||
-            h.era === 6 || h.era === 7,
-    );
+    if (
+        !(
+            h.era === 2 || h.era === 3 || h.era === 4 || h.era === 5 ||
+            h.era === 6 || h.era === 7
+        )
+    ) throw new Error();
 
     if (h.era === 2) {
-        assert.default(isIShelleyHeader(h.header));
+        if (!isIShelleyHeader(h.header)) throw new Error();
     }
     if (h.era === 3) {
-        assert.default(isIAllegraHeader(h.header));
+        if (!isIAllegraHeader(h.header)) throw new Error();
     }
     if (h.era === 4) {
-        assert.default(isIMaryHeader(h.header));
+        if (!isIMaryHeader(h.header)) throw new Error();
     }
     if (h.era === 5) {
-        assert.default(isIAlonzoHeader(h.header));
+        if (!isIAlonzoHeader(h.header)) throw new Error();
     }
     if (h.era === 6) {
-        assert.default(isIBabbageHeader(h.header));
+        if (!isIBabbageHeader(h.header)) throw new Error();
     }
     if (h.era === 7) {
-        assert.default(isIConwayHeader(h.header));
+        if (!isIConwayHeader(h.header)) throw new Error();
     }
     return h.header;
 }

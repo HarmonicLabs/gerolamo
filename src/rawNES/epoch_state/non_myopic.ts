@@ -2,8 +2,6 @@ import { CborArray, CborMap, CborObj } from "@harmoniclabs/cbor";
 import { Coin, PoolKeyHash } from "@harmoniclabs/cardano-ledger-ts";
 import { decodeCoin, ILikelihood, RawLikelihood } from "./common";
 
-import * as assert from "node:assert/strict";
-
 type _Likelihoods = Map<PoolKeyHash, ILikelihood>;
 export interface ILikelihoods {
     // get likelihoods(): _Likelihoods;
@@ -47,16 +45,16 @@ export class RawNonMyopic implements INonMyopic {
     }
 
     static fromCborObj(cborObj: CborObj): RawNonMyopic {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 2);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 2) throw new Error();
 
-        const [likelihoodsNM, rewardPotNM] = cborObj.array;
-        assert.default(likelihoodsNM instanceof CborMap);
+        const [likelihoodsNM, rewardPotNM] = (cborObj as CborArray).array;
+        if (!(likelihoodsNM instanceof CborMap)) throw new Error();
 
         return new RawNonMyopic(
             new RawLikelihoods(
                 new Map(
-                    likelihoodsNM.map.map((entry) => {
+                    (likelihoodsNM as CborMap).map.map((entry) => {
                         return [
                             PoolKeyHash.fromCborObj(entry.k),
                             RawLikelihood.fromCborObj(entry.v),

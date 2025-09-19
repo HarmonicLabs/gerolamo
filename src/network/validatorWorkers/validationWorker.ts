@@ -12,7 +12,7 @@ import { putBlock } from "../lmdbWorkers/lmdb";
 import { PeerManager } from '../PeerManager';
 
 parentPort!.on("message", async (msg: any) => {
-    if (msg.type === "validate") {
+    if (msg.type === "validateHeader") {
         const { peerId, data, shelleyGenesis, tip } = msg;
         // logger.debug(`Worker received data `, );
         try {

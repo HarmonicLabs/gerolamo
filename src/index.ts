@@ -1,7 +1,10 @@
+import { program } from "./cli";
 import * as Cli from "./cli";
 
-if (process.argv.length > 0) {
-    Cli.Main();
-} else {
-    throw new Error("No arguments passed");
-}
+Cli.Main();
+Cli.SyncNode();
+program.action(async (options) => {
+    await Cli.startNode(options.config);
+});
+
+program.parse(process.argv);

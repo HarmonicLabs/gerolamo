@@ -147,13 +147,13 @@ export function Main() {
             await getCbor(path.normalize(cborDirPath), outputDirPath);
         });
 
-    program.command("init-node", "Initialize the node").action(() => undefined);
+    program.command("init", "Initialize the node").action(() => undefined);
 }
 
 
 export function SyncNode() {
     program
-        .command("start-node")
+        .command("start")
         .description("Start Gerolamo node")
         .option("--config <path>", "Path to config file", "./config.json")
         .action(async (options) => {

@@ -48,7 +48,6 @@ export function validateBlock(peerId: string, data: any, onMessage?: (msg:any) =
             id,
             peerId,
             data,
-
         });
         const handler = (msg: any) => {
             if (msg.id === id) {

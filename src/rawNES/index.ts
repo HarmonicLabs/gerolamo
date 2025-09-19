@@ -33,7 +33,6 @@ import {
 } from "./stashed_avvm_addresses";
 
 import * as assert from "node:assert/strict";
-import { IReadWriteNES } from "../types";
 import { RawChainAccountState } from "./epoch_state/chain_account_state";
 import { RawLedgerState, RawUTxOState } from "./epoch_state/ledger_state";
 import {
@@ -172,8 +171,8 @@ export class RawNewEpochState {
             RawPulsingRewUpdate.fromCborObj(rewardsUpdate),
             RawPoolDistr.fromCborObj(poolDistr),
             RawStashedAVVMAddresses.fromCborObj(stashedAVVMAddrs),
-            1, // slotsPerKESPeriod
-            1, // maxKESEvolutions
+            1n, // slotsPerKESPeriod
+            1n, // maxKESEvolutions
         );
     }
 

@@ -5,6 +5,7 @@ import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, M
 import { logger } from "../../utils/logger";
 import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "../utils/epochCalculations";
 import { validateHeader } from "../../consensus/BlockHeaderValidator";
+import { ValidateHeader } from "../consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "../utils/blockFrostFetchEra";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { fetchBlock } from "../fetchBlocks";
@@ -88,7 +89,9 @@ parentPort!.on("message", async (msg: any) => {
             const epochNonce = await blockFrostFetchEra(headerEpoch as number);
             const slot = multiEraHeader.header.body.slot;
 
-            const validateHeaderRes = await validateHeader(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis);
+            // const validateHeaderRes = await validateHeader(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis);
+            const validateHeader = new ValidateHeader();
+            const validateHeaderRes = await validateHeader.validate(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis);
             // logger.debug("Header validation result: ", validateHeaderRes);
             
             logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);

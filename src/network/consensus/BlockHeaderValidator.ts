@@ -37,7 +37,7 @@ const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
     "1157920892373161954235709850086879078532699846656405640394575840079131296399360000000000000000000000000000000000",
 );
 
-class ValidateHeader {
+export class ValidateHeader {
     private lState: RawNewEpochState;
 
     constructor() {
@@ -246,6 +246,4 @@ class ValidateHeader {
             verifyKES
         );
     }
-}
-
-export { ValidateHeader };
+};

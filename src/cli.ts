@@ -16,7 +16,7 @@ import { startMinibfWorker } from "./minibfWorkers/minibf";
 export const peerManager = new PeerManager();
 
 export async function startNode(configPath: string) {
-    logger.debug("Starting node with configPath:", configPath);
+    logger.debug("Starting Gerolamo with configPath:", configPath);
     try {
         // Load and validate config
         // const config = await loadConfig(configPath);
@@ -24,10 +24,7 @@ export async function startNode(configPath: string) {
         const config = await configFile.json();
         // logger.debug("Config loaded:", config);
 
-        // Start validation worker
-        logger.debug("Starting validation worker...");
-        await startValidationWorker();
-        logger.debug("Validation worker started");
+        // Start PeerClient worker
 
         // Initialize PeerManager
         logger.debug("Initializing PeerManager...");

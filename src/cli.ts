@@ -163,15 +163,15 @@ export function Main() {
             await getCbor(path.normalize(cborDirPath), outputDirPath);
         });
 
-    program.command("init", "Initialize the node").action(() => undefined);
+    program.command("init", "Initialize Gerolamo(not implement yet)").action(() => undefined);
 }
 
 
 export function SyncNode() {
     program
         .command("start")
-        .description("Start Gerolamo node")
-        .option("--config <path>", "Path to config file", "./config.json")
+        .description("Start Gerolamo node:(bun src/index.ts --config ./src/config/config.json)")
+        .option("--config <path>", "Path to config file", "./src/config/config.json")
         .action(async (options) => {
             await startNode(options.config);
         });

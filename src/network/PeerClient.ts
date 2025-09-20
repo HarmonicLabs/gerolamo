@@ -139,7 +139,7 @@ export class PeerClient implements IPeerClient {
         });
 
         const handshakeResult = await handshake.propose({
-            networkMagic: this.config.network === "mainnet" ? 0 : 1,
+            networkMagic: this.config.networkMagic,
             query: false,
         });
 
@@ -227,6 +227,7 @@ export class PeerClient implements IPeerClient {
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
 
         this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
+            const tip = rollForward.tip.point.blockHeader?.slotNumber;
             const headerValidationRes = await headerValidation(rollForward, this.shelleyGenesisConfig);
             if (!(
                 headerValidationRes
@@ -234,8 +235,9 @@ export class PeerClient implements IPeerClient {
                 // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
                 await this.chainSyncClient.requestNext();
                 return;
-            }
-
+            };
+            if (parentPort) parentPort.postMessage({ type: "headerValidated", peerId: this.peerId, era: headerValidationRes.era, epoch: headerValidationRes.epoch, slot: headerValidationRes.slot, tip: tip });
+            
             const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await this.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
             blockValidation(newBlockRes);
             if (parentPort) parentPort.postMessage({type: "blockFetched", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, blockData: newBlockRes});

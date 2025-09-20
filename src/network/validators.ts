@@ -84,7 +84,11 @@ export async function headerValidation( data: ChainSyncRollForward, shelleyGenes
     
     if (!validateHeaderRes) return;
 
+    // Need to add DB logic here to save the header
+
     return {
+        era: blcokHeaderBodyEra,
+        epoch: headerEpoch,
         slot,
         blockHeaderHash
     };
@@ -101,18 +105,16 @@ export async function blockValidation(newBlock: BlockFetchNoBlocks | BlockFetchB
     )) throw new Error("invalid CBOR for block");
     
     // logger.debug("Lazy: ", toHex(newBlock.blockData))
-    //logger.log("Block Era: ", blockEra);
-    //logger.debug("block: ", block);
+    // logger.log("Block Era: ", blockEra);
+    // logger.debug("block: ", block);
+
     const newMultiEraBlock = MultiEraBlock.fromCbor(toHex(newBlock.blockData))
-    // logger.debug("MultiEraBlock: ", newMultiEraBlock);
-    //Call function here that does block applicaiton here which takes multiEraHeader.
+    logger.debug("MultiEraBlock: ", newMultiEraBlock);
+    // Call function here that does block applicaiton here which takes multiEraHeader.
     // return newMultiEraBlock;
 };
-//**
 
-    // Fetch and store the corresponding block
-    // const blockPeer = this.allPeers.get(peerId);
-    // if (!blockPeer) return;
+//**
     /**
      * Calculating block_body_hash
      * The block_body_hash is not a simple blake2b_256 hash of the entire serialized block body.

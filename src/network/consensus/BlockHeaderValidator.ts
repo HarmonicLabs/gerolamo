@@ -231,7 +231,7 @@ export class ValidateHeader {
             header.kesSignature,
             maxKesEvo,
         );
-
+        /*
         console.log({
             isKnownLeader,
             correctProof,
@@ -239,7 +239,7 @@ export class ValidateHeader {
             verifyOpCertValidity,
             verifyKES,
         }, "\n\n");
-
+        */
         return (
             isKnownLeader &&
             correctProof &&

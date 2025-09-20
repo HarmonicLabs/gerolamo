@@ -19,7 +19,7 @@ parentPort!.on("message", async (msg: any) => {
   }
 
   if (msg.type === "addPeer") {
-    const { host, port, category } = msg;
+    const { host, port, category, addId } = msg;
     try {
       const peer = new PeerClient(host, port, config);
       await peer.handShakePeer();
@@ -43,6 +43,7 @@ parentPort!.on("message", async (msg: any) => {
           break;
       }
       logger.debug(`Added peer ${peer.peerId} to ${category}`);
+      parentPort!.postMessage({ type: "peerAdded", addId, peerId: peer.peerId });
     } catch (error) {
       logger.error(`Failed to add peer ${host}:${port}`, error);
     }
@@ -50,6 +51,7 @@ parentPort!.on("message", async (msg: any) => {
 
   if (msg.type === "startSync") {
     const { peerIds } = msg;
+    logger.debug(`Starting sync for peers: ${peerIds.join(", ")}`);
     for (const peerId of peerIds) {
       const peer = allPeers.get(peerId);
       if (peer) {

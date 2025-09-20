@@ -8,12 +8,13 @@ import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
 import { closeDB } from "./lmdbWorkers/lmdb";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
-import { toHex } from "@harmoniclabs/uint8array-utils";
-import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
-import { Cbor, CborArray } from "@harmoniclabs/cbor";
+
+//This class is not being used anymore in flavor of workers however
+//still need to move the interfaces from here.
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
+    readonly networkMagic: number;
     readonly topologyFile: string;
     readonly syncFromTip: boolean;
     readonly syncFromGenesis: boolean;
@@ -23,8 +24,9 @@ export interface GerolamoConfig {
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
     readonly shelleyGenesisFile: string;
-    readonly enableMinibf?: boolean; // Add this field
+    readonly enableMinibf?: boolean;
     allPeers: Map<string, PeerClient>;
+
 }
 
 export interface IPeerManager {
@@ -187,40 +189,6 @@ export class PeerManager implements IPeerManager {
             }
         });
     }s
-
-    private async syncEventCallback(
-        peerId: string,
-        type: "rollForward" | "rollBackwards",
-        data: ChainSyncRollForward | ChainSyncRollBackwards,
-    )
-    {
-        if (
-            type === "rollBackwards" && data instanceof ChainSyncRollBackwards
-        ) {
-            const slotNumber = data.tip.point.blockHeader?.slotNumber;
-            if (slotNumber === undefined) {
-                logger.error(
-                    `Rollback failed for peer ${peerId}: missing slot number in rollback point`,
-                );
-                return;
-            }
-            logger.debug(
-                `Received rollback to slot ${slotNumber} from peer ${peerId}`,
-            );
-
-            // Need to make sure that it's not syncing before rollbacks are implemented
-            /*
-            const success = await rollBackWards(slotNumber);
-            if (!success) {
-                logger.error(`Rollback failed for peer ${peerId}`);
-                this.shutdown(); // Disconnect peer on failure
-            }
-            */
-
-            return;
-        }
-
-    }
 
     async shutdown() {
         logger.debug("Shutting down PeerManager");

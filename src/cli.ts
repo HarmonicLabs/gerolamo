@@ -6,14 +6,15 @@ import * as zlib from "node:zlib";
 import * as streamPromises from "node:stream/promises";
 import { Cbor } from "@harmoniclabs/cbor";
 import { RawNewEpochState } from "./rawNES";
-import { GerolamoConfig, PeerManager } from "./network/PeerManager";
+import { Worker } from "worker_threads";
+import { startPeerManager } from "./network/startPeerManager";
 // import { Database } from "bun:sqlite";
 // import "./types/polyfills";
 import { logger } from "./utils/logger";
-import { startValidationWorker } from "./network/validatorWorkers/validator";
 import { startMinibfWorker } from "./minibfWorkers/minibf";
+import { closeDB } from "./network/lmdbWorkers/lmdb";
 
-export const peerManager = new PeerManager();
+let peerManagerWorker: Worker;
 
 export async function startNode(configPath: string) {
     logger.debug("Starting Gerolamo with configPath:", configPath);
@@ -24,12 +25,10 @@ export async function startNode(configPath: string) {
         const config = await configFile.json();
         // logger.debug("Config loaded:", config);
 
-        // Start PeerClient worker
-
-        // Initialize PeerManager
-        logger.debug("Initializing PeerManager...");
-        await peerManager.init(config);
-        logger.debug("PeerManager initialized");
+        // Start PeerManager worker
+        logger.debug("Starting PeerManager worker...");
+        peerManagerWorker = await startPeerManager(config) as Worker;
+        logger.debug("PeerManager worker started");
 
         // Start minibf worker if enabled
         if (config.minibf) {
@@ -42,14 +41,34 @@ export async function startNode(configPath: string) {
 
         process.on('SIGINT', async () => {
             logger.debug('Received SIGINT, Shutting down');
-            await peerManager.shutdown();
-            process.exit(0);
+            peerManagerWorker.postMessage({ type: "shutdown" });
+            peerManagerWorker.on("message", async (msg) => {
+                if (msg.type === "shutdownComplete") {
+                    try {
+                        await closeDB();
+                        logger.debug("LMDB worker closed");
+                    } catch (error) {
+                        logger.error(`Error closing LMDB worker: ${error}`);
+                    }
+                    process.exit(0);
+                }
+            });
         });
 
         process.on('SIGTERM', async () => {
             logger.debug('Received SIGTERM, Shutting down');
-            await peerManager.shutdown();
-            process.exit(0);
+            peerManagerWorker.postMessage({ type: "shutdown" });
+            peerManagerWorker.on("message", async (msg) => {
+                if (msg.type === "shutdownComplete") {
+                    try {
+                        await closeDB();
+                        logger.debug("LMDB worker closed");
+                    } catch (error) {
+                        logger.error(`Error closing LMDB worker: ${error}`);
+                    }
+                    process.exit(0);
+                }
+            });
         });
     } catch (error) {
         logger.error("Failed to start node:", error);

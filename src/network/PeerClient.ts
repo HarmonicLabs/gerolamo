@@ -236,7 +236,19 @@ export class PeerClient implements IPeerClient {
                 await this.chainSyncClient.requestNext();
                 return;
             };
-            if (parentPort) parentPort.postMessage({ type: "headerValidated", peerId: this.peerId, era: headerValidationRes.era, epoch: headerValidationRes.epoch, slot: headerValidationRes.slot, tip: tip });
+            if (parentPort) {
+                // parentPort.postMessage({ type: "storeHeader", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, headerData: headerValidationRes.headerData });
+                parentPort.postMessage({
+                    type: "headerValidated",
+                    peerId: this.peerId,
+                    era: headerValidationRes.era,
+                    epoch: headerValidationRes.epoch,
+                    slot: headerValidationRes.slot,
+                    blockHeaderHash: headerValidationRes.blockHeaderHash,
+                    headerData: headerValidationRes.headerData,
+                    tip: tip
+                });
+            }
             
             const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await this.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
             blockValidation(newBlockRes);

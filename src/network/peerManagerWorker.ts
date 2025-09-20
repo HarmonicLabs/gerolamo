@@ -4,6 +4,7 @@ import { logger } from "../utils/logger";
 import { parseTopology } from "./topology/parseTopology";
 import { Topology, TopologyRoot } from "./topology/topology";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
+import { putHeader } from "./lmdbWorkers/lmdb";
 
 let config: GerolamoConfig;
 let topology: Topology;
@@ -30,9 +31,10 @@ async function initPeerClientWorker() {
 }
 
 function setupPeerClientListener() {
-  peerClientWorker.on("message", (msg: any) => {
+  peerClientWorker.on("message", async (msg: any) => {
     // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
     if (msg.type === "headerValidated") {
+      await putHeader(msg.slot, msg.blockHeaderHash, msg.headerData);
       logger.debug(`Header validated: ${msg.peerId}, slot ${msg.slot}`);
       logger.debug(`Validated - Era: ${msg.era} - Epoch: ${msg.epoch} - Slot: ${msg.slot} of ${msg.tip} - Percent Complete: ${((Number(msg.slot) / Number(msg.tip)) * 100).toFixed(2)}%`);
     };

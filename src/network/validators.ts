@@ -9,6 +9,7 @@ import { ValidateHeader } from "./consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
+import { putHeader } from "./lmdbWorkers/lmdb";
 
 export async function headerValidation( data: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig) {
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
@@ -83,14 +84,12 @@ export async function headerValidation( data: ChainSyncRollForward, shelleyGenes
     // logger.debug("Header validation result: ", validateHeaderRes);
     
     if (!validateHeaderRes) return;
-
-    // Need to add DB logic here to save the header
-
     return {
         era: blcokHeaderBodyEra,
         epoch: headerEpoch,
         slot,
-        blockHeaderHash
+        blockHeaderHash,
+        headerData: blockHeaderData
     };
 };
 
@@ -109,7 +108,7 @@ export async function blockValidation(newBlock: BlockFetchNoBlocks | BlockFetchB
     // logger.debug("block: ", block);
 
     const newMultiEraBlock = MultiEraBlock.fromCbor(toHex(newBlock.blockData))
-    logger.debug("MultiEraBlock: ", newMultiEraBlock);
+    // logger.debug("MultiEraBlock: ", newMultiEraBlock);
     // Call function here that does block applicaiton here which takes multiEraHeader.
     // return newMultiEraBlock;
 };

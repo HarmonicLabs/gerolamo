@@ -12,9 +12,10 @@ import { startPeerManager } from "./network/startPeerManager";
 // import "./types/polyfills";
 import { logger } from "./utils/logger";
 import { startMinibfWorker } from "./minibfWorkers/minibf";
-import { closeDB } from "./network/lmdbWorkers/lmdb";
+import { closeDB, startLmdbWorker } from "./network/lmdbWorkers/lmdb";
 
 let peerManagerWorker: Worker;
+let lmdbWorker: Worker;
 
 export async function startNode(configPath: string) {
     logger.debug("Starting Gerolamo with configPath:", configPath);
@@ -24,6 +25,11 @@ export async function startNode(configPath: string) {
         const configFile = Bun.file(configPath);
         const config = await configFile.json();
         // logger.debug("Config loaded:", config);
+
+        // Start LMDB worker
+        logger.debug("Starting LMDB worker...");
+        lmdbWorker = startLmdbWorker();
+        logger.debug("LMDB worker started");
 
         // Start PeerManager worker
         logger.debug("Starting PeerManager worker...");

@@ -1,11 +1,30 @@
-import { BlockFetchClient, ChainPoint, ChainSyncClient, HandshakeAcceptVersion, HandshakeClient, KeepAliveClient, KeepAliveResponse, Multiplexer, PeerAddress, PeerSharingClient, PeerSharingResponse, ChainSyncRollForward, ChainSyncRollBackwards, ChainSyncIntersectFound, ChainSyncIntersectNotFound, ChainSyncFindIntersect, BlockFetchBlock, BlockFetchNoBlocks } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import {
+    BlockFetchBlock,
+    BlockFetchClient,
+    BlockFetchNoBlocks,
+    ChainPoint,
+    ChainSyncClient,
+    ChainSyncFindIntersect,
+    ChainSyncIntersectFound,
+    ChainSyncIntersectNotFound,
+    ChainSyncRollBackwards,
+    ChainSyncRollForward,
+    HandshakeAcceptVersion,
+    HandshakeClient,
+    KeepAliveClient,
+    KeepAliveResponse,
+    Multiplexer,
+    PeerAddress,
+    PeerSharingClient,
+    PeerSharingResponse,
+} from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { connect } from "node:net";
 import { logger } from "../utils/logger";
 import { getLastSlot } from "./lmdbWorkers/lmdb";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { GerolamoConfig } from "./PeerManager";
 import { RawNewEpochState } from "../rawNES";
-import { headerValidation, blockValidation } from "./validators";
+import { blockValidation, headerValidation } from "./validators";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { parentPort } from "worker_threads";
 
@@ -22,7 +41,7 @@ export interface IPeerClient {
     syncPointFrom?: ChainPoint | null;
     syncPointTo?: ChainPoint | null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-};
+}
 
 export class PeerClient implements IPeerClient {
     readonly host: string;
@@ -39,7 +58,6 @@ export class PeerClient implements IPeerClient {
     private keepAliveInterval: NodeJS.Timeout | null;
     private isRangeSyncComplete: boolean = false;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-
 
     constructor(
         host: string,
@@ -69,9 +87,14 @@ export class PeerClient implements IPeerClient {
         this.peerSlotNumber = null;
         this.keepAliveInterval = null;
         getShelleyGenesisConfig(this.config)
-            .then(cfg => { this.shelleyGenesisConfig = cfg; })
-            .catch(err => {
-                logger.error(`Failed to load Shelley genesis config for peer ${this.peerId}:`, err);
+            .then((cfg) => {
+                this.shelleyGenesisConfig = cfg;
+            })
+            .catch((err) => {
+                logger.error(
+                    `Failed to load Shelley genesis config for peer ${this.peerId}:`,
+                    err,
+                );
             });
 
         this.mplexer.on("error", (err) => {
@@ -235,54 +258,88 @@ export class PeerClient implements IPeerClient {
     async startSyncLoop(): Promise<void> {
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
 
-        this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
-            const tip = rollForward.tip.point.blockHeader?.slotNumber;
-            const headerValidationRes = await headerValidation(rollForward, this.shelleyGenesisConfig);
-            if (!(
-                headerValidationRes
-            )) {
+        this.chainSyncClient.on(
+            "rollForward",
+            async (rollForward: ChainSyncRollForward) => {
+                const tip = rollForward.tip.point.blockHeader?.slotNumber;
+                const headerValidationRes = await headerValidation(
+                    rollForward,
+                    this.shelleyGenesisConfig,
+                );
+                if (!headerValidationRes) {
+                    // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
+                    await this.chainSyncClient.requestNext();
+                    return;
+                }
+                if (parentPort) {
+                    // parentPort.postMessage({ type: "storeHeader", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, headerData: headerValidationRes.headerData });
+                    parentPort.postMessage({
+                        type: "headerValidated",
+                        peerId: this.peerId,
+                        era: headerValidationRes.era,
+                        epoch: headerValidationRes.epoch,
+                        slot: headerValidationRes.slot,
+                        blockHeaderHash: headerValidationRes.blockHeaderHash,
+                        headerData: headerValidationRes.headerData,
+                        tip: tip,
+                    });
+                }
+
+                const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock =
+                    await this.fetchBlock(
+                        headerValidationRes.slot,
+                        headerValidationRes.blockHeaderHash,
+                    );
+                blockValidation(newBlockRes);
+                if (parentPort) {
+                    parentPort.postMessage({
+                        type: "blockFetched",
+                        peerId: this.peerId,
+                        slot: headerValidationRes.slot,
+                        blockHeaderHash: headerValidationRes.blockHeaderHash,
+                        blockData: newBlockRes,
+                    });
+                }
                 // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
                 await this.chainSyncClient.requestNext();
-                return;
-            };
-            if (parentPort) {
-                // parentPort.postMessage({ type: "storeHeader", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, headerData: headerValidationRes.headerData });
-                parentPort.postMessage({
-                    type: "headerValidated",
-                    peerId: this.peerId,
-                    era: headerValidationRes.era,
-                    epoch: headerValidationRes.epoch,
-                    slot: headerValidationRes.slot,
-                    blockHeaderHash: headerValidationRes.blockHeaderHash,
-                    headerData: headerValidationRes.headerData,
-                    tip: tip
-                });
-            }
-            
-            const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await this.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
-            blockValidation(newBlockRes);
-            if (parentPort) parentPort.postMessage({type: "blockFetched", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, blockData: newBlockRes});
-            // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
-            await this.chainSyncClient.requestNext();
-        });
+            },
+        );
 
-        this.chainSyncClient.on("rollBackwards", async (rollBack: ChainSyncRollBackwards) => {
-            if (!rollBack.point.blockHeader) return;
-            const tip = rollBack.tip.point;
-            logger.debug(`Rolled back tip for peer ${this.peerId}`, tip.blockHeader?.slotNumber );
-            if (parentPort) parentPort.postMessage({type: "rollBack", peerId: this.peerId, point: rollBack.point});
-            await this.chainSyncClient.requestNext();
-        });
+        this.chainSyncClient.on(
+            "rollBackwards",
+            async (rollBack: ChainSyncRollBackwards) => {
+                if (!rollBack.point.blockHeader) return;
+                const tip = rollBack.tip.point;
+                logger.debug(
+                    `Rolled back tip for peer ${this.peerId}`,
+                    tip.blockHeader?.slotNumber,
+                );
+                if (parentPort) {
+                    parentPort.postMessage({
+                        type: "rollBack",
+                        peerId: this.peerId,
+                        point: rollBack.point,
+                    });
+                }
+                await this.chainSyncClient.requestNext();
+            },
+        );
 
         this.chainSyncClient.on("error", (error: any) => {
-            logger.error( `ChainSyncClient error for peer ${this.peerId}:`, error );
+            logger.error(
+                `ChainSyncClient error for peer ${this.peerId}:`,
+                error,
+            );
         });
 
         await this.syncToTip();
         this.chainSyncClient.requestNext();
-    };
+    }
 
-    async fetchBlock(slot: number | bigint, blockHash: Uint8Array): Promise<BlockFetchNoBlocks | BlockFetchBlock> {
+    async fetchBlock(
+        slot: number | bigint,
+        blockHash: Uint8Array,
+    ): Promise<BlockFetchNoBlocks | BlockFetchBlock> {
         // logger.debug(`Peer: ${this.peerId}...`, `Fetching Block `, { slot, hash: toHex(blockHash)} );
         const chainPoint = new ChainPoint({
             blockHeader: { slotNumber: slot, hash: blockHash },
@@ -341,14 +398,14 @@ export class PeerClient implements IPeerClient {
             this.keepAliveClient.request(this.cookieCounter);
         }, interval);
     }
-};
+}
 
-function getCurrentNes() { 
-    return RawNewEpochState.init()
-};
+function getCurrentNes() {
+    return RawNewEpochState.init();
+}
 
-async function getShelleyGenesisConfig(config: GerolamoConfig) { 
-    const shelleyGenesisFile = Bun.file(config.shelleyGenesisFile)
+async function getShelleyGenesisConfig(config: GerolamoConfig) {
+    const shelleyGenesisFile = Bun.file(config.shelleyGenesisFile);
     const shelleyGenesisConfig = await shelleyGenesisFile.json();
     return shelleyGenesisConfig;
-};
+}

@@ -45,8 +45,8 @@ export async function startNode(configPath: string) {
         }
         logger.debug("Gerolamo node started successfully");
 
-        process.on('SIGINT', async () => {
-            logger.debug('Received SIGINT, Shutting down');
+        process.on("SIGINT", async () => {
+            logger.debug("Received SIGINT, Shutting down");
             peerManagerWorker.postMessage({ type: "shutdown" });
             peerManagerWorker.on("message", async (msg) => {
                 if (msg.type === "shutdownComplete") {
@@ -61,8 +61,8 @@ export async function startNode(configPath: string) {
             });
         });
 
-        process.on('SIGTERM', async () => {
-            logger.debug('Received SIGTERM, Shutting down');
+        process.on("SIGTERM", async () => {
+            logger.debug("Received SIGTERM, Shutting down");
             peerManagerWorker.postMessage({ type: "shutdown" });
             peerManagerWorker.on("message", async (msg) => {
                 if (msg.type === "shutdownComplete") {
@@ -169,15 +169,22 @@ export function Main() {
             await getCbor(path.normalize(cborDirPath), outputDirPath);
         });
 
-    program.command("init", "Initialize Gerolamo(not implement yet)").action(() => undefined);
+    program.command("init", "Initialize Gerolamo(not implement yet)").action(
+        () => undefined,
+    );
 }
-
 
 export function SyncNode() {
     program
         .command("start")
-        .description("Start Gerolamo node:(bun src/index.ts --config ./src/config/config.json)")
-        .option("--config <path>", "Path to config file", "./src/config/config.json")
+        .description(
+            "Start Gerolamo node:(bun src/index.ts --config ./src/config/config.json)",
+        )
+        .option(
+            "--config <path>",
+            "Path to config file",
+            "./src/config/config.json",
+        )
         .action(async (options) => {
             await startNode(options.config);
         });

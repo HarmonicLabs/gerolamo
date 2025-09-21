@@ -1,7 +1,11 @@
 import { parentPort } from "worker_threads";
 import { type Serve } from "bun";
 import { MultiEraBlock, MultiEraHeader } from "@harmoniclabs/cardano-ledger-ts";
-import { getBlockByHash, getHeaderByHash, resolveToHash } from "../network/lmdbWorkers/lmdb";
+import {
+    getBlockByHash,
+    getHeaderByHash,
+    resolveToHash,
+} from "../network/lmdbWorkers/lmdb";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { logger } from "../utils/logger"; // Adjust path as needed
 

@@ -1,5 +1,10 @@
-import { ChainSyncRollBackwards, ChainSyncRollForward, PeerAddress, PeerAddressIPv4 }  from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import {  NetworkT } from "@harmoniclabs/cardano-ledger-ts";
+import {
+    ChainSyncRollBackwards,
+    ChainSyncRollForward,
+    PeerAddress,
+    PeerAddressIPv4,
+} from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { logger } from "../utils/logger";
 import { parseTopology } from "./topology/parseTopology";
@@ -26,7 +31,6 @@ export interface GerolamoConfig {
     readonly shelleyGenesisFile: string;
     readonly enableMinibf?: boolean;
     allPeers: Map<string, PeerClient>;
-
 }
 
 export interface IPeerManager {
@@ -39,7 +43,6 @@ export interface IPeerManager {
     config: GerolamoConfig;
     topology: Topology;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-    
 }
 
 export class PeerManager implements IPeerManager {
@@ -64,7 +67,7 @@ export class PeerManager implements IPeerManager {
         const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
         this.lState = RawNewEpochState.init();
-       
+
         // Assign bootstrap peers
         if (this.topology.bootstrapPeers) {
             await Promise.all(
@@ -113,7 +116,7 @@ export class PeerManager implements IPeerManager {
         // }
 
         await this.peerSyncCurrentTasks();
-    };
+    }
 
     public getAllPeers(): ReadonlyArray<PeerClient> {
         return Array.from(this.allPeers.values());
@@ -163,7 +166,9 @@ export class PeerManager implements IPeerManager {
         // logger.log("this allpeers", this.allPeers);
         await Promise.all(this.hotPeers.map(async (peer) => {
             try {
-                logger.log(`Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync` );
+                logger.log(
+                    `Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync`,
+                );
                 peer.startSyncLoop();
                 // const peersAddresses = await peer.askForPeers();
                 // console.log("peersAddresses: ", peersAddresses);
@@ -195,7 +200,8 @@ export class PeerManager implements IPeerManager {
                 );
             }
         });
-    }s
+    }
+    s;
 
     async shutdown() {
         logger.debug("Shutting down PeerManager");

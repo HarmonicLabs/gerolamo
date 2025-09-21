@@ -6,10 +6,81 @@ import * as zlib from "node:zlib";
 import * as streamPromises from "node:stream/promises";
 import { Cbor } from "@harmoniclabs/cbor";
 import { RawNewEpochState } from "./rawNES";
-import { GerolamoConfig, PeerManager } from "./network/PeerManager";
+import { Worker } from "worker_threads";
+import { startPeerManager } from "./network/startPeerManager";
 // import { Database } from "bun:sqlite";
 // import "./types/polyfills";
 import { logger } from "./utils/logger";
+import { startMinibfWorker } from "./minibfWorkers/minibf";
+import { closeDB, startLmdbWorker } from "./network/lmdbWorkers/lmdb";
+
+let peerManagerWorker: Worker;
+let lmdbWorker: Worker;
+
+export async function startNode(configPath: string) {
+    logger.debug("Starting Gerolamo with configPath:", configPath);
+    try {
+        // Load and validate config
+        // const config = await loadConfig(configPath);
+        const configFile = Bun.file(configPath);
+        const config = await configFile.json();
+        // logger.debug("Config loaded:", config);
+
+        // Start LMDB worker
+        logger.debug("Starting LMDB worker...");
+        lmdbWorker = startLmdbWorker();
+        logger.debug("LMDB worker started");
+
+        // Start PeerManager worker
+        logger.debug("Starting PeerManager worker...");
+        peerManagerWorker = await startPeerManager(config) as Worker;
+        logger.debug("PeerManager worker started");
+
+        // Start minibf worker if enabled
+        if (config.minibf) {
+            logger.debug("Starting minibf worker on port 3000...");
+            await startMinibfWorker();
+        } else {
+            logger.debug("Minibf worker not started (disabled in config)");
+        }
+        logger.debug("Gerolamo node started successfully");
+
+        process.on('SIGINT', async () => {
+            logger.debug('Received SIGINT, Shutting down');
+            peerManagerWorker.postMessage({ type: "shutdown" });
+            peerManagerWorker.on("message", async (msg) => {
+                if (msg.type === "shutdownComplete") {
+                    try {
+                        await closeDB();
+                        logger.debug("LMDB worker closed");
+                    } catch (error) {
+                        logger.error(`Error closing LMDB worker: ${error}`);
+                    }
+                    process.exit(0);
+                }
+            });
+        });
+
+        process.on('SIGTERM', async () => {
+            logger.debug('Received SIGTERM, Shutting down');
+            peerManagerWorker.postMessage({ type: "shutdown" });
+            peerManagerWorker.on("message", async (msg) => {
+                if (msg.type === "shutdownComplete") {
+                    try {
+                        await closeDB();
+                        logger.debug("LMDB worker closed");
+                    } catch (error) {
+                        logger.error(`Error closing LMDB worker: ${error}`);
+                    }
+                    process.exit(0);
+                }
+            });
+        });
+    } catch (error) {
+        logger.error("Failed to start node:", error);
+        process.exit(1);
+    }
+}
 
 async function fetchLedgerState(cborDirPath: string) {
     console.log("Downloading ledger state snapshots to", cborDirPath);
@@ -68,7 +139,9 @@ export async function getCbor(cborFile: string, outputDirPath: string) {
 
 export function Main() {
     console.log("Starting CLI");
-    program.name("cardano-node-ts");
+    program.name("Gerolamo");
+
+    program.option("--config <path>", "Path to config file", "./config.json");
 
     program
         .command("download-ledger-state")
@@ -96,71 +169,18 @@ export function Main() {
             await getCbor(path.normalize(cborDirPath), outputDirPath);
         });
 
-    program.command("init-node", "Initialize the node").action(() => undefined);
-    program.parse(process.argv);
+    program.command("init", "Initialize Gerolamo(not implement yet)").action(() => undefined);
 }
 
+
 export function SyncNode() {
-    logger.debug("Starting Gerolamo with config: ", process.argv);
-    program.name("cardano-node-ts");
-
     program
-        .command("start-node")
-        .description("Start Gerolamo node with the specified config file")
-        .argument(
-            "<configPath>",
-            "Path to the config file (e.g., ./config.json)",
-        )
-        .action(async (configPath: string) => {
-            logger.debug("Starting node with configPath:", configPath);
-            try {
-                // Load and validate config
-                // const config = await loadConfig(configPath);
-                const configFile = Bun.file(configPath);
-                const config = await configFile.json();
-                // logger.debug("Config loaded:", config);
-
-                // Initialize PeerManager
-                const peerManager = new PeerManager();
-                peerManager.config = config;
-                logger.debug("Initializing PeerManager...");
-                await peerManager.init();
-                logger.debug("PeerManager initialized");
-
-                // Start expressServer if enabled
-                if (config.minibf) {
-                    logger.debug("Starting express server...");
-                    try {
-                        await import("./network/minibf/expressServer");
-                        logger.debug("Express server started on port 3000");
-                    } catch (error) {
-                        console.error("Failed to start express server:", error);
-                        throw error;
-                    }
-                } else {
-                    logger.debug(
-                        "Express server not started (disabled in config)",
-                    );
-                }
-                logger.debug("Gerolamo node started successfully");
-
-                process.on("SIGINT", async () => {
-                    logger.debug("Received SIGINT, Shutting down");
-                    await peerManager.shutdown();
-                    process.exit(0);
-                });
-
-                process.on("SIGTERM", async () => {
-                    logger.debug("Received SIGTERM, Shutting down");
-                    await peerManager.shutdown();
-                    process.exit(0);
-                });
-            } catch (error) {
-                logger.error("Failed to start node:", error);
-                process.exit(1);
-            }
+        .command("start")
+        .description("Start Gerolamo node:(bun src/index.ts --config ./src/config/config.json)")
+        .option("--config <path>", "Path to config file", "./src/config/config.json")
+        .action(async (options) => {
+            await startNode(options.config);
         });
 }
 
-SyncNode();
-program.parse(process.argv);
+export { program };

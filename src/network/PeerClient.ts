@@ -1,27 +1,14 @@
-import {
-    BlockFetchClient,
-    ChainPoint,
-    ChainSyncClient,
-    ChainSyncFindIntersect,
-    ChainSyncIntersectFound,
-    ChainSyncIntersectNotFound,
-    ChainSyncRollBackwards,
-    ChainSyncRollForward,
-    HandshakeAcceptVersion,
-    HandshakeClient,
-    KeepAliveClient,
-    KeepAliveResponse,
-    Multiplexer,
-    PeerAddress,
-    PeerSharingClient,
-    PeerSharingResponse,
-} from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
+import { BlockFetchClient, ChainPoint, ChainSyncClient, HandshakeAcceptVersion, HandshakeClient, KeepAliveClient, KeepAliveResponse, Multiplexer, PeerAddress, PeerSharingClient, PeerSharingResponse, ChainSyncRollForward, ChainSyncRollBackwards, ChainSyncIntersectFound, ChainSyncIntersectNotFound, ChainSyncFindIntersect, BlockFetchBlock, BlockFetchNoBlocks } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { connect } from "node:net";
 import { logger } from "../utils/logger";
 import { getLastSlot } from "./lmdbWorkers/lmdb";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { GerolamoConfig } from "./PeerManager";
+import { RawNewEpochState } from "../rawNES";
+import { headerValidation, blockValidation } from "./validators";
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
+import { parentPort } from "worker_threads";
+
 export interface IPeerClient {
     host: string;
     port: number | bigint;
@@ -34,8 +21,8 @@ export interface IPeerClient {
     peerSlotNumber: number | null;
     syncPointFrom?: ChainPoint | null;
     syncPointTo?: ChainPoint | null;
-    config: GerolamoConfig;
-}
+    shelleyGenesisConfig: ShelleyGenesisConfig;
+};
 
 export class PeerClient implements IPeerClient {
     readonly host: string;
@@ -51,6 +38,8 @@ export class PeerClient implements IPeerClient {
     private cookieCounter: number;
     private keepAliveInterval: NodeJS.Timeout | null;
     private isRangeSyncComplete: boolean = false;
+    shelleyGenesisConfig: ShelleyGenesisConfig;
+
 
     constructor(
         host: string,
@@ -62,6 +51,7 @@ export class PeerClient implements IPeerClient {
         this.config = config;
         const unixTimestamp = Math.floor(Date.now() / 1000);
         this.peerId = `${host}:${port}:${unixTimestamp}`; // Set after host/port
+        this.shelleyGenesisConfig = {} as ShelleyGenesisConfig;
 
         this.mplexer = new Multiplexer({
             connect: () => {
@@ -78,6 +68,11 @@ export class PeerClient implements IPeerClient {
         this.cookieCounter = 0;
         this.peerSlotNumber = null;
         this.keepAliveInterval = null;
+        getShelleyGenesisConfig(this.config)
+            .then(cfg => { this.shelleyGenesisConfig = cfg; })
+            .catch(err => {
+                logger.error(`Failed to load Shelley genesis config for peer ${this.peerId}:`, err);
+            });
 
         this.mplexer.on("error", (err) => {
             logger.error(`Multiplexer error for peer ${this.peerId}:`, err);
@@ -144,7 +139,7 @@ export class PeerClient implements IPeerClient {
         });
 
         const handshakeResult = await handshake.propose({
-            networkMagic: this.config.network === "mainnet" ? 0 : 1,
+            networkMagic: this.config.networkMagic,
             query: false,
         });
 
@@ -190,7 +185,6 @@ export class PeerClient implements IPeerClient {
             const lastPointDb = await getLastSlot();
             logger.debug(`Last point in DB: `, lastPointDb);
             logger.debug(`Syncing to latest point for peer ${this.peerId}...`);
-            logger.debug(`Last point in DB: `, lastPointDb);
             if (
                 lastPointDb &&
                 lastPointDb.slot < tipPoint.blockHeader?.slotNumber!
@@ -238,66 +232,64 @@ export class PeerClient implements IPeerClient {
     }
 
     // starts sync loop for all peers in parrallel
-    async startSyncLoop(
-        syncCallback: (
-            peerId: string,
-            type: "rollForward" | "rollBackwards",
-            data: ChainSyncRollForward | ChainSyncRollBackwards,
-        ) => void,
-    ): Promise<any> {
+    async startSyncLoop(): Promise<void> {
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
 
-        this.chainSyncClient.on(
-            "rollForward",
-            async (rollForward: ChainSyncRollForward) => {
-                const multiEraHeader = rollForward || null;
-                logger.debug(
-                    `Rolled forward for peer ${this.peerId}`,
-                    multiEraHeader.tip.point.blockHeader?.slotNumber,
-                );
-                syncCallback(this.peerId, "rollForward", multiEraHeader);
+        this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
+            const tip = rollForward.tip.point.blockHeader?.slotNumber;
+            const headerValidationRes = await headerValidation(rollForward, this.shelleyGenesisConfig);
+            if (!(
+                headerValidationRes
+            )) {
+                // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
                 await this.chainSyncClient.requestNext();
-            },
-        );
-
-        this.chainSyncClient.on(
-            "rollBackwards",
-            async (rollBack: ChainSyncRollBackwards) => {
-                if (!rollBack.point.blockHeader) return;
-                const tip = rollBack.tip.point;
-                logger.debug(
-                    `Rolled back tip for peer ${this.peerId}`,
-                    tip.blockHeader?.slotNumber,
-                );
-                // Optionally update peerSlotNumber here if needed
-                syncCallback(this.peerId, "rollBackwards", rollBack);
-                await this.chainSyncClient.requestNext();
-            },
-        );
-
-        this.chainSyncClient.on("error", (error: any) => {
-            logger.error(
-                `ChainSyncClient error for peer ${this.peerId}:`,
-                error,
-            );
-            // Optionally retry or terminate; don't stop listeners here
+                return;
+            };
+            if (parentPort) {
+                // parentPort.postMessage({ type: "storeHeader", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, headerData: headerValidationRes.headerData });
+                parentPort.postMessage({
+                    type: "headerValidated",
+                    peerId: this.peerId,
+                    era: headerValidationRes.era,
+                    epoch: headerValidationRes.epoch,
+                    slot: headerValidationRes.slot,
+                    blockHeaderHash: headerValidationRes.blockHeaderHash,
+                    headerData: headerValidationRes.headerData,
+                    tip: tip
+                });
+            }
+            
+            const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await this.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
+            blockValidation(newBlockRes);
+            if (parentPort) parentPort.postMessage({type: "blockFetched", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, blockData: newBlockRes});
+            // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
+            await this.chainSyncClient.requestNext();
         });
 
-        // Initial sync and start the process
-        const initialTip = await this.syncToTip();
-        await this.chainSyncClient.requestNext();
-        // Return status and initial tip
-        return { status: "started", initialTip };
-    }
+        this.chainSyncClient.on("rollBackwards", async (rollBack: ChainSyncRollBackwards) => {
+            if (!rollBack.point.blockHeader) return;
+            const tip = rollBack.tip.point;
+            logger.debug(`Rolled back tip for peer ${this.peerId}`, tip.blockHeader?.slotNumber );
+            if (parentPort) parentPort.postMessage({type: "rollBack", peerId: this.peerId, point: rollBack.point});
+            await this.chainSyncClient.requestNext();
+        });
 
-    async fetchBlock(slot: number | bigint, blockHash: Buffer): Promise<any> {
+        this.chainSyncClient.on("error", (error: any) => {
+            logger.error( `ChainSyncClient error for peer ${this.peerId}:`, error );
+        });
+
+        await this.syncToTip();
+        this.chainSyncClient.requestNext();
+    };
+
+    async fetchBlock(slot: number | bigint, blockHash: Uint8Array): Promise<BlockFetchNoBlocks | BlockFetchBlock> {
         // logger.debug(`Peer: ${this.peerId}...`, `Fetching Block `, { slot, hash: toHex(blockHash)} );
         const chainPoint = new ChainPoint({
             blockHeader: { slotNumber: slot, hash: blockHash },
         });
         // logger.debug(`Fetching block at chain point for peer ${this.peerId}:`, chainPoint);
         const blockData = await this.blockFetchClient.request(chainPoint);
-        logger.debug(`Fetched block at slot ${slot} for peer ${this.peerId}`);
+        // logger.debug(`Fetched block at slot ${slot} for peer ${this.peerId}`);
         return blockData;
     }
 
@@ -349,4 +341,14 @@ export class PeerClient implements IPeerClient {
             this.keepAliveClient.request(this.cookieCounter);
         }, interval);
     }
-}
+};
+
+function getCurrentNes() { 
+    return RawNewEpochState.init()
+};
+
+async function getShelleyGenesisConfig(config: GerolamoConfig) { 
+    const shelleyGenesisFile = Bun.file(config.shelleyGenesisFile)
+    const shelleyGenesisConfig = await shelleyGenesisFile.json();
+    return shelleyGenesisConfig;
+};

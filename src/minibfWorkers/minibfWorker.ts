@@ -1,14 +1,11 @@
-// src/blockfrost/server.ts
+import { parentPort } from "worker_threads";
 import { type Serve } from "bun";
 import { MultiEraBlock, MultiEraHeader } from "@harmoniclabs/cardano-ledger-ts";
-import {
-    getBlockByHash,
-    getHeaderByHash,
-    resolveToHash,
-} from "../sqlWorkers/sql"; // Adjust path as needed
+import { getBlockByHash, getHeaderByHash, resolveToHash } from "../network/lmdbWorkers/lmdb";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
-import { logger } from "../../utils/logger"; // Adjust path as needed
+import { logger } from "../utils/logger"; // Adjust path as needed
 
+// Start the server in the worker
 Bun.serve({
     port: 3000,
     routes: {
@@ -93,3 +90,6 @@ function responseError(msg: string): Response {
         status: 400,
     });
 }
+
+// Signal that the server is started
+parentPort!.postMessage({ type: "started" });

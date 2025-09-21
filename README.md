@@ -15,6 +15,15 @@
 
 # Gerolamo
 
+## How to run
+• You will need latest version of Bun JS Run time from https://bun.sh<br />
+• Clone the repo: `git clone https://github.com/@harmoniclabs/gerolamo`<br />
+• install deps: `bun i`<br />
+• Start node with config: `bun src/index.ts --config ./src/config/config.json` (same as subcommand `start-node`)<br />
+• View help: `bun src/index.ts --help`<br />
+• Use subcommands: `bun src/index.ts start-node --config ./src/config/config.json` (same as above, starts and syncs the node based on config)<br />
+• Other commands: `bun src/index.ts download-ledger-state <path>, etc.`<br />
+
 ## Roadmap
 
 ### Q1 (Before end of March)

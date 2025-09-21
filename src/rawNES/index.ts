@@ -32,7 +32,7 @@ import {
     RawStashedAVVMAddresses,
 } from "./stashed_avvm_addresses";
 
-import { IReadWriteNES } from "../types";
+import * as assert from "node:assert/strict";
 import { RawChainAccountState } from "./epoch_state/chain_account_state";
 import { RawLedgerState, RawUTxOState } from "./epoch_state/ledger_state";
 import {

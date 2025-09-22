@@ -6,9 +6,9 @@ export async function startPeerManager(config: GerolamoConfig) {
 	worker.postMessage({ type: "init" });
 	return new Promise((resolve) => {
 		worker.on("message", (msg) => {
-		if (msg.type === "started") {
-			resolve(worker);
-		}
+			if (msg.type === "started") {
+				resolve(worker);
+			}
 		});
 	});
 };

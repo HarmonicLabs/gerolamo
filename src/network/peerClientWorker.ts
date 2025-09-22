@@ -84,36 +84,36 @@ parentPort!.on("message", async (msg: any) => {
 		const { peerId, category } = msg;
 		const peer = allPeers.get(peerId);
 		if (peer) {
-		hotPeers = hotPeers.filter(p => p.peerId !== peerId);
-		warmPeers = warmPeers.filter(p => p.peerId !== peerId);
-		coldPeers = coldPeers.filter(p => p.peerId !== peerId);
-		bootstrapPeers = bootstrapPeers.filter(p => p.peerId !== peerId);
-		newPeers = newPeers.filter(p => p.peerId !== peerId);
-		switch (category) {
-			case "hot":
-			hotPeers.push(peer);
-			break;
-			case "warm":
-			warmPeers.push(peer);
-			break;
-			case "cold":
-			coldPeers.push(peer);
-			break;
-			case "bootstrap":
-			bootstrapPeers.push(peer);
-			break;
-			case "new":
-			newPeers.push(peer);
-			break;
+			hotPeers = hotPeers.filter(p => p.peerId !== peerId);
+			warmPeers = warmPeers.filter(p => p.peerId !== peerId);
+			coldPeers = coldPeers.filter(p => p.peerId !== peerId);
+			bootstrapPeers = bootstrapPeers.filter(p => p.peerId !== peerId);
+			newPeers = newPeers.filter(p => p.peerId !== peerId);
+			switch (category) {
+				case "hot":
+				hotPeers.push(peer);
+				break;
+				case "warm":
+				warmPeers.push(peer);
+				break;
+				case "cold":
+				coldPeers.push(peer);
+				break;
+				case "bootstrap":
+				bootstrapPeers.push(peer);
+				break;
+				case "new":
+				newPeers.push(peer);
+				break;
+			}
+			logger.debug(`Moved peer ${peerId} to ${category}`);
 		}
-		logger.debug(`Moved peer ${peerId} to ${category}`);
-		}
-	}
+	};
 
 	if (msg.type === "shutdown") {
 		for (const peer of allPeers.values()) {
-		peer.terminate();
-		}
+			peer.terminate();
+		};
 		allPeers.clear();
 		hotPeers = [];
 		warmPeers = [];
@@ -122,5 +122,5 @@ parentPort!.on("message", async (msg: any) => {
 		newPeers = [];
 		logger.debug("PeerClient worker shut down");
 		parentPort!.postMessage({ type: "shutdownComplete" });
-	}
+	};
 });

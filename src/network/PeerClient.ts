@@ -116,9 +116,7 @@ export class PeerClient implements IPeerClient {
         logger.info(`Terminating connections for peer ${this.peerId}...`);
         this.chainSyncClient.removeAllListeners("rollForward");
         this.chainSyncClient.removeAllListeners("rollBackwards");
-        logger.debug(
-            `Removed all ChainSyncClient listeners for peer ${this.peerId}`,
-        );
+        logger.debug(`Removed all ChainSyncClient listeners for peer ${this.peerId}` );
         this.chainSyncClient.done();
         this.blockFetchClient.done();
         this.keepAliveClient.done();
@@ -197,7 +195,7 @@ export class PeerClient implements IPeerClient {
             intersectResult = await this.chainSyncClient.findIntersect([
                 tipPoint,
             ]);
-        }
+        };
 
         if (this.config.syncFromPoint && !this.config.syncFromTip) {
             logger.debug(

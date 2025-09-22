@@ -145,7 +145,7 @@ export class PeerClient implements IPeerClient {
 
         if (!(handshakeResult instanceof HandshakeAcceptVersion)) {
             logger.error(
-                `Handshake failed for peer ${this.peerId}:`,
+                `Handshake failed for peer ${this.peerId}:`, 
                 handshakeResult,
             );
             throw new Error("Handshake failed");
@@ -219,13 +219,12 @@ export class PeerClient implements IPeerClient {
 
         logger.debug(`Intersect result for peer ${this.peerId}:`, intersectResult.tip.point.blockHeader?.slotNumber,
         );
-        return intersectResult.tip.point;
+        return intersectResult.tip.point; 
     }
 
     // starts sync loop for all peers in parrallel
     async startSyncLoop(): Promise<void> {
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
-
         this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
             const tip = rollForward.tip.point.blockHeader?.slotNumber;
             const headerValidationRes = await headerValidation(rollForward, this.shelleyGenesisConfig);
@@ -248,7 +247,7 @@ export class PeerClient implements IPeerClient {
                     headerData: headerValidationRes.headerData,
                     tip: tip
                 });
-            }
+            };
             
             const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await this.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
             blockValidation(newBlockRes);

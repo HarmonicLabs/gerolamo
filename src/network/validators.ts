@@ -9,7 +9,6 @@ import { ValidateHeader } from "./consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
-import { putHeader } from "./lmdbWorkers/lmdb";
 
 export async function headerValidation( data: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig) {
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.

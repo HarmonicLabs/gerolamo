@@ -6,24 +6,26 @@ let idCounter = 0;
 const pendingPromises = new Map<number, (value: any) => void>();
 
 worker.on("message", (msg: any) => {
-  if (msg.type === "done") {
-    const resolve = pendingPromises.get(msg.id);
-    if (resolve) {
-      resolve(undefined);
-      pendingPromises.delete(msg.id);
+    if (msg.type === "done") {
+        const resolve = pendingPromises.get(msg.id);
+        if (resolve) {
+        resolve(undefined);
+        pendingPromises.delete(msg.id);
+        }
+    } else if (msg.type === "result") {
+        const resolve = pendingPromises.get(msg.id);
+        if (resolve) {
+        resolve(msg.data);
+        pendingPromises.delete(msg.id);
+        }
     }
-  } else if (msg.type === "result") {
-    const resolve = pendingPromises.get(msg.id);
-    if (resolve) {
-      resolve(msg.data);
-      pendingPromises.delete(msg.id);
-    }
-  }
 });
 
 export function startLmdbWorker() {
   return worker;
-};
+}
+
+
 
 export async function putHeader(
     slot: number | bigint,
@@ -39,7 +41,7 @@ export async function putHeader(
         id: curId,
     });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
-};
+}
 
 export async function putBlock(
     blockHeaderHash: Uint8Array,
@@ -48,7 +50,7 @@ export async function putBlock(
     const curId = idCounter++;
     worker.postMessage({ type: "putBlock", blockHeaderHash, block, id: curId });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
-};
+}
 
 // Convenience: Get header by slot (uses slotIndexDB internally)
 export async function getHeaderBySlot(
@@ -124,9 +126,11 @@ export async function rollBackWards(
 };
 
 export async function closeDB(): Promise<void> {
-    const curId = idCounter++;
-    worker.postMessage({ type: "closeDB", id: curId });
-    return new Promise((resolve) => pendingPromises.set(curId, resolve));
+    if (worker) {
+        const curId = idCounter++;
+        worker.postMessage({ type: "closeDB", id: curId });
+        return new Promise((resolve) => pendingPromises.set(curId, resolve));
+    }
 };
 
 // Utility to check if a string is a valid 64-char hex hash32

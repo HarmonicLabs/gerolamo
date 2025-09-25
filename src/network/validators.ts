@@ -35,8 +35,7 @@ import {
 import { ValidateHeader } from "./consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
-import { putHeader } from "./lmdbWorkers/lmdb";
+import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
 
 export async function headerValidation(
     data: ChainSyncRollForward,

@@ -139,9 +139,7 @@ export class PeerClient implements IPeerClient {
         logger.info(`Terminating connections for peer ${this.peerId}...`);
         this.chainSyncClient.removeAllListeners("rollForward");
         this.chainSyncClient.removeAllListeners("rollBackwards");
-        logger.debug(
-            `Removed all ChainSyncClient listeners for peer ${this.peerId}`,
-        );
+        logger.debug(`Removed all ChainSyncClient listeners for peer ${this.peerId}` );
         this.chainSyncClient.done();
         this.blockFetchClient.done();
         this.keepAliveClient.done();
@@ -168,7 +166,7 @@ export class PeerClient implements IPeerClient {
 
         if (!(handshakeResult instanceof HandshakeAcceptVersion)) {
             logger.error(
-                `Handshake failed for peer ${this.peerId}:`,
+                `Handshake failed for peer ${this.peerId}:`, 
                 handshakeResult,
             );
             throw new Error("Handshake failed");
@@ -222,7 +220,7 @@ export class PeerClient implements IPeerClient {
             intersectResult = await this.chainSyncClient.findIntersect([
                 tipPoint,
             ]);
-        }
+        };
 
         if (this.config.syncFromPoint && !this.config.syncFromTip) {
             logger.debug(
@@ -251,59 +249,42 @@ export class PeerClient implements IPeerClient {
             `Intersect result for peer ${this.peerId}:`,
             intersectResult.tip.point.blockHeader?.slotNumber,
         );
-        return intersectResult.tip.point;
+        return intersectResult.tip.point; 
     }
 
     // starts sync loop for all peers in parrallel
     async startSyncLoop(): Promise<void> {
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
-
-        this.chainSyncClient.on(
-            "rollForward",
-            async (rollForward: ChainSyncRollForward) => {
-                const tip = rollForward.tip.point.blockHeader?.slotNumber;
-                const headerValidationRes = await headerValidation(
-                    rollForward,
-                    this.shelleyGenesisConfig,
-                );
-                if (!headerValidationRes) {
-                    // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
-                    await this.chainSyncClient.requestNext();
-                    return;
-                }
-                if (parentPort) {
-                    // parentPort.postMessage({ type: "storeHeader", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, headerData: headerValidationRes.headerData });
-                    parentPort.postMessage({
-                        type: "headerValidated",
-                        peerId: this.peerId,
-                        era: headerValidationRes.era,
-                        epoch: headerValidationRes.epoch,
-                        slot: headerValidationRes.slot,
-                        blockHeaderHash: headerValidationRes.blockHeaderHash,
-                        headerData: headerValidationRes.headerData,
-                        tip: tip,
-                    });
-                }
-
-                const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock =
-                    await this.fetchBlock(
-                        headerValidationRes.slot,
-                        headerValidationRes.blockHeaderHash,
-                    );
-                blockValidation(newBlockRes);
-                if (parentPort) {
-                    parentPort.postMessage({
-                        type: "blockFetched",
-                        peerId: this.peerId,
-                        slot: headerValidationRes.slot,
-                        blockHeaderHash: headerValidationRes.blockHeaderHash,
-                        blockData: newBlockRes,
-                    });
-                }
+        this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
+            const tip = rollForward.tip.point.blockHeader?.slotNumber;
+            const headerValidationRes = await headerValidation(rollForward, this.shelleyGenesisConfig);
+            if (!(
+                headerValidationRes
+            )) {
                 // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
                 await this.chainSyncClient.requestNext();
-            },
-        );
+                return;
+            };
+            if (parentPort) {
+                // parentPort.postMessage({ type: "storeHeader", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, headerData: headerValidationRes.headerData });
+                parentPort.postMessage({
+                    type: "headerValidated",
+                    peerId: this.peerId,
+                    era: headerValidationRes.era,
+                    epoch: headerValidationRes.epoch,
+                    slot: headerValidationRes.slot,
+                    blockHeaderHash: headerValidationRes.blockHeaderHash,
+                    headerData: headerValidationRes.headerData,
+                    tip: tip
+                });
+            };
+            
+            const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await this.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
+            blockValidation(newBlockRes);
+            if (parentPort) parentPort.postMessage({type: "blockFetched", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, blockData: newBlockRes});
+            // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
+            await this.chainSyncClient.requestNext();
+        });
 
         this.chainSyncClient.on(
             "rollBackwards",

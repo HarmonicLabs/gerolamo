@@ -207,15 +207,15 @@ export class PeerManager implements IPeerManager {
         logger.debug("Shutting down PeerManager");
         for (const peer of this.allPeers.values()) {
             peer.terminate();
-        }
+        };
         try {
             await closeDB();
             logger.debug("LMDB worker closed");
         } catch (error) {
             logger.error(`Error closing LMDB worker: ${error}`);
-        }
-    }
-}
+        };
+    };
+};
 
 // Initialize the peer manager
 /*

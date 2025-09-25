@@ -9,21 +9,23 @@ worker.on("message", (msg: any) => {
     if (msg.type === "done") {
         const resolve = pendingPromises.get(msg.id);
         if (resolve) {
-            resolve(undefined);
-            pendingPromises.delete(msg.id);
+        resolve(undefined);
+        pendingPromises.delete(msg.id);
         }
     } else if (msg.type === "result") {
         const resolve = pendingPromises.get(msg.id);
         if (resolve) {
-            resolve(msg.data);
-            pendingPromises.delete(msg.id);
+        resolve(msg.data);
+        pendingPromises.delete(msg.id);
         }
     }
 });
 
 export function startLmdbWorker() {
-    return worker;
+  return worker;
 }
+
+
 
 export async function putHeader(
     slot: number | bigint,
@@ -124,10 +126,12 @@ export async function rollBackWards(
 }
 
 export async function closeDB(): Promise<void> {
-    const curId = idCounter++;
-    worker.postMessage({ type: "closeDB", id: curId });
-    return new Promise((resolve) => pendingPromises.set(curId, resolve));
-}
+    if (worker) {
+        const curId = idCounter++;
+        worker.postMessage({ type: "closeDB", id: curId });
+        return new Promise((resolve) => pendingPromises.set(curId, resolve));
+    }
+};
 
 // Utility to check if a string is a valid 64-char hex hash32
 function isHex(str: string): boolean {

@@ -17,6 +17,11 @@ const slotIndexDB = rootDB.openDB({
     encoding: "binary",
     keyEncoding: "ordered-binary",
 });
+const slotEpochStartIndexDB = rootDB.openDB({
+    name: "slot_to_epochStart",
+    encoding: "binary",
+    keyEncoding: "ordered-binary",
+});
 
 parentPort!.on("message", async (msg: any) => {
     if (msg.type === "putHeader") {

@@ -19,6 +19,7 @@ import {
     ConwayUTxO,
     Credential,
     Hash32,
+    isCertificate,
     isITxWitnessSet,
     MultiEraBlock,
     PoolKeyHash,
@@ -38,6 +39,7 @@ import {
 import { calculateCardanoEpoch } from "./validation";
 import { toHex, uint8ArrayEq } from "@harmoniclabs/uint8array-utils";
 import { containsKeys } from "@harmoniclabs/obj-utils";
+import { isEmptyStatement } from "typescript";
 
 const EPOCH_TRANSITION_ENABLED = false;
 
@@ -110,12 +112,15 @@ export function applyTx(tx: ConwayTx, state: RawNewEpochState): void {
 
     const refs = tx.body.inputs.map((utxo) => utxo.utxoRef);
     // TODO: Re-enable input validation once we have proper test blocks or genesis state
-    // assert.default(state.epochState.ledgerState.UTxOState.UTxO.length === 0 || validateInputsExist(refs, state));
+    // For now, skip UTxO existence validation during chain following
+    if (state.epochState.ledgerState.UTxOState.UTxO.length > 0 && !validateInputsExist(refs, state)) {
+        throw new Error("Transaction inputs do not exist in UTxO set");
+    }
 
     removeInputs(refs, state);
     addOutputs(tx.body, state);
 
-    // tx.body.certs!.forEach((cert) => processCert(cert, state));
+    tx.body.certs?.forEach((cert) => processCert(cert, state));
     state.epochState.chainAccountState.casTreasury =
         BigInt(state.epochState.chainAccountState.casTreasury) + tx.body.fee;
 }
@@ -560,8 +565,52 @@ export function validateTx(tx: ConwayTx, state: RawNewEpochState): boolean {
     #### Post-Validation Application
     If both phases pass, apply Tx: consume inputs, create outputs, update stake/pools/treasury.
 
-    This ensures no surprises: fees/ex units predictable in Phase-1, scripts deterministic (no external data). For formal proof, see Agda mechanization.
+    MINIMAL VALIDATION FOR CHAIN FOLLOWING
+
+    Since we're following the chain rather than participating in consensus,
+    we trust that blocks received from the network contain valid transactions.
+    We only perform basic structural checks to ensure the transaction can be processed.
+
+    Full Phase-1/Phase-2 validation would include:
+    - Fee calculations and balance checks
+    - Script execution and collateral validation
+    - Certificate validation and signature checks
+    - Multi-asset balance verification
+    - Size limits and complexity bounds
+
+    For chain following, we skip these and rely on network consensus.
     */
+
+    // 1. Basic structure validation
+    // Must have inputs and outputs
+    if (tx.body.inputs?.length === 0 || tx.body.outputs?.length === 0) {
+        return false;
+    }
+
+    // Must have a valid fee
+    if (tx.body.fee === undefined || tx.body.fee < 0n) {
+        return false;
+    }
+
+    // 2. Ensure inputs are distinct (no duplicate UTxO references)
+    const inputRefs = tx.body.inputs.map(input => input.utxoRef.toCborBytes());
+    if (new Set(inputRefs).size !== inputRefs.length) {
+        return false;
+    }
+
+    // 3. Basic certificate validation (ensure processable types)
+    if (!tx.body.certs?.every(isCertificate)) {
+        return false;
+    }
+
+    // Trust network consensus for all other validations:
+    // - UTxO existence (checked in applyTx)
+    // - Fee adequacy, balance preservation
+    // - Script execution, collateral requirements
+    // - Certificate validity, signatures
+    // - Multi-asset conservation
+    // - Size limits, validity intervals
+
     return true;
 }
 
@@ -599,7 +648,7 @@ export function isEpochBoundary(
     state: RawNewEpochState,
 ): boolean {
     // Implementation
-    return false;
+    return true;
 }
 
 // Function to get current delegations

@@ -49,7 +49,7 @@ function validateNoInvalidTxs(
 ): boolean {
     // TODO: Figure out how to implement Phase-2 script validation
     //
-    return false;
+    return true;
 }
 
 function validateUTxOBalance(

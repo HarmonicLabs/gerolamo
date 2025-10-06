@@ -110,10 +110,8 @@ export function applyTx(tx: ConwayTx, state: RawNewEpochState): void {
     // Implementation
     if (!validateTx(tx, state)) throw new Error();
 
-    const refs = tx.body.inputs.map((utxo) => utxo.utxoRef);
-    // TODO: Re-enable input validation once we have proper test blocks or genesis state
-    // For now, skip UTxO existence validation during chain following
-    if (state.epochState.ledgerState.UTxOState.UTxO.length > 0 && !validateInputsExist(refs, state)) {
+    const refs = tx.body.inputs.map((input) => input.utxoRef);
+    if (!validateInputsExist(refs, state)) {
         throw new Error("Transaction inputs do not exist in UTxO set");
     }
 
@@ -473,144 +471,52 @@ export function calculatePoolReward(
 
 // Function to validate a transaction against the state
 export function validateTx(tx: ConwayTx, state: RawNewEpochState): boolean {
-    /*
-    ### Transaction Validation Algorithm in Cardano
-
-    Based on the IOG research library and related documentation, transaction validation in Cardano (particularly in the Shelley/Babbage eras) is designed to be deterministic and "no-surprises," ensuring predictable outcomes, fees, and behavior before submission. This is achieved through the Extended Unspent Transaction Output (EUTXO) model, which avoids indeterminism common in account-based systems like Ethereum. The algorithm is divided into two phases: Phase-1 (structural and deterministic checks) and Phase-2 (script execution). Phase-1 must pass for Phase-2 to run, and collateral ensures fees are covered if Phase-2 fails. The process is formally specified in the Cardano ledger specs and supported by papers like "Formal specification of the Cardano blockchain ledger, mechanized in Agda."
-
-    The validation occurs before applying the transaction to the ledger, ensuring it can be processed without unexpected failures or costs. Below is a step-by-step detail of the algorithm, drawn from the ledger rules and blog posts on deterministic validation.
-
-    #### Preparation: Gather Ledger State and Protocol Parameters
-    Before validation, retrieve the current ledger state (UTxO set, stake distribution, pool parameters, etc.) and protocol parameters (e.g., `min_fee_a`, `min_fee_b`, `key_deposit`, `pool_deposit`, `collateral_percent`, `max_tx_size`, `max_ex_mem`, `max_ex_steps`). These are from the `NewEpochState` or equivalent.
-
-    #### Phase-1 Validation: Structural and Deterministic Checks
-    This phase ensures the transaction is well-formed and can pay its own fees without running scripts. It is fully deterministic, based on transaction size and structure. If Phase-1 fails, the transaction is rejected without cost (except minimal network propagation).
-
-    1. **Check Transaction Structure**:
-       - Verify the transaction body has all required fields: inputs, outputs, fee, validity interval, certificates, withdrawals, mint/burn, etc.
-       - Ensure inputs are distinct, outputs are valid addresses, and no duplicate certificates.
-       - If the transaction has Phase-2 scripts (e.g., Plutus V2), ensure collateral inputs are present and valid (no scripts in collateral outputs, only ADA).
-
-    2. **Validate UTxO Inputs**:
-       - All inputs must exist in the current UTxO set and be unspent.
-       - Sum input values (ADA and multi-assets).
-       - Ensure no input is locked by an expired timelock or invalid phase-1 script (multisig/timelock).
-
-    3. **Calculate Minimum Fee**:
-       - Compute transaction size in bytes (CBOR serialized).
-       - Fee = `min_fee_a * size + min_fee_b`.
-       - Assert transaction's declared fee >= calculated min fee.
-
-    4. **Check UTxO Balance (ADA Preservation)**:
-       - Sum inputs ADA >= sum outputs ADA + fee + net deposits (deposits - refunds).
-       - Deposits from certificates (e.g., `key_deposit` for stake reg, `pool_deposit` for pool reg).
-       - Refunds from withdrawals or deregistrations.
-       - No net ADA creation/destruction (except protocol-defined, e.g., rewards).
-
-    5. **Validate Multi-Asset Balance**:
-       - For non-ADA assets, sum inputs + mint = sum outputs + burn.
-       - Mint/burn must be authorized by policy scripts (checked in Phase-2 if scripted).
-
-    6. **Validate Validity Interval**:
-       - Current slot >= validity_start (if set) and < TTL (if set).
-       - Ensures transaction is timely.
-
-    7. **Validate Collateral (if Phase-2 Scripts Present)**:
-       - Collateral inputs must exist, contain only ADA, and sum >= (fee * collateral_percent) / 100.
-       - Collateral outputs must be simple (no scripts, no multi-assets).
-       - Collateral return address must be valid.
-
-    8. **Validate Certificates**:
-       - Check stake registrations, delegations, pool registrations/retirements comply with rules (e.g., pledge >= min, cost >= min_pool_cost).
-       - No duplicates, valid signatures.
-
-    9. **Validate Withdrawals**:
-       - Withdrawals from valid stake addresses, amount <= available rewards.
-       - Rewards calculated from 'go' snapshot.
-
-    10. **Validate Size Limits**:
-        - Tx size <= max_tx_size.
-        - Number of inputs, outputs, certs, etc., within bounds.
-
-    11. **Validate Phase-1 Scripts (if any)**:
-        - Simple scripts (multisig/timelock) must succeed without execution cost (deterministic).
-
-    If all Phase-1 checks pass, proceed to Phase-2; else, reject.
-
-    #### Phase-2 Validation: Script Execution
-    This phase runs Plutus V2 scripts (spending, minting, cert, reward withdrawal). It is bounded by ex units (mem/steps) to prevent infinite loops. If it fails, collateral pays the fees; if succeeds, regular fee is charged. Determinism is ensured by limiting script inputs to predictable data (no block header, no randomness).
-
-    1. **Assemble Script Contexts**:
-       - For spending: datum, redeemer, Tx info (inputs/outputs hashed, no full body for determinism).
-       - For mint: policy ID, redeemer, Tx info.
-       - For cert: cert, redeemer, Tx info.
-       - For withdrawal: stake address, redeemer, Tx info.
-
-    2. **Execute Scripts**:
-       - Run each Plutus script with context, datum/redeemer.
-       - Track ex units consumed (mem/steps <= tx's declared budget).
-       - All must succeed (return true).
-
-    3. **Check Ex Units**:
-       - Total ex units <= tx's ex units budget.
-       - If exceeds, fail and charge collateral.
-
-    4. **Handle Failure**:
-       - If any script fails or ex units exceed, charge collateral for fees (up to collateral sum).
-       - Return excess collateral to return address.
-
-    5. **Handle Success**:
-       - Apply Tx: update UTxO, process certs/withdrawals/mint.
-
-    #### Post-Validation Application
-    If both phases pass, apply Tx: consume inputs, create outputs, update stake/pools/treasury.
-
-    MINIMAL VALIDATION FOR CHAIN FOLLOWING
-
-    Since we're following the chain rather than participating in consensus,
-    we trust that blocks received from the network contain valid transactions.
-    We only perform basic structural checks to ensure the transaction can be processed.
-
-    Full Phase-1/Phase-2 validation would include:
-    - Fee calculations and balance checks
-    - Script execution and collateral validation
-    - Certificate validation and signature checks
-    - Multi-asset balance verification
-    - Size limits and complexity bounds
-
-    For chain following, we skip these and rely on network consensus.
-    */
+    // For chain following, perform basic structural checks
+    // Trust network consensus for full Phase-1/Phase-2 validation
 
     // 1. Basic structure validation
-    // Must have inputs and outputs
-    if (tx.body.inputs?.length === 0 || tx.body.outputs?.length === 0) {
+    if (!tx.body.inputs || tx.body.inputs.length === 0 ||
+        !tx.body.outputs || tx.body.outputs.length === 0) {
         return false;
     }
 
-    // Must have a valid fee
     if (tx.body.fee === undefined || tx.body.fee < 0n) {
         return false;
     }
 
-    // 2. Ensure inputs are distinct (no duplicate UTxO references)
+    // 2. Ensure inputs are distinct
     const inputRefs = tx.body.inputs.map(input => input.utxoRef.toCborBytes());
-    if (new Set(inputRefs).size !== inputRefs.length) {
+    if (new Set(inputRefs.map(ref => toHex(ref))).size !== inputRefs.length) {
         return false;
     }
 
-    // 3. Basic certificate validation (ensure processable types)
-    if (!tx.body.certs?.every(isCertificate)) {
+    // 3. Basic certificate validation
+    if (tx.body.certs && !tx.body.certs.every(isCertificate)) {
         return false;
     }
 
-    // Trust network consensus for all other validations:
-    // - UTxO existence (checked in applyTx)
-    // - Fee adequacy, balance preservation
-    // - Script execution, collateral requirements
-    // - Certificate validity, signatures
-    // - Multi-asset conservation
-    // - Size limits, validity intervals
+    // Additional basic checks for chain following
+    // 4. Validate UTxO inputs exist
+    if (!validateInputsExist(tx.body.inputs.map(input => input.utxoRef), state)) {
+        return false;
+    }
 
+    // 5. Basic balance check (simplified)
+    let inputSum = 0n;
+    for (const input of tx.body.inputs) {
+        const utxo = state.epochState.ledgerState.UTxOState.UTxO.find(
+            u => u.utxoRef.eq(input.utxoRef)
+        );
+        if (!utxo) return false;
+        inputSum += utxo.resolved.value.lovelaces;
+    }
+
+    let outputSum = tx.body.outputs.reduce((sum, output) => sum + output.value.lovelaces, 0n);
+    if (inputSum < outputSum + tx.body.fee) {
+        return false;
+    }
+
+    // Trust network for scripts, collateral, certificates, etc.
     return true;
 }
 

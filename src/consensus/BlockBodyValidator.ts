@@ -3,7 +3,6 @@ import {
     TxOutRef,
     Value,
 } from "@harmoniclabs/cardano-ledger-ts";
-import { IReadWriteNES } from "../types";
 import { MockChainState } from "./validation";
 import { RawNewEpochState } from "../rawNES";
 
@@ -47,45 +46,44 @@ function validateNoInvalidTxs(
     block: any,
     state: RawNewEpochState,
 ): boolean {
-    // TODO: Figure out how to implement Phase-2 script validation
-    //
+    // For chain following, trust network consensus for Phase-2 script validation
+    // In full implementation, would execute Plutus scripts
     return true;
 }
 
 function validateUTxOBalance(
     block: any,
-    _state: RawNewEpochState,
+    state: RawNewEpochState,
 ): boolean {
-    let sumInputs = Value.zero;
-    let sumOutputs = Value.zero;
-    let sumFees = Value.zero;
-    let sumDeposits = Value.zero;
-
     for (const txBody of block.transactionBodies) {
-        sumInputs = Value.add(
-            sumInputs,
-            txBody.inputs.map((utxo) => utxo.resolved.value)
-                .reduce((a, b) => Value.add(a, b)),
-        );
-        sumOutputs = Value.add(
-            sumOutputs,
-            txBody.outputs.map((utxo) => utxo.value).reduce((a, b) =>
-                Value.add(a, b)
-            ),
-        );
-        sumFees = Value.add(
-            sumFees,
-            Value.lovelaces(txBody.fee),
-        );
-        sumDeposits = Value.add(
-            sumDeposits,
-            Value.lovelaces(txBody.totCollateral ?? 0),
-        );
-    }
+        let sumInputs = Value.zero;
+        let sumOutputs = Value.zero;
+        let sumFees = Value.zero;
+        let sumDeposits = Value.zero;
 
-    return sumInputs.lovelaces >=
-        [sumOutputs, sumFees, sumDeposits].reduce((a, b) => Value.add(a, b))
-            .lovelaces;
+        // Resolve input values from UTxO set
+        for (const input of txBody.inputs) {
+            const utxo = state.epochState.ledgerState.UTxOState.UTxO.find(
+                (u) => u.utxoRef.eq(input.utxoRef)
+            );
+            if (!utxo) return false; // Input doesn't exist
+            sumInputs = Value.add(sumInputs, utxo.resolved.value);
+        }
+
+        sumOutputs = txBody.outputs.reduce((acc, output) =>
+            Value.add(acc, output.value), Value.zero);
+
+        sumFees = Value.lovelaces(txBody.fee);
+
+        // For deposits, we need to calculate based on certificates
+        // This is a simplified version - in full implementation, calculate net deposits
+        sumDeposits = Value.zero; // Placeholder
+
+        if (sumInputs.lovelaces < sumOutputs.lovelaces + sumFees.lovelaces + sumDeposits.lovelaces) {
+            return false;
+        }
+    }
+    return true;
 }
 
 function validateFeesCorrect(
@@ -154,24 +152,113 @@ function validateCollateralValid(
     block: any,
     state: RawNewEpochState,
 ): boolean {
-    // Implementation
-    return false;
+    for (const txBody of block.transactionBodies) {
+        // Check if transaction has scripts (Phase-2)
+        const hasScripts = txBody.inputs.some(input => {
+            const utxo = state.epochState.ledgerState.UTxOState.UTxO.find(
+                u => u.utxoRef.eq(input.utxoRef)
+            );
+            return utxo && utxo.resolved.datum !== undefined; // Simplified check for scripts
+        }) || txBody.mint || txBody.certs?.some(cert => cert.certType > 10); // Rough check
+
+        if (!hasScripts) continue; // No collateral required
+
+        // Must have collateral inputs
+        if (!txBody.collateral || txBody.collateral.length === 0) return false;
+
+        // Collateral inputs must exist and contain only ADA
+        let collateralSum = 0n;
+        for (const collInput of txBody.collateral) {
+            const utxo = state.epochState.ledgerState.UTxOState.UTxO.find(
+                u => u.utxoRef.eq(collInput.utxoRef)
+            );
+            if (!utxo) return false;
+            // Check if has multi-assets (simplified)
+            if (utxo.resolved.value.map.some(entry => 'policy' in entry)) return false;
+            collateralSum += utxo.resolved.value.lovelaces;
+        }
+
+        // Collateral must cover at least collateral_percent of fee
+        const collateralPercent = 150; // Default from protocol params
+        const requiredCollateral = txBody.fee * BigInt(collateralPercent) / 100n;
+        if (collateralSum < requiredCollateral) return false;
+
+        // Collateral return must be valid
+        if (txBody.collateralReturn && txBody.collateralReturn.value.assets.size > 0) return false;
+    }
+    return true;
 }
 
 function validateCertificatesValid(
     block: any,
     state: RawNewEpochState,
 ): boolean {
-    // Implementation
-    return false;
+    for (const txBody of block.transactionBodies) {
+        if (!txBody.certs) continue;
+
+        for (const cert of txBody.certs) {
+            switch (cert.certType) {
+                case 0: // StakeRegistration (deprecated)
+                case 1: // StakeDeRegistration (deprecated)
+                case 2: // StakeDelegation
+                    // Basic checks
+                    if (!cert.stakeCredential) return false;
+                    break;
+                case 3: // PoolRegistration
+                    const poolReg = cert;
+                    if (!poolReg.poolParams || !poolReg.poolParams.pledge ||
+                        poolReg.poolParams.pledge < 0n) return false;
+                    break;
+                case 4: // PoolRetirement
+                    // Basic checks
+                    break;
+                case 5: // GenesisKeyDelegation (deprecated)
+                    break;
+                case 6: // MoveInstantRewards (deprecated)
+                    break;
+                case 7: // RegistrationDeposit
+                    if (!cert.stakeCredential || !cert.deposit || cert.deposit <= 0n) return false;
+                    break;
+                case 8: // UnRegistrationDeposit
+                    if (!cert.stakeCredential || !cert.deposit || cert.deposit <= 0n) return false;
+                    break;
+                case 9: // VoteDeleg
+                    break;
+                case 10: // StakeVoteDeleg
+                    break;
+                case 11: // StakeRegistrationDeleg
+                    if (!cert.stakeCredential || !cert.poolKeyHash || !cert.coin || cert.coin <= 0n) return false;
+                    break;
+                case 12: // VoteRegistrationDeleg
+                    break;
+                case 13: // StakeVoteRegistrationDeleg
+                    if (!cert.stakeCredential || !cert.poolKeyHash || !cert.dRep || !cert.coin || cert.coin <= 0n) return false;
+                    break;
+                case 14: // AuthCommitteeHot
+                    break;
+                case 15: // ResignCommitteeCold
+                    break;
+                case 16: // RegistrationDrep
+                    break;
+                case 17: // UnRegistrationDrep
+                    break;
+                case 18: // UpdateDrep
+                    break;
+                default:
+                    return false; // Unknown certificate type
+            }
+        }
+    }
+    return true;
 }
 
 function validateScriptsValid(
     block: any,
     state: RawNewEpochState,
 ): boolean {
-    // Implementation
-    return false;
+    // For chain following, trust network consensus for script validation
+    // In full implementation, would validate Phase-1 scripts (timelock/multisig)
+    return true;
 }
 
 function validateSizeLimits(

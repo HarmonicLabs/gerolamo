@@ -1,13 +1,13 @@
 import { ChainSyncRollBackwards, ChainSyncRollForward, PeerAddress, PeerAddressIPv4 }  from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import {  NetworkT } from "@harmoniclabs/cardano-ledger-ts";
-import { PeerClient } from "./PeerClient";
-import { logger } from "../utils/logger";
-import { parseTopology } from "./topology/parseTopology";
-import { Topology, TopologyRoot } from "./topology/topology";
-import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { closeDB } from "./lmdbWorkers/lmdb";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
-import { RawNewEpochState } from "../rawNES";
+import { PeerClient } from "../peerClientWorkers/PeerClient";
+import { logger } from "../../utils/logger";
+import { parseTopology } from "../topology/parseTopology";
+import { Topology, TopologyRoot } from "../topology/topology";
+import { uint32ToIpv4 } from "../utils/uint32ToIpv4";
+import { closeDB } from "../lmdbWorkers/lmdb";
+import { ShelleyGenesisConfig } from "../../config/preprod/ShelleyGenesisTypes";
+import { RawNewEpochState } from "../../rawNES";
 
 //This class is not being used anymore in flavor of workers however
 //still need to move the interfaces from here.

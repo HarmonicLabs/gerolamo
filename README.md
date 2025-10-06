@@ -15,6 +15,8 @@
 
 # Gerolamo
 
+https://miro.com/app/live-embed/uXjVJ-6VFqQ=/?embedMode=view_only_without_ui&moveToViewport=-1456%2C-726%2C1817%2C919&embedId=712366805313
+
 ## How to run
 • You will need latest version of Bun JS Run time from https://bun.sh<br />
 • Clone the repo: `git clone https://github.com/@harmoniclabs/gerolamo`<br />

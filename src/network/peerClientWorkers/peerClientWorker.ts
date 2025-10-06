@@ -1,7 +1,7 @@
 import { parentPort, workerData } from "worker_threads";
 import { PeerClient } from "./PeerClient";
-import { GerolamoConfig } from "./PeerManager";
-import { logger } from "../utils/logger";
+import { GerolamoConfig } from "../peerManagerWorkers/peerManagerWorker";
+import { logger } from "../../utils/logger";
 
 let config: GerolamoConfig;
 let allPeers = new Map<string, PeerClient>();

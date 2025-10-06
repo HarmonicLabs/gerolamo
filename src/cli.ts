@@ -7,7 +7,7 @@ import * as streamPromises from "node:stream/promises";
 import { Cbor } from "@harmoniclabs/cbor";
 import { RawNewEpochState } from "./rawNES";
 import { Worker } from "worker_threads";
-import { startPeerManager } from "./network/startPeerManager";
+import { startPeerManager } from "./network/peerManagerWorkers/startPeerManager";
 // import { Database } from "bun:sqlite";
 // import "./types/polyfills";
 import { logger } from "./utils/logger";
@@ -24,7 +24,7 @@ export async function startNode(configPath: string) {
         // const config = await loadConfig(configPath);
         const configFile = Bun.file(configPath);
         const config = await configFile.json();
-        // logger.debug("Config loaded:", config);
+        logger.debug("Config loaded:", config);
 
         // Start LMDB worker
         logger.debug("Starting LMDB worker...");
@@ -80,7 +80,17 @@ export async function startNode(configPath: string) {
         logger.error("Failed to start node:", error);
         process.exit(1);
     }
-}
+};
+
+export function SyncNode() {
+    program
+        .command("start")
+        .description("Start Gerolamo node:(bun src/index.ts --config ./src/config/preprod/config.json)")
+        .option("--config <path>", "Path to config file")
+        .action(async (options) => {
+            await startNode(options.config);
+        });
+};
 
 async function fetchLedgerState(cborDirPath: string) {
     console.log("Downloading ledger state snapshots to", cborDirPath);
@@ -137,6 +147,7 @@ export async function getCbor(cborFile: string, outputDirPath: string) {
     // nes.put(db);
 }
 
+/*
 export function Main() {
     console.log("Starting CLI");
     program.name("Gerolamo");
@@ -171,16 +182,6 @@ export function Main() {
 
     program.command("init", "Initialize Gerolamo(not implement yet)").action(() => undefined);
 }
-
-
-export function SyncNode() {
-    program
-        .command("start")
-        .description("Start Gerolamo node:(bun src/index.ts --config ./src/config/config.json)")
-        .option("--config <path>", "Path to config file", "./src/config/config.json")
-        .action(async (options) => {
-            await startNode(options.config);
-        });
-}
+*/
 
 export { program };

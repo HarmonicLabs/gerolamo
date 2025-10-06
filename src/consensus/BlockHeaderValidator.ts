@@ -31,7 +31,7 @@ import { Cbor } from "@harmoniclabs/cbor";
 import { RawNewEpochState } from "../rawNES";
 import * as assert from "node:assert/strict";
 import * as wasm from "wasm-kes";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
+import { ShelleyGenesisConfig } from "../config/preprod/ShelleyGenesisTypes"
 import { logger } from "../utils/logger";
 
 const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(

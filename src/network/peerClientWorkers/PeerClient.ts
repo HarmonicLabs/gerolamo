@@ -1,13 +1,14 @@
 import { BlockFetchClient, ChainPoint, ChainSyncClient, HandshakeAcceptVersion, HandshakeClient, KeepAliveClient, KeepAliveResponse, Multiplexer, PeerAddress, PeerSharingClient, PeerSharingResponse, ChainSyncRollForward, ChainSyncRollBackwards, ChainSyncIntersectFound, ChainSyncIntersectNotFound, ChainSyncFindIntersect, BlockFetchBlock, BlockFetchNoBlocks } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { connect } from "node:net";
-import { logger } from "../utils/logger";
-import { getLastSlot } from "./lmdbWorkers/lmdb";
+import { logger } from "../../utils/logger";
+import { getLastSlot } from "../lmdbWorkers/lmdb";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
-import { GerolamoConfig } from "./PeerManager";
-import { RawNewEpochState } from "../rawNES";
-import { headerValidation, blockValidation } from "./validators";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
+import { GerolamoConfig } from "../peerManagerWorkers/peerManagerWorker";
+import { RawNewEpochState } from "../../rawNES";
+import { headerValidation, blockValidation } from "../consensus/validators";
+import { ShelleyGenesisConfig } from "../../config/preprod/ShelleyGenesisTypes";
 import { parentPort } from "worker_threads";
+import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 
 export interface IPeerClient {
     host: string;
@@ -208,15 +209,15 @@ export class PeerClient implements IPeerClient {
                     hash: fromHex(this.config.syncFromPointBlockHash)
                 }
             })
+            
             intersectResult = await this.chainSyncClient.findIntersect([newChainPoint]);
             if (intersectResult instanceof ChainSyncIntersectNotFound) {
                 throw new Error("Configured syncFromPoint not found on peer");
             };
-            logger.debug("Sync from Point: Intersected at: ", intersectResult.point.blockHeader?.slotNumber)
+            logger.debug("Sync from Point ", intersectResult.point.blockHeader?.slotNumber)
         };
 
-        logger.debug(`Intersect result for peer ${this.peerId}:`, intersectResult.tip.point.blockHeader?.slotNumber,
-        );
+        // logger.debug("intersectResult: ", intersectResult);
         return intersectResult.tip.point; 
     }
 
@@ -229,28 +230,42 @@ export class PeerClient implements IPeerClient {
             if (!(
                 headerValidationRes
             )) {
-                // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
+                logger.debug("header validaiotn failed");
                 await this.chainSyncClient.requestNext();
                 return;
             };
             if (parentPort) {
-                // parentPort.postMessage({ type: "storeHeader", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, headerData: headerValidationRes.headerData });
                 parentPort.postMessage({
                     type: "headerValidated",
                     peerId: this.peerId,
+                    epochNonce: headerValidationRes.epochNonce,
                     era: headerValidationRes.era,
                     epoch: headerValidationRes.epoch,
                     slot: headerValidationRes.slot,
                     blockHeaderHash: headerValidationRes.blockHeaderHash,
-                    headerData: headerValidationRes.headerData,
-                    tip: tip
+                    multiEraHeader: headerValidationRes.multiEraHeader,
+                    nonceVrfProofBytes: headerValidationRes.nonceVrfProofBytes,
+                    nonceVrfProofHash: headerValidationRes.nonceVrfProofHash,
+                    tip: tip,
                 });
             };
             
             const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await this.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
-            blockValidation(newBlockRes);
-            if (parentPort) parentPort.postMessage({type: "blockFetched", peerId: this.peerId, slot: headerValidationRes.slot, blockHeaderHash: headerValidationRes.blockHeaderHash, blockData: newBlockRes});
-            // logger.debug(`Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tip} - Percent Complete: ${((Number(slot) / Number(tip)) * 100).toFixed(2)}%`);
+            const multiEraBlock: MultiEraBlock | undefined = await blockValidation(newBlockRes);
+            if
+                (!(multiEraBlock instanceof MultiEraBlock
+            )) {
+                // logger.error(`Block validation failed for peer ${this.peerId} at slot ${headerValidationRes.slot}`);
+                await this.chainSyncClient.requestNext();
+                return;
+            };
+            if (parentPort) parentPort.postMessage({
+                type: "blockFetched",
+                peerId: this.peerId,
+                slot: headerValidationRes.slot,
+                blockHeaderHash: headerValidationRes.blockHeaderHash,
+                multiEraBlock: multiEraBlock.toCborBytes()
+            });
             await this.chainSyncClient.requestNext();
         });
 

@@ -1,16 +1,21 @@
 import { Cbor, CborArray, CborBytes, CborTag, LazyCborArray } from "@harmoniclabs/cbor";
 import { BlockFetchNoBlocks, BlockFetchBlock } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { blake2b_256 } from "@harmoniclabs/crypto";
-import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, MultiEraHeader, ShelleyHeader, MultiEraBlock, ShelleyBlock, AllegraBlock, MaryBlock, AlonzoBlock, BabbageBlock, ConwayBlock } from "@harmoniclabs/cardano-ledger-ts";
+import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, MultiEraHeader, ShelleyHeader, MultiEraBlock, BabbageHeaderBody, ConwayHeaderBody, VrfProofBytes, VrfProofHash, VrfCert } from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { logger } from "../utils/logger";
-import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
-import { ValidateHeader } from "./consensus/BlockHeaderValidator";
-import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
+import { logger } from "../../utils/logger";
+import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
+import { ValidatePostBabbageHeader, ValidatePreBabbageHeader } from "./BlockHeaderValidator";
+import { blockFrostFetchEra } from "../utils/blockFrostFetchEra";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes"
+import { ShelleyGenesisConfig } from "../../config/preprod/ShelleyGenesisTypes"
 
-export async function headerValidation( data: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig) {
+/*
+THIS NEEDS TO BE WITH THE CONSENSUS WORKER
+*/
+
+export async function headerValidation(data: ChainSyncRollForward, shelleyGenesis: ShelleyGenesisConfig) {
+    // logger.debug("validating header...")
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
     if (!(
         data.data instanceof CborArray
@@ -70,25 +75,34 @@ export async function headerValidation( data: ChainSyncRollForward, shelleyGenes
         era: blcokHeaderBodyEra,
         header: parsedHeader,
     });
-    // logger.debug("MultiEraHeader: ", multiEraHeader);
-
+    // logger.debug("MultiEraHeader: ", (multiEraHeader.header.body instanceof BabbageHeaderBody || multiEraHeader.header.body instanceof ConwayHeaderBody) ? multiEraHeader.header.body.vrfResult.toCborBytes() : multiEraHeader.header.body.nonceVrfResult);
+    // logger.debug("multieraheader bytes:, ", multiEraHeader.toCborBytes());
     const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
+    // logger.debug("blockheaderHash: ", blockHeaderHash);
     const headerEpoch = calculatePreProdCardanoEpoch(Number(multiEraHeader.header.body.slot));
     const epochNonce = await blockFrostFetchEra(headerEpoch as number);
     const slot = multiEraHeader.header.body.slot;
 	    
     // const validateHeaderRes = await validateHeader(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis);
-    const validateHeader = new ValidateHeader();
+    const validateHeader = multiEraHeader.header.body instanceof BabbageHeaderBody || multiEraHeader.header.body instanceof ConwayHeaderBody ? new ValidatePostBabbageHeader() : new ValidatePreBabbageHeader();
     const validateHeaderRes = await validateHeader.validate(multiEraHeader, fromHex(epochNonce.nonce), shelleyGenesis);
     // logger.debug("Header validation result: ", validateHeaderRes);
     
+    const nonceVrfCert: VrfCert = multiEraHeader.header.body instanceof BabbageHeaderBody || multiEraHeader.header.body instanceof ConwayHeaderBody ? multiEraHeader.header.body.vrfResult : multiEraHeader.header.body.nonceVrfResult;
+    const nonceVrfProofBytes: VrfProofBytes = multiEraHeader.header.body instanceof BabbageHeaderBody || multiEraHeader.header.body instanceof ConwayHeaderBody ? multiEraHeader.header.body.vrfResult.proof : multiEraHeader.header.body.nonceVrfResult.proof;
+    const nonceVrfProofHash: VrfProofHash =  multiEraHeader.header.body instanceof BabbageHeaderBody || multiEraHeader.header.body instanceof ConwayHeaderBody ? multiEraHeader.header.body.vrfResult.proofHash : multiEraHeader.header.body.nonceVrfResult.proofHash;
+    // logger.debug("nonceVrfCert: ", nonceVrfCert.toCborBytes());
+
     if (!validateHeaderRes) return;
     return {
         era: blcokHeaderBodyEra,
+        epochNonce: fromHex(epochNonce.nonce),
         epoch: headerEpoch,
         slot,
         blockHeaderHash,
-        headerData: blockHeaderData
+        multiEraHeader: multiEraHeader.toCborBytes(),
+        nonceVrfProofBytes: nonceVrfProofBytes,
+        nonceVrfProofHash: nonceVrfProofHash
     };
 };
 
@@ -105,11 +119,11 @@ export async function blockValidation(newBlock: BlockFetchNoBlocks | BlockFetchB
     // logger.debug("Lazy: ", toHex(newBlock.blockData))
     // logger.log("Block Era: ", blockEra);
     // logger.debug("block: ", block);
-
+    logger.debug("Block data: ", toHex(newBlock.blockData), "\n\n\n");
     const newMultiEraBlock = MultiEraBlock.fromCbor(toHex(newBlock.blockData))
     // logger.debug("MultiEraBlock: ", newMultiEraBlock);
     // Call function here that does block applicaiton here which takes multiEraHeader.
-    // return newMultiEraBlock;
+    return newMultiEraBlock;
 };
 
 //**

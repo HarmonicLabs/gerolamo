@@ -1,8 +1,8 @@
 import { Worker } from "worker_threads";
-import { GerolamoConfig } from "./PeerManager";
+import { GerolamoConfig } from "./peerManagerWorker";
 
 export async function startPeerManager(config: GerolamoConfig) {
-	const worker = new Worker("./src/network/peerManagerWorker.ts", { workerData: config });
+	const worker = new Worker("./src/network/peerManagerWorkers/peerManagerWorker.ts", { workerData: config });
 	worker.postMessage({ type: "init" });
 	return new Promise((resolve) => {
 		worker.on("message", (msg) => {

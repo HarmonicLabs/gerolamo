@@ -18,13 +18,15 @@
 https://miro.com/app/live-embed/uXjVJ-6VFqQ=/?embedMode=view_only_without_ui&moveToViewport=-1456%2C-726%2C1817%2C919&embedId=712366805313
 
 ## How to run
-• You will need latest version of Bun JS Run time from https://bun.sh<br />
-• Clone the repo: `git clone https://github.com/@harmoniclabs/gerolamo`<br />
-• install deps: `bun i`<br />
-• Start node with config: `bun src/index.ts --config ./src/config/config.json` (same as subcommand `start-node`)<br />
-• View help: `bun src/index.ts --help`<br />
-• Use subcommands: `bun src/index.ts start-node --config ./src/config/config.json` (same as above, starts and syncs the node based on config)<br />
-• Other commands: `bun src/index.ts download-ledger-state <path>, etc.`<br />
+
+• You will need latest version of Bun JS Run time from https://bun.sh<br /> •
+Clone the repo: `git clone https://github.com/@harmoniclabs/gerolamo`<br /> •
+install deps: `bun i`<br /> • Start node with config:
+`bun src/index.ts --config ./src/config/config.json` (same as subcommand
+`start-node`)<br /> • View help: `bun src/index.ts --help`<br /> • Use
+subcommands: `bun src/index.ts start-node --config ./src/config/config.json`
+(same as above, starts and syncs the node based on config)<br /> • Other
+commands: `bun src/index.ts download-ledger-state <path>, etc.`<br />
 
 ## Roadmap
 

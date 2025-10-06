@@ -15,7 +15,6 @@ import {
 } from "@harmoniclabs/cbor";
 import { INonMyopic, RawNonMyopic } from "./epoch_state/non_myopic";
 import { decodeCoin, ILikelihood, RawLikelihood } from "./epoch_state/common";
-import * as assert from "node:assert/strict";
 import { CanBeUInteger } from "@harmoniclabs/cardano-ledger-ts/dist/utils/ints";
 import { RewardSnapshot } from "./_rewards_update";
 
@@ -51,19 +50,19 @@ export class RawPulsingRewUpdate implements IPulsingRewUpdate {
     }
 
     static fromCborObj(cborObj: CborObj): RawPulsingRewUpdate {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 1);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 1) throw new Error();
 
         // WHY, CHARLES?????? WHY????????????????????????????????
-        const [d] = cborObj.array;
-        assert.default(d instanceof CborArray);
-        assert.equal(d.array.length, 2);
+        const [d] = (cborObj as CborArray).array;
+        if (!(d instanceof CborArray)) throw new Error();
+        if ((d as CborArray).array.length !== 2) throw new Error();
 
-        const [choice, data] = d.array;
-        assert.default(choice instanceof CborUInt);
+        const [choice, data] = (d as CborArray).array;
+        if (!(choice instanceof CborUInt)) throw new Error();
 
         return new RawPulsingRewUpdate(
-            choice.num
+            (choice as CborUInt).num
                 ? new RawComplete(RawRewardUpdate.fromCborObj(data))
                 : RawPulsing.fromCborObj(data),
         );
@@ -95,16 +94,16 @@ export class RawProtVer implements IProtVer {
     }
 
     static fromCborObj(cborObj: CborObj): RawProtVer {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 2);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 2) throw new Error();
 
-        const [pvMajor, pvMinor] = cborObj.array;
-        assert.default(pvMajor instanceof CborUInt);
-        assert.default(pvMinor instanceof CborUInt);
+        const [pvMajor, pvMinor] = (cborObj as CborArray).array;
+        if (!(pvMajor instanceof CborUInt)) throw new Error();
+        if (!(pvMinor instanceof CborUInt)) throw new Error();
 
         return new RawProtVer(
-            pvMajor.num,
-            pvMinor.num,
+            (pvMajor as CborUInt).num,
+            (pvMinor as CborUInt).num,
         );
     }
 
@@ -180,8 +179,8 @@ export class RawRewardSnapshot implements IRewardSnapshot {
     }
 
     static fromCborObj(cborObj: CborObj): RawRewardSnapshot {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array, 8);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 8) throw new Error();
 
         const [
             rewFees,
@@ -192,10 +191,10 @@ export class RawRewardSnapshot implements IRewardSnapshot {
             rewDeltaT1,
             rewLikelihoods,
             rewLeaders,
-        ] = cborObj.array;
+        ] = (cborObj as CborArray).array;
 
-        assert.default(rewLikelihoods instanceof CborMap);
-        assert.default(rewLeaders instanceof CborMap);
+        if (!(rewLikelihoods instanceof CborMap)) throw new Error();
+        if (!(rewLeaders instanceof CborMap)) throw new Error();
 
         return new RawRewardSnapshot(
             decodeCoin(rewFees),
@@ -204,15 +203,15 @@ export class RawRewardSnapshot implements IRewardSnapshot {
             decodeCoin(rewDeltaR1),
             decodeCoin(rewR),
             decodeCoin(rewDeltaT1),
-            rewLikelihoods.map.map((entry) => [
+            (rewLikelihoods as CborMap).map.map((entry) => [
                 PoolKeyHash.fromCborObj(entry.k),
                 RawLikelihood.fromCborObj(entry.v),
             ]),
-            rewLeaders.map.map((entry) => {
-                assert.default(entry.v instanceof CborArray);
+            (rewLeaders as CborMap).map.map((entry) => {
+                if (!(entry.v instanceof CborArray)) throw new Error();
                 return [
                     StakeCredentials.fromCborObj(entry.k),
-                    entry.v.array.map((cObj: CborObj) =>
+                    (entry.v as CborArray).array.map((cObj: CborObj) =>
                         RawReward.fromCborObj(cObj)
                     ),
                 ];
@@ -297,24 +296,24 @@ export class RawPulser implements IPulser {
     }
 
     static fromCborObj(cborObj: CborObj): RawPulser {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 2);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 2) throw new Error();
 
-        const [accumRewardAns, recentRewardAns] = cborObj.array;
+        const [accumRewardAns, recentRewardAns] = (cborObj as CborArray).array;
 
-        assert.default(accumRewardAns instanceof CborMap);
-        assert.default(recentRewardAns instanceof CborMap);
+        if (!(accumRewardAns instanceof CborMap)) throw new Error();
+        if (!(recentRewardAns instanceof CborMap)) throw new Error();
 
         return new RawPulser(
-            accumRewardAns.map.map((entry) => [
+            (accumRewardAns as CborMap).map.map((entry) => [
                 StakeCredentials.fromCborObj(entry.k),
                 RawReward.fromCborObj(entry.v),
             ]),
-            recentRewardAns.map.map((entry) => {
-                assert.default(entry.v instanceof CborArray);
+            (recentRewardAns as CborMap).map.map((entry) => {
+                if (!(entry.v instanceof CborArray)) throw new Error();
                 return [
                     StakeCredentials.fromCborObj(entry.k),
-                    entry.v.array.map((cObj: CborObj) =>
+                    (entry.v as CborArray).array.map((cObj: CborObj) =>
                         RawReward.fromCborObj(cObj)
                     ),
                 ];
@@ -350,12 +349,12 @@ export class RawPulsing {
     }
 
     static fromCborObj(cborObj: CborObj): RawPulsing {
-        assert.default(nonCompleteUpdatesEnabled);
+        if (!nonCompleteUpdatesEnabled) throw new Error();
 
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 2);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 2) throw new Error();
 
-        const [rewardSnapshot, pulser] = cborObj.array;
+        const [rewardSnapshot, pulser] = (cborObj as CborArray).array;
         return new RawPulsing([
             RawRewardSnapshot.fromCborObj(rewardSnapshot),
             RawPulser.fromCborObj(pulser),
@@ -391,15 +390,21 @@ export class RawReward implements IReward {
     }
 
     static fromCborObj(cborObj: CborObj): RawReward {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 3);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 3) throw new Error();
 
-        const [rewardType, rewardPool, rewardAmount] = cborObj.array;
-        assert.default(rewardType instanceof CborUInt);
-        assert.default(rewardType.num === 1n || rewardType.num === 0n);
+        const [rewardType, rewardPool, rewardAmount] =
+            (cborObj as CborArray).array;
+        if (!(rewardType instanceof CborUInt)) throw new Error();
+        if (
+            !((rewardType as CborUInt).num === 1n ||
+                (rewardType as CborUInt).num === 0n)
+        ) throw new Error();
 
         return new RawReward(
-            rewardType.num ? RewardType.LeaderReward : RewardType.MemberReward,
+            (rewardType as CborUInt).num
+                ? RewardType.LeaderReward
+                : RewardType.MemberReward,
             PoolKeyHash.fromCborObj(rewardPool),
             decodeCoin(rewardAmount),
         );
@@ -465,21 +470,24 @@ export class RawRewardUpdate implements IRewardUpdate {
     }
 
     static fromCborObj(cborObj: CborObj): RawRewardUpdate {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 5);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 5) throw new Error();
 
-        const [deltaT, deltaR, rs, deltaF, nonMyopic] = cborObj.array;
-        assert.default(rs instanceof CborMap);
+        const [deltaT, deltaR, rs, deltaF, nonMyopic] =
+            (cborObj as CborArray).array;
+        if (!(rs instanceof CborMap)) throw new Error();
 
         return new RawRewardUpdate(
             decodeCoin(deltaT),
             decodeCoin(deltaR),
-            rs.map.map((entry) => {
-                assert.default(entry.v instanceof CborTag);
-                assert.default(entry.v.data instanceof CborArray);
+            (rs as CborMap).map.map((entry) => {
+                if (!(entry.v instanceof CborTag)) throw new Error();
+                if (!((entry.v as CborTag).data instanceof CborArray)) {
+                    throw new Error();
+                }
                 return [
                     StakeCredentials.fromCborObj(entry.k),
-                    entry.v.data.array.map((cObj) =>
+                    (entry.v as CborTag).data.array.map((cObj) =>
                         RawReward.fromCborObj(cObj)
                     ),
                 ];

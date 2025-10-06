@@ -93,7 +93,7 @@ export async function getHeaderBySlot(
     const curId = idCounter++;
     worker.postMessage({ type: "getHeaderBySlot", slot, id: curId });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
-};
+}
 
 // Convenience: Get header by hash
 export async function getHeaderByHash(
@@ -103,7 +103,7 @@ export async function getHeaderByHash(
     const curId = idCounter++;
     worker.postMessage({ type: "getHeaderByHash", blockHeaderHash, id: curId });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
-};
+}
 
 // Convenience: Get block by slot (uses slotIndexDB internally)
 export async function getBlockBySlot(
@@ -112,7 +112,7 @@ export async function getBlockBySlot(
     const curId = idCounter++;
     worker.postMessage({ type: "getBlockBySlot", slot, id: curId });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
-};
+}
 
 // Convenience: Get block by hash
 export async function getBlockByHash(
@@ -122,7 +122,7 @@ export async function getBlockByHash(
     const curId = idCounter++;
     worker.postMessage({ type: "getBlockByHash", blockHeaderHash, id: curId });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
-};
+}
 
 
 export async function getHeader(
@@ -131,7 +131,7 @@ export async function getHeader(
 ): Promise<Uint8Array | undefined>
 {
     return getHeaderBySlot(slot);
-};
+}
 
 // Helper: Get hash by slot (for internal use or queries)
 export async function getHashBySlot(
@@ -174,7 +174,7 @@ export async function rollBackWards(
     return new Promise<boolean>((resolve) =>
         pendingPromises.set(curId, resolve)
     );
-};
+}
 
 export async function closeDB(): Promise<void> {
     if (worker) {
@@ -187,7 +187,7 @@ export async function closeDB(): Promise<void> {
 // Utility to check if a string is a valid 64-char hex hash32
 function isHex(str: string): boolean {
     return /^[0-9a-fA-F]{64}$/.test(str);
-};
+}
 
 // Export for API use: Resolve identifier to hash (slot or hex hash string)
 export async function resolveToHash(

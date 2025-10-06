@@ -1,20 +1,20 @@
-import * as assert from "node:assert/strict";
-
 import {
     Coin,
+    Credential,
+    CredentialType,
     PoolKeyHash,
     PoolParams,
-    StakeCredentials,
 } from "@harmoniclabs/cardano-ledger-ts";
 
 import { CborArray, CborMap, CborObj } from "@harmoniclabs/cbor";
 import { IPoolDistr } from "../pool_distr";
 
 import { decodeCoin } from "./common";
+import { ShelleyProtocolParams } from "../../config/ShelleyGenesisTypes";
 
 const calcPoolDistrEnabled = false;
 
-type _Stake = [StakeCredentials, Coin][];
+type _Stake = [Credential<CredentialType>, Coin][];
 export interface IStake {
     get stake(): _Stake;
     set stake(s: _Stake);
@@ -27,10 +27,10 @@ export class RawStake implements IStake {
         this._stake = stake;
     }
     static fromCborObj(cborObj: CborObj): RawStake {
-        assert.default(cborObj instanceof CborMap);
+        if (!(cborObj instanceof CborMap)) throw new Error();
         return new RawStake(
-            cborObj.map.map((entry) => [
-                StakeCredentials.fromCborObj(entry.k),
+            (cborObj as CborMap).map.map((entry) => [
+                Credential.fromCborObj(entry.k),
                 decodeCoin(entry.v),
             ]),
         );
@@ -44,7 +44,7 @@ export class RawStake implements IStake {
     }
 }
 
-type _Delegations = [StakeCredentials, PoolKeyHash][];
+type _Delegations = [Credential<CredentialType>, PoolKeyHash][];
 
 export interface IDelegations {
     get delegations(): _Delegations;
@@ -59,10 +59,10 @@ export class RawDelegations implements IDelegations {
     }
 
     static fromCborObj(cborObj: CborObj): RawDelegations {
-        assert.default(cborObj instanceof CborMap);
+        if (!(cborObj instanceof CborMap)) throw new Error();
         return new RawDelegations(
-            cborObj.map.map((entry) => [
-                StakeCredentials.fromCborObj(entry.k),
+            (cborObj as CborMap).map.map((entry) => [
+                Credential.fromCborObj(entry.k),
                 PoolKeyHash.fromCborObj(entry.v),
             ]),
         );
@@ -91,13 +91,13 @@ export class RawPParams implements IPParams {
     }
 
     static fromCborObj(cborObj: CborObj): RawPParams {
-        assert.default(cborObj instanceof CborMap);
+        if (!(cborObj instanceof CborMap)) throw new Error();
         return new RawPParams(
-            cborObj.map.map((entry) => {
-                assert.default(entry.v instanceof CborArray);
+            (cborObj as CborMap).map.map((entry) => {
+                if (!(entry.v instanceof CborArray)) throw new Error();
                 return [
                     PoolKeyHash.fromCborObj(entry.k),
-                    PoolParams.fromCborObjArray(entry.v.array),
+                    PoolParams.fromCborObjArray((entry.v as CborArray).array),
                 ];
             }),
         );
@@ -141,10 +141,11 @@ export class RawSnapshot implements ISnapshot {
     }
 
     static fromCborObj(cborObj: CborObj): RawSnapshot {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 3);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 3) throw new Error();
 
-        const [stake, ssDelegations, ssPoolParams] = cborObj.array;
+        const [stake, ssDelegations, ssPoolParams] =
+            (cborObj as CborArray).array;
 
         return new RawSnapshot(
             RawStake.fromCborObj(stake),
@@ -176,7 +177,7 @@ export class RawSnapshot implements ISnapshot {
 }
 
 export function calculatePoolDistr(_snapshots: ISnapshot): IPoolDistr {
-    assert.default(calcPoolDistrEnabled);
+    if (!calcPoolDistrEnabled) throw new Error();
     return undefined as unknown as IPoolDistr;
 }
 
@@ -215,10 +216,11 @@ export class RawSnapshots implements ISnapshots {
     }
 
     static fromCborObj(cborObj: CborObj): RawSnapshots {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 4);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 4) throw new Error();
 
-        const [ssStakeMark, ssStakeSet, ssStakeGo, ssFee] = cborObj.array;
+        const [ssStakeMark, ssStakeSet, ssStakeGo, ssFee] =
+            (cborObj as CborArray).array;
 
         return new RawSnapshots(
             RawSnapshot.fromCborObj(ssStakeMark),
@@ -254,5 +256,52 @@ export class RawSnapshots implements ISnapshots {
     }
     set fee(fee: Coin) {
         this._ssFee = fee;
+    }
+}
+
+export interface IProtocolParams {
+    get pparams(): ShelleyProtocolParams;
+    set pparams(pp: ShelleyProtocolParams);
+}
+
+export class RawProtocolParams implements IProtocolParams {
+    _pparams: ShelleyProtocolParams;
+
+    constructor(pparams: ShelleyProtocolParams) {
+        this._pparams = pparams;
+    }
+
+    static fromCborObj(cborObj: CborObj): RawProtocolParams {
+        if (!(cborObj instanceof CborMap)) throw new Error();
+        // Parse CBOR map into ShelleyProtocolParams structure
+        // For now, return default values - this would need full implementation
+        const defaultParams: ShelleyProtocolParams = {
+            protocolVersion: { minor: 0, major: 0 },
+            decentralisationParam: 0,
+            eMax: 0,
+            extraEntropy: { tag: "NeutralNonce" },
+            maxTxSize: 0,
+            maxBlockBodySize: 0,
+            maxBlockHeaderSize: 0,
+            minFeeA: 0,
+            minFeeB: 0,
+            minUTxOValue: 0,
+            poolDeposit: 500000000,
+            minPoolCost: 340000000,
+            keyDeposit: 2000000,
+            nOpt: 150,
+            rho: 0.003,
+            tau: 0.2,
+            a0: 0.3,
+        };
+        return new RawProtocolParams(defaultParams);
+    }
+
+    get pparams(): ShelleyProtocolParams {
+        return this._pparams;
+    }
+
+    set pparams(pp: ShelleyProtocolParams) {
+        this._pparams = pp;
     }
 }

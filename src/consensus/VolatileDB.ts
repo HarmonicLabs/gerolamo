@@ -1,4 +1,5 @@
 import { AnchoredVolatileState, Point } from "./AnchoredVolatileState";
+import { uint8ArrayEq } from "@harmoniclabs/uint8array-utils";
 
 // VolatileDB manages a sequence of AnchoredVolatileState
 // Based on Amaru's VolatileDB design
@@ -52,7 +53,7 @@ export class VolatileDB {
                 ix++;
             } else if (
                 diff.point.slot === point.slot &&
-                diff.point.hash.toString() === point.hash.toString()
+                uint8ArrayEq(diff.point.hash.toBuffer(), point.hash.toBuffer())
             ) {
                 // Merge UTxOs into cache
                 this.cache.merge(diff.state._utxos);

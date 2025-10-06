@@ -1,6 +1,36 @@
-import { ConwayHeader, BabbageHeader, AlonzoHeader, MaryHeader, AllegraHeader, ShelleyHeader, isIBabbageHeader,  isIConwayHeader, isIAlonzoHeader, isIMaryHeader, isIAllegraHeader, isIShelleyHeader, KesPubKey, KesSignature, MultiEraHeader, PoolKeyHash, PublicKey, VrfCert, IVrfCert } from "@harmoniclabs/cardano-ledger-ts";
-import { blake2b_256, verifyEd25519Signature_sync, VrfProof03 } from "@harmoniclabs/crypto";
-import { concatUint8Array, fromHex, toHex, uint8ArrayEq, writeBigUInt64BE } from "@harmoniclabs/uint8array-utils";
+import {
+    AllegraHeader,
+    AlonzoHeader,
+    BabbageHeader,
+    ConwayHeader,
+    isIAllegraHeader,
+    isIAlonzoHeader,
+    isIBabbageHeader,
+    isIConwayHeader,
+    isIMaryHeader,
+    isIShelleyHeader,
+    IVrfCert,
+    KesPubKey,
+    KesSignature,
+    MaryHeader,
+    MultiEraHeader,
+    PoolKeyHash,
+    PublicKey,
+    ShelleyHeader,
+    VrfCert,
+} from "@harmoniclabs/cardano-ledger-ts";
+import {
+    blake2b_256,
+    verifyEd25519Signature_sync,
+    VrfProof03,
+} from "@harmoniclabs/crypto";
+import {
+    concatUint8Array,
+    fromHex,
+    toHex,
+    uint8ArrayEq,
+    writeBigUInt64BE,
+} from "@harmoniclabs/uint8array-utils";
 import { PoolOperationalCert } from "@harmoniclabs/cardano-ledger-ts";
 import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
@@ -21,7 +51,10 @@ export class ValidatePostBabbageHeader {
         this.lState = RawNewEpochState.init();
     }
 
-    private verifyKnownLeader(issuerPubKey: PoolKeyHash, poolDistr: [PoolKeyHash, bigint][]): boolean {
+    private verifyKnownLeader(
+        issuerPubKey: PoolKeyHash,
+        poolDistr: [PoolKeyHash, bigint][],
+    ): boolean {
         const knownLeader = poolDistr.find(([pkh, _ps]) =>
             uint8ArrayEq(pkh.toCborBytes(), issuerPubKey.toCborBytes())
         );
@@ -33,7 +66,10 @@ export class ValidatePostBabbageHeader {
         leaderRelativeStake: BigDecimal,
         certifiedLeaderVrf: bigint,
     ): boolean {
-        const denom = BigDecimal.sub(CERTIFIED_NATURAL_MAX, BigDecimal.fromBigint(certifiedLeaderVrf));
+        const denom = BigDecimal.sub(
+            CERTIFIED_NATURAL_MAX,
+            BigDecimal.fromBigint(certifiedLeaderVrf),
+        );
         const recipQ = BigDecimal.div(CERTIFIED_NATURAL_MAX, denom);
         const c = BigDecimal.sub(BigDecimal.fromBigint(1n), asc).ln();
         const x = BigDecimal.mul(leaderRelativeStake, c).neg();
@@ -58,7 +94,10 @@ export class ValidatePostBabbageHeader {
         return wasm.verify(signature, kesPeriod, pubKey, body);
     }
 
-    private verifyOpCertError(cert: PoolOperationalCert, issuer: PublicKey): boolean {
+    private verifyOpCertError(
+        cert: PoolOperationalCert,
+        issuer: PublicKey,
+    ): boolean {
         return verifyEd25519Signature_sync(
             cert.signature,
             concatUint8Array(
@@ -132,7 +171,8 @@ export class ValidatePostBabbageHeader {
         );
 
         const totalActiveStake = this.lState.poolDistr.totalActiveStake;
-        const individualStake = this.lState.GET_nes_pd_individual_total_pool_stake!(issuer);
+        const individualStake = this.lState
+            .GET_nes_pd_individual_total_pool_stake!(issuer);
 
         let stakeRatio: BigDecimal;
         if (totalActiveStake === 0n) {
@@ -142,7 +182,9 @@ export class ValidatePostBabbageHeader {
                 return false;
             }
         } else {
-            stakeRatio = BigDecimal.from(individualStake).div(BigDecimal.from(totalActiveStake));
+            stakeRatio = BigDecimal.from(individualStake).div(
+                BigDecimal.from(totalActiveStake),
+            );
         }
 
         const verifyLeaderStake = this.verifyLeaderEligibility(
@@ -357,9 +399,13 @@ export class ValidatePreBabbageHeader {
             BigInt(`0x${toHex(header.body.leaderVrfResult.proofHash)}`),
         );
 
-        const verifyOpCertValidity = this.verifyOpCertError(header.body.opCert, new PublicKey(header.body.issuerPubKey));
+        const verifyOpCertValidity = this.verifyOpCertError(
+            header.body.opCert,
+            new PublicKey(header.body.issuerPubKey),
+        );
 
-        const headerBodyBytes = Cbor.encode(header.toCborObj().array[0]).toBuffer();
+        const headerBodyBytes = Cbor.encode(header.toCborObj().array[0])
+            .toBuffer();
 
         const verifyKES = this.verifyKESSignature(
             header.body.slot / slotsPerKESPeriod,
@@ -386,4 +432,4 @@ export class ValidatePreBabbageHeader {
             verifyKES
         );
     }
-};
+}

@@ -6,7 +6,6 @@ import {
     CborPositiveRational,
 } from "@harmoniclabs/cbor";
 import { Rational, VRFKeyHash } from "@harmoniclabs/cardano-ledger-ts";
-import * as assert from "node:assert/strict";
 
 import { decodeCoin } from "./epoch_state/common";
 
@@ -37,15 +36,16 @@ export class RawIndividualPoolStake implements IIndividualPoolStake {
     }
 
     static fromCborObj(v: CborObj): RawIndividualPoolStake {
-        assert.default(v instanceof CborArray);
-        assert.equal(v.array.length, 3);
+        if (!(v instanceof CborArray)) throw new Error();
+        if ((v as CborArray).array.length !== 3) throw new Error();
 
-        const [iPS, individualTotalPoolStake, individualPoolStakeVrf] = v.array;
+        const [iPS, individualTotalPoolStake, individualPoolStakeVrf] =
+            (v as CborArray).array;
         const individualPoolStake = CborPositiveRational
             .fromCborObjOrUndef(
                 iPS,
             );
-        assert.default(individualPoolStake !== undefined);
+        if (individualPoolStake === undefined) throw new Error();
 
         return new RawIndividualPoolStake(
             individualPoolStake,
@@ -101,14 +101,14 @@ export class RawPoolDistr implements IPoolDistr {
     }
 
     static fromCborObj(cborObj: CborObj): RawPoolDistr {
-        assert.default(cborObj instanceof CborArray);
-        assert.equal(cborObj.array.length, 2);
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 2) throw new Error();
 
-        const [unPoolDistr, pdTotalActiveStake] = cborObj.array;
-        assert.default(unPoolDistr instanceof CborMap);
+        const [unPoolDistr, pdTotalActiveStake] = (cborObj as CborArray).array;
+        if (!(unPoolDistr instanceof CborMap)) throw new Error();
 
         return new RawPoolDistr(
-            unPoolDistr.map.map((entry) => {
+            (unPoolDistr as CborMap).map.map((entry) => {
                 return [
                     PoolKeyHash.fromCborObj(entry.k),
                     RawIndividualPoolStake.fromCborObj(entry.v),

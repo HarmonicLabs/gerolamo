@@ -1,5 +1,3 @@
-import * as assert from "node:assert/strict";
-
 import { CborArray, CborObj, CborSimple, CborUInt } from "@harmoniclabs/cbor";
 import { Coin } from "@harmoniclabs/cardano-ledger-ts";
 
@@ -17,15 +15,17 @@ export class RawLikelihood implements ILikelihood {
     }
 
     static fromCborObj(cborObj: CborObj): RawLikelihood {
-        assert.default(cborObj instanceof CborArray);
+        if (!(cborObj instanceof CborArray)) throw new Error();
 
         return new RawLikelihood(
-            cborObj.array.map((v) => {
-                assert.default(v instanceof CborSimple);
-                assert.equal(v.numAs, "float");
-                assert.default(typeof v.simple === "number");
+            (cborObj as CborArray).array.map((v) => {
+                if (!(v instanceof CborSimple)) throw new Error();
+                if ((v as CborSimple).numAs !== "float") throw new Error();
+                if (!(typeof (v as CborSimple).simple === "number")) {
+                    throw new Error();
+                }
 
-                return v.simple;
+                return (v as CborSimple).simple as number;
             }),
         );
     }
@@ -40,6 +40,6 @@ export class RawLikelihood implements ILikelihood {
 }
 
 export function decodeCoin(cborObj: CborObj): Coin {
-    assert.default(cborObj instanceof CborUInt);
-    return cborObj.num;
+    if (!(cborObj instanceof CborUInt)) throw new Error();
+    return (cborObj as CborUInt).num;
 }

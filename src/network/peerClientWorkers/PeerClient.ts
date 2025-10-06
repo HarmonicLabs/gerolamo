@@ -259,38 +259,23 @@ export class PeerClient implements IPeerClient {
                 await this.chainSyncClient.requestNext();
                 return;
             };
-            if (parentPort) {
-                parentPort.postMessage({
-                    type: "headerValidated",
-                    peerId: this.peerId,
-                    epochNonce: headerValidationRes.epochNonce,
-                    era: headerValidationRes.era,
-                    epoch: headerValidationRes.epoch,
-                    slot: headerValidationRes.slot,
-                    blockHeaderHash: headerValidationRes.blockHeaderHash,
-                    multiEraHeader: headerValidationRes.multiEraHeader,
-                    nonceVrfProofBytes: headerValidationRes.nonceVrfProofBytes,
-                    nonceVrfProofHash: headerValidationRes.nonceVrfProofHash,
-                    tip: tip,
-                });
-            };
             
             const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await this.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
             const multiEraBlock: MultiEraBlock | undefined = await blockValidation(newBlockRes);
-            if
-                (!(multiEraBlock instanceof MultiEraBlock
+            if (!(multiEraBlock instanceof MultiEraBlock
             )) {
                 // logger.error(`Block validation failed for peer ${this.peerId} at slot ${headerValidationRes.slot}`);
                 await this.chainSyncClient.requestNext();
                 return;
             };
+            
             if (parentPort) parentPort.postMessage({
                 type: "blockFetched",
                 peerId: this.peerId,
-                slot: headerValidationRes.slot,
-                blockHeaderHash: headerValidationRes.blockHeaderHash,
-                multiEraBlock: multiEraBlock.toCborBytes()
+                multiEraBlock: multiEraBlock.toCborBytes(),
+                tip: tip,
             });
+            
             await this.chainSyncClient.requestNext();
         });
 

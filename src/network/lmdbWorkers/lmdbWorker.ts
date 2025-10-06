@@ -23,12 +23,12 @@ const epochVrfIndexDb = rootDB.openDB({ name: "epoch_vrf_index" });
 
 parentPort!.on("message", async (msg: any) => {
     if (msg.type === "putHeader") {
-        headersDB.put(msg.blockHeaderHash, msg.multiEraHeader);
-        slotIndexDB.put(Number(msg.slot), msg.blockHeaderHash);
-        epochNonceIndexDb.put(Number(msg.epoch), msg.epochNonce);
-        epochSlotHeaderHashIndexDB.put(Number(msg.epoch), msg.currentEpochHeaderHashes);
-        epochRollingNonceDb.put(Number(msg.epoch), msg.currentRollingNonces);
-        epochVrfIndexDb.put(Number(msg.epoch), msg.currentVrfOutputs);
+        // headersDB.put(msg.blockHeaderHash, msg.multiEraHeader);
+        // slotIndexDB.put(Number(msg.slot), msg.blockHeaderHash);
+        // epochNonceIndexDb.put(Number(msg.epoch), msg.epochNonce);
+        // epochSlotHeaderHashIndexDB.put(Number(msg.epoch), msg.currentEpochHeaderHashes);
+        // epochRollingNonceDb.put(Number(msg.epoch), msg.currentRollingNonces);
+        // epochVrfIndexDb.put(Number(msg.epoch), msg.currentVrfOutputs);
         parentPort!.postMessage({ type: "done", id: msg.id });
     };
     if (msg.type === "putBlock") {

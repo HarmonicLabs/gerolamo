@@ -4,12 +4,14 @@ import { parseTopology } from "../topology/parseTopology";
 import { Topology } from "../topology/topology";
 import { ShelleyGenesisConfig } from "../../config/preprod/ShelleyGenesisTypes";
 import { putHeader, putEpochNonce, getEpochNonce, getLastSlot } from "../lmdbWorkers/lmdb";
-import { Hash32, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
+import { Hash32, MultiEraBlock, NetworkT, VrfProofBytes, VrfProofHash, VrfCert, BabbageHeaderBody, ConwayHeaderBody } from "@harmoniclabs/cardano-ledger-ts";
 import { calcEpochNonce } from "../utils/calcEpochNonce";
 import { PeerClient } from "../peerClientWorkers/PeerClient";
 import { toHex } from "@harmoniclabs/uint8array-utils";
-
-
+import { Cbor, CborArray, CborBytes, CborTag, LazyCborArray } from "@harmoniclabs/cbor"
+import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
+import { blake2b_256 } from "@harmoniclabs/crypto";
+import { blockFrostFetchEra } from "../utils/blockFrostFetchEra";
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly networkMagic: number;
@@ -65,14 +67,7 @@ async function initPeerClientWorker() {
 export interface IMsg { 
 	type: string;
 	peerId: string;
-	era: number | bigint;
-	epochNonce: Uint8Array;
-	epoch: number | bigint;
-	slot: number | bigint;
-	blockHeaderHash: Uint8Array;
-	multiEraHeader: Uint8Array;
-	nonceVrfProofBytes: Uint8Array;
-	nonceVrfProofHash: Uint8Array;
+	multiEraBlock: Uint8Array;
 	tip: number | bigint;
 	addId: string;
 	point: {
@@ -81,7 +76,6 @@ export interface IMsg {
 			blockHash: Uint8Array | Hash32;
 		};
 	};
-	multiEraBlock: Uint8Array;
 }
 
 let currentEpoch: number | null = null;
@@ -98,33 +92,52 @@ function setupPeerClientListener() {
 	peerClientWorker.on("message", async (msg: IMsg) => {
 		if (msg.type === "headerValidated"){
 
-			vrfOutput = msg.nonceVrfProofHash.subarray(0, 32);
-			currentVrfOutputs.push({ [Number(msg.slot)]: vrfOutput });
-
-			if ( currentEpoch === null) currentEpoch = Number(msg.epoch);
-			if ( firstEpochSlot === null) firstEpochSlot = Number(msg.slot);
-			if ( currentEpoch && currentEpoch < msg.epoch ) calcEpochNonce(currentEpoch, shelleyGenesisConfig, Number(msg.slot));
-			if ( currentEpoch && currentEpoch < msg.epoch ) firstEpochSlot = Number(msg.slot);
-			if ( currentEpoch && currentEpoch < msg.epoch ) rollingNonce = new Uint8Array(32);
-			if ( currentEpoch && currentEpoch < msg.epoch ) currentRollingNonces = [];
-			if ( currentEpoch && currentEpoch < msg.epoch ) currentVrfOutputs = [];
-			if ( currentEpoch && currentEpoch < msg.epoch ) currentEpoch = Number(msg.epoch);
-
-			
-			await putHeader(msg.epochNonce, msg.epoch, msg.slot, msg.blockHeaderHash, msg.multiEraHeader, currentRollingNonces, currentEpochHeaderHashes, currentVrfOutputs);
-			
-            logger.debug(`Validated - Era: ${msg.era} - Epoch: ${msg.epoch} - Block Header Hash: ${toHex(msg.blockHeaderHash)} - Absolute Slot: ${msg.slot} of ${msg.tip} - Total Percent Complete: ${((Number(msg.slot) / Number(msg.tip)) * 100).toFixed(2)}%`);
 		};
 		
 		if (msg.type === "blockFetched")
 		{
-			// logger.debug(`Block fetched: ${msg.peerId}, slot ${msg.slot}`);
-			// logger.debug(toHex(msg.multiEraBlock));
+			// logger.debug(`Block fetched: ${msg.peerId}, tip ${msg.tip}`);
+			const multiEraBLockParsed = MultiEraBlock.fromCbor(msg.multiEraBlock);
+			// logger.debug("Block: ", toHex(multiEraBLockParsed.block.toCborBytes()))
+			const era = multiEraBLockParsed.era;
+			// logger.debug("Era: ", era);
+			const blockHeader = multiEraBLockParsed.block.header;
+			// logger.debug("Block Header: ", blockHeader);
+			const blockSlot = Number(blockHeader.body.slot);
+			// logger.debug("Slot: ", slot);
+			const blockEpoch = calculatePreProdCardanoEpoch(Number(blockSlot));
+			// logger.debug("Epoch: ", blockEpoch);
+			const blockHeaderHash = blake2b_256(blockHeader.toCborBytes());
+			// logger.debug("Block Header Hash: ", toHex(blockHeaderHash));
+			const epochNonce = await blockFrostFetchEra(blockEpoch as number);
+			// logger.debug("Epoch Nonce: ", epochNonce);
+
+			// const nonceVrfCert: VrfCert = blockHeader.header.body instanceof BabbageHeaderBody || multiEraHeader.header.body instanceof ConwayHeaderBody ? multiEraHeader.header.body.vrfResult : multiEraHeader.header.body.nonceVrfResult;
+			const nonceVrfProofBytes: VrfProofBytes = blockHeader.body instanceof BabbageHeaderBody || blockHeader.body instanceof ConwayHeaderBody ? blockHeader.body.vrfResult.proof : blockHeader.body.nonceVrfResult.proof;
+			const nonceVrfProofHash: VrfProofHash = blockHeader.body instanceof BabbageHeaderBody || blockHeader.body instanceof ConwayHeaderBody ? blockHeader.body.vrfResult.proofHash : blockHeader.body.nonceVrfResult.proofHash;
+
+			vrfOutput = nonceVrfProofHash.subarray(0, 32);
+			currentVrfOutputs.push({ [Number(blockSlot)]: vrfOutput });
+
+			if ( currentEpoch === null) currentEpoch = Number(blockEpoch);
+			if ( firstEpochSlot === null) firstEpochSlot = Number(blockSlot);
+			if ( currentEpoch && currentEpoch < blockEpoch ) calcEpochNonce(currentEpoch, shelleyGenesisConfig, Number(blockSlot));
+			if ( currentEpoch && currentEpoch < blockEpoch ) firstEpochSlot = Number(blockSlot);
+			if ( currentEpoch && currentEpoch < blockEpoch ) rollingNonce = new Uint8Array(32);
+			if ( currentEpoch && currentEpoch < blockEpoch ) currentRollingNonces = [];
+			if ( currentEpoch && currentEpoch < blockEpoch ) currentVrfOutputs = [];
+			if ( currentEpoch && currentEpoch < blockEpoch ) currentEpoch = Number(blockEpoch);
+
+			await putHeader(epochNonce, blockEpoch, blockSlot, blockHeaderHash, blockHeader.toCborBytes(), currentRollingNonces, currentEpochHeaderHashes, currentVrfOutputs);
+			// logger.debug(`Validated - Era: ${era} - Epoch: ${blockEpoch} - Block Header Hash: ${toHex(blockHeaderHash)} - Absolute Slot: ${blockSlot} of ${msg.tip} - Total Percent Complete: ${((Number(blockSlot) / Number(msg.tip)) * 100).toFixed(2)}%`);
+			prettyBlockValidationLog(era, Number(blockEpoch), blockHeaderHash, blockSlot, msg.tip, toHex)
 		};
+
 		if (msg.type === "rollBack")
 		{
 			logger.debug(`Roll back: ${msg.peerId}, point ${msg.point.blockHeader?.slotNumber}`);
 		};
+
 		if (msg.type === "peerAdded")
 		{
 			peerAddedResolvers.get(msg.addId)?.(msg.peerId);
@@ -132,8 +145,6 @@ function setupPeerClientListener() {
 		};
 	});
 };
-
-
 
 async function addPeer(host: string, port: number | bigint, category: string) {
 	const addId = `${host}:${port}:${Math.floor(Date.now() / 1000)}`;
@@ -210,3 +221,82 @@ parentPort!.on("message", async (msg: any) => {
 	};
 });
 
+
+import { stdout } from 'process'; // Bun/Node built-in
+let logLines = 0; // Track lines for updates
+function prettyBlockValidationLog(
+	era: number,
+	blockEpoch: number,
+	blockHeaderHash: Uint8Array,
+	blockSlot: bigint | number,
+	tip: bigint | number,
+	toHex?: (bytes: Uint8Array) => string
+): void {
+	const slotNum = Number(blockSlot);
+	const tipNum = Number(tip);
+	const percent = ((slotNum / tipNum) * 100).toFixed(2);
+	const hashHex = toHex ? toHex(blockHeaderHash) : blockHeaderHash.toString();
+	const shortHash = hashHex.slice(0, 16) + '...';
+
+	// Progress bar
+	const progressWidth = 50;
+	const filled = Math.floor((slotNum / tipNum) * progressWidth);
+	const progressBar = '█'.repeat(filled) + '░'.repeat(progressWidth - filled);
+
+	// ANSI colors
+	const green = '\x1b[32m';
+	const yellow = '\x1b[33m';
+	const reset = '\x1b[0m';
+	const bold = '\x1b[1m';
+	const clearLine = '\r\x1b[K'; // Carriage return + clear to end of line
+	const moveUp = '\x1b[A'; // Up one line
+	const moveDown = '\x1b[B'; // Down one line
+
+	// Core lines (without trailing \n yet)
+	const title = `${green}✓ BLOCK VALIDATED${reset} ${bold}(${era} Era)${reset}`;
+	const details = `Epoch: ${blockEpoch.toString().padStart(4, ' ')} | Slot: ${slotNum.toLocaleString().padStart(8, ' ')} / ${tipNum.toLocaleString()} (${percent}%)`;
+	const hashLine = `Header Hash: ${shortHash}`;
+	const footer = `Gerolamo Sync: Forging the Chain in TS`;
+
+	// ASCII frame (fixed width: 72 chars inner, total ~74)
+	const frameTop = '╔' + '═'.repeat(70) + '╗';
+	const frameMid = '║' + ' '.repeat(70) + '║';
+	const frameBot = '╚' + '═'.repeat(70) + '╝';
+	const linkLeft = ' ⛓ ';
+	const linkRight = ' ⛓ ';
+
+	// Build output lines array (exact 9 lines)
+	const outputLines = [
+		frameTop,
+		`║${linkLeft}${title.padEnd(66)}${linkRight}║`,
+		frameMid,
+		`║${linkLeft}${details.padEnd(66)}${linkRight}║`,
+		`║${linkLeft}${hashLine.padEnd(66)}${linkRight}║`,
+		`║${linkLeft}Progress: [${progressBar}] ${percent}%${linkRight}║`,
+		frameMid,
+		`║${yellow}${footer.padEnd(70)}${reset}${linkRight}║`,
+		frameBot
+	];
+
+	const totalLines = outputLines.length;
+
+	// Clear previous block if exists
+	if (logLines > 0) {
+		// Move up to start of previous block and clear down
+		stdout.write(`\x1b[${logLines}A\x1b[0J`); // Up to top, clear from cursor to end
+	}
+
+	// Write new block line-by-line with precise control (no extra \n)
+	outputLines.forEach((line, index) => {
+		if (index === 0) {
+		stdout.write(clearLine + line + '\n');
+		} else {
+		stdout.write(line + '\n');
+		}
+	});
+
+	// No need to move down; next log will overwrite from current position
+	// (Cursor is now after the new block; subsequent calls will move up from there)
+
+	logLines = totalLines; // Update for next call
+}

@@ -97,7 +97,7 @@ self.addEventListener("message", async (event: MessageEvent) => {
 
     if (msg.type === "putHeader") {
         try {
-            await sql.begin(async tx => {
+            await sql.begin(async (tx) => {
                 await tx`
                     INSERT OR REPLACE INTO headers (hash, header_data)
                     VALUES (${msg.blockHeaderHash}, ${msg.header})
@@ -110,7 +110,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             self.postMessage({ type: "done", id: msg.id });
         } catch (error: any) {
             console.error("Error in putHeader:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "putBlock") {
         try {
@@ -121,7 +125,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             self.postMessage({ type: "done", id: msg.id });
         } catch (error: any) {
             console.error("Error in putBlock:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getHeader") {
         try {
@@ -129,7 +137,9 @@ self.addEventListener("message", async (event: MessageEvent) => {
                 SELECT h.header_data
                 FROM headers h
                 JOIN slot_index si ON h.hash = si.block_hash
-                WHERE si.slot = ${BigInt(msg.slot)} AND si.block_hash = ${msg.blockHeaderHash}
+                WHERE si.slot = ${
+                BigInt(msg.slot)
+            } AND si.block_hash = ${msg.blockHeaderHash}
             `;
             self.postMessage({
                 type: "result",
@@ -138,7 +148,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             });
         } catch (error: any) {
             console.error("Error in getHeader:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getHeaderBySlot") {
         try {
@@ -155,7 +169,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             });
         } catch (error: any) {
             console.error("Error in getHeaderBySlot:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getHeaderByHash") {
         try {
@@ -169,7 +187,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             });
         } catch (error: any) {
             console.error("Error in getHeaderByHash:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getBlockBySlot") {
         try {
@@ -186,7 +208,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             });
         } catch (error: any) {
             console.error("Error in getBlockBySlot:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getBlockByHash") {
         try {
@@ -200,12 +226,18 @@ self.addEventListener("message", async (event: MessageEvent) => {
             });
         } catch (error: any) {
             console.error("Error in getBlockByHash:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getHashBySlot") {
         try {
             const result = await sql`
-                SELECT block_hash FROM slot_index WHERE slot = ${BigInt(msg.slot)}
+                SELECT block_hash FROM slot_index WHERE slot = ${
+                BigInt(msg.slot)
+            }
             `;
             self.postMessage({
                 type: "result",
@@ -214,7 +246,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             });
         } catch (error: any) {
             console.error("Error in getHashBySlot:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getLastSlot") {
         try {
@@ -225,11 +261,17 @@ self.addEventListener("message", async (event: MessageEvent) => {
             self.postMessage({
                 type: "result",
                 id: msg.id,
-                data: result.length > 0 ? { slot: result[0].slot, hash: result[0].block_hash } : null,
+                data: result.length > 0
+                    ? { slot: result[0].slot, hash: result[0].block_hash }
+                    : null,
             });
         } catch (error: any) {
             console.error("Error in getLastSlot:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "rollBackWards") {
         try {
@@ -244,7 +286,7 @@ self.addEventListener("message", async (event: MessageEvent) => {
                 return;
             }
 
-            await sql.begin(async tx => {
+            await sql.begin(async (tx) => {
                 // Get slots to remove
                 const slotsToRemove = await tx`
                     SELECT slot FROM slot_index WHERE slot > ${rollbackPointBig}
@@ -277,7 +319,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             self.postMessage({ type: "result", id: msg.id, data: true });
         } catch (error: any) {
             console.error("Error in rollBackWards:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "putEpochNonce") {
         try {
@@ -288,12 +334,18 @@ self.addEventListener("message", async (event: MessageEvent) => {
             self.postMessage({ type: "done", id: msg.id });
         } catch (error: any) {
             console.error("Error in putEpochNonce:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getEpochNonce") {
         try {
             const result = await sql`
-                SELECT nonce FROM epoch_nonces WHERE epoch = ${BigInt(msg.epoch)}
+                SELECT nonce FROM epoch_nonces WHERE epoch = ${
+                BigInt(msg.epoch)
+            }
             `;
             self.postMessage({
                 type: "result",
@@ -302,13 +354,19 @@ self.addEventListener("message", async (event: MessageEvent) => {
             });
         } catch (error: any) {
             console.error("Error in getEpochNonce:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "putEpochSlotHeaderHashes") {
         try {
             const epochBig = BigInt(msg.epoch);
-            await sql.begin(async tx => {
-                for (const [slotStr, hash] of Object.entries(msg.headerHashes)) {
+            await sql.begin(async (tx) => {
+                for (
+                    const [slotStr, hash] of Object.entries(msg.headerHashes)
+                ) {
                     await tx`
                         INSERT OR REPLACE INTO epoch_slot_header_hashes (epoch, slot, hash)
                         VALUES (${epochBig}, ${BigInt(slotStr)}, ${hash})
@@ -318,7 +376,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             self.postMessage({ type: "done", id: msg.id });
         } catch (error: any) {
             console.error("Error in putEpochSlotHeaderHashes:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getEpochSlotHeaderHashes") {
         try {
@@ -329,21 +391,37 @@ self.addEventListener("message", async (event: MessageEvent) => {
             if (results.length === 0) {
                 self.postMessage({ type: "result", id: msg.id, data: null });
             } else {
-                const result = results.reduce((acc: { [key: string]: Uint8Array }, row: { slot: bigint; hash: Uint8Array }) => {
-                    acc[row.slot.toString()] = row.hash;
-                    return acc;
-                }, {} as { [key: string]: Uint8Array });
-                self.postMessage({ type: "result", id: msg.id, data: [result] });
+                const result = results.reduce(
+                    (
+                        acc: { [key: string]: Uint8Array },
+                        row: { slot: bigint; hash: Uint8Array },
+                    ) => {
+                        acc[row.slot.toString()] = row.hash;
+                        return acc;
+                    },
+                    {} as { [key: string]: Uint8Array },
+                );
+                self.postMessage({
+                    type: "result",
+                    id: msg.id,
+                    data: [result],
+                });
             }
         } catch (error: any) {
             console.error("Error in getEpochSlotHeaderHashes:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "putEpochRollingNonces") {
         try {
             const epochBig = BigInt(msg.epoch);
-            await sql.begin(async tx => {
-                for (const [slotStr, nonce] of Object.entries(msg.rollingNonces)) {
+            await sql.begin(async (tx) => {
+                for (
+                    const [slotStr, nonce] of Object.entries(msg.rollingNonces)
+                ) {
                     await tx`
                         INSERT OR REPLACE INTO epoch_rolling_nonces (epoch, slot, nonce)
                         VALUES (${epochBig}, ${BigInt(slotStr)}, ${nonce})
@@ -353,13 +431,19 @@ self.addEventListener("message", async (event: MessageEvent) => {
             self.postMessage({ type: "done", id: msg.id });
         } catch (error: any) {
             console.error("Error in putEpochRollingNonces:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getEpochRollingNonce") {
         try {
             const result = await sql`
                 SELECT nonce FROM epoch_rolling_nonces
-                WHERE epoch = ${BigInt(msg.epoch)} AND slot = ${BigInt(msg.slot)}
+                WHERE epoch = ${BigInt(msg.epoch)} AND slot = ${
+                BigInt(msg.slot)
+            }
             `;
             self.postMessage({
                 type: "result",
@@ -368,12 +452,16 @@ self.addEventListener("message", async (event: MessageEvent) => {
             });
         } catch (error: any) {
             console.error("Error in getEpochRollingNonce:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "putEpochVrfOutputs") {
         try {
             const epochBig = BigInt(msg.epoch);
-            await sql.begin(async tx => {
+            await sql.begin(async (tx) => {
                 for (const [slotStr, vrf] of Object.entries(msg.vrfOutputs)) {
                     await tx`
                         INSERT OR REPLACE INTO epoch_vrf_outputs (epoch, slot, vrf)
@@ -384,7 +472,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             self.postMessage({ type: "done", id: msg.id });
         } catch (error: any) {
             console.error("Error in putEpochVrfOutputs:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "getEpochVrfOutputs") {
         try {
@@ -395,15 +487,29 @@ self.addEventListener("message", async (event: MessageEvent) => {
             if (results.length === 0) {
                 self.postMessage({ type: "result", id: msg.id, data: null });
             } else {
-                const result = results.reduce((acc: { [key: string]: Uint8Array }, row: { slot: bigint; vrf: Uint8Array }) => {
-                    acc[row.slot.toString()] = row.vrf;
-                    return acc;
-                }, {} as { [key: string]: Uint8Array });
-                self.postMessage({ type: "result", id: msg.id, data: [result] });
+                const result = results.reduce(
+                    (
+                        acc: { [key: string]: Uint8Array },
+                        row: { slot: bigint; vrf: Uint8Array },
+                    ) => {
+                        acc[row.slot.toString()] = row.vrf;
+                        return acc;
+                    },
+                    {} as { [key: string]: Uint8Array },
+                );
+                self.postMessage({
+                    type: "result",
+                    id: msg.id,
+                    data: [result],
+                });
             }
         } catch (error: any) {
             console.error("Error in getEpochVrfOutputs:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     } else if (msg.type === "closeDB") {
         try {
@@ -411,7 +517,11 @@ self.addEventListener("message", async (event: MessageEvent) => {
             self.postMessage({ type: "done", id: msg.id });
         } catch (error: any) {
             console.error("Error in closeDB:", error);
-            self.postMessage({ type: "error", id: msg.id, error: error.message });
+            self.postMessage({
+                type: "error",
+                id: msg.id,
+                error: error.message,
+            });
         }
     }
 });

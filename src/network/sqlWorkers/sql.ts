@@ -190,9 +190,17 @@ class SqlStorage {
         });
     }
 
-    async putEpochNonce(epoch: number | bigint, nonce: Uint8Array): Promise<void> {
+    async putEpochNonce(
+        epoch: number | bigint,
+        nonce: Uint8Array,
+    ): Promise<void> {
         const curId = this.idCounter++;
-        this.worker.postMessage({ type: "putEpochNonce", epoch, nonce, id: curId });
+        this.worker.postMessage({
+            type: "putEpochNonce",
+            epoch,
+            nonce,
+            id: curId,
+        });
         return new Promise((resolve, reject) => {
             this.pendingPromises.set(curId, (result) => {
                 if (result instanceof Error) reject(result);
@@ -201,7 +209,9 @@ class SqlStorage {
         });
     }
 
-    async getEpochNonce(epoch: number | bigint): Promise<Uint8Array | undefined> {
+    async getEpochNonce(
+        epoch: number | bigint,
+    ): Promise<Uint8Array | undefined> {
         const curId = this.idCounter++;
         this.worker.postMessage({ type: "getEpochNonce", epoch, id: curId });
         return new Promise((resolve, reject) => {
@@ -212,9 +222,17 @@ class SqlStorage {
         });
     }
 
-    async putEpochSlotHeaderHashes(epoch: number | bigint, headerHashes: { [key: string]: Uint8Array }): Promise<void> {
+    async putEpochSlotHeaderHashes(
+        epoch: number | bigint,
+        headerHashes: { [key: string]: Uint8Array },
+    ): Promise<void> {
         const curId = this.idCounter++;
-        this.worker.postMessage({ type: "putEpochSlotHeaderHashes", epoch, headerHashes, id: curId });
+        this.worker.postMessage({
+            type: "putEpochSlotHeaderHashes",
+            epoch,
+            headerHashes,
+            id: curId,
+        });
         return new Promise((resolve, reject) => {
             this.pendingPromises.set(curId, (result) => {
                 if (result instanceof Error) reject(result);
@@ -223,9 +241,15 @@ class SqlStorage {
         });
     }
 
-    async getEpochSlotHeaderHashes(epoch: number | bigint): Promise<[{ [key: string]: Uint8Array }] | null> {
+    async getEpochSlotHeaderHashes(
+        epoch: number | bigint,
+    ): Promise<[{ [key: string]: Uint8Array }] | null> {
         const curId = this.idCounter++;
-        this.worker.postMessage({ type: "getEpochSlotHeaderHashes", epoch, id: curId });
+        this.worker.postMessage({
+            type: "getEpochSlotHeaderHashes",
+            epoch,
+            id: curId,
+        });
         return new Promise((resolve, reject) => {
             this.pendingPromises.set(curId, (result) => {
                 if (result instanceof Error) reject(result);
@@ -234,9 +258,17 @@ class SqlStorage {
         });
     }
 
-    async putEpochRollingNonces(epoch: number | bigint, rollingNonces: { [key: string]: Uint8Array }): Promise<void> {
+    async putEpochRollingNonces(
+        epoch: number | bigint,
+        rollingNonces: { [key: string]: Uint8Array },
+    ): Promise<void> {
         const curId = this.idCounter++;
-        this.worker.postMessage({ type: "putEpochRollingNonces", epoch, rollingNonces, id: curId });
+        this.worker.postMessage({
+            type: "putEpochRollingNonces",
+            epoch,
+            rollingNonces,
+            id: curId,
+        });
         return new Promise((resolve, reject) => {
             this.pendingPromises.set(curId, (result) => {
                 if (result instanceof Error) reject(result);
@@ -245,9 +277,17 @@ class SqlStorage {
         });
     }
 
-    async getEpochRollingNonce(epoch: number | bigint, slot: number | bigint): Promise<Uint8Array | undefined> {
+    async getEpochRollingNonce(
+        epoch: number | bigint,
+        slot: number | bigint,
+    ): Promise<Uint8Array | undefined> {
         const curId = this.idCounter++;
-        this.worker.postMessage({ type: "getEpochRollingNonce", epoch, slot, id: curId });
+        this.worker.postMessage({
+            type: "getEpochRollingNonce",
+            epoch,
+            slot,
+            id: curId,
+        });
         return new Promise((resolve, reject) => {
             this.pendingPromises.set(curId, (result) => {
                 if (result instanceof Error) reject(result);
@@ -256,9 +296,17 @@ class SqlStorage {
         });
     }
 
-    async putEpochVrfOutputs(epoch: number | bigint, vrfOutputs: { [key: string]: Uint8Array }): Promise<void> {
+    async putEpochVrfOutputs(
+        epoch: number | bigint,
+        vrfOutputs: { [key: string]: Uint8Array },
+    ): Promise<void> {
         const curId = this.idCounter++;
-        this.worker.postMessage({ type: "putEpochVrfOutputs", epoch, vrfOutputs, id: curId });
+        this.worker.postMessage({
+            type: "putEpochVrfOutputs",
+            epoch,
+            vrfOutputs,
+            id: curId,
+        });
         return new Promise((resolve, reject) => {
             this.pendingPromises.set(curId, (result) => {
                 if (result instanceof Error) reject(result);
@@ -267,9 +315,15 @@ class SqlStorage {
         });
     }
 
-    async getEpochVrfOutputs(epoch: number | bigint): Promise<[{ [key: string]: Uint8Array }] | null> {
+    async getEpochVrfOutputs(
+        epoch: number | bigint,
+    ): Promise<[{ [key: string]: Uint8Array }] | null> {
         const curId = this.idCounter++;
-        this.worker.postMessage({ type: "getEpochVrfOutputs", epoch, id: curId });
+        this.worker.postMessage({
+            type: "getEpochVrfOutputs",
+            epoch,
+            id: curId,
+        });
         return new Promise((resolve, reject) => {
             this.pendingPromises.set(curId, (result) => {
                 if (result instanceof Error) reject(result);
@@ -366,35 +420,56 @@ export async function rollBackWards(
     return storage.rollBackWards(rollbackPoint);
 }
 
-export async function putEpochNonce(epoch: number | bigint, nonce: Uint8Array): Promise<void> {
+export async function putEpochNonce(
+    epoch: number | bigint,
+    nonce: Uint8Array,
+): Promise<void> {
     return storage.putEpochNonce(epoch, nonce);
 }
 
-export async function getEpochNonce(epoch: number | bigint): Promise<Uint8Array | undefined> {
+export async function getEpochNonce(
+    epoch: number | bigint,
+): Promise<Uint8Array | undefined> {
     return storage.getEpochNonce(epoch);
 }
 
-export async function putEpochSlotHeaderHashes(epoch: number | bigint, headerHashes: { [key: string]: Uint8Array }): Promise<void> {
+export async function putEpochSlotHeaderHashes(
+    epoch: number | bigint,
+    headerHashes: { [key: string]: Uint8Array },
+): Promise<void> {
     return storage.putEpochSlotHeaderHashes(epoch, headerHashes);
 }
 
-export async function getEpochSlotHeaderHashes(epoch: number | bigint): Promise<[{ [key: string]: Uint8Array }] | null> {
+export async function getEpochSlotHeaderHashes(
+    epoch: number | bigint,
+): Promise<[{ [key: string]: Uint8Array }] | null> {
     return storage.getEpochSlotHeaderHashes(epoch);
 }
 
-export async function putEpochRollingNonces(epoch: number | bigint, rollingNonces: { [key: string]: Uint8Array }): Promise<void> {
+export async function putEpochRollingNonces(
+    epoch: number | bigint,
+    rollingNonces: { [key: string]: Uint8Array },
+): Promise<void> {
     return storage.putEpochRollingNonces(epoch, rollingNonces);
 }
 
-export async function getEpochRollingNonce(epoch: number | bigint, slot: number | bigint): Promise<Uint8Array | undefined> {
+export async function getEpochRollingNonce(
+    epoch: number | bigint,
+    slot: number | bigint,
+): Promise<Uint8Array | undefined> {
     return storage.getEpochRollingNonce(epoch, slot);
 }
 
-export async function putEpochVrfOutputs(epoch: number | bigint, vrfOutputs: { [key: string]: Uint8Array }): Promise<void> {
+export async function putEpochVrfOutputs(
+    epoch: number | bigint,
+    vrfOutputs: { [key: string]: Uint8Array },
+): Promise<void> {
     return storage.putEpochVrfOutputs(epoch, vrfOutputs);
 }
 
-export async function getEpochVrfOutputs(epoch: number | bigint): Promise<[{ [key: string]: Uint8Array }] | null> {
+export async function getEpochVrfOutputs(
+    epoch: number | bigint,
+): Promise<[{ [key: string]: Uint8Array }] | null> {
     return storage.getEpochVrfOutputs(epoch);
 }
 

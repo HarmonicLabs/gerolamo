@@ -16,10 +16,16 @@ block	N/A	N/A	N/A
 
 PreProd Testnet: Era Block Number Absolute Slot Block Header Hash
 
-Last Byron block	45 	 	 84242 45899e8002b27df291e09188bfe3aeb5397ac03546a7d0ead93aa2500860f1af 
-Last Shelley block	21644 	 518360 f9d8b6c77fedd60c3caf5de0ce63a0aeb9d1753269c9c07503d9aa09d5144481 
-Last Allegra block	43242 	 950340 74c03af754bcde9cd242c5a168689edcab1756a3f7ae4d5dca1a31d86839c7b1 
-Last Mary block	 	64902 	 1382348 af5fddc7d16a349e1a2af8ba89f4f5d3273955a13095b3709ef6e3db576a0b33 
-Last Alonzo block	172497 	 3542390 f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f 
-Last Babbage block	2620289  68774372 36f5b4a370c22fd4a5c870248f26ac72c0ac0ecc34a42e28ced1a4e15136efa4 
-Last Conway	block	N/A	N/A	N/A
+Last Byron block	45 	 	 84242
+45899e8002b27df291e09188bfe3aeb5397ac03546a7d0ead93aa2500860f1af Last Shelley
+block	21644 	 518360
+f9d8b6c77fedd60c3caf5de0ce63a0aeb9d1753269c9c07503d9aa09d5144481 Last Allegra
+block	43242 	 950340
+74c03af754bcde9cd242c5a168689edcab1756a3f7ae4d5dca1a31d86839c7b1 Last Mary
+block	 	64902 	 1382348
+af5fddc7d16a349e1a2af8ba89f4f5d3273955a13095b3709ef6e3db576a0b33 Last Alonzo
+block	172497 	 3542390
+f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f Last Babbage
+block	2620289 68774372
+36f5b4a370c22fd4a5c870248f26ac72c0ac0ecc34a42e28ced1a4e15136efa4 Last
+Conway	block	N/A	N/A	N/A

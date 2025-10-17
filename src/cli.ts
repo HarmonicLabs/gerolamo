@@ -108,9 +108,10 @@ export function SyncNode() {
         .command("start-node")
         .description("Start Gerolamo node with the specified config file")
         .argument("<configPath>", "Path to the config file (e.g., ./config.json)")
-        .action(async (configPath: string) => {
-            logger.debug("Starting node with configPath:", configPath);
-            try {
+    .action(async (configPath: string) => {
+        let expressServer: any = null;
+        logger.debug("Starting node with configPath:", configPath);
+        try {
                 // Load and validate config
                 // const config = await loadConfig(configPath);
                 const configFile = Bun.file(configPath);
@@ -128,7 +129,8 @@ export function SyncNode() {
                 if (config.minibf) {
                     logger.debug("Starting express server...");
                     try {
-                        await import("./network/minibf/expressServer");
+                        const { server } = await import("./network/minibf/expressServer");
+                        expressServer = server;
                         logger.debug("Express server started on port 3000");
                     } catch (error) {
                         console.error("Failed to start express server:", error);
@@ -141,12 +143,20 @@ export function SyncNode() {
 
                 process.on('SIGINT', async () => {
                     logger.debug('Received SIGINT, Shutting down');
+                    if (expressServer) {
+                        expressServer.stop();
+                        logger.debug('Express server stopped');
+                    }
                     await peerManager.shutdown();
                     process.exit(0);
                 });
-                  
+
                 process.on('SIGTERM', async () => {
                     logger.debug('Received SIGTERM, Shutting down');
+                    if (expressServer) {
+                        expressServer.stop();
+                        logger.debug('Express server stopped');
+                    }
                     await peerManager.shutdown();
                     process.exit(0);
                 });

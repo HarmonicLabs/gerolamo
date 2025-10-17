@@ -19,7 +19,7 @@ import {
     putBlock,
     putHeader,
     rollBackWards,
-} from "./lmdbWorkers/lmdb";
+} from "./sqlWorkers/sql";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { RawNewEpochState } from "../rawNES";
 import { toHex } from "@harmoniclabs/uint8array-utils";
@@ -290,9 +290,9 @@ export class PeerManager implements IPeerManager {
         }
         try {
             await closeDB();
-            logger.debug("LMDB worker closed");
+            logger.debug("SQL worker closed");
         } catch (error) {
-            logger.error(`Error closing LMDB worker: ${error}`);
+            logger.error(`Error closing SQL worker: ${error}`);
         }
     }
 }

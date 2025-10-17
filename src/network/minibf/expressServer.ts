@@ -9,7 +9,7 @@ import {
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { logger } from "../../utils/logger"; // Adjust path as needed
 
-Bun.serve({
+const server = Bun.serve({
     port: 3000,
     routes: {
         "/headers/:id": async (req) => {
@@ -76,6 +76,8 @@ Bun.serve({
         return responseError("Internal server error");
     },
 });
+
+export { server };
 
 // Helper to handle BigInt serialization
 function serializeBigInt(obj: any): any {

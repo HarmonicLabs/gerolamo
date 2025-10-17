@@ -2,7 +2,7 @@ import { BlockFetchClient, ChainPoint, ChainSyncClient, HandshakeAcceptVersion, 
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { connect } from "node:net";
 import { logger } from "../utils/logger";
-import { getLastSlot } from "./lmdbWorkers/lmdb";
+import { getLastSlot } from "./sqlWorkers/sql";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { GerolamoConfig } from "./PeerManager";
 export interface IPeerClient {

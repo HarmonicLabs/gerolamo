@@ -22,7 +22,6 @@
         "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.5-dev7",
         "@harmoniclabs/uint8array-utils": "^1.0.4",
         "commander": "^14.0.1",
-        "lmdb": "^3.4.2",
         "picocolors": "^1.1.1",
         "wasm-kes": "./wasm-kes-0.2.1.tgz"
     }

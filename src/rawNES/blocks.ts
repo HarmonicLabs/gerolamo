@@ -26,7 +26,7 @@ export class RawBlocksMade implements IBlocksMade {
     }
 
     get value(): _BlocksMade {
-        return [];
+        return this._value;
     }
     set value(v: _BlocksMade) {
         this._value = v;

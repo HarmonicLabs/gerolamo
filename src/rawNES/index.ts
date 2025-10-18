@@ -248,4 +248,16 @@ export class RawNewEpochState {
         );
         return entry ? entry[1].individualTotalPoolStake : 0n;
     }
+
+    toCborObj(): CborObj {
+        return CborArray.from([
+            this.lastEpochModified,
+            this.prevBlocks.toCborObj(),
+            this.currBlocks.toCborObj(),
+            this.epochState.toCborObj(),
+            this.pulsingRewUpdate?.toCborObj() || CborSimple.undefined,
+            this.poolDistr.toCborObj(),
+            this.stashedAvvmAddresses.toCborObj(),
+        ]);
+    }
 }

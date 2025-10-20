@@ -1,33 +1,11 @@
+import { SQL } from "bun";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 
 class SqlStorage {
-    private worker: Worker;
-    private idCounter = 0;
-    private pendingPromises = new Map<number, (value: any) => void>();
+    db: SQL;
 
-    constructor() {
-        this.worker = new Worker("./src/network/sqlWorkers/sqlWorker.ts");
-        this.worker.addEventListener("message", (msg: any) => {
-            if (msg.type === "done") {
-                const resolve = this.pendingPromises.get(msg.id);
-                if (resolve) {
-                    resolve(undefined);
-                    this.pendingPromises.delete(msg.id);
-                }
-            } else if (msg.type === "result") {
-                const resolve = this.pendingPromises.get(msg.id);
-                if (resolve) {
-                    resolve(msg.data);
-                    this.pendingPromises.delete(msg.id);
-                }
-            } else if (msg.type === "error") {
-                const resolve = this.pendingPromises.get(msg.id);
-                if (resolve) {
-                    resolve(Promise.reject(new Error(msg.error)));
-                    this.pendingPromises.delete(msg.id);
-                }
-            }
-        });
+    constructor(db: SQL) {
+        this.db = db;
     }
 
     async putHeader(
@@ -35,19 +13,15 @@ class SqlStorage {
         blockHeaderHash: Uint8Array,
         header: Uint8Array,
     ): Promise<void> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "putHeader",
-            slot,
-            blockHeaderHash,
-            header,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
+        await this.db.begin(async (tx) => {
+            await tx`
+                INSERT OR REPLACE INTO headers (hash, header_data)
+                VALUES (${blockHeaderHash}, ${header})
+            `;
+            await tx`
+                INSERT OR REPLACE INTO slot_index (slot, block_hash)
+                VALUES (${BigInt(slot)}, ${blockHeaderHash})
+            `;
         });
     }
 
@@ -55,225 +29,199 @@ class SqlStorage {
         blockHeaderHash: Uint8Array,
         block: Uint8Array,
     ): Promise<void> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "putBlock",
-            blockHeaderHash,
-            block,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        await this.db`
+            INSERT OR REPLACE INTO blocks (hash, block_data)
+            VALUES (${blockHeaderHash}, ${block})
+        `;
     }
 
     async getHeader(
         slot: string | bigint,
         blockHeaderHash: Uint8Array,
     ): Promise<Uint8Array | null> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "getHeader",
-            slot,
-            blockHeaderHash,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const result = await this.db`
+            SELECT h.header_data
+            FROM headers h
+            JOIN slot_index si ON h.hash = si.block_hash
+            WHERE si.slot = ${BigInt(slot)} AND si.block_hash = ${blockHeaderHash}
+        `;
+        return result.length > 0 ? result[0].header_data : null;
     }
 
     async getHeaderBySlot(
         slot: number | bigint,
     ): Promise<Uint8Array | undefined> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({ type: "getHeaderBySlot", slot, id: curId });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const result = await this.db`
+            SELECT h.header_data
+            FROM headers h
+            JOIN slot_index si ON h.hash = si.block_hash
+            WHERE si.slot = ${BigInt(slot)}
+        `;
+        return result.length > 0 ? result[0].header_data : undefined;
     }
 
     async getHeaderByHash(
         blockHeaderHash: Uint8Array,
     ): Promise<Uint8Array | undefined> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "getHeaderByHash",
-            blockHeaderHash,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const result = await this.db`
+            SELECT header_data FROM headers WHERE hash = ${blockHeaderHash}
+        `;
+        return result.length > 0 ? result[0].header_data : undefined;
     }
 
     async getBlockBySlot(
         slot: number | bigint,
     ): Promise<Uint8Array | undefined> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({ type: "getBlockBySlot", slot, id: curId });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const result = await this.db`
+            SELECT b.block_data
+            FROM blocks b
+            JOIN slot_index si ON b.hash = si.block_hash
+            WHERE si.slot = ${BigInt(slot)}
+        `;
+        return result.length > 0 ? result[0].block_data : undefined;
     }
 
     async getBlockByHash(
         blockHeaderHash: Uint8Array,
     ): Promise<Uint8Array | undefined> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "getBlockByHash",
-            blockHeaderHash,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const result = await this.db`
+            SELECT block_data FROM blocks WHERE hash = ${blockHeaderHash}
+        `;
+        return result.length > 0 ? result[0].block_data : undefined;
     }
 
     async getHashBySlot(
         slot: number | bigint,
     ): Promise<Uint8Array | undefined> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({ type: "getHashBySlot", slot, id: curId });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const result = await this.db`
+            SELECT block_hash FROM slot_index WHERE slot = ${BigInt(slot)}
+        `;
+        return result.length > 0 ? result[0].block_hash : undefined;
     }
 
     async getLastSlot(): Promise<{ slot: bigint; hash: Uint8Array } | null> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({ type: "getLastSlot", id: curId });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const result = await this.db`
+            SELECT slot, block_hash FROM slot_index
+            ORDER BY slot DESC LIMIT 1
+        `;
+        return result.length > 0
+            ? { slot: result[0].slot, hash: result[0].block_hash }
+            : null;
     }
 
     async rollBackWards(
         rollbackPoint: number | bigint,
     ): Promise<boolean> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "rollBackWards",
-            rollbackPoint,
-            id: curId,
+        const rollbackPointBig = BigInt(rollbackPoint);
+
+        // Check if rollback point exists
+        const exists = await this.db`
+            SELECT 1 FROM slot_index WHERE slot = ${rollbackPointBig}
+        `;
+        if (exists.length === 0) {
+            return false;
+        }
+
+        await this.db.begin(async (tx) => {
+            // Get slots to remove
+            const slotsToRemove = await tx`
+                SELECT slot FROM slot_index WHERE slot > ${rollbackPointBig}
+            `;
+
+            for (const { slot } of slotsToRemove) {
+                // Get hash for this slot
+                const hashResult = await tx`
+                    SELECT block_hash FROM slot_index WHERE slot = ${slot}
+                `;
+                if (hashResult.length > 0) {
+                    const hash = hashResult[0].block_hash;
+
+                    // Remove from slot_index
+                    await tx`DELETE FROM slot_index WHERE slot = ${slot}`;
+
+                    // Check if hash is referenced elsewhere
+                    const refCount = await tx`
+                        SELECT COUNT(*) as count FROM slot_index WHERE block_hash = ${hash}
+                    `;
+                    if (refCount[0].count === 0) {
+                        // Remove from headers and blocks
+                        await tx`DELETE FROM headers WHERE hash = ${hash}`;
+                        await tx`DELETE FROM blocks WHERE hash = ${hash}`;
+                    }
+                }
+            }
         });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+
+        return true;
     }
 
     async putEpochNonce(
         epoch: number | bigint,
         nonce: Uint8Array,
     ): Promise<void> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "putEpochNonce",
-            epoch,
-            nonce,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        await this.db`
+            INSERT OR REPLACE INTO epoch_nonces (epoch, nonce)
+            VALUES (${BigInt(epoch)}, ${nonce})
+        `;
     }
 
     async getEpochNonce(
         epoch: number | bigint,
     ): Promise<Uint8Array | undefined> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({ type: "getEpochNonce", epoch, id: curId });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const result = await this.db`
+            SELECT nonce FROM epoch_nonces WHERE epoch = ${BigInt(epoch)}
+        `;
+        return result.length > 0 ? result[0].nonce : undefined;
     }
 
     async putEpochSlotHeaderHashes(
         epoch: number | bigint,
         headerHashes: { [key: string]: Uint8Array },
     ): Promise<void> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "putEpochSlotHeaderHashes",
-            epoch,
-            headerHashes,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
+        const epochBig = BigInt(epoch);
+        await this.db.begin(async (tx) => {
+            for (const [slotStr, hash] of Object.entries(headerHashes)) {
+                await tx`
+                    INSERT OR REPLACE INTO epoch_slot_header_hashes (epoch, slot, hash)
+                    VALUES (${epochBig}, ${BigInt(slotStr)}, ${hash})
+                `;
+            }
         });
     }
 
     async getEpochSlotHeaderHashes(
         epoch: number | bigint,
     ): Promise<[{ [key: string]: Uint8Array }] | null> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "getEpochSlotHeaderHashes",
-            epoch,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const results = await this.db`
+            SELECT slot, hash FROM epoch_slot_header_hashes
+            WHERE epoch = ${BigInt(epoch)}
+        `;
+        if (results.length === 0) {
+            return null;
+        } else {
+            const result = results.reduce(
+                (acc: { [key: string]: Uint8Array }, row: { slot: bigint; hash: Uint8Array }) => {
+                    acc[row.slot.toString()] = row.hash;
+                    return acc;
+                },
+                {} as { [key: string]: Uint8Array },
+            );
+            return [result];
+        }
     }
 
     async putEpochRollingNonces(
         epoch: number | bigint,
         rollingNonces: { [key: string]: Uint8Array },
     ): Promise<void> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "putEpochRollingNonces",
-            epoch,
-            rollingNonces,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
+        const epochBig = BigInt(epoch);
+        await this.db.begin(async (tx) => {
+            for (const [slotStr, nonce] of Object.entries(rollingNonces)) {
+                await tx`
+                    INSERT OR REPLACE INTO epoch_rolling_nonces (epoch, slot, nonce)
+                    VALUES (${epochBig}, ${BigInt(slotStr)}, ${nonce})
+                `;
+            }
         });
     }
 
@@ -281,70 +229,51 @@ class SqlStorage {
         epoch: number | bigint,
         slot: number | bigint,
     ): Promise<Uint8Array | undefined> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "getEpochRollingNonce",
-            epoch,
-            slot,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const result = await this.db`
+            SELECT nonce FROM epoch_rolling_nonces
+            WHERE epoch = ${BigInt(epoch)} AND slot = ${BigInt(slot)}
+        `;
+        return result.length > 0 ? result[0].nonce : undefined;
     }
 
     async putEpochVrfOutputs(
         epoch: number | bigint,
         vrfOutputs: { [key: string]: Uint8Array },
     ): Promise<void> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "putEpochVrfOutputs",
-            epoch,
-            vrfOutputs,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
+        const epochBig = BigInt(epoch);
+        await this.db.begin(async (tx) => {
+            for (const [slotStr, vrf] of Object.entries(vrfOutputs)) {
+                await tx`
+                    INSERT OR REPLACE INTO epoch_vrf_outputs (epoch, slot, vrf)
+                    VALUES (${epochBig}, ${BigInt(slotStr)}, ${vrf})
+                `;
+            }
         });
     }
 
     async getEpochVrfOutputs(
         epoch: number | bigint,
     ): Promise<[{ [key: string]: Uint8Array }] | null> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({
-            type: "getEpochVrfOutputs",
-            epoch,
-            id: curId,
-        });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
+        const results = await this.db`
+            SELECT slot, vrf FROM epoch_vrf_outputs
+            WHERE epoch = ${BigInt(epoch)}
+        `;
+        if (results.length === 0) {
+            return null;
+        } else {
+            const result = results.reduce(
+                (acc: { [key: string]: Uint8Array }, row: { slot: bigint; vrf: Uint8Array }) => {
+                    acc[row.slot.toString()] = row.vrf;
+                    return acc;
+                },
+                {} as { [key: string]: Uint8Array },
+            );
+            return [result];
+        }
     }
 
     async closeDB(): Promise<void> {
-        const curId = this.idCounter++;
-        this.worker.postMessage({ type: "closeDB", id: curId });
-        return new Promise((resolve, reject) => {
-            this.pendingPromises.set(curId, (result) => {
-                if (result instanceof Error) reject(result);
-                else resolve(result);
-            });
-        });
-    }
-
-    terminate(): void {
-        this.worker.terminate();
+        await this.db.close();
     }
 }
 
@@ -354,7 +283,8 @@ function isHex(str: string): boolean {
 }
 
 // Create an instance for the exports
-const storage = new SqlStorage();
+const db = new SQL('sqlite://./gerolamo.db');
+const storage = new SqlStorage(db);
 
 export async function putHeader(
     slot: number | bigint,
@@ -374,7 +304,7 @@ export async function putBlock(
 export async function getHeader(
     slot: string | bigint,
     blockHeaderHash: Uint8Array,
-): Promise<any> {
+): Promise<Uint8Array | null> {
     return storage.getHeader(slot, blockHeaderHash);
 }
 
@@ -475,7 +405,6 @@ export async function getEpochVrfOutputs(
 
 export async function closeDB(): Promise<void> {
     await storage.closeDB();
-    storage.terminate();
 }
 
 export async function resolveToHash(

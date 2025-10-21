@@ -34,7 +34,7 @@ import {
 import { PoolOperationalCert } from "@harmoniclabs/cardano-ledger-ts";
 import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "./ledger";
 import * as assert from "node:assert/strict";
 import * as wasm from "wasm-kes";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
@@ -174,28 +174,28 @@ function getEraHeader(
     | AlonzoHeader
     | BabbageHeader
     | ConwayHeader {
-    assert.default(
+    assert.ok(
         h.era === 2 || h.era === 3 || h.era === 4 || h.era === 5 ||
             h.era === 6 || h.era === 7,
     );
 
     if (h.era === 2) {
-        assert.default(isIShelleyHeader(h.header));
+        assert.ok(isIShelleyHeader(h.header));
     }
     if (h.era === 3) {
-        assert.default(isIAllegraHeader(h.header));
+        assert.ok(isIAllegraHeader(h.header));
     }
     if (h.era === 4) {
-        assert.default(isIMaryHeader(h.header));
+        assert.ok(isIMaryHeader(h.header));
     }
     if (h.era === 5) {
-        assert.default(isIAlonzoHeader(h.header));
+        assert.ok(isIAlonzoHeader(h.header));
     }
     if (h.era === 6) {
-        assert.default(isIBabbageHeader(h.header));
+        assert.ok(isIBabbageHeader(h.header));
     }
     if (h.era === 7) {
-        assert.default(isIConwayHeader(h.header));
+        assert.ok(isIConwayHeader(h.header));
     }
     return h.header;
 }
@@ -204,7 +204,7 @@ export async function validateHeader(
     h: MultiEraHeader,
     nonce: Uint8Array,
     shelleyGenesis: ShelleyGenesisConfig,
-    lState: RawNewEpochState,
+    lState: SQLNewEpochState,
     sequenceNumber?: bigint, //only used for Amaru test
 ): Promise<boolean> {
     const header = getEraHeader(h);
@@ -265,10 +265,11 @@ export async function validateHeader(
         );
     }
 
-    const totalActiveStake = lState.poolDistr.totalActiveStake;
-    const individualStake = lState.GET_nes_pd_individual_total_pool_stake!(
-        issuer,
-    );
+    const poolDistr = await lState.getPoolDistr();
+    const totalActiveStake = poolDistr.totalActiveStake;
+    const individualStake = poolDistr.unPoolDistr.find(([pkh, _]) =>
+        uint8ArrayEq(pkh.toCborBytes(), issuer.toCborBytes())
+    )?.[1].individualTotalPoolStake || 0n;
 
     // If total active stake is zero, check if individual stake is also zero
     // If both are zero, the stake ratio is undefined, but we can still validate other aspects

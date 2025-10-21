@@ -18,7 +18,7 @@ import {
 } from "@harmoniclabs/cardano-ledger-ts";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "./ledger";
 import { VolatileState } from "./validation/types";
 import { AnchoredVolatileState, Point } from "./AnchoredVolatileState";
 
@@ -29,16 +29,16 @@ import { calculateCardanoEpoch } from "./validation";
 const EPOCH_TRANSITION_ENABLED = false;
 
 // Function to apply a block to the state and return an AnchoredVolatileState
-export function applyBlock(
+export async function applyBlock(
     block: ConwayBlock,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
     issuer: PoolKeyHash,
-): AnchoredVolatileState {
+): Promise<AnchoredVolatileState> {
     // Implementation
 
     if (EPOCH_TRANSITION_ENABLED) {
         const start_slot = block.header.body.slot;
-        const tip_slot = BigInt(state.lastEpochModified);
+        const tip_slot = await state.getLastEpochModified();
 
         const current_epoch = calculateCardanoEpoch(start_slot);
         const tip_epoch = calculateCardanoEpoch(tip_slot);
@@ -55,13 +55,20 @@ export function applyBlock(
         block.transactionWitnessSets.length,
     );
 
-    block.transactionBodies.map((tb, i: number) => {
-        assert.default(isITxWitnessSet(block.transactionWitnessSets[i]));
-        return new ConwayTx({
+    const utxo = await state.getUTxO();
+    const treasury = { value: await state.getTreasury() };
+
+    for (const [i, tb] of block.transactionBodies.entries()) {
+        assert.ok(isITxWitnessSet(block.transactionWitnessSets[i]));
+        const tx = new ConwayTx({
             body: tb,
             witnesses: block.transactionWitnessSets[i],
         });
-    }).forEach((tx) => applyTx(tx, state));
+        await applyTx(tx, utxo, treasury);
+    }
+
+    await state.setUTxO(utxo);
+    await state.setTreasury(treasury.value);
 
     // Create VolatileState from the applied block
     const volatileState = VolatileState.fromBlock(block);
@@ -80,47 +87,46 @@ export function applyBlock(
 }
 
 // Function to apply a transaction to the state
-export function applyTx(tx: ConwayTx, state: RawNewEpochState): void {
+export async function applyTx(tx: ConwayTx, utxo: ConwayUTxO[], treasury: { value: bigint }): Promise<void> {
     // Implementation
-    assert.default(validateTx(tx, state));
+    assert.ok(validateTx(tx, utxo));
 
-    const refs = tx.body.inputs.map((utxo) => utxo.utxoRef);
+    const refs = tx.body.inputs.map((input) => input.utxoRef);
     // TODO: Re-enable input validation once we have proper test blocks or genesis state
-    // assert.default(state.epochState.ledgerState.UTxOState.UTxO.length === 0 || validateInputsExist(refs, state));
+    // assert.ok(utxo.length === 0 || validateInputsExist(refs, utxo));
 
-    removeInputs(refs, state);
-    addOutputs(tx.body, state);
+    removeInputs(refs, utxo);
+    addOutputs(tx.body, utxo);
 
     // tx.body.certs!.forEach((cert) => processCert(cert, state));
-    state.epochState.chainAccountState.casTreasury =
-        BigInt(state.epochState.chainAccountState.casTreasury) + tx.body.fee;
+    treasury.value = BigInt(treasury.value) + tx.body.fee;
 }
 
 function validateInputsExist(
     utxoRefs: TxOutRef[],
-    state: RawNewEpochState,
+    utxo: ConwayUTxO[],
 ): boolean {
     return utxoRefs.every((ref) =>
-        state.epochState.ledgerState.UTxOState.UTxO.some((utxo) =>
-            utxo.utxoRef.eq(ref)
+        utxo.some((u) =>
+            u.utxoRef.eq(ref)
         )
     );
 }
 
 // Function to shift snapshots at epoch boundary
-export function shiftSnapshots(state: RawNewEpochState): void {
+export function shiftSnapshots(state: SQLNewEpochState): void {
     // Implementation
 }
 
 // Function to compute and distribute rewards using 'go' snapshot
-export function computeRewards(state: RawNewEpochState): void {
+export function computeRewards(state: SQLNewEpochState): void {
     // Implementation
 }
 
 // Function to process a certificate and update the state
 export function processCert(
     cert: Certificate,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): void {
     // Enable certificate processing for demo - set to false to disable
     const ENABLE_CERT_PROCESSING = true;
@@ -159,7 +165,7 @@ function updateDelegationInSnapshot(
 // Function to update delegation in the 'mark' snapshot
 export function updateDelegation(
     deleg: CertStakeDelegation,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): void {
     // Implementation
 }
@@ -167,7 +173,7 @@ export function updateDelegation(
 // Function to register a pool in the 'f_p_pools'
 export function registerPool(
     reg: CertPoolRegistration,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): void {
     // Implementation
 }
@@ -175,7 +181,7 @@ export function registerPool(
 // Function to retire a pool by updating retiring epoch
 export function retirePool(
     ret: CertPoolRetirement,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): void {
     // Implementation
 }
@@ -184,14 +190,14 @@ export function retirePool(
 export function calculatePoolReward(
     stake: Coin,
     pool: PoolKeyHash,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): Coin {
     // Implementation
     return 0n;
 }
 
 // Function to validate a transaction against the state
-export function validateTx(tx: ConwayTx, state: RawNewEpochState): boolean {
+export function validateTx(tx: ConwayTx, utxo: ConwayUTxO[]): boolean {
     /*
     ### Transaction Validation Algorithm in Cardano
 
@@ -292,22 +298,22 @@ export function validateTx(tx: ConwayTx, state: RawNewEpochState): boolean {
 // Function to remove transaction inputs from UTxO
 export function removeInputs(
     inputs: TxOutRef[],
-    state: RawNewEpochState,
+    utxo: ConwayUTxO[],
 ): void {
-    state.epochState.ledgerState.UTxOState.UTxO = state.epochState.ledgerState
-        .UTxOState.UTxO.filter(
-            // remove utxos with TxOutRef equal to any of the inputs
-            (utxo) => !inputs.some(utxo.utxoRef.eq),
-        );
+    const newUtxo = utxo.filter(
+        // remove utxos with TxOutRef equal to any of the inputs
+        (u) => !inputs.some(i => u.utxoRef.eq(i)),
+    );
+    utxo.length = 0;
+    utxo.push(...newUtxo);
 }
 
 // Function to add transaction outputs to UTxO
 export function addOutputs(
     body: ConwayTxBody,
-    state: RawNewEpochState,
+    utxo: ConwayUTxO[],
 ): void {
-    // Implementation
-    state.epochState.ledgerState.UTxOState.UTxO.push(
+    utxo.push(
         ...body.outputs.map((txOut, i) =>
             new ConwayUTxO({
                 utxoRef: new TxOutRef({ id: body.hash, index: i }),
@@ -320,7 +326,7 @@ export function addOutputs(
 // Function to check if the slot is at an epoch boundary
 export function isEpochBoundary(
     slot: number,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): boolean {
     // Implementation
     return false;
@@ -328,7 +334,7 @@ export function isEpochBoundary(
 
 // Function to get current delegations
 export function currentDelegations(
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): RawDelegations {
     // Implementation
     return new RawDelegations([]);
@@ -336,32 +342,26 @@ export function currentDelegations(
 
 // Function to get 'go' stake distribution
 export function getGoStake(
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): [PoolKeyHash, Coin][] {
-    // Suboptimal quadratic search
-    // TODO: Replace with proper SQLite join
-    return state.epochState.snapshots.stakeGo.stake.stake.map((v) => [
-        state.epochState.snapshots.stakeGo.delegations.delegations.find(
-            (u) => u[0].toCborBytes() === v[0].toCborBytes(),
-        )![1],
-        v[1],
-    ]);
+    // TODO: Implement with SQLite
+    return [];
 }
 
 // Function to get active pools
-export function getPools(state: RawNewEpochState): RawPParams {
-    // Implementation
+export function getPools(state: SQLNewEpochState): RawPParams {
+    // TODO: Implement with SQLite
     return new RawPParams([]);
 }
 
 // Function to get config reward ratio (assume state has config)
-export function getRewardRatio(state: RawNewEpochState): Coin {
-    // Implementation
+export function getRewardRatio(state: SQLNewEpochState): Coin {
+    // TODO: Implement
     return 0n;
 }
 
 // Function to get slots per epoch
-export function getSlotsPerEpoch(state: RawNewEpochState): bigint {
-    // Implementation
+export function getSlotsPerEpoch(state: SQLNewEpochState): bigint {
+    // TODO: Implement
     return 0n;
 }

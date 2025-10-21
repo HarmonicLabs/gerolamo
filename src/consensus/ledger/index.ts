@@ -1,8 +1,11 @@
 import { SQL } from "bun";
+import { ConwayUTxO } from "@harmoniclabs/cardano-ledger-ts";
+import { Cbor, CborArray, CborObj } from "@harmoniclabs/cbor";
+import { RawPoolDistr } from "../../rawNES/pool_distr";
 
 // Skeleton classes for interacting with the NewEpochState SQLite schema
 
-class SQLNewEpochState {
+export class SQLNewEpochState {
     db: SQL;
 
     constructor(db: SQL) {
@@ -161,5 +164,87 @@ class SQLNewEpochState {
                 data BLOB
             );
         `;
+    }
+
+    // Methods to get and set UTxO
+    async getUTxO(): Promise<ConwayUTxO[]> {
+        const result = await this.db`
+            SELECT utxo FROM ledger_state
+            WHERE id = (
+                SELECT ledger_state_id FROM epoch_state
+                WHERE id = (
+                    SELECT epoch_state_id FROM new_epoch_state WHERE epoch = 0
+                )
+            )
+        `;
+        if (result.length === 0 || !result[0].utxo) return [];
+        const bytes = result[0].utxo as Uint8Array;
+        const cbor = Cbor.parse(bytes);
+        if (!(cbor instanceof CborArray)) return [];
+        return cbor.array.map((obj: CborObj) => ConwayUTxO.fromCborObj(obj));
+    }
+
+    async setUTxO(utxo: ConwayUTxO[]): Promise<void> {
+        const cborArray = new CborArray(utxo.map(u => u.toCborObj()));
+        const bytes = Cbor.encode(cborArray);
+        await this.db`
+            UPDATE ledger_state SET utxo = ${bytes}
+            WHERE id = (
+                SELECT ledger_state_id FROM epoch_state
+                WHERE id = (
+                    SELECT epoch_state_id FROM new_epoch_state WHERE epoch = 0
+                )
+            )
+        `;
+    }
+
+    // Methods to get and set treasury
+    async getTreasury(): Promise<bigint> {
+        const result = await this.db`
+            SELECT treasury FROM chain_account_state
+            WHERE id = (
+                SELECT chain_account_state_id FROM epoch_state
+                WHERE id = (
+                    SELECT epoch_state_id FROM new_epoch_state WHERE epoch = 0
+                )
+            )
+        `;
+        return result.length > 0 ? BigInt(result[0].treasury as number) : 0n;
+    }
+
+    async setTreasury(treasury: bigint): Promise<void> {
+        await this.db`
+            UPDATE chain_account_state SET treasury = ${treasury}
+            WHERE id = (
+                SELECT chain_account_state_id FROM epoch_state
+                WHERE id = (
+                    SELECT epoch_state_id FROM new_epoch_state WHERE epoch = 0
+                )
+            )
+        `;
+    }
+
+    // Method to get lastEpochModified
+    async getLastEpochModified(): Promise<bigint> {
+        const result = await this.db`SELECT last_epoch_modified FROM new_epoch_state WHERE epoch = 0`;
+        return result.length > 0 ? BigInt(result[0].last_epoch_modified as number) : 0n;
+    }
+
+    async setLastEpochModified(epoch: bigint): Promise<void> {
+        await this.db`UPDATE new_epoch_state SET last_epoch_modified = ${epoch} WHERE epoch = 0`;
+    }
+
+    // Method to get pool distribution
+    async getPoolDistr(): Promise<RawPoolDistr> {
+        const result = await this.db`
+            SELECT data FROM pool_distr
+            WHERE id = (
+                SELECT pool_distr_id FROM new_epoch_state WHERE epoch = 0
+            )
+        `;
+        if (result.length === 0 || !result[0].data) return new RawPoolDistr([], 0n);
+        const bytes = result[0].data as Uint8Array;
+        const cbor = Cbor.parse(bytes);
+        return RawPoolDistr.fromCborObj(cbor);
     }
 }

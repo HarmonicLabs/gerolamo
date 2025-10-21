@@ -1,11 +1,10 @@
 import { BabbageBlock, TxOutRef, Value } from "@harmoniclabs/cardano-ledger-ts";
-import { IReadWriteNES } from "../types";
 import { MockChainState } from "./validation";
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "./ledger";
 
 export function validateBlock(
     block: BabbageBlock,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): boolean {
     return [
         validateTransactionCountMatch(block, state),
@@ -23,7 +22,7 @@ export function validateBlock(
 
 function validateTransactionCountMatch(
     block: BabbageBlock,
-    _state: RawNewEpochState,
+    _state: SQLNewEpochState,
 ): boolean {
     // Implementation
     return block.transactionBodies.length ===
@@ -32,7 +31,7 @@ function validateTransactionCountMatch(
 
 function validateNoInvalidTxs(
     block: BabbageBlock,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): boolean {
     // TODO: Figure out how to implement Phase-2 script validation
     //
@@ -41,7 +40,7 @@ function validateNoInvalidTxs(
 
 function validateUTxOBalance(
     block: BabbageBlock,
-    _state: RawNewEpochState,
+    _state: SQLNewEpochState,
 ): boolean {
     let sumInputs = Value.zero;
     let sumOutputs = Value.zero;
@@ -74,7 +73,7 @@ function validateUTxOBalance(
 
 function validateFeesCorrect(
     block: BabbageBlock,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): boolean {
     // Implementation
     return block.transactionBodies.map((txBody) =>
@@ -87,7 +86,7 @@ function validateFeesCorrect(
 
 function validateValidityInterval(
     block: BabbageBlock,
-    _state: RawNewEpochState,
+    _state: SQLNewEpochState,
 ): boolean {
     // Implementation
     return block.transactionBodies.map(
@@ -103,13 +102,13 @@ function validateValidityInterval(
 // TODO: Fill in placeholder for cert deposits
 function validateMultiAssetsBalance(
     block: BabbageBlock,
-    _state: RawNewEpochState,
+    _state: SQLNewEpochState,
 ): boolean {
     return block.transactionBodies.map((txBody) => {
         let inputValueMA = txBody.inputs.map((utxo) => utxo.resolved.value)
-            .reduce(Value.add, Value.zero);
+            .reduce((a, b) => Value.add(a, b), Value.zero);
         let outputValueMA = txBody.outputs.map((txOut) => txOut.value).reduce(
-            Value.add,
+            (a, b) => Value.add(a, b),
             Value.zero,
         );
 
@@ -135,7 +134,7 @@ function validateMultiAssetsBalance(
 
 function validateCollateralValid(
     block: BabbageBlock,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): boolean {
     // Implementation
     return false;
@@ -143,7 +142,7 @@ function validateCollateralValid(
 
 function validateCertificatesValid(
     block: BabbageBlock,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): boolean {
     // Implementation
     return false;
@@ -151,7 +150,7 @@ function validateCertificatesValid(
 
 function validateScriptsValid(
     block: BabbageBlock,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): boolean {
     // Implementation
     return false;
@@ -159,7 +158,7 @@ function validateScriptsValid(
 
 function validateSizeLimits(
     block: BabbageBlock,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): boolean {
     // Implementation
     return block.transactionBodies.map((txBody) =>

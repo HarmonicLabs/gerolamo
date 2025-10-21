@@ -52,11 +52,11 @@ function validateUTxOBalance(
         sumInputs = Value.add(
             sumInputs,
             txBody.inputs.map((utxo) => utxo.resolved.value)
-                .reduce(Value.add),
+                .reduce((a, b) => Value.add(a, b)),
         );
         sumOutputs = Value.add(
             sumOutputs,
-            txBody.outputs.map((utxo) => utxo.value).reduce(Value.add),
+            txBody.outputs.map((utxo) => utxo.value).reduce((a, b) => Value.add(a, b)),
         );
         sumFees = Value.add(
             sumFees,
@@ -69,7 +69,7 @@ function validateUTxOBalance(
     }
 
     return sumInputs.lovelaces >=
-        [sumOutputs, sumFees, sumDeposits].reduce(Value.add).lovelaces;
+        [sumOutputs, sumFees, sumDeposits].reduce((a, b) => Value.add(a, b)).lovelaces;
 }
 
 function validateFeesCorrect(

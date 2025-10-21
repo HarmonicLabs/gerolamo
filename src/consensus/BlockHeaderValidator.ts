@@ -38,7 +38,6 @@ import { RawNewEpochState } from "../rawNES";
 import * as assert from "node:assert/strict";
 import * as wasm from "wasm-kes";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
-import { logger } from "../utils/logger";
 
 const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
     "1157920892373161954235709850086879078532699846656405640394575840079131296399360000000000000000000000000000000000",
@@ -53,26 +52,6 @@ function verifyKnownLeader(
     )!;
     return knownLeader[1] >= 0n;
 }
-
-// function checkSlotLeader(
-//     vrfOutput: Uint8Array,
-//     poolStake: bigint,
-//     totalStake: bigint,
-//     asc: number,
-// ): boolean {
-//     const y = BigInt(`0x{toHex(vrfOutput)}`);
-
-//     // Calculate relative stake (alpha)
-//     const alpha = poolStake / totalStake;
-//     const f = BigInt(asc);
-
-//     // Compute threshold T = 2^256 * (1 - (1 - f)^alpha)
-//     // Use BigInt to avoid precision issues
-//     const thresholdNum = 2n ** 256n * (1n - (1n - f) ** alpha);
-//     // const thresholdNum = (2n ** 256n * BigInt(Math.floor((1n - (1n - f) ** alpha) * 1e15))) / BigInt(1e15);
-
-//     return y < thresholdNum;
-// }
 
 function verifyLeaderEligibility(
     asc: BigDecimal,
@@ -176,10 +155,8 @@ function getVrfInput(
 ): Uint8Array {
     const base = concatUint8Array(biguintToU64BE(slot), nonce);
     if (domain) {
-        // logger.debug("VRF Input Domain:" , toHex(domain));
         return blake2b_256(concatUint8Array(base, domain));
     }
-    logger.debug("VRF Input No Domain");
     return blake2b_256(base);
 }
 function biguintToU64BE(n: bigint): Uint8Array {
@@ -249,9 +226,6 @@ export async function validateHeader(
     let correctProof: boolean = false;
 
     if (isIAlonzoHeader(header)) {
-        // logger.debug("header.body", header.body.nonceVrfResult.proofHash);
-        // logger.debug("header.body.getNonceVrfOutput()", leaderVrfOut);
-
         const leaderInput = getVrfInput(
             header.body.slot,
             nonce,
@@ -264,8 +238,6 @@ export async function validateHeader(
             header.body.leaderVrfResult,
             "pre-babbage",
         );
-        // logger.debug("Leader VRF Input:", toHex(leaderInput));
-        logger.debug("Leader VRF correct:", leaderCorrect);
         const nonceInput = getVrfInput(
             header.body.slot,
             nonce,
@@ -278,8 +250,6 @@ export async function validateHeader(
             header.body.nonceVrfResult,
             "pre-babbage",
         );
-        // logger.debug("Nonce VRF Input:", toHex(nonceInput));
-        logger.debug("Nonce VRF correct:", nonceCorrect);
         correctProof = leaderCorrect && nonceCorrect;
         correctProof = true; //temp
     }
@@ -340,14 +310,6 @@ export async function validateHeader(
         header.kesSignature,
         maxKesEvo,
     );
-
-    console.log({
-        isKnownLeader,
-        correctProof,
-        verifyLeaderStake,
-        verifyOpCertValidity,
-        verifyKES,
-    }, "\n\n");
 
     return (
         isKnownLeader &&

@@ -1,25 +1,17 @@
 import { validateHeader } from "./BlockHeaderValidator";
-// import { expect, test } from "bun:test";
 import { expect, test } from "bun:test";
 
-// import { default as vector } from "./test";
 import {
     BabbageHeader,
-    isKesPubKey,
-    KesPubKey,
     MultiEraHeader,
-    PoolOperationalCert,
     VRFKeyHash,
 } from "@harmoniclabs/cardano-ledger-ts";
 import { RawNewEpochState } from "../rawNES";
-import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
+import { fromHex } from "@harmoniclabs/uint8array-utils";
+import { default as vector } from "./test-vector.json";
 
-const testVectorFile = Bun.file("./src/consensus/test-vector.json");
-const vector = await testVectorFile.json();
-
-function genTestCase(testData: unknown, i: number) {
+function genTestCase(testData, i: number) {
     test(`Test case #${i}`, async () => {
-        const testData = vector[i];
         expect(testData[0].vrfVKeyHash).toBeDefined();
         const vrfVKeyHash = VRFKeyHash.fromAscii(
             testData[0].vrfVKeyHash as string,
@@ -83,4 +75,4 @@ function genTestCase(testData: unknown, i: number) {
     });
 }
 
-vector.forEach((value, index) => genTestCase(value, index));
+vector.forEach((v, i: number) => genTestCase(v, i));

@@ -25,12 +25,12 @@ import { validateHeader } from "../consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "../consensus/ledger";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 export async function headerValidation(
     data: ChainSyncRollForward,
     shelleyGenesis: ShelleyGenesisConfig,
-    lState: RawNewEpochState,
+    lState: SQLNewEpochState,
 ) {
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
     if (
@@ -113,6 +113,7 @@ export async function headerValidation(
         fromHex(epochNonce.nonce),
         shelleyGenesis,
         lState,
+        BigInt(headerEpoch),
     );
     // logger.debug("Header validation result: ", validateHeaderRes);
 

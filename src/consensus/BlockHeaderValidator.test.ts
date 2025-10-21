@@ -11,7 +11,8 @@ import {
     PoolOperationalCert,
     VRFKeyHash,
 } from "@harmoniclabs/cardano-ledger-ts";
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "./ledger";
+import { SQL } from "bun";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 
 const testVectorFile = Bun.file("./src/consensus/test-vector.json");
@@ -45,11 +46,12 @@ function genTestCase(testData: unknown, i: number) {
         expect(testData[1].header).toBeDefined();
         let header = BabbageHeader.fromCbor(testData[1].header as string);
 
-        const lState = RawNewEpochState.init(
-            0n,
-            BigInt(slotsPerKESPeriod),
-            BigInt(maxKESEvo),
-        );
+        const db = new SQL(':memory:');
+        const lState = new SQLNewEpochState(db);
+        await lState.init();
+        // Insert initial state for epoch 0
+        await db`INSERT INTO new_epoch_state (epoch, last_epoch_modified, slots_per_kes_period, max_kes_evolutions) VALUES (0, 0, ${BigInt(slotsPerKESPeriod)}, ${BigInt(maxKESEvo)})`;
+        // TODO: initialize other fields
 
         expect(testData[0].activeSlotCoeff).toBeDefined();
         const asc = testData[0].activeSlotCoeff as number;
@@ -77,6 +79,7 @@ function genTestCase(testData: unknown, i: number) {
             nonce,
             shelleyGenesis,
             lState,
+            0n,
             sequenceNumber,
         );
         expect(sum).toBe(mutation === "NoMutation");

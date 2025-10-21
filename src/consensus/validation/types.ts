@@ -25,6 +25,7 @@ import {
     ISnapshots,
 } from "../../rawNES/epoch_state/snapshots";
 import { ChainTip } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { toHex } from "@harmoniclabs/uint8array-utils";
 
 export const PRECISION = BigInt(10) ** BigInt(34);
 export const EPS = 0n;
@@ -165,3 +166,43 @@ export class MockChainState {
 export const BYRON_SLOTS_PER_EPOCH = 21600n;
 export const SHELLEY_SLOTS_PER_EPOCH = 432000n;
 export const BYRON_EPOCHS = 208n;
+
+/**
+ * Represents a candidate chain for selection.
+ * Used in chain selection to compare competing chains.
+ */
+export interface ChainCandidate {
+    /** The tip of the chain */
+    tip: ChainTip;
+    /** The stake of the slot leader of the last block, for tie-breaking */
+    leaderStake?: bigint;
+}
+
+/**
+ * Compares two chain candidates according to the longest chain rule.
+ * Returns 1 if a is preferred, -1 if b is preferred, 0 if equal.
+ * Prefers longer chains, then higher leader stake for ties.
+ */
+export function compareChains(a: ChainCandidate, b: ChainCandidate): number {
+    // Longest chain rule: prefer the chain with more blocks
+    if (a.tip.blockNo > b.tip.blockNo) return 1;
+    if (a.tip.blockNo < b.tip.blockNo) return -1;
+
+    // Tie-breaking: prefer higher leader stake
+    if (a.leaderStake !== undefined && b.leaderStake !== undefined) {
+        if (a.leaderStake > b.leaderStake) return 1;
+        if (a.leaderStake < b.leaderStake) return -1;
+    }
+
+    // If still tied, prefer the one with lexicographically smaller hash (deterministic)
+    const aHash = a.tip.point.blockHeader?.hash;
+    const bHash = b.tip.point.blockHeader?.hash;
+    if (aHash && bHash) {
+        const aHex = toHex(aHash);
+        const bHex = toHex(bHash);
+        if (aHex < bHex) return 1;
+        if (aHex > bHex) return -1;
+    }
+
+    return 0; // identical or no hashes
+}

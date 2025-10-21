@@ -1,11 +1,11 @@
 import { BabbageBlock, TxOutRef, Value } from "@harmoniclabs/cardano-ledger-ts";
 import { IReadWriteNES } from "../types";
 import { MockChainState } from "./validation";
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "./ledger";
 
 export function validateBlock(
     block: BabbageBlock,
-    state: RawNewEpochState,
+    state: SQLNewEpochState,
 ): boolean {
     return [
         validateTransactionCountMatch(block, state),

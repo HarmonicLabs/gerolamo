@@ -34,7 +34,7 @@ import {
 import { PoolOperationalCert } from "@harmoniclabs/cardano-ledger-ts";
 import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "./ledger";
 import * as assert from "node:assert/strict";
 import * as wasm from "wasm-kes";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
@@ -227,7 +227,8 @@ export async function validateHeader(
     h: MultiEraHeader,
     nonce: Uint8Array,
     shelleyGenesis: ShelleyGenesisConfig,
-    lState: RawNewEpochState,
+    lState: SQLNewEpochState,
+    epoch: bigint,
     sequenceNumber?: bigint, //only used for Amaru test
 ): Promise<boolean> {
     const header = getEraHeader(h);
@@ -295,10 +296,9 @@ export async function validateHeader(
         );
     }
 
-    const totalActiveStake = lState.poolDistr.totalActiveStake;
-    const individualStake = lState.GET_nes_pd_individual_total_pool_stake!(
-        issuer,
-    );
+    const poolDistr = await lState.getPoolDistr(epoch);
+    const totalActiveStake = poolDistr ? poolDistr.totalActiveStake : 0n;
+    const individualStake = await lState.getIndividualTotalPoolStake(epoch, issuer.toCborBytes());
 
     // If total active stake is zero, check if individual stake is also zero
     // If both are zero, the stake ratio is undefined, but we can still validate other aspects

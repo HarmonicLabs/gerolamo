@@ -12,6 +12,7 @@
         "@harmoniclabs/obj-utils": "^1.0.0",
         "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.5-dev7",
         "@harmoniclabs/uint8array-utils": "^1.0.4",
+        "@mithril-dev/mithril-client-wasm": "^0.9.5",
         "commander": "^14.0.1",
         "picocolors": "^1.1.1",
         "wasm-kes": "./wasm-kes-0.2.1.tgz",
@@ -60,6 +61,8 @@
     "@harmoniclabs/uint8array-utils": ["@harmoniclabs/uint8array-utils@1.0.4", "", {}, "sha512-Z454prSbX4geXGHyjjcn9vm6u9NsD3VJykv8f8yE1VjIXSPitaLPEnm8u2+B+GMp1chYlLilOq+kW4OvJ6y28A=="],
 
     "@harmoniclabs/uplc": ["@harmoniclabs/uplc@1.4.1", "", { "dependencies": { "@harmoniclabs/bigint-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.3" }, "peerDependencies": { "@harmoniclabs/bytestring": "^1.0.0", "@harmoniclabs/cbor": "^1.3.0", "@harmoniclabs/crypto": "^0.3.0-dev0", "@harmoniclabs/pair": "^1.0.0", "@harmoniclabs/plutus-data": "^1.2.4" } }, "sha512-sELKStjxPBPBxBMylU4oBSUe0/8eJe2HqRblNSwrMu8Fso4YpSPDqHZ33iDZ8QAadVUsT5r2EQKX0TLrj7qXvQ=="],
+
+    "@mithril-dev/mithril-client-wasm": ["@mithril-dev/mithril-client-wasm@0.9.5", "", {}, "sha512-CrX3jj8AUudqd0Ij8AhD2U0DV927YEBYaRlgqs4BseBzDGXTSIewp92h7n2+OifUg86jSnj7e9q7TqELE2mMew=="],
 
     "@types/bun": ["@types/bun@1.2.22", "", { "dependencies": { "bun-types": "1.2.22" } }, "sha512-5A/KrKos2ZcN0c6ljRSOa1fYIyCKhZfIVYeuyb4snnvomnpFqC0tTsEkdqNxbAgExV384OETQ//WAjl3XbYqQA=="],
 

@@ -1,4 +1,4 @@
-import { BabbageBlock, TxOutRef, Value } from "@harmoniclabs/cardano-ledger-ts";
+import { BabbageBlock, Value } from "@harmoniclabs/cardano-ledger-ts";
 import { MockChainState } from "./validation";
 import { SQLNewEpochState } from "./ledger";
 

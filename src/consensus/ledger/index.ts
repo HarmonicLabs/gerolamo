@@ -2,67 +2,138 @@ import { SQL } from "bun";
 import { ConwayUTxO, PoolKeyHash, Coin, StakeCredentials } from "@harmoniclabs/cardano-ledger-ts";
 import { Cbor, CborArray, CborObj, CborUInt, CborMap } from "@harmoniclabs/cbor";
 
-// Define types since rawNES is removed
+// Ported from rawNES
+import { Rational, VRFKeyHash } from "@harmoniclabs/cardano-ledger-ts";
+import { CborPositiveRational } from "@harmoniclabs/cbor";
+
 interface IIndividualPoolStake {
-    individualTotalPoolStake: Coin;
+    get individualPoolStake(): Rational;
+    set individualPoolStake(ips: Rational);
+
+    get individualTotalPoolStake(): Coin;
+    set individualTotalPoolStake(itps: Coin);
+
+    get individualPoolStakeVrf(): VRFKeyHash;
+    set individualPoolStakeVrf(ipsv: VRFKeyHash);
 }
 
-export class CertState {
-    stake: Map<StakeCredentials, Coin>;
-    delegations: Map<StakeCredentials, PoolKeyHash>;
+class RawIndividualPoolStake implements IIndividualPoolStake {
+    _individualPoolStake: Rational;
+    _individualTotalPoolStake: Coin;
+    _individualPoolStakeVrf: VRFKeyHash;
 
-    constructor(stake: Map<StakeCredentials, Coin>, delegations: Map<StakeCredentials, PoolKeyHash>) {
-        this.stake = stake;
-        this.delegations = delegations;
+    constructor(
+        ips: Rational,
+        itps: Coin,
+        ipsv: VRFKeyHash,
+    ) {
+        this._individualPoolStake = ips;
+        this._individualTotalPoolStake = itps;
+        this._individualPoolStakeVrf = ipsv;
     }
 
-    toCborObj(): CborObj {
-        const stakeEntries: [CborObj, CborObj][] = [];
-        for (const [cred, coin] of this.stake) {
-            stakeEntries.push([cred.toCborObj(), new CborUInt(coin)]);
-        }
-        const delegationsEntries: [CborObj, CborObj][] = [];
-        for (const [cred, pool] of this.delegations) {
-            delegationsEntries.push([cred.toCborObj(), pool.toCborObj()]);
-        }
-        return new CborArray([new CborMap(stakeEntries), new CborMap(delegationsEntries)]);
+    static fromCborObj(v: CborObj): RawIndividualPoolStake {
+        if (!(v instanceof CborArray)) throw new Error();
+        if ((v as CborArray).array.length !== 3) throw new Error();
+
+        const [iPS, individualTotalPoolStake, individualPoolStakeVrf] =
+            (v as CborArray).array;
+        const individualPoolStake = CborPositiveRational
+            .fromCborObjOrUndef(
+                iPS,
+            );
+        if (individualPoolStake === undefined) throw new Error();
+
+        return new RawIndividualPoolStake(
+            individualPoolStake,
+            decodeCoin(
+                individualTotalPoolStake,
+            ),
+            VRFKeyHash.fromCborObj(
+                individualPoolStakeVrf,
+            ),
+        );
     }
 
-    static fromCborObj(cbor: CborObj): CertState {
-        if (!(cbor instanceof CborArray) || cbor.array.length < 2) return new CertState(new Map(), new Map());
-        const stakeMap = cbor.array[0] as CborMap;
-        const delegationsMap = cbor.array[1] as CborMap;
-        const stake = new Map<StakeCredentials, Coin>();
-        for (const [k, v] of stakeMap.map.entries()) {
-            const cred = StakeCredentials.fromCborObj(k);
-            const coin = BigInt((v as CborUInt).num);
-            stake.set(cred, coin);
-        }
-        const delegations = new Map<StakeCredentials, PoolKeyHash>();
-        for (const [k, v] of delegationsMap.map.entries()) {
-            const cred = StakeCredentials.fromCborObj(k);
-            const pool = PoolKeyHash.fromCborObj(v);
-            delegations.set(cred, pool);
-        }
-        return new CertState(stake, delegations);
+    get individualPoolStake(): Rational {
+        return this._individualPoolStake;
+    }
+
+    set individualPoolStake(v: Rational) {
+        this._individualPoolStake = v;
+    }
+
+    get individualTotalPoolStake(): Coin {
+        return this._individualTotalPoolStake;
+    }
+    set individualTotalPoolStake(itps: Coin) {
+        this._individualTotalPoolStake = itps;
+    }
+
+    get individualPoolStakeVrf(): VRFKeyHash {
+        return this._individualPoolStakeVrf;
+    }
+    set individualPoolStakeVrf(ipsv: VRFKeyHash) {
+        this._individualPoolStakeVrf = ipsv;
     }
 }
 
-export class RawPoolDistr {
-    unPoolDistr: [PoolKeyHash, IIndividualPoolStake][];
-    totalActiveStake: bigint;
-
-    constructor(unPoolDistr: [PoolKeyHash, IIndividualPoolStake][], totalActiveStake: bigint) {
-        this.unPoolDistr = unPoolDistr;
-        this.totalActiveStake = totalActiveStake;
-    }
-
-    static fromCborObj(cbor: CborObj): RawPoolDistr {
-        // Stub implementation
-        return new RawPoolDistr([], 0n);
-    }
+function decodeCoin(cbor: CborObj): Coin {
+    if (!(cbor instanceof CborUInt)) throw new Error();
+    return BigInt((cbor as CborUInt).num);
 }
 
+type _PoolDistr = [PoolKeyHash, IIndividualPoolStake][];
+
+interface IPoolDistr {
+    get unPoolDistr(): _PoolDistr;
+    set unPoolDistr(pd: _PoolDistr);
+
+    get totalActiveStake(): Coin;
+    set totalActiveStake(tas: Coin);
+}
+
+export class RawPoolDistr implements IPoolDistr {
+    _unPoolDistr: _PoolDistr;
+    _pdTotalActiveStake: Coin;
+
+    constructor(unPoolDistr: _PoolDistr, pdActiveTotalStake: Coin) {
+        this._unPoolDistr = unPoolDistr;
+        this._pdTotalActiveStake = pdActiveTotalStake;
+    }
+
+    static fromCborObj(cborObj: CborObj): RawPoolDistr {
+        if (!(cborObj instanceof CborArray)) throw new Error();
+        if ((cborObj as CborArray).array.length !== 2) throw new Error();
+
+        const [unPoolDistr, pdTotalActiveStake] = (cborObj as CborArray).array;
+        if (!(unPoolDistr instanceof CborMap)) throw new Error();
+
+        return new RawPoolDistr(
+            (unPoolDistr as CborMap).map.map(({k, v}) => {
+                return [
+                    PoolKeyHash.fromCborObj(k),
+                    RawIndividualPoolStake.fromCborObj(v),
+                ];
+            }),
+            decodeCoin(pdTotalActiveStake),
+        );
+    }
+
+    get unPoolDistr(): _PoolDistr {
+        return this._unPoolDistr;
+    }
+    set unPoolDistr(pd: _PoolDistr) {
+        this._unPoolDistr = pd;
+    }
+
+    get totalActiveStake(): Coin {
+        return this._pdTotalActiveStake;
+    }
+    set totalActiveStake(tas: Coin) {
+        this._pdTotalActiveStake = tas;
+    }
+}
 // Skeleton classes for interacting with the NewEpochState SQLite schema
 
 export class SQLNewEpochState {
@@ -295,34 +366,7 @@ export class SQLNewEpochState {
         `;
     }
 
-    // Methods for cert state
-    async getCertState(): Promise<CertState> {
-        const result = await this.db`
-            SELECT ls.cert_state
-            FROM ledger_state ls
-            JOIN epoch_state es ON ls.id = es.ledger_state_id
-            JOIN new_epoch_state nes ON es.id = nes.epoch_state_id
-            WHERE nes.epoch = 0
-        `;
-        if (result.length === 0 || !result[0].cert_state) return new CertState(new Map(), new Map());
-        const bytes = result[0].cert_state as Uint8Array;
-        const cbor = Cbor.parse(bytes);
-        return CertState.fromCborObj(cbor);
-    }
 
-    async setCertState(certState: CertState): Promise<void> {
-        const bytes = Cbor.encode(certState.toCborObj());
-        await this.db`
-            UPDATE ledger_state
-            SET cert_state = ${bytes}
-            WHERE id IN (
-                SELECT es.ledger_state_id
-                FROM epoch_state es
-                JOIN new_epoch_state nes ON es.id = nes.epoch_state_id
-                WHERE nes.epoch = 0
-            )
-        `;
-    }
 
     // Methods for stake
     async getStake(): Promise<Map<StakeCredentials, Coin>> {

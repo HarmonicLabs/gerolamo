@@ -6,7 +6,8 @@ import {
     MultiEraHeader,
     VRFKeyHash,
 } from "@harmoniclabs/cardano-ledger-ts";
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "./ledger";
+import { SQL } from "bun";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { default as vector } from "./test-vector.json";
 
@@ -37,11 +38,7 @@ function genTestCase(testData, i: number) {
         expect(testData[1].header).toBeDefined();
         let header = BabbageHeader.fromCbor(testData[1].header as string);
 
-        const lState = RawNewEpochState.init(
-            0n,
-            BigInt(slotsPerKESPeriod),
-            BigInt(maxKESEvo),
-        );
+        const lState = await SQLNewEpochState.init(new SQL(":memory:"), 0n, BigInt(slotsPerKESPeriod), BigInt(maxKESEvo));
 
         expect(testData[0].activeSlotCoeff).toBeDefined();
         const asc = testData[0].activeSlotCoeff as number;

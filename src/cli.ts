@@ -5,7 +5,8 @@ import * as path from "node:path";
 import * as zlib from "node:zlib";
 import * as streamPromises from "node:stream/promises";
 import { Cbor } from "@harmoniclabs/cbor";
-import { RawNewEpochState } from "./rawNES";
+import { SQLNewEpochState } from "./consensus/ledger";
+import { SQL } from "bun";
 import { GerolamoConfig, PeerManager } from "./network/PeerManager";
 // import { Database } from "bun:sqlite";
 // import "./types/polyfills";
@@ -60,7 +61,7 @@ export async function getCbor(cborFile: string, outputDirPath: string) {
     // const db = new Database(
     //     path.join(outputDirPath, "new_epoch_state.db"),
     // );
-    RawNewEpochState.fromCborObj(Cbor.parse(cbor));
+    await SQLNewEpochState.fromCborObj(new SQL(path.join(outputDirPath, "nes.db")), Cbor.parse(cbor));
 
     // NewEpochState.bootstrap(db);
     // nes.put(db);

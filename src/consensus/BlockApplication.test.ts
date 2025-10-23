@@ -6,9 +6,11 @@ import {
 } from "@harmoniclabs/cardano-ledger-ts";
 import * as filepath from "node:path/posix";
 import * as fsPromises from "node:fs/promises";
+import { SQL } from "bun";
+import { Buffer } from "node:buffer";
 
 import { applyBlock } from "./BlockApplication";
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "./ledger";
 
 const BLOCKS = [
     "conway1.block",
@@ -37,7 +39,7 @@ test("Parse and apply blocks", async () => {
         return block.block as ConwayBlock;
     });
 
-    const state = RawNewEpochState.init();
+    const state = await SQLNewEpochState.init(new SQL(":memory:"));
 
     // Apply blocks using the proper applyBlock function
     // Note: This will fail input validation since test blocks reference UTxOs
@@ -46,11 +48,11 @@ test("Parse and apply blocks", async () => {
     const mockIssuer = new PoolKeyHash(
         Buffer.from("mockpoolkeyhash12345678901234567890123456789012", "hex"),
     );
-    cBlocks.forEach((block) => applyBlock(block, state, mockIssuer));
+    for (const block of cBlocks) {
+        await applyBlock(block, state, mockIssuer);
+    }
 
     // Test blocks are valid and applied successfully
-    expect(state.epochState.ledgerState.UTxOState.UTxO.length).toBeGreaterThan(
-        0,
-    );
-    expect(state.epochState.chainAccountState.casTreasury).toBeGreaterThan(0n);
+    const treasury = await state.getTreasury();
+    expect(treasury).toBeGreaterThan(0n);
 });

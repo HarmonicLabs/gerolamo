@@ -8,6 +8,58 @@ class SqlStorage {
         this.db = db;
     }
 
+    async initTables(): Promise<void> {
+        await this.db`
+            CREATE TABLE IF NOT EXISTS headers (
+                hash BLOB PRIMARY KEY,
+                header_data BLOB NOT NULL
+            )
+        `;
+        await this.db`
+            CREATE TABLE IF NOT EXISTS blocks (
+                hash BLOB PRIMARY KEY,
+                block_data BLOB NOT NULL
+            )
+        `;
+        await this.db`
+            CREATE TABLE IF NOT EXISTS slot_index (
+                slot INTEGER PRIMARY KEY,
+                block_hash BLOB NOT NULL,
+                FOREIGN KEY (block_hash) REFERENCES headers(hash)
+            )
+        `;
+        await this.db`
+            CREATE TABLE IF NOT EXISTS epoch_nonces (
+                epoch INTEGER PRIMARY KEY,
+                nonce BLOB NOT NULL
+            )
+        `;
+        await this.db`
+            CREATE TABLE IF NOT EXISTS epoch_slot_header_hashes (
+                epoch INTEGER,
+                slot INTEGER,
+                hash BLOB NOT NULL,
+                PRIMARY KEY (epoch, slot)
+            )
+        `;
+        await this.db`
+            CREATE TABLE IF NOT EXISTS epoch_rolling_nonces (
+                epoch INTEGER,
+                slot INTEGER,
+                nonce BLOB NOT NULL,
+                PRIMARY KEY (epoch, slot)
+            )
+        `;
+        await this.db`
+            CREATE TABLE IF NOT EXISTS epoch_vrf_outputs (
+                epoch INTEGER,
+                slot INTEGER,
+                vrf BLOB NOT NULL,
+                PRIMARY KEY (epoch, slot)
+            )
+        `;
+    }
+
     async putHeader(
         slot: number | bigint,
         blockHeaderHash: Uint8Array,
@@ -405,6 +457,10 @@ export async function getEpochVrfOutputs(
 
 export async function closeDB(): Promise<void> {
     await storage.closeDB();
+}
+
+export async function initDB(): Promise<void> {
+    await storage.initTables();
 }
 
 export async function resolveToHash(

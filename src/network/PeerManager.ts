@@ -14,12 +14,16 @@ import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { closeDB, putBlock, putHeader, rollBackWards } from "./sqlWorkers/sql";
+import { closeDB, putBlock, putHeader, rollBackWards, initDB } from "./sqlWorkers/sql";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
-import { RawNewEpochState } from "../rawNES";
+import { SQLNewEpochState } from "../consensus/ledger";
+import { BlockValidator } from "../consensus/blockValidation";
+import { BlockApplier } from "../consensus/BlockApplication";
+import { SQL } from "bun";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
 import { Cbor, CborArray } from "@harmoniclabs/cbor";
+import * as mithril from "@mithril-dev/mithril-client-wasm";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
@@ -45,7 +49,7 @@ export interface IPeerManager {
     config: GerolamoConfig;
     topology: Topology;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-    lState: RawNewEpochState;
+    lState: SQLNewEpochState;
 }
 
 export class PeerManager implements IPeerManager {
@@ -58,7 +62,7 @@ export class PeerManager implements IPeerManager {
     config: GerolamoConfig;
     topology: Topology;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-    lState: RawNewEpochState;
+    lState: SQLNewEpochState;
 
     constructor() {}
 
@@ -68,7 +72,19 @@ export class PeerManager implements IPeerManager {
         // logger.debug("Parsed topology:", this.topology);
         const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
-        this.lState = RawNewEpochState.init();
+        if (this.config.syncFromTip) {
+            // TODO: Implement Mithril-based bootstrapping
+            // - Fetch latest certified snapshot using Mithril client
+            // - Verify certificate
+            // - Load snapshot into ledger state
+            logger.debug("Sync from tip using Mithril - not yet implemented");
+            this.lState = await SQLNewEpochState.init(new SQL(":memory:"));
+        } else {
+            this.lState = await SQLNewEpochState.init(new SQL(":memory:"));
+        }
+
+        // Initialize chain sync database tables
+        await initDB();
 
         // Assign bootstrap peers
         if (this.topology.bootstrapPeers) {
@@ -285,16 +301,28 @@ export class PeerManager implements IPeerManager {
             )
         )
         */
-        const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
-        // logger.debug("Fetched block: ", block.blockData);
-        if (block) {
-            await putBlock(blockHeaderHash, block.blockData); // Assuming block is MultiEraBlock; adjust if needed
-            // logger.debug(`Stored block for hash ${blockHeaderHash} from peer ${peerId}`);
-        } else {
-            logger.error(
-                `Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`,
-            );
-        }
+         const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
+         // logger.debug("Fetched block: ", block.blockData);
+         if (block) {
+             await putBlock(blockHeaderHash, block.blockData); // Assuming block is MultiEraBlock; adjust if needed
+             // logger.debug(`Stored block for hash ${blockHeaderHash} from peer ${peerId}`);
+
+             // Validate and apply the block to the ledger state
+             const blockValidator = new BlockValidator(this.lState);
+             const isValid = await blockValidator.validateBlock(block, slot);
+             if (isValid) {
+                 const blockApplier = new BlockApplier(this.lState);
+                 await blockApplier.applyBlock(block, slot);
+                 logger.debug(`Validated and applied block at slot ${slot}`);
+             } else {
+                 logger.error(`Block validation failed for slot ${slot}`);
+                 // TODO: Handle invalid block (disconnect peer, rollback, etc.)
+             }
+         } else {
+             logger.error(
+                 `Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`,
+             );
+         }
     }
 
     async shutdown() {

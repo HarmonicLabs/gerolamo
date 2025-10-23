@@ -1,12 +1,10 @@
 // src/blockfrost/server.ts
-import { type Serve } from "bun";
 import { MultiEraBlock, MultiEraHeader } from "@harmoniclabs/cardano-ledger-ts";
 import {
     getBlockByHash,
     getHeaderByHash,
     resolveToHash,
 } from "../sqlWorkers/sql"; // Adjust path as needed
-import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { logger } from "../../utils/logger"; // Adjust path as needed
 
 const server = Bun.serve({

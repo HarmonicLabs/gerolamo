@@ -18,12 +18,7 @@ import {
     VRFKeyHash,
 } from "@harmoniclabs/cardano-ledger-ts";
 
-import { INewEpochState } from "../../rawNES";
-import {
-    IDelegations,
-    IPParams,
-    ISnapshots,
-} from "../../rawNES/epoch_state/snapshots";
+import { SQLNewEpochState } from "../ledger";
 import { ChainTip } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 
 export const PRECISION = BigInt(10) ** BigInt(34);
@@ -40,6 +35,21 @@ export type ExpCmpOrdering = {
     estimation: ExpOrdering;
     approx: number;
 };
+
+// Simplified interfaces for validation
+export interface IPParams {
+    [key: string]: any; // Pool parameters
+}
+
+export interface IDelegations {
+    [key: string]: any; // Delegation mappings
+}
+
+export interface ISnapshots {
+    stake: any;
+    delegations: IDelegations;
+    pparams: IPParams;
+}
 
 /// The state of the ledger split into two sub-components:
 ///
@@ -121,7 +131,7 @@ export class AnchoredVolatileState {
 }
 
 export class MockChainState {
-    stable: INewEpochState;
+    stable: SQLNewEpochState;
 
     /// A handle to the stable store, shared across all ledger instances.
     snapshots: ISnapshots;

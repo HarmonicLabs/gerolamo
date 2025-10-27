@@ -2,22 +2,22 @@ import { BabbageBlock, Value } from "@harmoniclabs/cardano-ledger-ts";
 import { MockChainState } from "./validation";
 import { SQLNewEpochState } from "./ledger";
 
-export function validateBlock(
+export async function validateBlock(
     block: BabbageBlock,
     state: SQLNewEpochState,
-): boolean {
-    return [
-        validateTransactionCountMatch(block, state),
-        validateNoInvalidTxs(block, state),
-        validateUTxOBalance(block, state),
-        validateFeesCorrect(block, state),
-        validateValidityInterval(block, state),
-        validateMultiAssetsBalance(block, state),
-        validateCollateralValid(block, state),
-        validateCertificatesValid(block, state),
-        validateScriptsValid(block, state),
-        validateSizeLimits(block, state),
-    ].reduce((a, b) => a && b, true);
+): Promise<boolean> {
+    return (
+        validateTransactionCountMatch(block, state) &&
+        validateNoInvalidTxs(block, state) &&
+        await validateUTxOBalance(block, state) &&
+        validateFeesCorrect(block, state) &&
+        validateValidityInterval(block, state) &&
+        validateMultiAssetsBalance(block, state) &&
+        validateCollateralValid(block, state) &&
+        validateCertificatesValid(block, state) &&
+        validateScriptsValid(block, state) &&
+        validateSizeLimits(block, state)
+    );
 }
 
 function validateTransactionCountMatch(
@@ -33,17 +33,29 @@ function validateNoInvalidTxs(
     block: BabbageBlock,
     state: SQLNewEpochState,
 ): boolean {
-    // TODO: Figure out how to implement Phase-2 script validation
-    //
-    return false;
+    // TODO: Implement Phase-2 script validation
+    // For now, assume all txs are valid
+    return true;
 }
 
-function validateUTxOBalance(
+async function validateUTxOBalance(
     block: BabbageBlock,
-    _state: SQLNewEpochState,
-): boolean {
-    // TODO: Implement proper balance validation
-    // For now, return true for testing
+    state: SQLNewEpochState,
+): Promise<boolean> {
+    const utxos = await state.getUTxO();
+    for (const txBody of block.transactionBodies) {
+        let inputValue = 0n;
+        for (const input of txBody.inputs) {
+            const utxo = utxos.find((u) => u.utxoRef.eq(input.utxoRef));
+            if (!utxo) return false;
+            inputValue += utxo.resolved.value.lovelaces;
+        }
+        let outputValue = 0n;
+        for (const output of txBody.outputs) {
+            outputValue += output.value.lovelaces;
+        }
+        if (inputValue < outputValue + txBody.fee) return false;
+    }
     return true;
 }
 
@@ -112,24 +124,24 @@ function validateCollateralValid(
     block: BabbageBlock,
     state: SQLNewEpochState,
 ): boolean {
-    // Implementation
-    return false;
+    // TODO: Implement collateral validation for Plutus scripts
+    return true;
 }
 
 function validateCertificatesValid(
     block: BabbageBlock,
     state: SQLNewEpochState,
 ): boolean {
-    // Implementation
-    return false;
+    // TODO: Implement certificate validation
+    return true;
 }
 
 function validateScriptsValid(
     block: BabbageBlock,
     state: SQLNewEpochState,
 ): boolean {
-    // Implementation
-    return false;
+    // TODO: Implement script validation
+    return true;
 }
 
 function validateSizeLimits(

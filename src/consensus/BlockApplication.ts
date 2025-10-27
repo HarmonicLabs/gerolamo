@@ -1,16 +1,17 @@
 import {
-    MultiEraBlock,
+    Certificate,
+    CertPoolRegistration,
+    CertPoolRetirement,
+    CertStakeDelegation,
+    CertStakeDeRegistration,
+    CertStakeRegistration,
     ConwayBlock,
     ConwayTxBody,
     ConwayUTxO,
-    TxOutRef,
     Hash32,
-    Certificate,
-    CertStakeRegistration,
-    CertStakeDeRegistration,
-    CertStakeDelegation,
-    CertPoolRegistration,
-    CertPoolRetirement,
+    MultiEraBlock,
+    StakeCredentials,
+    TxOutRef,
 } from "@harmoniclabs/cardano-ledger-ts";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { SQLNewEpochState } from "./ledger";
@@ -41,7 +42,7 @@ export class BlockApplier {
             // 2. Update treasury (simplified)
             const totalFees = conwayBlock.transactionBodies.reduce(
                 (sum, txBody) => sum + txBody.fee,
-                0n
+                0n,
             );
             const currentTreasury = await this.ledgerState.getTreasury();
             await this.ledgerState.setTreasury(currentTreasury + totalFees);
@@ -49,7 +50,9 @@ export class BlockApplier {
             // 3. Update last epoch modified if needed
             // TODO: Implement epoch boundary logic
 
-            logger.debug(`Applied block at slot ${slot} with ${conwayBlock.transactionBodies.length} transactions`);
+            logger.debug(
+                `Applied block at slot ${slot} with ${conwayBlock.transactionBodies.length} transactions`,
+            );
         } catch (error) {
             logger.error("Block application failed:", error);
             throw error;
@@ -62,8 +65,8 @@ export class BlockApplier {
     private async applyTransaction(txBody: ConwayTxBody): Promise<void> {
         // 1. Remove spent UTxOs
         const currentUtxo = await this.ledgerState.getUTxO();
-        const newUtxo = currentUtxo.filter(utxo => {
-            return !txBody.inputs.some(input =>
+        const newUtxo = currentUtxo.filter((utxo) => {
+            return !txBody.inputs.some((input) =>
                 input.utxoRef.eq(utxo.utxoRef)
             );
         });
@@ -87,7 +90,10 @@ export class BlockApplier {
         // 4. Process withdrawals
         let totalWithdrawals = 0n;
         if (txBody.withdrawals) {
-            for (const [rewardAccount, amount] of txBody.withdrawals.map.entries()) {
+            for (
+                const [rewardAccount, amount] of txBody.withdrawals.map
+                    .entries()
+            ) {
                 totalWithdrawals += amount as unknown as bigint;
                 // TODO: Update reward account balance
             }
@@ -102,25 +108,60 @@ export class BlockApplier {
     /**
      * Process a certificate and update the ledger state
      */
+    /**
+     * Process a certificate and update the ledger state
+     */
     private async processCert(cert: Certificate): Promise<void> {
         if (cert instanceof CertStakeRegistration) {
-            // Add stake credential to stake set
-            // TODO: Implement stake set management in ledger state
-            logger.debug(`Processed stake registration for ${cert.stakeCredential.toCbor().toString()}`);
+            const stakeCred = StakeCredentials.fromCbor(
+                cert.stakeCredential.toCbor(),
+            );
+            // Add stake credential to stake set with 0 amount
+            const stake = await this.ledgerState.getStake();
+            stake.set(stakeCred, 0n);
+            await this.ledgerState.setStake(stake);
+            logger.debug(
+                `Processed stake registration for ${stakeCred.toCbor().toString()}`,
+            );
         } else if (cert instanceof CertStakeDeRegistration) {
-            // Remove stake credential from stake set
-            logger.debug(`Processed stake deregistration for ${cert.stakeCredential.toCbor().toString()}`);
+            const stakeCred = StakeCredentials.fromCbor(
+                cert.stakeCredential.toCbor(),
+            );
+            // Remove stake credential from stake set and delegations
+            const stake = await this.ledgerState.getStake();
+            stake.delete(stakeCred);
+            await this.ledgerState.setStake(stake);
+            const delegations = await this.ledgerState.getDelegations();
+            delegations.delete(stakeCred);
+            await this.ledgerState.setDelegations(delegations);
+            logger.debug(
+                `Processed stake deregistration for ${stakeCred.toCbor().toString()}`,
+            );
         } else if (cert instanceof CertStakeDelegation) {
+            const stakeCred = StakeCredentials.fromCbor(
+                cert.stakeCredential.toCbor(),
+            );
             // Update delegation
-            logger.debug(`Processed stake delegation from ${cert.stakeCredential.toCbor().toString()} to ${cert.poolKeyHash.toCbor().toString()}`);
+            const delegations = await this.ledgerState.getDelegations();
+            delegations.set(stakeCred, cert.poolKeyHash);
+            await this.ledgerState.setDelegations(delegations);
+            logger.debug(
+                `Processed stake delegation from ${stakeCred.toCbor().toString()} to ${cert.poolKeyHash.toCbor().toString()}`,
+            );
         } else if (cert instanceof CertPoolRegistration) {
-            // Register pool
-            logger.debug(`Processed pool registration for ${cert.poolParams.operator.toCbor().toString()}`);
+            // Register pool - for now, just log
+            logger.debug(
+                `Processed pool registration for ${cert.poolParams.operator.toCbor().toString()}`,
+            );
         } else if (cert instanceof CertPoolRetirement) {
-            // Retire pool
-            logger.debug(`Processed pool retirement for ${cert.poolHash.toCbor().toString()}`);
+            // Retire pool - for now, just log
+            logger.debug(
+                `Processed pool retirement for ${cert.poolHash.toCbor().toString()}`,
+            );
         } else {
-            logger.warn(`Unknown certificate type: ${cert.toCbor().toString()}`);
+            logger.warn(
+                `Unknown certificate type: ${cert.toCbor().toString()}`,
+            );
         }
     }
 

@@ -267,9 +267,10 @@ export async function validateHeader(
 
     const poolDistr = await lState.getPoolDistr();
     const totalActiveStake = poolDistr.totalActiveStake;
-    const individualStake = poolDistr.unPoolDistr.find(([pkh, _]) =>
-        uint8ArrayEq(pkh.toCborBytes(), issuer.toCborBytes())
-    )?.[1].individualTotalPoolStake || 0n;
+    const individualStake =
+        poolDistr.unPoolDistr.find(([pkh, _]) =>
+            uint8ArrayEq(pkh.toCborBytes(), issuer.toCborBytes())
+        )?.[1].individualTotalPoolStake || 0n;
 
     // If total active stake is zero, check if individual stake is also zero
     // If both are zero, the stake ratio is undefined, but we can still validate other aspects

@@ -1,6 +1,17 @@
 import { SQL } from "bun";
-import { ConwayUTxO, PoolKeyHash, Coin, StakeCredentials } from "@harmoniclabs/cardano-ledger-ts";
-import { Cbor, CborArray, CborObj, CborUInt, CborMap } from "@harmoniclabs/cbor";
+import {
+    Coin,
+    ConwayUTxO,
+    PoolKeyHash,
+    StakeCredentials,
+} from "@harmoniclabs/cardano-ledger-ts";
+import {
+    Cbor,
+    CborArray,
+    CborMap,
+    CborObj,
+    CborUInt,
+} from "@harmoniclabs/cbor";
 import { logger } from "../../utils/logger";
 
 // Ported from rawNES
@@ -111,7 +122,7 @@ export class RawPoolDistr implements IPoolDistr {
         if (!(unPoolDistr instanceof CborMap)) throw new Error();
 
         return new RawPoolDistr(
-            (unPoolDistr as CborMap).map.map(({k, v}) => {
+            (unPoolDistr as CborMap).map.map(({ k, v }) => {
                 return [
                     PoolKeyHash.fromCborObj(k),
                     RawIndividualPoolStake.fromCborObj(v),
@@ -170,10 +181,14 @@ export class SQLNewEpochState {
                 FOREIGN KEY (stashed_avvm_addresses_id) REFERENCES stashed_avvm_addresses(id)
             );
         `;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_new_epoch_state_epoch_state_id ON new_epoch_state(epoch_state_id)`;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_new_epoch_state_pulsing_rew_update_id ON new_epoch_state(pulsing_rew_update_id)`;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_new_epoch_state_pool_distr_id ON new_epoch_state(pool_distr_id)`;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_new_epoch_state_stashed_avvm_addresses_id ON new_epoch_state(stashed_avvm_addresses_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_new_epoch_state_epoch_state_id ON new_epoch_state(epoch_state_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_new_epoch_state_pulsing_rew_update_id ON new_epoch_state(pulsing_rew_update_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_new_epoch_state_pool_distr_id ON new_epoch_state(pool_distr_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_new_epoch_state_stashed_avvm_addresses_id ON new_epoch_state(stashed_avvm_addresses_id)`;
     }
 
     private async initBlocksMade(): Promise<void> {
@@ -187,7 +202,8 @@ export class SQLNewEpochState {
                 FOREIGN KEY (epoch) REFERENCES new_epoch_state(epoch)
             );
         `;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_blocks_made_epoch ON blocks_made(epoch)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_blocks_made_epoch ON blocks_made(epoch)`;
     }
 
     private async initEpochState(): Promise<void> {
@@ -204,10 +220,14 @@ export class SQLNewEpochState {
                 FOREIGN KEY (non_myopic_id) REFERENCES non_myopic(id)
             );
         `;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_epoch_state_chain_account_state_id ON epoch_state(chain_account_state_id)`;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_epoch_state_ledger_state_id ON epoch_state(ledger_state_id)`;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_epoch_state_snapshots_id ON epoch_state(snapshots_id)`;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_epoch_state_non_myopic_id ON epoch_state(non_myopic_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_epoch_state_chain_account_state_id ON epoch_state(chain_account_state_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_epoch_state_ledger_state_id ON epoch_state(ledger_state_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_epoch_state_snapshots_id ON epoch_state(snapshots_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_epoch_state_non_myopic_id ON epoch_state(non_myopic_id)`;
 
         await this.db`
             CREATE TABLE IF NOT EXISTS chain_account_state (
@@ -236,9 +256,12 @@ export class SQLNewEpochState {
                 FOREIGN KEY (pparams_id) REFERENCES pparams(id)
             );
         `;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_snapshots_stake_id ON snapshots(stake_id)`;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_snapshots_delegations_id ON snapshots(delegations_id)`;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_snapshots_pparams_id ON snapshots(pparams_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_snapshots_stake_id ON snapshots(stake_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_snapshots_delegations_id ON snapshots(delegations_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_snapshots_pparams_id ON snapshots(pparams_id)`;
 
         await this.db`
             CREATE TABLE IF NOT EXISTS stake (
@@ -259,7 +282,6 @@ export class SQLNewEpochState {
         await this.db`
             CREATE TABLE IF NOT EXISTS pparams (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                stake_credential BLOB,
                 params BLOB
             );
         `;
@@ -272,7 +294,8 @@ export class SQLNewEpochState {
                 FOREIGN KEY (likelihoods_id) REFERENCES likelihoods(id)
             );
         `;
-        await this.db`CREATE INDEX IF NOT EXISTS idx_non_myopic_likelihoods_id ON non_myopic(likelihoods_id)`;
+        await this
+            .db`CREATE INDEX IF NOT EXISTS idx_non_myopic_likelihoods_id ON non_myopic(likelihoods_id)`;
 
         await this.db`
             CREATE TABLE IF NOT EXISTS likelihoods (
@@ -328,7 +351,7 @@ export class SQLNewEpochState {
     }
 
     async setUTxO(utxo: ConwayUTxO[]): Promise<void> {
-        const cborArray = new CborArray(utxo.map(u => u.toCborObj()));
+        const cborArray = new CborArray(utxo.map((u) => u.toCborObj()));
         const bytes = Cbor.encode(cborArray);
         await this.db`
             UPDATE ledger_state
@@ -393,7 +416,8 @@ export class SQLNewEpochState {
         `;
         // Insert new
         for (const [cred, amount] of stake) {
-            await this.db`INSERT INTO stake (stake_credential, amount) VALUES (${cred.toCbor()}, ${amount})`;
+            await this
+                .db`INSERT INTO stake (stake_credential, amount) VALUES (${cred.toCbor()}, ${amount})`;
         }
     }
 
@@ -416,7 +440,9 @@ export class SQLNewEpochState {
         return delegations;
     }
 
-    async setDelegations(delegations: Map<StakeCredentials, PoolKeyHash>): Promise<void> {
+    async setDelegations(
+        delegations: Map<StakeCredentials, PoolKeyHash>,
+    ): Promise<void> {
         // Clear existing
         await this.db`
             DELETE FROM delegations
@@ -430,18 +456,23 @@ export class SQLNewEpochState {
         `;
         // Insert new
         for (const [cred, pool] of delegations) {
-            await this.db`INSERT INTO delegations (stake_credential, pool_key_hash) VALUES (${cred.toCbor()}, ${pool.toCbor()})`;
+            await this
+                .db`INSERT INTO delegations (stake_credential, pool_key_hash) VALUES (${cred.toCbor()}, ${pool.toCbor()})`;
         }
     }
 
     // Method to get lastEpochModified
     async getLastEpochModified(): Promise<bigint> {
-        const result = await this.db`SELECT last_epoch_modified FROM new_epoch_state WHERE epoch = 0`;
-        return result.length > 0 ? BigInt(result[0].last_epoch_modified as number) : 0n;
+        const result = await this
+            .db`SELECT last_epoch_modified FROM new_epoch_state WHERE epoch = 0`;
+        return result.length > 0
+            ? BigInt(result[0].last_epoch_modified as number)
+            : 0n;
     }
 
     async setLastEpochModified(epoch: bigint): Promise<void> {
-        await this.db`UPDATE new_epoch_state SET last_epoch_modified = ${epoch} WHERE epoch = 0`;
+        await this
+            .db`UPDATE new_epoch_state SET last_epoch_modified = ${epoch} WHERE epoch = 0`;
     }
 
     // Method to get pool distribution
@@ -452,13 +483,20 @@ export class SQLNewEpochState {
             JOIN new_epoch_state nes ON pd.id = nes.pool_distr_id
             WHERE nes.epoch = 0
         `;
-        if (result.length === 0 || !result[0].data) return new RawPoolDistr([], 0n);
+        if (result.length === 0 || !result[0].data) {
+            return new RawPoolDistr([], 0n);
+        }
         const bytes = result[0].data;
         const cbor = Cbor.parse(bytes);
         return RawPoolDistr.fromCborObj(cbor);
     }
 
-    static async init(db: SQL, startEpoch: bigint = 0n, slotsPerKESPeriod: bigint = 1n, maxKESEvolutions: bigint = 1n): Promise<SQLNewEpochState> {
+    static async init(
+        db: SQL,
+        startEpoch: bigint = 0n,
+        slotsPerKESPeriod: bigint = 1n,
+        maxKESEvolutions: bigint = 1n,
+    ): Promise<SQLNewEpochState> {
         const state = new SQLNewEpochState(db);
 
         await state.init();
@@ -466,7 +504,9 @@ export class SQLNewEpochState {
         await db.begin(async (tx) => {
             await tx`INSERT OR IGNORE INTO new_epoch_state (epoch, last_epoch_modified, slots_per_kes_period, max_kes_evolutions) VALUES (${startEpoch}, 0, ${slotsPerKESPeriod}, ${maxKESEvolutions})`;
             await tx`INSERT OR IGNORE INTO chain_account_state (id, treasury, reserves) VALUES (1, 0, 0)`;
-            await tx`INSERT OR IGNORE INTO ledger_state (id, utxo) VALUES (1, ${Cbor.encode(new CborArray([]))})`;
+            await tx`INSERT OR IGNORE INTO ledger_state (id, utxo) VALUES (1, ${
+                Cbor.encode(new CborArray([]))
+            })`;
             await tx`INSERT OR IGNORE INTO snapshots (id, stake_id, delegations_id, pparams_id) VALUES (1, NULL, NULL, NULL)`;
             await tx`INSERT OR IGNORE INTO epoch_state (id, chain_account_state_id, ledger_state_id, snapshots_id) VALUES (1, 1, 1, 1)`;
             await tx`UPDATE new_epoch_state SET epoch_state_id = 1 WHERE epoch = ${startEpoch}`;
@@ -475,7 +515,10 @@ export class SQLNewEpochState {
         return state;
     }
 
-    static async initFromSnapshot(db: SQL, snapshotData: Uint8Array): Promise<SQLNewEpochState> {
+    static async initFromSnapshot(
+        db: SQL,
+        snapshotData: Uint8Array,
+    ): Promise<SQLNewEpochState> {
         // Parse snapshotData as CBOR NES
         const cbor = Cbor.parse(snapshotData);
         // TODO: Implement full NES parsing and SQL population
@@ -483,7 +526,10 @@ export class SQLNewEpochState {
         return SQLNewEpochState.fromCborObj(db, cbor);
     }
 
-    static async fromCborObj(db: SQL, cborObj: CborObj): Promise<SQLNewEpochState> {
+    static async fromCborObj(
+        db: SQL,
+        cborObj: CborObj,
+    ): Promise<SQLNewEpochState> {
         const state = new SQLNewEpochState(db);
         await state.init();
 
@@ -499,29 +545,41 @@ export class SQLNewEpochState {
             [lastEpochModified, epochState] = cborObj.array;
             poolDistr = undefined;
         } else {
-            throw new Error("Invalid CBOR - expected 7 elements for NES or 2 for Mithril snapshot");
+            throw new Error(
+                "Invalid CBOR - expected 7 elements for NES or 2 for Mithril snapshot",
+            );
         }
 
         // Parse epochState: [chainAccountState, ledgerState, snapshots, nonMyopic, pparams?]
         if (!(epochState instanceof CborArray) || epochState.array.length < 4) {
-            throw new Error("Invalid epochState CBOR - expected at least 4 elements");
+            throw new Error(
+                "Invalid epochState CBOR - expected at least 4 elements",
+            );
         }
-        const [chainAccountState, ledgerState, snapshots] = epochState.array;
+        const [chainAccountState, ledgerState, snapshots, , pparams] =
+            epochState.array;
 
         // Extract treasury and reserves
-        if (chainAccountState instanceof CborArray && chainAccountState.array.length >= 2) {
+        if (
+            chainAccountState instanceof CborArray &&
+            chainAccountState.array.length >= 2
+        ) {
             const treasury = chainAccountState.array[0] as CborUInt;
             const reserves = chainAccountState.array[1] as CborUInt;
             await state.setTreasury(BigInt(treasury.num));
             // Note: reserves not stored in current schema, could be added later
-            logger.debug(`Loaded treasury: ${treasury.num}, reserves: ${reserves.num}`);
+            logger.debug(
+                `Loaded treasury: ${treasury.num}, reserves: ${reserves.num}`,
+            );
         }
 
         // Extract UTxO
         if (ledgerState instanceof CborArray && ledgerState.array.length >= 1) {
             const utxoCbor = ledgerState.array[0];
             if (utxoCbor instanceof CborArray) {
-                const utxos = utxoCbor.array.map(obj => ConwayUTxO.fromCborObj(obj));
+                const utxos = utxoCbor.array.map((obj) =>
+                    ConwayUTxO.fromCborObj(obj)
+                );
                 await state.setUTxO(utxos);
                 logger.debug(`Loaded ${utxos.length} UTxOs`);
             }
@@ -552,16 +610,29 @@ export class SQLNewEpochState {
 
                 // Parse delegations
                 if (delegationsCbor instanceof CborMap) {
-                    const delegationsMap = new Map<StakeCredentials, PoolKeyHash>();
+                    const delegationsMap = new Map<
+                        StakeCredentials,
+                        PoolKeyHash
+                    >();
                     for (const { k, v } of delegationsCbor.map) {
                         const cred = StakeCredentials.fromCborObj(k);
                         const pool = PoolKeyHash.fromCborObj(v);
                         delegationsMap.set(cred, pool);
                     }
                     await state.setDelegations(delegationsMap);
-                    logger.debug(`Loaded ${delegationsMap.size} delegation entries`);
+                    logger.debug(
+                        `Loaded ${delegationsMap.size} delegation entries`,
+                    );
                 }
             }
+        }
+
+        // Extract pparams
+        if (pparams) {
+            const pparamsBytes = Cbor.encode(pparams);
+            await db`INSERT OR REPLACE INTO pparams (id, params) VALUES (1, ${pparamsBytes})`;
+            await db`UPDATE snapshots SET pparams_id = 1 WHERE id = 1`;
+            logger.debug(`Loaded pparams`);
         }
 
         // Extract pool distribution
@@ -574,7 +645,9 @@ export class SQLNewEpochState {
                 // Store pool distribution as CBOR blob (encode the original CBOR)
                 const poolDistrBytes = Cbor.encode(poolDistr);
                 await db`UPDATE pool_distr SET data = ${poolDistrBytes} WHERE id = 1`;
-                logger.debug(`Loaded pool distribution with ${rawPoolDistr.unPoolDistr.length} pools`);
+                logger.debug(
+                    `Loaded pool distribution with ${rawPoolDistr.unPoolDistr.length} pools`,
+                );
             }
         }
 
@@ -582,7 +655,9 @@ export class SQLNewEpochState {
         if (lastEpochModified instanceof CborUInt) {
             await state.setLastEpochModified(BigInt(lastEpochModified.num));
             await db`UPDATE new_epoch_state SET epoch = ${lastEpochModified.num} WHERE epoch = 0`;
-            logger.debug(`Set epoch and last epoch modified to ${lastEpochModified.num}`);
+            logger.debug(
+                `Set epoch and last epoch modified to ${lastEpochModified.num}`,
+            );
         }
 
         return state;

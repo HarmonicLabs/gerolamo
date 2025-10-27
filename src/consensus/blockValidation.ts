@@ -9,9 +9,9 @@ export class BlockValidator {
         this.lState = lState;
     }
 
-    validateBlock(block: BabbageBlock, _slot: bigint): boolean {
+    async validateBlock(block: BabbageBlock, _slot: bigint): Promise<boolean> {
         // For now, delegate to the existing validateBlock function
         // In the future, this could include additional validation logic
-        return validateBlock(block, this.lState);
+        return await validateBlock(block, this.lState);
     }
 }

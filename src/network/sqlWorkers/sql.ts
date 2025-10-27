@@ -95,7 +95,9 @@ class SqlStorage {
             SELECT h.header_data
             FROM headers h
             JOIN slot_index si ON h.hash = si.block_hash
-            WHERE si.slot = ${BigInt(slot)} AND si.block_hash = ${blockHeaderHash}
+            WHERE si.slot = ${
+            BigInt(slot)
+        } AND si.block_hash = ${blockHeaderHash}
         `;
         return result.length > 0 ? result[0].header_data : null;
     }
@@ -252,7 +254,10 @@ class SqlStorage {
             return null;
         } else {
             const result = results.reduce(
-                (acc: { [key: string]: Uint8Array }, row: { slot: bigint; hash: Uint8Array }) => {
+                (
+                    acc: { [key: string]: Uint8Array },
+                    row: { slot: bigint; hash: Uint8Array },
+                ) => {
                     acc[row.slot.toString()] = row.hash;
                     return acc;
                 },
@@ -314,7 +319,10 @@ class SqlStorage {
             return null;
         } else {
             const result = results.reduce(
-                (acc: { [key: string]: Uint8Array }, row: { slot: bigint; vrf: Uint8Array }) => {
+                (
+                    acc: { [key: string]: Uint8Array },
+                    row: { slot: bigint; vrf: Uint8Array },
+                ) => {
                     acc[row.slot.toString()] = row.vrf;
                     return acc;
                 },
@@ -335,7 +343,7 @@ function isHex(str: string): boolean {
 }
 
 // Create an instance for the exports
-const db = new SQL('sqlite://./gerolamo.db');
+const db = new SQL("sqlite://./gerolamo.db");
 const storage = new SqlStorage(db);
 
 export async function putHeader(

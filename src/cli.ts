@@ -1,19 +1,9 @@
 import { program } from "commander";
 import * as fsPromises from "node:fs/promises";
-import * as fs from "node:fs";
 import * as path from "node:path";
-import * as zlib from "node:zlib";
-import * as streamPromises from "node:stream/promises";
 import { Cbor } from "@harmoniclabs/cbor";
 import { SQLNewEpochState } from "./consensus/ledger";
 import { SQL } from "bun";
-import { GerolamoConfig, PeerManager } from "./network/PeerManager";
-
-// import { Database } from "bun:sqlite";
-// import "./types/polyfills";
-import { logger } from "./utils/logger";
-
-
 
 export async function getCbor(cborFile: string, outputDirPath: string) {
     try {
@@ -23,25 +13,22 @@ export async function getCbor(cborFile: string, outputDirPath: string) {
     }
 
     const cbor = await fsPromises.readFile(cborFile);
-    // const db = new Database(
-    //     path.join(outputDirPath, "new_epoch_state.db"),
-    // );
-    await SQLNewEpochState.fromCborObj(new SQL(path.join(outputDirPath, "nes.db")), Cbor.parse(cbor));
-
-    // NewEpochState.bootstrap(db);
-    // nes.put(db);
+    await SQLNewEpochState.fromCborObj(
+        new SQL(path.join(outputDirPath, "nes.db")),
+        Cbor.parse(cbor),
+    );
 }
 
 program.name("gerolamo");
 
 export function Main() {
-
-
-
     program
         .command("import-ledger-state")
         .description("Import and load ledger state snapshots into SQLite")
-        .argument("<cborFilePath>", "path to the CBOR file containing the ledger state")
+        .argument(
+            "<cborFilePath>",
+            "path to the CBOR file containing the ledger state",
+        )
         .argument("[outputDirPath]", undefined, path.normalize("./output"))
         .action(async (
             cborFilePath: string,
@@ -50,9 +37,6 @@ export function Main() {
             await getCbor(path.normalize(cborFilePath), outputDirPath);
         });
 
-
-
     program.command("init-node", "Initialize the node").action(() => undefined);
-
     program.parse(process.argv);
 }

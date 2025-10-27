@@ -8,7 +8,5 @@
     "syncFromPoint": true,
     "syncFromPointSlot": 68774372,
     "syncFromPointBlockHash": "36f5b4a370c22fd4a5c870248f26ac72c0ac0ecc34a42e28ced1a4e15136efa4",
-    "logLevel": "Error",
-    "minibf": true,
-    "minibfPort": 3000
+    "logLevel": "Error"
 }

@@ -14,7 +14,13 @@ import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { closeDB, putBlock, putHeader, rollBackWards, initDB } from "./sqlWorkers/sql";
+import {
+    closeDB,
+    initDB,
+    putBlock,
+    putHeader,
+    rollBackWards,
+} from "./sqlWorkers/sql";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { SQLNewEpochState } from "../consensus/ledger";
 import { BlockValidator } from "../consensus/blockValidation";
@@ -35,7 +41,6 @@ export interface GerolamoConfig {
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
     readonly shelleyGenesisFile: string;
-    readonly enableMinibf?: boolean; // Add this field
 }
 
 export interface IPeerManager {
@@ -224,14 +229,19 @@ export class PeerManager implements IPeerManager {
                 `Received rollback to slot ${slotNumber} from peer ${peerId}`,
             );
 
-            // Need to make sure that it's not syncing before rollbacks are implemented
-            /*
+            // Rollback volatile state
             const success = await rollBackWards(slotNumber);
             if (!success) {
-                logger.error(`Rollback failed for peer ${peerId}`);
-                this.shutdown(); // Disconnect peer on failure
+                logger.error(
+                    `Rollback failed for peer ${peerId}: rollback point not found`,
+                );
+                this.removePeer(peerId);
+                return;
             }
-            */
+            logger.debug(
+                `Rolled back to slot ${slotNumber} for peer ${peerId}`,
+            );
+            // Note: Ledger state rollback not implemented; assumes linear chain
 
             return;
         }
@@ -291,28 +301,28 @@ export class PeerManager implements IPeerManager {
             )
         )
         */
-         const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
-         // logger.debug("Fetched block: ", block.blockData);
-         if (block) {
-             await putBlock(blockHeaderHash, block.blockData); // Assuming block is MultiEraBlock; adjust if needed
-             // logger.debug(`Stored block for hash ${blockHeaderHash} from peer ${peerId}`);
+        const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
+        // logger.debug("Fetched block: ", block.blockData);
+        if (block) {
+            await putBlock(blockHeaderHash, block.blockData); // Assuming block is MultiEraBlock; adjust if needed
+            // logger.debug(`Stored block for hash ${blockHeaderHash} from peer ${peerId}`);
 
-             // Validate and apply the block to the ledger state
-             const blockValidator = new BlockValidator(this.lState);
-             const isValid = await blockValidator.validateBlock(block, slot);
-             if (isValid) {
-                 const blockApplier = new BlockApplier(this.lState);
-                 await blockApplier.applyBlock(block, slot);
-                 logger.debug(`Validated and applied block at slot ${slot}`);
-             } else {
-                 logger.error(`Block validation failed for slot ${slot}`);
-                 // TODO: Handle invalid block (disconnect peer, rollback, etc.)
-             }
-         } else {
-             logger.error(
-                 `Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`,
-             );
-         }
+            // Validate and apply the block to the ledger state
+            const blockValidator = new BlockValidator(this.lState);
+            const isValid = await blockValidator.validateBlock(block, slot);
+            if (isValid) {
+                const blockApplier = new BlockApplier(this.lState);
+                await blockApplier.applyBlock(block, slot);
+                logger.debug(`Validated and applied block at slot ${slot}`);
+            } else {
+                logger.error(`Block validation failed for slot ${slot}`);
+                // TODO: Handle invalid block (disconnect peer, rollback, etc.)
+            }
+        } else {
+            logger.error(
+                `Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`,
+            );
+        }
     }
 
     async shutdown() {

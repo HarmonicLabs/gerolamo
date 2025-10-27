@@ -30,7 +30,10 @@ export class ChainSelector {
     /**
      * Compare two chain candidates and return the better one
      */
-    compareChains(chainA: ChainCandidate, chainB: ChainCandidate): ChainCandidate {
+    compareChains(
+        chainA: ChainCandidate,
+        chainB: ChainCandidate,
+    ): ChainCandidate {
         // Primary: Mithril verification
         if (chainA.mithrilVerified && !chainB.mithrilVerified) {
             return chainA;
@@ -69,7 +72,9 @@ export class ChainSelector {
     selectBestChain(candidates: ChainCandidate[]): ChainCandidate | null {
         if (candidates.length === 0) return null;
 
-        return candidates.reduce((best, current) => this.compareChains(best, current));
+        return candidates.reduce((best, current) =>
+            this.compareChains(best, current)
+        );
     }
 
     /**
@@ -79,7 +84,9 @@ export class ChainSelector {
     async verifyWithMithril(candidate: ChainCandidate): Promise<boolean> {
         // Placeholder: Query Mithril for certificate verification
         // Return true if the chain's tip is certified
-        logger.debug(`Verifying chain with Mithril: slot ${candidate.tip.header.body.slot}`);
+        logger.debug(
+            `Verifying chain with Mithril: slot ${candidate.tip.header.body.slot}`,
+        );
         return false; // Stub
     }
 
@@ -98,7 +105,9 @@ export class ChainSelector {
      * Evaluate and select the best chain from peers
      * TODO: Integrate with PeerManager
      */
-    async evaluateChains(peerChains: ChainCandidate[]): Promise<ChainCandidate | null> {
+    async evaluateChains(
+        peerChains: ChainCandidate[],
+    ): Promise<ChainCandidate | null> {
         // Verify each chain with Mithril
         for (const chain of peerChains) {
             chain.mithrilVerified = await this.verifyWithMithril(chain);

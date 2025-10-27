@@ -23,7 +23,6 @@ import { SQL } from "bun";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
 import { Cbor, CborArray } from "@harmoniclabs/cbor";
-import * as mithril from "@mithril-dev/mithril-client-wasm";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
@@ -72,16 +71,7 @@ export class PeerManager implements IPeerManager {
         // logger.debug("Parsed topology:", this.topology);
         const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
-        if (this.config.syncFromTip) {
-            // TODO: Implement Mithril-based bootstrapping
-            // - Fetch latest certified snapshot using Mithril client
-            // - Verify certificate
-            // - Load snapshot into ledger state
-            logger.debug("Sync from tip using Mithril - not yet implemented");
-            this.lState = await SQLNewEpochState.init(new SQL(":memory:"));
-        } else {
-            this.lState = await SQLNewEpochState.init(new SQL(":memory:"));
-        }
+        this.lState = await SQLNewEpochState.init(new SQL(":memory:"));
 
         // Initialize chain sync database tables
         await initDB();

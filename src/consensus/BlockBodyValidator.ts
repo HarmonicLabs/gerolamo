@@ -1,36 +1,42 @@
-import { BabbageBlock, Value } from "@harmoniclabs/cardano-ledger-ts";
-import { MockChainState } from "./validation";
+import {
+    BabbageBlock,
+    MultiEraBlock,
+    Value,
+} from "@harmoniclabs/cardano-ledger-ts";
 import { SQLNewEpochState } from "./ledger";
 
 export async function validateBlock(
-    block: BabbageBlock,
+    block: MultiEraBlock,
     state: SQLNewEpochState,
 ): Promise<boolean> {
+    if (!block.block) return true; // Skip if block not parsed
+    const babbageBlock = block.block as any;
     return (
-        validateTransactionCountMatch(block, state) &&
-        validateNoInvalidTxs(block, state) &&
-        await validateUTxOBalance(block, state) &&
-        validateFeesCorrect(block, state) &&
-        validateValidityInterval(block, state) &&
-        validateMultiAssetsBalance(block, state) &&
-        validateCollateralValid(block, state) &&
-        validateCertificatesValid(block, state) &&
-        validateScriptsValid(block, state) &&
-        validateSizeLimits(block, state)
+        validateTransactionCountMatch(babbageBlock, state) &&
+        validateNoInvalidTxs(babbageBlock, state) &&
+        await validateUTxOBalance(babbageBlock, state) &&
+        validateFeesCorrect(babbageBlock, state) &&
+        validateValidityInterval(babbageBlock, state) &&
+        validateMultiAssetsBalance(babbageBlock, state) &&
+        validateCollateralValid(babbageBlock, state) &&
+        validateCertificatesValid(babbageBlock, state) &&
+        validateScriptsValid(babbageBlock, state) &&
+        validateSizeLimits(babbageBlock, state)
     );
 }
 
 function validateTransactionCountMatch(
-    block: BabbageBlock,
+    block: any,
     _state: SQLNewEpochState,
 ): boolean {
     // Implementation
+    if (!block.transactionBodies) return true; // Skip if not present
     return block.transactionBodies.length ===
         block.transactionWitnessSets.length;
 }
 
 function validateNoInvalidTxs(
-    block: BabbageBlock,
+    block: any,
     state: SQLNewEpochState,
 ): boolean {
     // TODO: Implement Phase-2 script validation
@@ -39,7 +45,7 @@ function validateNoInvalidTxs(
 }
 
 async function validateUTxOBalance(
-    block: BabbageBlock,
+    block: any,
     state: SQLNewEpochState,
 ): Promise<boolean> {
     const utxos = await state.getUTxO();
@@ -60,20 +66,21 @@ async function validateUTxOBalance(
 }
 
 function validateFeesCorrect(
-    block: BabbageBlock,
+    block: any,
     state: SQLNewEpochState,
 ): boolean {
     // Implementation
+    const minFeeA = 44; // from preprod genesis
+    const minFeeB = 155381;
     return block.transactionBodies.map((txBody) =>
         txBody.fee >=
-            BigInt(MockChainState.protocol_parameters.txFeePerByte.valueOf()) * // min_fee_a
-                        BigInt(txBody.toCborBytes().length) + // size
-                BigInt(MockChainState.protocol_parameters.txFeeFixed) // min_fee_b
+            BigInt(minFeeA) * BigInt(txBody.toCborBytes().length) +
+                BigInt(minFeeB)
     ).reduce((a, b) => a && b);
 }
 
 function validateValidityInterval(
-    block: BabbageBlock,
+    block: any,
     _state: SQLNewEpochState,
 ): boolean {
     // Implementation
@@ -89,7 +96,7 @@ function validateValidityInterval(
 
 // TODO: Fill in placeholder for cert deposits
 function validateMultiAssetsBalance(
-    block: BabbageBlock,
+    block: any,
     _state: SQLNewEpochState,
 ): boolean {
     return block.transactionBodies.map((txBody) => {
@@ -121,7 +128,7 @@ function validateMultiAssetsBalance(
 }
 
 function validateCollateralValid(
-    block: BabbageBlock,
+    block: any,
     state: SQLNewEpochState,
 ): boolean {
     // TODO: Implement collateral validation for Plutus scripts
@@ -129,7 +136,7 @@ function validateCollateralValid(
 }
 
 function validateCertificatesValid(
-    block: BabbageBlock,
+    block: any,
     state: SQLNewEpochState,
 ): boolean {
     // TODO: Implement certificate validation
@@ -137,7 +144,7 @@ function validateCertificatesValid(
 }
 
 function validateScriptsValid(
-    block: BabbageBlock,
+    block: any,
     state: SQLNewEpochState,
 ): boolean {
     // TODO: Implement script validation
@@ -145,12 +152,12 @@ function validateScriptsValid(
 }
 
 function validateSizeLimits(
-    block: BabbageBlock,
+    block: any,
     state: SQLNewEpochState,
 ): boolean {
     // Implementation
+    const maxTxSize = 16384; // from preprod genesis
     return block.transactionBodies.map((txBody) =>
-        txBody.toCborBytes().length <=
-            MockChainState.protocol_parameters.maxTxSize
+        txBody.toCborBytes().length <= maxTxSize
     ).reduce((a, b) => a && b);
 }

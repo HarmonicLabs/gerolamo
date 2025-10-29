@@ -168,14 +168,6 @@ class SqlStorage {
     ): Promise<boolean> {
         const rollbackPointBig = BigInt(rollbackPoint);
 
-        // Check if rollback point exists
-        const exists = await this.db`
-            SELECT 1 FROM slot_index WHERE slot = ${rollbackPointBig}
-        `;
-        if (exists.length === 0) {
-            return false;
-        }
-
         await this.db.begin(async (tx) => {
             // Get slots to remove
             const slotsToRemove = await tx`

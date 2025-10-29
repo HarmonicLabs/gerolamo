@@ -25,6 +25,7 @@ import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { SQLNewEpochState } from "../consensus/ledger";
 import { BlockValidator } from "../consensus/blockValidation";
 import { BlockApplier } from "../consensus/BlockApplication";
+import { ChainCandidate, ChainSelector } from "../consensus/chainSelection";
 import { SQL } from "bun";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
@@ -67,16 +68,28 @@ export class PeerManager implements IPeerManager {
     topology: Topology;
     shelleyGenesisConfig: ShelleyGenesisConfig;
     lState: SQLNewEpochState;
+    chainSelector: ChainSelector;
+    chainCandidates: Map<string, ChainCandidate> = new Map();
+    currentFollowedPeer: string | null = null;
 
-    constructor() {}
+    constructor(config: GerolamoConfig, lState?: SQLNewEpochState) {
+        this.config = config;
+        if (lState) {
+            this.lState = lState;
+            this.chainSelector = new ChainSelector(lState);
+        }
+    }
 
     async init() {
-        // logger.debug("Reading config file: ", this.config);
         this.topology = await parseTopology(this.config.topologyFile);
-        // logger.debug("Parsed topology:", this.topology);
         const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
-        this.lState = await SQLNewEpochState.init(new SQL(":memory:"));
+        if (!this.lState) {
+            this.lState = await SQLNewEpochState.init(new SQL(":memory:"));
+        }
+        if (!this.chainSelector) {
+            this.chainSelector = new ChainSelector(this.lState);
+        }
 
         // Initialize chain sync database tables
         await initDB();
@@ -171,28 +184,12 @@ export class PeerManager implements IPeerManager {
     }
 
     private async peerSyncCurrentTasks() {
-        // logger.debug("Starting peer sync tasks...");
         await Promise.all(this.hotPeers.map(async (peer) => {
-            try {
-                logger.log(
-                    `Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync`,
-                );
-                peer.startSyncLoop(this.syncEventCallback.bind(this));
-                // const peersAddresses = await peer.askForPeers();
-                // console.log("peersAddresses: ", peersAddresses);
-                // this.addNewSharedPeers(peersAddresses);
-            } catch (error) {
-                logger.error(
-                    `Failed to initialize hot peer ${peer.peerId}:`,
-                    error,
-                );
-                this.removePeer(peer.peerId);
-            }
+            peer.startSyncLoop(this.syncEventCallback.bind(this));
         }));
     }
 
     private addNewSharedPeers(peersAddresses: PeerAddress[]) {
-        logger.log("Adding new shared peers from network...");
         peersAddresses.forEach((address) => {
             if (address instanceof PeerAddressIPv4) {
                 const newPeer = new PeerClient(
@@ -220,9 +217,6 @@ export class PeerManager implements IPeerManager {
         ) {
             const slotNumber = data.tip.point.blockHeader?.slotNumber;
             if (slotNumber === undefined) {
-                logger.error(
-                    `Rollback failed for peer ${peerId}: missing slot number in rollback point`,
-                );
                 return;
             }
             logger.debug(
@@ -253,28 +247,46 @@ export class PeerManager implements IPeerManager {
                 data.data instanceof CborArray
             )
         ) throw new Error("invalid CBOR for header");
-        // logger.debug("ChainSyncRollForward data: ", Cbor.encode(data.data).toString());
+
         const validateHeaderRes = await headerValidation(
             data,
             this.shelleyGenesisConfig,
             this.lState,
         );
-        // logger.debug("Validated header res: ", validateHeaderRes);
 
         /*This is just tempo for quick testing
         const blockPeerTest = this.allPeers.get(peerId);
         if (!blockPeerTest) return;
         const blockTest = await fetchBlock(blockPeerTest, 102379274, fromHex("9122f44b2848ff4bb91f872ee01636b666fd3418a87edbe0d9b70a2df417941d"));
-        logger.debug("Test fetch block: ", blockTest.toCbor().toString());
+
         */
         if (!validateHeaderRes) return;
 
         const tipSlot = data.tip.point.blockHeader?.slotNumber;
         const { slot, blockHeaderHash, multiEraHeader } = validateHeaderRes;
-        // logger.debug("multiEraHeader: ", multiEraHeader.toCborBytes());
+
         // Store validated header in LMDB (as JSON) using worker
         await putHeader(slot, blockHeaderHash, multiEraHeader.toCborBytes());
-        // logger.debug(`Stored header for hash ${blockHeaderHash}`);
+        logger.debug(
+            `Header added to volatile state: slot ${slot}, hash ${
+                toHex(blockHeaderHash)
+            }`,
+        );
+
+        // Update chain candidate for this peer
+        let candidate = this.chainCandidates.get(peerId);
+        if (!candidate) {
+            candidate = {
+                tip: multiEraHeader,
+                stake: 0n, // Placeholder, calculate later
+                mithrilVerified: false,
+                length: 1,
+            };
+            this.chainCandidates.set(peerId, candidate);
+        } else {
+            candidate.tip = multiEraHeader;
+            candidate.length += 1;
+        }
 
         const headerEpoch = calculatePreProdCardanoEpoch(Number(slot));
         logger.debug(
@@ -302,10 +314,14 @@ export class PeerManager implements IPeerManager {
         )
         */
         const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
-        // logger.debug("Fetched block: ", block.blockData);
+
         if (block) {
-            await putBlock(blockHeaderHash, block.blockData); // Assuming block is MultiEraBlock; adjust if needed
-            // logger.debug(`Stored block for hash ${blockHeaderHash} from peer ${peerId}`);
+            await putBlock(blockHeaderHash, block.toCborBytes());
+            logger.debug(
+                `Block added to volatile state: slot ${slot}, hash ${
+                    toHex(blockHeaderHash)
+                }`,
+            );
 
             // Validate and apply the block to the ledger state
             const blockValidator = new BlockValidator(this.lState);
@@ -313,39 +329,49 @@ export class PeerManager implements IPeerManager {
             if (isValid) {
                 const blockApplier = new BlockApplier(this.lState);
                 await blockApplier.applyBlock(block, slot);
-                logger.debug(`Validated and applied block at slot ${slot}`);
-            } else {
-                logger.error(`Block validation failed for slot ${slot}`);
-                // TODO: Handle invalid block (disconnect peer, rollback, etc.)
+                logger.debug(
+                    `Block applied to stable state: slot ${slot}, hash ${
+                        toHex(blockHeaderHash)
+                    }`,
+                );
             }
-        } else {
-            logger.error(
-                `Failed to fetch block for hash ${blockHeaderHash} from peer ${peerId}`,
-            );
+        }
+    }
+
+    private async performChainSelection() {
+        const candidates = Array.from(this.chainCandidates.values());
+        if (candidates.length === 0) return;
+
+        const bestChain = await this.chainSelector.selectBestChain(candidates);
+        if (bestChain) {
+            // Find the peer ID of the best chain
+            const bestPeerId = Array.from(this.chainCandidates.entries()).find((
+                [id, cand],
+            ) => cand === bestChain)?.[0];
+            if (bestPeerId && bestPeerId !== this.currentFollowedPeer) {
+                this.currentFollowedPeer = bestPeerId;
+                // Disconnect other hot peers to follow only the best
+                this.hotPeers = this.hotPeers.filter((p) =>
+                    p.peerId === bestPeerId
+                );
+                // Remove from allPeers as well, but keep the best
+                for (const peer of Array.from(this.allPeers.values())) {
+                    if (peer.peerId !== bestPeerId) {
+                        this.removePeer(peer.peerId);
+                    }
+                }
+            } else {
+            }
         }
     }
 
     async shutdown() {
-        logger.debug("Shutting down PeerManager");
         for (const peer of this.allPeers.values()) {
             peer.terminate();
         }
         try {
             await closeDB();
-            logger.debug("SQL worker closed");
         } catch (error) {
-            logger.error(`Error closing SQL worker: ${error}`);
         }
     }
 }
-
-// Initialize the peer manager
-/*
-export async function start(config: Bun.BunFile) {
-    const peerManager = new PeerManager();
-    peerManager.init(config).catch((error) => {
-        logger.error("Error initializing PeerManager:", error);
-    });
-}
-start().catch((error) => console.error("Failed to start:", error));
-*/

@@ -84,9 +84,6 @@ export class ChainSelector {
     async verifyWithMithril(candidate: ChainCandidate): Promise<boolean> {
         // Placeholder: Query Mithril for certificate verification
         // Return true if the chain's tip is certified
-        logger.debug(
-            `Verifying chain with Mithril: slot ${candidate.tip.header.body.slot}`,
-        );
         return false; // Stub
     }
 

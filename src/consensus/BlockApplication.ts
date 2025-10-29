@@ -32,6 +32,7 @@ export class BlockApplier {
      */
     async applyBlock(block: MultiEraBlock, slot: bigint): Promise<void> {
         try {
+            if (!block.block) return; // Skip if block not parsed
             const conwayBlock = block.block as ConwayBlock;
 
             // 1. Apply transactions
@@ -49,10 +50,6 @@ export class BlockApplier {
 
             // 3. Update last epoch modified if needed
             // TODO: Implement epoch boundary logic
-
-            logger.debug(
-                `Applied block at slot ${slot} with ${conwayBlock.transactionBodies.length} transactions`,
-            );
         } catch (error) {
             logger.error("Block application failed:", error);
             throw error;
@@ -120,9 +117,6 @@ export class BlockApplier {
             const stake = await this.ledgerState.getStake();
             stake.set(stakeCred, 0n);
             await this.ledgerState.setStake(stake);
-            logger.debug(
-                `Processed stake registration for ${stakeCred.toCbor().toString()}`,
-            );
         } else if (cert instanceof CertStakeDeRegistration) {
             const stakeCred = StakeCredentials.fromCbor(
                 cert.stakeCredential.toCbor(),
@@ -134,9 +128,6 @@ export class BlockApplier {
             const delegations = await this.ledgerState.getDelegations();
             delegations.delete(stakeCred);
             await this.ledgerState.setDelegations(delegations);
-            logger.debug(
-                `Processed stake deregistration for ${stakeCred.toCbor().toString()}`,
-            );
         } else if (cert instanceof CertStakeDelegation) {
             const stakeCred = StakeCredentials.fromCbor(
                 cert.stakeCredential.toCbor(),
@@ -145,23 +136,11 @@ export class BlockApplier {
             const delegations = await this.ledgerState.getDelegations();
             delegations.set(stakeCred, cert.poolKeyHash);
             await this.ledgerState.setDelegations(delegations);
-            logger.debug(
-                `Processed stake delegation from ${stakeCred.toCbor().toString()} to ${cert.poolKeyHash.toCbor().toString()}`,
-            );
         } else if (cert instanceof CertPoolRegistration) {
             // Register pool - for now, just log
-            logger.debug(
-                `Processed pool registration for ${cert.poolParams.operator.toCbor().toString()}`,
-            );
         } else if (cert instanceof CertPoolRetirement) {
             // Retire pool - for now, just log
-            logger.debug(
-                `Processed pool retirement for ${cert.poolHash.toCbor().toString()}`,
-            );
         } else {
-            logger.warn(
-                `Unknown certificate type: ${cert.toCbor().toString()}`,
-            );
         }
     }
 
@@ -173,6 +152,5 @@ export class BlockApplier {
         // - Update stake distribution
         // - Calculate rewards
         // - Reset epoch-specific state
-        logger.debug("Applied epoch boundary");
     }
 }

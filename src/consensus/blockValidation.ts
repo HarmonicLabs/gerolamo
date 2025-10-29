@@ -1,4 +1,4 @@
-import { BabbageBlock } from "@harmoniclabs/cardano-ledger-ts";
+import { BabbageBlock, MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { SQLNewEpochState } from "./ledger";
 import { validateBlock } from "./BlockBodyValidator";
 
@@ -9,7 +9,7 @@ export class BlockValidator {
         this.lState = lState;
     }
 
-    async validateBlock(block: BabbageBlock, _slot: bigint): Promise<boolean> {
+    async validateBlock(block: MultiEraBlock, _slot: bigint): Promise<boolean> {
         // For now, delegate to the existing validateBlock function
         // In the future, this could include additional validation logic
         return await validateBlock(block, this.lState);

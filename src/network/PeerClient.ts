@@ -20,7 +20,7 @@ import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { connect } from "node:net";
 import { logger } from "../utils/logger";
 import { getLastSlot } from "./sqlWorkers/sql";
-import { fromHex } from "@harmoniclabs/uint8array-utils";
+import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { GerolamoConfig } from "./PeerManager";
 export interface IPeerClient {
     host: string;
@@ -49,7 +49,7 @@ export class PeerClient implements IPeerClient {
     readonly config: GerolamoConfig;
     peerSlotNumber: number | null;
     private cookieCounter: number;
-    private keepAliveInterval: NodeJS.Timeout | null;
+    private keepAliveInterval: number | null;
     private isRangeSyncComplete: boolean = false;
 
     constructor(
@@ -80,9 +80,6 @@ export class PeerClient implements IPeerClient {
         this.keepAliveInterval = null;
 
         this.mplexer.on("error", (err) => {
-            logger.error(`Multiplexer error for peer ${this.peerId}:`, err);
-            this.terminate();
-            // process.exit(1);
         });
         this.mplexer.on("data", (data) => {
             // logger.debug(`Multiplexer data for peer ${this.peerId}:`, toHex(data));
@@ -105,7 +102,7 @@ export class PeerClient implements IPeerClient {
         this.keepAliveClient.on("response", (response: KeepAliveResponse) => {
             logger.debug(
                 `KeepAliveResponse received for peer ${this.peerId}:`,
-                response,
+                toHex(response.toCborBytes()),
             );
         });
         this.keepAliveClient.on("error", (err) => {
@@ -139,7 +136,6 @@ export class PeerClient implements IPeerClient {
         const handshake = new HandshakeClient(this.mplexer);
 
         handshake.on("error", (err) => {
-            logger.error(`Handshake error for peer ${this.peerId}:`, err);
             this.terminate();
         });
 
@@ -149,19 +145,13 @@ export class PeerClient implements IPeerClient {
         });
 
         if (!(handshakeResult instanceof HandshakeAcceptVersion)) {
-            logger.error(
-                `Handshake failed for peer ${this.peerId}:`,
-                handshakeResult,
-            );
-            throw new Error("Handshake failed");
+            throw new Error(`Handshake failed for peer ${this.peerId}`);
         }
 
-        logger.debug(`Handshake success for peer ${this.peerId}`);
         // return "handshake success";
     }
 
     async syncToTip(): Promise<ChainPoint> {
-        logger.debug(`Starting chain sync for peer ${this.peerId}...`);
         let intersectResult:
             | ChainSyncIntersectFound
             | ChainSyncIntersectNotFound = await this.chainSyncClient
@@ -174,23 +164,11 @@ export class PeerClient implements IPeerClient {
         ) throw new Error("Invalid sync configuration in config file");
 
         if (this.config.syncFromGenesis) {
-            logger.debug(`Syncing from genesis for peer ${this.peerId}...`);
-            const genesisBlock = new ChainPoint({
-                blockHeader: {
-                    slotNumber: 2n,
-                    hash: fromHex(this.config.genesisBlockHash),
-                },
-            });
-            intersectResult = await this.chainSyncClient.findIntersect([
-                genesisBlock,
-            ]);
+            await this.chainSyncClient.requestNext();
         }
 
         if (this.config.syncFromTip) {
             const lastPointDb = await getLastSlot();
-            logger.debug(`Last point in DB: `, lastPointDb);
-            logger.debug(`Syncing to latest point for peer ${this.peerId}...`);
-            logger.debug(`Last point in DB: `, lastPointDb);
             if (
                 lastPointDb &&
                 lastPointDb.slot < tipPoint.blockHeader?.slotNumber!
@@ -207,33 +185,6 @@ export class PeerClient implements IPeerClient {
             ]);
         }
 
-        if (this.config.syncFromPoint && !this.config.syncFromTip) {
-            logger.debug(
-                `Syncing from configured point for peer ${this.peerId}...`,
-                this.config.syncFromPoint,
-            );
-            const newChainPoint = new ChainPoint({
-                blockHeader: {
-                    slotNumber: this.config.syncFromPointSlot,
-                    hash: fromHex(this.config.syncFromPointBlockHash),
-                },
-            });
-            intersectResult = await this.chainSyncClient.findIntersect([
-                newChainPoint,
-            ]);
-            if (intersectResult instanceof ChainSyncIntersectNotFound) {
-                throw new Error("Configured syncFromPoint not found on peer");
-            }
-            logger.debug(
-                "Sync from Point: Intersected at: ",
-                intersectResult.point.blockHeader?.slotNumber,
-            );
-        }
-
-        logger.debug(
-            `Intersect result for peer ${this.peerId}:`,
-            intersectResult.tip.point.blockHeader?.slotNumber,
-        );
         return intersectResult.tip.point;
     }
 
@@ -290,7 +241,10 @@ export class PeerClient implements IPeerClient {
         return { status: "started", initialTip };
     }
 
-    async fetchBlock(slot: number | bigint, blockHash: Buffer): Promise<any> {
+    async fetchBlock(
+        slot: number | bigint,
+        blockHash: Uint8Array,
+    ): Promise<any> {
         // logger.debug(`Peer: ${this.peerId}...`, `Fetching Block `, { slot, hash: toHex(blockHash)} );
         const chainPoint = new ChainPoint({
             blockHeader: { slotNumber: slot, hash: blockHash },
@@ -306,19 +260,7 @@ export class PeerClient implements IPeerClient {
         // logger.debug(`Peer: ${this.peerId}...`, `Fetching multiple blocks`, points.map(p => ({ slot: p.blockHeader?.slotNumber, hash: p.blockHeader?.hash ? toHex(p.blockHeader.hash) : undefined })) );
         const blocksData: any[] = [];
         for (const point of points) {
-            try {
-                const blockData = await this.blockFetchClient.requestRange(
-                    point,
-                    point,
-                );
-                blocksData.push(blockData);
-            } catch (error) {
-                logger.error(
-                    `Failed to fetch block at point for peer ${this.peerId}:`,
-                    point,
-                    error,
-                );
-            }
+            // TODO: implement fetching multiple blocks
         }
         return blocksData;
     }

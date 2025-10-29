@@ -566,11 +566,8 @@ export class SQLNewEpochState {
         ) {
             const treasury = chainAccountState.array[0] as CborUInt;
             const reserves = chainAccountState.array[1] as CborUInt;
-            await state.setTreasury(BigInt(treasury.num));
+            await state.setTreasury(treasury.num);
             // Note: reserves not stored in current schema, could be added later
-            logger.debug(
-                `Loaded treasury: ${treasury.num}, reserves: ${reserves.num}`,
-            );
         }
 
         // Extract UTxO
@@ -581,7 +578,6 @@ export class SQLNewEpochState {
                     ConwayUTxO.fromCborObj(obj)
                 );
                 await state.setUTxO(utxos);
-                logger.debug(`Loaded ${utxos.length} UTxOs`);
             }
         }
 
@@ -605,7 +601,6 @@ export class SQLNewEpochState {
                         stakeMap.set(cred, amount);
                     }
                     await state.setStake(stakeMap);
-                    logger.debug(`Loaded ${stakeMap.size} stake entries`);
                 }
 
                 // Parse delegations
@@ -620,9 +615,6 @@ export class SQLNewEpochState {
                         delegationsMap.set(cred, pool);
                     }
                     await state.setDelegations(delegationsMap);
-                    logger.debug(
-                        `Loaded ${delegationsMap.size} delegation entries`,
-                    );
                 }
             }
         }
@@ -632,7 +624,6 @@ export class SQLNewEpochState {
             const pparamsBytes = Cbor.encode(pparams);
             await db`INSERT OR REPLACE INTO pparams (id, params) VALUES (1, ${pparamsBytes})`;
             await db`UPDATE snapshots SET pparams_id = 1 WHERE id = 1`;
-            logger.debug(`Loaded pparams`);
         }
 
         // Extract pool distribution
@@ -655,9 +646,6 @@ export class SQLNewEpochState {
         if (lastEpochModified instanceof CborUInt) {
             await state.setLastEpochModified(BigInt(lastEpochModified.num));
             await db`UPDATE new_epoch_state SET epoch = ${lastEpochModified.num} WHERE epoch = 0`;
-            logger.debug(
-                `Set epoch and last epoch modified to ${lastEpochModified.num}`,
-            );
         }
 
         return state;

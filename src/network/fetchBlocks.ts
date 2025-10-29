@@ -16,9 +16,5 @@ export async function fetchBlock(
 }
 
 function validateBlock(multiEraBlocks: any): boolean {
-    // logger.log("Validating block", block );
-    multiEraBlocks.map((b: MultiEraBlock) => {
-        logger.log("\nBlock item:", b.toCbor().toString());
-    });
     return true;
 }

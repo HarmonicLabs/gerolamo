@@ -342,11 +342,11 @@ export class PeerManager implements IPeerManager {
         const candidates = Array.from(this.chainCandidates.values());
         if (candidates.length === 0) return;
 
-        const bestChain = await this.chainSelector.selectBestChain(candidates);
+        const bestChain = this.chainSelector.selectBestChain(candidates);
         if (bestChain) {
             // Find the peer ID of the best chain
             const bestPeerId = Array.from(this.chainCandidates.entries()).find((
-                [id, cand],
+                [_id, cand],
             ) => cand === bestChain)?.[0];
             if (bestPeerId && bestPeerId !== this.currentFollowedPeer) {
                 this.currentFollowedPeer = bestPeerId;
@@ -360,7 +360,6 @@ export class PeerManager implements IPeerManager {
                         this.removePeer(peer.peerId);
                     }
                 }
-            } else {
             }
         }
     }

@@ -29,12 +29,13 @@ export class ChainSelector {
 
     /**
      * Compare two chain candidates and return the better one
+     * Based on Ouroboros Praos chain selection: prefer verified chains, then higher stake density, then longer chains, then higher slot
      */
     compareChains(
         chainA: ChainCandidate,
         chainB: ChainCandidate,
     ): ChainCandidate {
-        // Primary: Mithril verification
+        // Primary: Mithril verification (for security)
         if (chainA.mithrilVerified && !chainB.mithrilVerified) {
             return chainA;
         }
@@ -42,11 +43,13 @@ export class ChainSelector {
             return chainB;
         }
 
-        // Secondary: Stake weight
-        if (chainA.stake > chainB.stake) {
+        // Secondary: Stake density (stake per length, approximating chain quality)
+        const densityA = chainA.length > 0 ? Number(chainA.stake) / chainA.length : 0;
+        const densityB = chainB.length > 0 ? Number(chainB.stake) / chainB.length : 0;
+        if (densityA > densityB) {
             return chainA;
         }
-        if (chainA.stake < chainB.stake) {
+        if (densityA < densityB) {
             return chainB;
         }
 
@@ -58,7 +61,7 @@ export class ChainSelector {
             return chainB;
         }
 
-        // Tiebreaker: Slot number
+        // Tiebreaker: Slot number (prefer more recent)
         if (chainA.tip.header.body.slot > chainB.tip.header.body.slot) {
             return chainA;
         }

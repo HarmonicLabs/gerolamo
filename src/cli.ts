@@ -6,19 +6,11 @@ import { SQLNewEpochState } from "./consensus/ledger";
 import { SQL } from "bun";
 import { GerolamoConfig, PeerManager } from "./network/PeerManager";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
+import { setDB } from "./network/sqlWorkers/sql";
 
-export async function getCbor(cborFile: string, outputDirPath: string) {
-    try {
-        await fsPromises.stat(outputDirPath);
-    } catch {
-        await fsPromises.mkdir(outputDirPath);
-    }
-
-    const cbor = await fsPromises.readFile(cborFile);
-    await SQLNewEpochState.fromCborObj(
-        new SQL(`file:${path.join(outputDirPath, "nes.db")}`),
-        Cbor.parse(cbor),
-    );
+export async function getCbor(dbPath: string, cborFile: string) {
+    const snapshotData = await fsPromises.readFile(cborFile);
+    await SQLNewEpochState.initFromSnapshot(path.resolve(dbPath), snapshotData);
 }
 
 program.name("gerolamo");
@@ -31,12 +23,12 @@ export function Main() {
             "<cborFilePath>",
             "path to the CBOR file containing the ledger state",
         )
-        .argument("[outputDirPath]", undefined, path.normalize("./output"))
+        .argument("<dbPath>", "path to the SQLite database file")
         .action(async (
             cborFilePath: string,
-            outputDirPath: string,
+            dbPath: string,
         ) => {
-            await getCbor(path.normalize(cborFilePath), outputDirPath);
+            await getCbor(dbPath, path.normalize(cborFilePath));
         });
 
     program
@@ -59,18 +51,19 @@ export function Main() {
                 logLevel: "debug",
                 shelleyGenesisFile: "./src/config/preprod-shelley-genesis.json",
             };
-            const db = new SQL(`file:${path.normalize(dbPath)}`);
+    const resolvedPath = path.resolve(dbPath);
+    const db = new SQL(`file:${resolvedPath}`);
+            setDB(db);
             const lState = new SQLNewEpochState(db);
             await lState.init(); // Ensure tables exist
             const peerManager = new PeerManager(config, lState);
             await peerManager.init();
-            // Keep the process running
-            process.on("SIGINT", async () => {
-                await peerManager.shutdown();
-                process.exit(0);
-            });
+             // Keep the process running
+             setInterval(() => {}, 1000);
+             process.on("SIGINT", async () => {
+                 await peerManager.shutdown();
+                 process.exit(0);
+             });
         });
-
-    program.command("init-node", "Initialize the node").action(() => undefined);
     program.parse(process.argv);
 }

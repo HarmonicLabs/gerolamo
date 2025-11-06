@@ -2,10 +2,10 @@ import { SQL } from "bun";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 
 class SqlStorage {
-    db: SQL;
+    db!: SQL;
 
-    constructor(db: SQL) {
-        this.db = db;
+    constructor(db?: SQL) {
+        if (db) this.db = db;
     }
 
     async initTables(): Promise<void> {
@@ -335,8 +335,13 @@ function isHex(str: string): boolean {
 }
 
 // Create an instance for the exports
-const db = new SQL("sqlite://./gerolamo.db");
-const storage = new SqlStorage(db);
+let db: SQL;
+const storage = new SqlStorage();
+
+export function setDB(newDB: SQL) {
+    db = newDB;
+    storage.db = newDB;
+}
 
 export async function putHeader(
     slot: number | bigint,

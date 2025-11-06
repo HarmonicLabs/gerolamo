@@ -71,6 +71,7 @@ export class PeerManager implements IPeerManager {
     chainSelector: ChainSelector;
     chainCandidates: Map<string, ChainCandidate> = new Map();
     currentFollowedPeer: string | null = null;
+    private chainSelectionTimeout: number | null = null;
 
     constructor(config: GerolamoConfig, lState?: SQLNewEpochState) {
         this.config = config;
@@ -85,7 +86,7 @@ export class PeerManager implements IPeerManager {
         const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
         if (!this.lState) {
-            this.lState = await SQLNewEpochState.init(new SQL(":memory:"));
+            throw new Error("Ledger state must be provided");
         }
         if (!this.chainSelector) {
             this.chainSelector = new ChainSelector(this.lState);
@@ -288,6 +289,10 @@ export class PeerManager implements IPeerManager {
             candidate.length += 1;
         }
 
+        // Perform chain selection after updating candidate
+        if (this.chainSelectionTimeout) clearTimeout(this.chainSelectionTimeout);
+        this.chainSelectionTimeout = setTimeout(async () => { await this.performChainSelection(); this.chainSelectionTimeout = null; }, 100);
+
         const headerEpoch = calculatePreProdCardanoEpoch(Number(slot));
         logger.debug(
             `Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
@@ -342,23 +347,36 @@ export class PeerManager implements IPeerManager {
         const candidates = Array.from(this.chainCandidates.values());
         if (candidates.length === 0) return;
 
-        const bestChain = this.chainSelector.selectBestChain(candidates);
+        logger.debug(`Performing chain selection with ${candidates.length} candidates`);
+        if (candidates.length > 1) {
+            logger.warn(`Fork detected: ${candidates.length} competing chains`);
+            candidates.forEach((cand, idx) => {
+                logger.warn(`Candidate ${idx}: tip slot ${cand.tip.header.body.slot}, length ${cand.length}, stake ${cand.stake}`);
+            });
+        }
+
+        const bestChain = await this.chainSelector.evaluateChains(candidates);
         if (bestChain) {
             // Find the peer ID of the best chain
             const bestPeerId = Array.from(this.chainCandidates.entries()).find((
                 [_id, cand],
             ) => cand === bestChain)?.[0];
-            if (bestPeerId && bestPeerId !== this.currentFollowedPeer) {
-                this.currentFollowedPeer = bestPeerId;
-                // Disconnect other hot peers to follow only the best
-                this.hotPeers = this.hotPeers.filter((p) =>
-                    p.peerId === bestPeerId
-                );
-                // Remove from allPeers as well, but keep the best
-                for (const peer of Array.from(this.allPeers.values())) {
-                    if (peer.peerId !== bestPeerId) {
-                        this.removePeer(peer.peerId);
+            if (bestPeerId) {
+                if (bestPeerId !== this.currentFollowedPeer) {
+                    logger.info(`Switching chain selection from peer ${this.currentFollowedPeer || 'none'} to ${bestPeerId} (tip slot ${bestChain.tip.header.body.slot})`);
+                    this.currentFollowedPeer = bestPeerId;
+                    // Disconnect other hot peers to follow only the best
+                    this.hotPeers = this.hotPeers.filter((p) =>
+                        p.peerId === bestPeerId
+                    );
+                    // Remove from allPeers as well, but keep the best
+                    for (const peer of Array.from(this.allPeers.values())) {
+                        if (peer.peerId !== bestPeerId) {
+                            this.removePeer(peer.peerId);
+                        }
                     }
+                } else {
+                    logger.debug(`Continuing to follow peer ${bestPeerId} as best chain`);
                 }
             }
         }

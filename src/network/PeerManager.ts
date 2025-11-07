@@ -290,8 +290,13 @@ export class PeerManager implements IPeerManager {
         }
 
         // Perform chain selection after updating candidate
-        if (this.chainSelectionTimeout) clearTimeout(this.chainSelectionTimeout);
-        this.chainSelectionTimeout = setTimeout(async () => { await this.performChainSelection(); this.chainSelectionTimeout = null; }, 100);
+        if (this.chainSelectionTimeout) {
+            clearTimeout(this.chainSelectionTimeout);
+        }
+        this.chainSelectionTimeout = setTimeout(async () => {
+            await this.performChainSelection();
+            this.chainSelectionTimeout = null;
+        }, 100);
 
         const headerEpoch = calculatePreProdCardanoEpoch(Number(slot));
         logger.debug(
@@ -347,11 +352,15 @@ export class PeerManager implements IPeerManager {
         const candidates = Array.from(this.chainCandidates.values());
         if (candidates.length === 0) return;
 
-        logger.debug(`Performing chain selection with ${candidates.length} candidates`);
+        logger.debug(
+            `Performing chain selection with ${candidates.length} candidates`,
+        );
         if (candidates.length > 1) {
             logger.warn(`Fork detected: ${candidates.length} competing chains`);
             candidates.forEach((cand, idx) => {
-                logger.warn(`Candidate ${idx}: tip slot ${cand.tip.header.body.slot}, length ${cand.length}, stake ${cand.stake}`);
+                logger.warn(
+                    `Candidate ${idx}: tip slot ${cand.tip.header.body.slot}, length ${cand.length}, stake ${cand.stake}`,
+                );
             });
         }
 
@@ -363,7 +372,11 @@ export class PeerManager implements IPeerManager {
             ) => cand === bestChain)?.[0];
             if (bestPeerId) {
                 if (bestPeerId !== this.currentFollowedPeer) {
-                    logger.info(`Switching chain selection from peer ${this.currentFollowedPeer || 'none'} to ${bestPeerId} (tip slot ${bestChain.tip.header.body.slot})`);
+                    logger.info(
+                        `Switching chain selection from peer ${
+                            this.currentFollowedPeer || "none"
+                        } to ${bestPeerId} (tip slot ${bestChain.tip.header.body.slot})`,
+                    );
                     this.currentFollowedPeer = bestPeerId;
                     // Disconnect other hot peers to follow only the best
                     this.hotPeers = this.hotPeers.filter((p) =>
@@ -376,7 +389,9 @@ export class PeerManager implements IPeerManager {
                         }
                     }
                 } else {
-                    logger.debug(`Continuing to follow peer ${bestPeerId} as best chain`);
+                    logger.debug(
+                        `Continuing to follow peer ${bestPeerId} as best chain`,
+                    );
                 }
             }
         }

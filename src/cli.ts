@@ -51,19 +51,19 @@ export function Main() {
                 logLevel: "debug",
                 shelleyGenesisFile: "./src/config/preprod-shelley-genesis.json",
             };
-    const resolvedPath = path.resolve(dbPath);
-    const db = new SQL(`file:${resolvedPath}`);
+            const resolvedPath = path.resolve(dbPath);
+            const db = new SQL(`file:${resolvedPath}`);
             setDB(db);
             const lState = new SQLNewEpochState(db);
             await lState.init(); // Ensure tables exist
             const peerManager = new PeerManager(config, lState);
             await peerManager.init();
-             // Keep the process running
-             setInterval(() => {}, 1000);
-             process.on("SIGINT", async () => {
-                 await peerManager.shutdown();
-                 process.exit(0);
-             });
+            // Keep the process running
+            setInterval(() => {}, 1000);
+            process.on("SIGINT", async () => {
+                await peerManager.shutdown();
+                process.exit(0);
+            });
         });
     program.parse(process.argv);
 }

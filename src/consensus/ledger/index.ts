@@ -481,14 +481,20 @@ export class SQLNewEpochState {
 
         await state.init();
         // Insert initial data
-        await state.db`INSERT OR IGNORE INTO new_epoch_state (epoch, last_epoch_modified, slots_per_kes_period, max_kes_evolutions) VALUES (${startEpoch}, 0, ${slotsPerKESPeriod}, ${maxKESEvolutions})`;
-        await state.db`INSERT OR IGNORE INTO chain_account_state (id, treasury, reserves) VALUES (1, 0, 0)`;
-        await state.db`INSERT OR IGNORE INTO ledger_state (id, utxo) VALUES (1, ${
+        await state
+            .db`INSERT OR IGNORE INTO new_epoch_state (epoch, last_epoch_modified, slots_per_kes_period, max_kes_evolutions) VALUES (${startEpoch}, 0, ${slotsPerKESPeriod}, ${maxKESEvolutions})`;
+        await state
+            .db`INSERT OR IGNORE INTO chain_account_state (id, treasury, reserves) VALUES (1, 0, 0)`;
+        await state
+            .db`INSERT OR IGNORE INTO ledger_state (id, utxo) VALUES (1, ${
             Cbor.encode(new CborArray([]))
         })`;
-        await state.db`INSERT OR IGNORE INTO snapshots (id, stake_id, delegations_id, pparams_id) VALUES (1, NULL, NULL, NULL)`;
-        await state.db`INSERT OR IGNORE INTO epoch_state (id, chain_account_state_id, ledger_state_id, snapshots_id) VALUES (1, 1, 1, 1)`;
-        await state.db`UPDATE new_epoch_state SET epoch_state_id = 1 WHERE epoch = ${startEpoch}`;
+        await state
+            .db`INSERT OR IGNORE INTO snapshots (id, stake_id, delegations_id, pparams_id) VALUES (1, NULL, NULL, NULL)`;
+        await state
+            .db`INSERT OR IGNORE INTO epoch_state (id, chain_account_state_id, ledger_state_id, snapshots_id) VALUES (1, 1, 1, 1)`;
+        await state
+            .db`UPDATE new_epoch_state SET epoch_state_id = 1 WHERE epoch = ${startEpoch}`;
 
         return state;
     }
@@ -535,7 +541,9 @@ export class SQLNewEpochState {
                 // Override lastEpochModified with the snapshot epoch
                 lastEpochModified = epoch;
             } else {
-                throw new Error("Invalid Mithril snapshot: expected at least epochState and poolDistr");
+                throw new Error(
+                    "Invalid Mithril snapshot: expected at least epochState and poolDistr",
+                );
             }
         } else {
             throw new Error(
@@ -545,14 +553,23 @@ export class SQLNewEpochState {
 
         // Insert initial rows
         const epoch = BigInt((lastEpochModified as CborUInt).num);
-        await state.db`INSERT INTO new_epoch_state (epoch, last_epoch_modified, slots_per_kes_period, max_kes_evolutions) VALUES (${epoch}, 0, 1, 1)`;
-        await state.db`INSERT INTO chain_account_state (id, treasury, reserves) VALUES (1, 0, 0)`;
-        await state.db`INSERT INTO ledger_state (id, utxo, cert_state) VALUES (1, ${Cbor.encode(new CborArray([]))}, NULL)`;
-        await state.db`INSERT INTO snapshots (id, stake_id, delegations_id, pparams_id) VALUES (1, NULL, NULL, NULL)`;
-        await state.db`INSERT INTO epoch_state (id, chain_account_state_id, ledger_state_id, snapshots_id, non_myopic_id) VALUES (1, 1, 1, 1, NULL)`;
-        await state.db`UPDATE new_epoch_state SET epoch_state_id = 1 WHERE epoch = ${epoch}`;
+        await state
+            .db`INSERT INTO new_epoch_state (epoch, last_epoch_modified, slots_per_kes_period, max_kes_evolutions) VALUES (${epoch}, 0, 1, 1)`;
+        await state
+            .db`INSERT INTO chain_account_state (id, treasury, reserves) VALUES (1, 0, 0)`;
+        await state
+            .db`INSERT INTO ledger_state (id, utxo, cert_state) VALUES (1, ${
+            Cbor.encode(new CborArray([]))
+        }, NULL)`;
+        await state
+            .db`INSERT INTO snapshots (id, stake_id, delegations_id, pparams_id) VALUES (1, NULL, NULL, NULL)`;
+        await state
+            .db`INSERT INTO epoch_state (id, chain_account_state_id, ledger_state_id, snapshots_id, non_myopic_id) VALUES (1, 1, 1, 1, NULL)`;
+        await state
+            .db`UPDATE new_epoch_state SET epoch_state_id = 1 WHERE epoch = ${epoch}`;
         await state.db`INSERT INTO pool_distr (id, data) VALUES (1, NULL)`;
-        await state.db`UPDATE new_epoch_state SET pool_distr_id = 1 WHERE epoch = ${epoch}`;
+        await state
+            .db`UPDATE new_epoch_state SET pool_distr_id = 1 WHERE epoch = ${epoch}`;
 
         // Parse epochState: [chainAccountState, ledgerState, snapshots?, nonMyopic?, pparams?]
         if (!(epochState instanceof CborArray) || epochState.array.length < 2) {
@@ -565,9 +582,21 @@ export class SQLNewEpochState {
         if (ledgerState instanceof CborBytes) {
             ledgerState = Cbor.parse(ledgerState.bytes);
         }
-        if (!snapshots) snapshots = epochState.array.length > 2 ? epochState.array[2] : undefined;
-        if (!nonMyopic) nonMyopic = epochState.array.length > 3 ? epochState.array[3] : undefined;
-        if (!pparams) pparams = epochState.array.length > 4 ? epochState.array[4] : undefined;
+        if (!snapshots) {
+            snapshots = epochState.array.length > 2
+                ? epochState.array[2]
+                : undefined;
+        }
+        if (!nonMyopic) {
+            nonMyopic = epochState.array.length > 3
+                ? epochState.array[3]
+                : undefined;
+        }
+        if (!pparams) {
+            pparams = epochState.array.length > 4
+                ? epochState.array[4]
+                : undefined;
+        }
 
         // Extract treasury and reserves
         if (
@@ -595,7 +624,9 @@ export class SQLNewEpochState {
         if (snapshots instanceof CborArray && snapshots.array.length >= 2) {
             const stakeMark = snapshots.array[0];
             const stakeSet = snapshots.array[1];
-            const stakeGo = snapshots.array.length > 2 ? snapshots.array[2] : undefined;
+            const stakeGo = snapshots.array.length > 2
+                ? snapshots.array[2]
+                : undefined;
 
             // Use stakeSet as the current stake snapshot (most recent)
             if (stakeSet instanceof CborMap) {
@@ -603,15 +634,29 @@ export class SQLNewEpochState {
                     if (k instanceof CborUInt) {
                         if (k.num === 0n) { // stake
                             if (v instanceof CborArray) {
-                                const stakeMap = new Map<StakeCredentials, Coin>();
+                                const stakeMap = new Map<
+                                    StakeCredentials,
+                                    Coin
+                                >();
                                 for (const entry of v.array) {
-                                    if (entry instanceof CborArray && entry.array.length === 2) {
+                                    if (
+                                        entry instanceof CborArray &&
+                                        entry.array.length === 2
+                                    ) {
                                         const hashCbor = entry.array[0];
                                         const amountCbor = entry.array[1];
-                                        if (hashCbor instanceof CborBytes && hashCbor.bytes.length === 28) {
-                                            const hash = Hash28.fromCborObj(hashCbor);
-                                            const cred = StakeCredentials.keyHash(hash);
-                                            const amount = decodeCoin(amountCbor);
+                                        if (
+                                            hashCbor instanceof CborBytes &&
+                                            hashCbor.bytes.length === 28
+                                        ) {
+                                            const hash = Hash28.fromCborObj(
+                                                hashCbor,
+                                            );
+                                            const cred = StakeCredentials
+                                                .keyHash(hash);
+                                            const amount = decodeCoin(
+                                                amountCbor,
+                                            );
                                             stakeMap.set(cred, amount);
                                         }
                                     }
@@ -621,7 +666,10 @@ export class SQLNewEpochState {
                         } else if (k.num === 5n) { // delegations
                             if (v instanceof CborMap) {
                                 for (const { k: kk, v: vv } of v.map) {
-                                    await state.db`INSERT INTO delegations (stake_credential, pool_key_hash) VALUES (${Cbor.encode(kk)}, ${Cbor.encode(vv)})`;
+                                    await state
+                                        .db`INSERT INTO delegations (stake_credential, pool_key_hash) VALUES (${
+                                        Cbor.encode(kk)
+                                    }, ${Cbor.encode(vv)})`;
                                 }
                             }
                         }
@@ -633,7 +681,8 @@ export class SQLNewEpochState {
         // Extract pparams
         if (pparams) {
             const pparamsBytes = Cbor.encode(pparams);
-            await state.db`INSERT OR REPLACE INTO pparams (id, params) VALUES (1, ${pparamsBytes})`;
+            await state
+                .db`INSERT OR REPLACE INTO pparams (id, params) VALUES (1, ${pparamsBytes})`;
             await state.db`UPDATE snapshots SET pparams_id = 1 WHERE id = 1`;
         }
 
@@ -643,7 +692,8 @@ export class SQLNewEpochState {
                 const rawPoolDistr = RawPoolDistr.fromCborObj(poolDistr);
                 // Store pool distribution as CBOR blob (encode the original CBOR)
                 const poolDistrBytes = Cbor.encode(poolDistr);
-                await state.db`UPDATE pool_distr SET data = ${poolDistrBytes} WHERE id = 1`;
+                await state
+                    .db`UPDATE pool_distr SET data = ${poolDistrBytes} WHERE id = 1`;
                 logger.debug(
                     `Loaded pool distribution with ${rawPoolDistr.unPoolDistr.length} pools`,
                 );

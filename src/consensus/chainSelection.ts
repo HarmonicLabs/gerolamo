@@ -44,8 +44,12 @@ export class ChainSelector {
         }
 
         // Secondary: Stake density (stake per length, approximating chain quality)
-        const densityA = chainA.length > 0 ? Number(chainA.stake) / chainA.length : 0;
-        const densityB = chainB.length > 0 ? Number(chainB.stake) / chainB.length : 0;
+        const densityA = chainA.length > 0
+            ? Number(chainA.stake) / chainA.length
+            : 0;
+        const densityB = chainB.length > 0
+            ? Number(chainB.stake) / chainB.length
+            : 0;
         if (densityA > densityB) {
             return chainA;
         }

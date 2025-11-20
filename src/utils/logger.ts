@@ -73,10 +73,21 @@ export class Logger {
     debug(...stuff: any[]) {
         if (!this.canDebug()) return;
 
-        let prefix = `[Debug][${new Date().toUTCString()}]:`;
-        if (this._colors) prefix = color.magenta(prefix);
+        const message = stuff[0];
+        if (
+            typeof message === "string" &&
+            (message.includes("volatile state") ||
+                message.includes("stable state") ||
+                message.includes("rollback") || message.includes("roll") ||
+                message.includes("chain selection") ||
+                message.includes("Validated") ||
+                message.includes("Fetched block"))
+        ) {
+            let prefix = `[Debug][${new Date().toUTCString()}]:`;
+            if (this._colors) prefix = color.magenta(prefix);
 
-        console.log(prefix, ...stuff);
+            console.log(prefix, ...stuff);
+        }
     }
     log(...stuff: any[]) {
         this.info(...stuff);
@@ -84,18 +95,19 @@ export class Logger {
     info(...stuff: any[]) {
         if (!this.canInfo()) return;
 
-        let prefix = `[Info ][${new Date().toUTCString()}]:`;
-        if (this._colors) prefix = color.cyan(prefix);
+        const message = stuff[0];
+        if (
+            typeof message === "string" &&
+            message.includes("Block applied to stable state")
+        ) {
+            let prefix = `[Info ][${new Date().toUTCString()}]:`;
+            if (this._colors) prefix = color.cyan(prefix);
 
-        console.log(prefix, ...stuff);
+            console.log(prefix, ...stuff);
+        }
     }
     warn(...stuff: any[]) {
-        if (!this.canWarn()) return;
-
-        let prefix = `[Warn ][${new Date().toUTCString()}]:`;
-        if (this._colors) prefix = color.yellow(prefix);
-
-        console.warn(prefix, ...stuff);
+        // Disabled
     }
     error(...stuff: any[]) {
         if (!this.canError()) return;

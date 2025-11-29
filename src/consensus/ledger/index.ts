@@ -12,142 +12,25 @@ import {
     CborBytes,
     CborMap,
     CborObj,
+    CborPositiveRational,
+    CborSimple,
     CborUInt,
+    isRawCborTag,
 } from "@harmoniclabs/cbor";
 import { logger } from "../../utils/logger";
 
-// Ported from rawNES
-import { Rational, VRFKeyHash } from "@harmoniclabs/cardano-ledger-ts";
-import { CborPositiveRational } from "@harmoniclabs/cbor";
-
-interface IIndividualPoolStake {
-    get individualPoolStake(): Rational;
-    set individualPoolStake(ips: Rational);
-
-    get individualTotalPoolStake(): Coin;
-    set individualTotalPoolStake(itps: Coin);
-
-    get individualPoolStakeVrf(): VRFKeyHash;
-    set individualPoolStakeVrf(ipsv: VRFKeyHash);
-}
-
-class RawIndividualPoolStake implements IIndividualPoolStake {
-    _individualPoolStake: Rational;
-    _individualTotalPoolStake: Coin;
-    _individualPoolStakeVrf: VRFKeyHash;
-
-    constructor(
-        ips: Rational,
-        itps: Coin,
-        ipsv: VRFKeyHash,
-    ) {
-        this._individualPoolStake = ips;
-        this._individualTotalPoolStake = itps;
-        this._individualPoolStakeVrf = ipsv;
-    }
-
-    static fromCborObj(v: CborObj): RawIndividualPoolStake {
-        if (!(v instanceof CborArray)) throw new Error();
-        if ((v as CborArray).array.length !== 3) throw new Error();
-
-        const [iPS, individualTotalPoolStake, individualPoolStakeVrf] =
-            (v as CborArray).array;
-        const individualPoolStake = CborPositiveRational
-            .fromCborObjOrUndef(
-                iPS,
-            );
-        if (individualPoolStake === undefined) throw new Error();
-
-        return new RawIndividualPoolStake(
-            individualPoolStake,
-            decodeCoin(
-                individualTotalPoolStake,
-            ),
-            VRFKeyHash.fromCborObj(
-                individualPoolStakeVrf,
-            ),
-        );
-    }
-
-    get individualPoolStake(): Rational {
-        return this._individualPoolStake;
-    }
-
-    set individualPoolStake(v: Rational) {
-        this._individualPoolStake = v;
-    }
-
-    get individualTotalPoolStake(): Coin {
-        return this._individualTotalPoolStake;
-    }
-    set individualTotalPoolStake(itps: Coin) {
-        this._individualTotalPoolStake = itps;
-    }
-
-    get individualPoolStakeVrf(): VRFKeyHash {
-        return this._individualPoolStakeVrf;
-    }
-    set individualPoolStakeVrf(ipsv: VRFKeyHash) {
-        this._individualPoolStakeVrf = ipsv;
-    }
-}
-
-function decodeCoin(cbor: CborObj): Coin {
-    if (!(cbor instanceof CborUInt)) throw new Error();
-    return BigInt((cbor as CborUInt).num);
-}
-
-type _PoolDistr = [PoolKeyHash, IIndividualPoolStake][];
-
-interface IPoolDistr {
-    get unPoolDistr(): _PoolDistr;
-    set unPoolDistr(pd: _PoolDistr);
-
-    get totalActiveStake(): Coin;
-    set totalActiveStake(tas: Coin);
-}
-
-export class RawPoolDistr implements IPoolDistr {
-    _unPoolDistr: _PoolDistr;
-    _pdTotalActiveStake: Coin;
-
-    constructor(unPoolDistr: _PoolDistr, pdActiveTotalStake: Coin) {
-        this._unPoolDistr = unPoolDistr;
-        this._pdTotalActiveStake = pdActiveTotalStake;
-    }
-
-    static fromCborObj(cborObj: CborObj): RawPoolDistr {
-        if (!(cborObj instanceof CborArray)) throw new Error();
-        if ((cborObj as CborArray).array.length !== 2) throw new Error();
-
-        const [unPoolDistr, pdTotalActiveStake] = (cborObj as CborArray).array;
-        if (!(unPoolDistr instanceof CborMap)) throw new Error();
-
-        return new RawPoolDistr(
-            (unPoolDistr as CborMap).map.map(({ k, v }) => {
-                return [
-                    PoolKeyHash.fromCborObj(k),
-                    RawIndividualPoolStake.fromCborObj(v),
-                ];
-            }),
-            decodeCoin(pdTotalActiveStake),
-        );
-    }
-
-    get unPoolDistr(): _PoolDistr {
-        return this._unPoolDistr;
-    }
-    set unPoolDistr(pd: _PoolDistr) {
-        this._unPoolDistr = pd;
-    }
-
-    get totalActiveStake(): Coin {
-        return this._pdTotalActiveStake;
-    }
-    set totalActiveStake(tas: Coin) {
-        this._pdTotalActiveStake = tas;
-    }
-}
+// Import from rawNES
+import { RawNewEpochState } from "../rawNES";
+import { RawPoolDistr } from "../rawNES/pool_distr";
+import { RawBlocksMade } from "../rawNES/blocks";
+import { decodeCoin, encodeCoin } from "../rawNES/epoch_state/common";
+import {
+    RawLedgerState,
+    RawUTxOState,
+} from "../rawNES/epoch_state/ledger_state";
+import { RawChainAccountState } from "../rawNES/epoch_state/chain_account_state";
+import { RawNonMyopic } from "../rawNES/epoch_state/non_myopic";
+import { isRationalOrUndefined } from "@harmoniclabs/buildooor/dist/utils/Rational";
 // Skeleton classes for interacting with the NewEpochState SQLite schema
 
 export class SQLNewEpochState {
@@ -298,13 +181,9 @@ export class SQLNewEpochState {
         await this.db`
             CREATE TABLE IF NOT EXISTS non_myopic (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                likelihoods_id INTEGER,
-                reward_pot INTEGER,
-                FOREIGN KEY (likelihoods_id) REFERENCES likelihoods(id)
+                data BLOB
             );
         `;
-        await this
-            .db`CREATE INDEX IF NOT EXISTS idx_non_myopic_likelihoods_id ON non_myopic(likelihoods_id)`;
 
         await this.db`
             CREATE TABLE IF NOT EXISTS likelihoods (
@@ -340,6 +219,217 @@ export class SQLNewEpochState {
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 data BLOB
             );
+        `;
+    }
+
+    async loadFromRawNES(rawNES: RawNewEpochState): Promise<void> {
+        const epoch = BigInt(rawNES.lastEpochModified);
+
+        // Insert chain_account_state
+        const casId = await this.insertChainAccountState(
+            rawNES.epochState.chainAccountState,
+        );
+
+        // Insert ledger_state
+        const lsId = await this.insertLedgerState(
+            rawNES.epochState.ledgerState,
+        );
+
+        // Insert snapshots (stake, delegations, pparams from stakeSet)
+        const snapsId = await this.insertSnapshots(rawNES.epochState.snapshots);
+
+        // Insert non_myopic
+        const nmId = await this.insertNonMyopic(rawNES.epochState.nonMyopic);
+
+        // Insert epoch_state
+        const esId = await this.insertEpochState(casId, lsId, snapsId, nmId);
+
+        // Insert pulsing_rew_update
+        const pruId = await this.insertPulsingRewUpdate(
+            rawNES.pulsingRewUpdate,
+        );
+
+        // Insert pool_distr
+        const pdId = await this.insertPoolDistr(rawNES.poolDistr);
+
+        // Insert stashed_avvm_addresses
+        const savId = await this.insertStashedAVVM(rawNES.stashedAvvmAddresses);
+
+        // Insert blocks_made
+        await this.insertBlocksMade(rawNES.prevBlocks, epoch, false);
+        await this.insertBlocksMade(rawNES.currBlocks, epoch, true);
+
+        // Insert new_epoch_state
+        await this.insertNewEpochState(
+            epoch,
+            BigInt(rawNES.lastEpochModified),
+            rawNES.slotsPerKESPeriod,
+            rawNES.maxKESEvolutions,
+            esId,
+            pruId,
+            pdId,
+            savId,
+        );
+    }
+
+    private async insertChainAccountState(cas: any): Promise<number> {
+        const result = await this.db`
+            INSERT INTO chain_account_state (treasury, reserves) VALUES (${
+            Number(cas.casTreasury)
+        }, ${Number(cas.casReserves)})
+            RETURNING id
+        `;
+
+        return result[0].id as number;
+    }
+
+    private async insertLedgerState(ls: any): Promise<number> {
+        const utxoCbor = Cbor.encode(RawUTxOState.toCborObj(ls.UTxOState));
+        const certStateCbor = Cbor.encode(ls.certState);
+        const result = await this.db`
+            INSERT INTO ledger_state (utxo, cert_state) VALUES (${utxoCbor}, ${certStateCbor})
+            RETURNING id
+        `;
+        return result[0].id as number;
+    }
+
+    private async insertSnapshots(snaps: any): Promise<number> {
+        // Use stakeSet for stake and delegations
+        const stakeSet = snaps.stakeSet;
+        await this.setStake(
+            new Map(
+                stakeSet.stake.map((
+                    [cred, coin]: [any, bigint],
+                ) => [cred, coin]),
+            ),
+        );
+        await this.setDelegations(
+            new Map(
+                stakeSet.delegations.map((
+                    [cred, pool]: [any, any],
+                ) => [cred, pool]),
+            ),
+        );
+
+        // Insert pparams
+        const pparamsMap = new CborMap(
+            stakeSet.poolParams.pparams.map(([pool, params]: [any, any]) => ({
+                k: pool.toCborObj(),
+                v: params.toCborObj(),
+            })),
+        );
+        const pparamsCbor = Cbor.encode(pparamsMap);
+        await this
+            .db`INSERT OR REPLACE INTO pparams (id, params) VALUES (1, ${pparamsCbor})`;
+
+        // Insert snapshots entry
+        const result = await this.db`
+            INSERT INTO snapshots (stake_id, delegations_id, pparams_id) VALUES (NULL, NULL, 1)
+            RETURNING id
+        `;
+        return result[0].id as number;
+    }
+
+    private async insertNonMyopic(nm: any): Promise<number> {
+        // Store as BLOB
+        const likMap = new CborMap(
+            Array.from(nm.likelihoods.entries()).map(([pool, lik]) => ({
+                k: pool.toCborObj(),
+                v: new CborArray(
+                    lik.value.map((n: number) => new CborSimple(n)),
+                ),
+            })),
+        );
+        const nmArray = new CborArray([likMap, encodeCoin(nm.rewardPot)]);
+        const nmCbor = Cbor.encode(nmArray);
+        const result = await this.db`
+            INSERT INTO non_myopic (data) VALUES (${nmCbor})
+            RETURNING id
+        `;
+        return result[0].id as number;
+    }
+
+    private async insertEpochState(
+        casId: number,
+        lsId: number,
+        snapsId: number,
+        nmId: number,
+    ): Promise<number> {
+        const result = await this.db`
+            INSERT INTO epoch_state (chain_account_state_id, ledger_state_id, snapshots_id, non_myopic_id) VALUES (${casId}, ${lsId}, ${snapsId}, ${nmId})
+            RETURNING id
+        `;
+        return result[0].id as number;
+    }
+
+    private async insertPulsingRewUpdate(pru: any): Promise<number> {
+        const pruCbor = Cbor.encode(pru.toCborObj ? pru.toCborObj() : pru);
+        const result = await this.db`
+            INSERT INTO pulsing_rew_update (data) VALUES (${pruCbor})
+            RETURNING id
+        `;
+        return result[0].id as number;
+    }
+
+    private async insertPoolDistr(pd: RawPoolDistr): Promise<number> {
+        const unPoolDistrMap = new CborMap(
+            pd.unPoolDistr.map(([pool, ips]) => ({
+                k: pool.toCborObj(),
+                v: new CborArray([
+                    typeof ips.individualPoolStake === "number" ?
+                        CborPositiveRational.fromNumber(ips.individualPoolStake) :
+                        ips.individualPoolStake,
+                    encodeCoin(ips.individualTotalPoolStake),
+                    ips.individualPoolStakeVrf.toCborObj(),
+                ]),
+            })),
+        );
+        const pdArray = new CborArray([
+            unPoolDistrMap,
+            encodeCoin(pd.totalActiveStake),
+        ]);
+        const pdCbor = Cbor.encode(pdArray);
+        const result = await this.db`
+            INSERT INTO pool_distr (data) VALUES (${pdCbor})
+            RETURNING id
+        `;
+        return result[0].id as number;
+    }
+
+    private async insertStashedAVVM(sav: any): Promise<number> {
+        const savCbor = Cbor.encode(sav.toCborObj ? sav.toCborObj() : sav);
+        const result = await this.db`
+            INSERT INTO stashed_avvm_addresses (data) VALUES (${savCbor})
+            RETURNING id
+        `;
+        return result[0].id as number;
+    }
+
+    private async insertBlocksMade(
+        bm: RawBlocksMade,
+        epoch: bigint,
+        isPrev: boolean,
+    ): Promise<void> {
+        for (const [pool, blocks] of bm.value) {
+            await this.db`
+                INSERT INTO blocks_made (epoch, is_prev, pool_hash, blocks) VALUES (${epoch}, ${isPrev}, ${pool.toCbor()}, ${blocks})
+            `;
+        }
+    }
+
+    private async insertNewEpochState(
+        epoch: bigint,
+        lastEpochModified: bigint,
+        slotsPerKES: bigint,
+        maxKES: bigint,
+        esId: number,
+        pruId: number,
+        pdId: number,
+        savId: number,
+    ): Promise<void> {
+        await this.db`
+            INSERT INTO new_epoch_state (epoch, last_epoch_modified, slots_per_kes_period, max_kes_evolutions, epoch_state_id, pulsing_rew_update_id, pool_distr_id, stashed_avvm_addresses_id) 
+            VALUES (${epoch}, ${lastEpochModified}, ${slotsPerKES}, ${maxKES}, ${esId}, ${pruId}, ${pdId}, ${savId})
         `;
     }
 
@@ -503,210 +593,11 @@ export class SQLNewEpochState {
         dbPath: string,
         snapshotData: Uint8Array,
     ): Promise<SQLNewEpochState> {
-        // Parse snapshotData as CBOR NES
         const cbor = Cbor.parse(snapshotData);
-        // TODO: Implement full NES parsing and SQL population
-        // For now, assume it's the NES CBOR and use fromCborObj
-        return SQLNewEpochState.fromCborObj(dbPath, cbor);
-    }
-
-    static async fromCborObj(
-        dbPath: string,
-        cborObj: CborObj,
-    ): Promise<SQLNewEpochState> {
+        const rawNES = RawNewEpochState.fromCborObj(cbor);
         const state = new SQLNewEpochState(dbPath);
-        await state.db`PRAGMA journal_mode = DELETE`;
-        await state.db`PRAGMA synchronous = FULL`;
         await state.init();
-
-        let lastEpochModified: CborObj;
-        let epochState: CborObj;
-        let poolDistr: CborObj | undefined;
-        let snapshots: CborObj | undefined;
-        let nonMyopic: CborObj | undefined;
-        let pparams: CborObj | undefined;
-
-        if (cborObj instanceof CborArray && cborObj.array.length === 7) {
-            // Haskell NES format: [lastEpochModified, prevBlocks, currBlocks, epochState, rewardsUpdate, poolDistr, stashedAVVMAddrs]
-            [lastEpochModified, , , epochState, , poolDistr] = cborObj.array;
-        } else if (cborObj instanceof CborArray && cborObj.array.length === 2) {
-            // Mithril snapshot format: [epoch, nes] where nes is [epochState, poolDistr, snapshots?, nonMyopic?, pparams?]
-            const [epoch, nes] = cborObj.array;
-            if (nes instanceof CborArray && nes.array.length >= 2) {
-                epochState = nes.array[0];
-                poolDistr = nes.array[1];
-                if (nes.array.length >= 3) snapshots = nes.array[2];
-                if (nes.array.length >= 4) nonMyopic = nes.array[3];
-                if (nes.array.length >= 5) pparams = nes.array[4];
-                // Override lastEpochModified with the snapshot epoch
-                lastEpochModified = epoch;
-            } else {
-                throw new Error(
-                    "Invalid Mithril snapshot: expected at least epochState and poolDistr",
-                );
-            }
-        } else {
-            throw new Error(
-                "Invalid CBOR - expected 7 elements for NES or 2 for Mithril snapshot",
-            );
-        }
-
-        // Insert initial rows
-        const epoch = BigInt((lastEpochModified as CborUInt).num);
-        await state
-            .db`INSERT INTO new_epoch_state (epoch, last_epoch_modified, slots_per_kes_period, max_kes_evolutions) VALUES (${epoch}, 0, 1, 1)`;
-        await state
-            .db`INSERT INTO chain_account_state (id, treasury, reserves) VALUES (1, 0, 0)`;
-        await state
-            .db`INSERT INTO ledger_state (id, utxo, cert_state) VALUES (1, ${
-            Cbor.encode(new CborArray([]))
-        }, NULL)`;
-        await state
-            .db`INSERT INTO snapshots (id, stake_id, delegations_id, pparams_id) VALUES (1, NULL, NULL, NULL)`;
-        await state
-            .db`INSERT INTO epoch_state (id, chain_account_state_id, ledger_state_id, snapshots_id, non_myopic_id) VALUES (1, 1, 1, 1, NULL)`;
-        await state
-            .db`UPDATE new_epoch_state SET epoch_state_id = 1 WHERE epoch = ${epoch}`;
-        await state.db`INSERT INTO pool_distr (id, data) VALUES (1, NULL)`;
-        await state
-            .db`UPDATE new_epoch_state SET pool_distr_id = 1 WHERE epoch = ${epoch}`;
-
-        // Parse epochState: [chainAccountState, ledgerState, snapshots?, nonMyopic?, pparams?]
-        if (!(epochState instanceof CborArray) || epochState.array.length < 2) {
-            throw new Error(
-                "Invalid epochState CBOR - expected at least 2 elements",
-            );
-        }
-        const chainAccountState = epochState.array[0];
-        let ledgerState = epochState.array[1];
-        if (ledgerState instanceof CborBytes) {
-            ledgerState = Cbor.parse(ledgerState.bytes);
-        }
-        if (!snapshots) {
-            snapshots = epochState.array.length > 2
-                ? epochState.array[2]
-                : undefined;
-        }
-        if (!nonMyopic) {
-            nonMyopic = epochState.array.length > 3
-                ? epochState.array[3]
-                : undefined;
-        }
-        if (!pparams) {
-            pparams = epochState.array.length > 4
-                ? epochState.array[4]
-                : undefined;
-        }
-
-        // Extract treasury and reserves
-        if (
-            chainAccountState instanceof CborArray &&
-            chainAccountState.array.length >= 2
-        ) {
-            const treasury = chainAccountState.array[0] as CborUInt;
-            const reserves = chainAccountState.array[1] as CborUInt;
-            await state.setTreasury(treasury.num);
-            // Note: reserves not stored in current schema, could be added later
-        }
-
-        // Extract UTxO
-        if (ledgerState instanceof CborArray && ledgerState.array.length >= 1) {
-            const utxoCbor = ledgerState.array[0];
-            if (utxoCbor instanceof CborArray) {
-                const utxos = utxoCbor.array.map((obj) =>
-                    ConwayUTxO.fromCborObj(obj)
-                );
-                await state.setUTxO(utxos);
-            }
-        }
-
-        // Extract snapshots: [stakeMark, stakeSet, stakeGo?, fee?]
-        if (snapshots instanceof CborArray && snapshots.array.length >= 2) {
-            const stakeMark = snapshots.array[0];
-            const stakeSet = snapshots.array[1];
-            const stakeGo = snapshots.array.length > 2
-                ? snapshots.array[2]
-                : undefined;
-
-            // Use stakeSet as the current stake snapshot (most recent)
-            if (stakeSet instanceof CborMap) {
-                for (const { k, v } of stakeSet.map) {
-                    if (k instanceof CborUInt) {
-                        if (k.num === 0n) { // stake
-                            if (v instanceof CborArray) {
-                                const stakeMap = new Map<
-                                    StakeCredentials,
-                                    Coin
-                                >();
-                                for (const entry of v.array) {
-                                    if (
-                                        entry instanceof CborArray &&
-                                        entry.array.length === 2
-                                    ) {
-                                        const hashCbor = entry.array[0];
-                                        const amountCbor = entry.array[1];
-                                        if (
-                                            hashCbor instanceof CborBytes &&
-                                            hashCbor.bytes.length === 28
-                                        ) {
-                                            const hash = Hash28.fromCborObj(
-                                                hashCbor,
-                                            );
-                                            const cred = StakeCredentials
-                                                .keyHash(hash);
-                                            const amount = decodeCoin(
-                                                amountCbor,
-                                            );
-                                            stakeMap.set(cred, amount);
-                                        }
-                                    }
-                                }
-                                await state.setStake(stakeMap);
-                            }
-                        } else if (k.num === 5n) { // delegations
-                            if (v instanceof CborMap) {
-                                for (const { k: kk, v: vv } of v.map) {
-                                    await state
-                                        .db`INSERT INTO delegations (stake_credential, pool_key_hash) VALUES (${
-                                        Cbor.encode(kk)
-                                    }, ${Cbor.encode(vv)})`;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Extract pparams
-        if (pparams) {
-            const pparamsBytes = Cbor.encode(pparams);
-            await state
-                .db`INSERT OR REPLACE INTO pparams (id, params) VALUES (1, ${pparamsBytes})`;
-            await state.db`UPDATE snapshots SET pparams_id = 1 WHERE id = 1`;
-        }
-
-        // Extract pool distribution
-        if (poolDistr instanceof CborArray && poolDistr.array.length >= 2) {
-            try {
-                const rawPoolDistr = RawPoolDistr.fromCborObj(poolDistr);
-                // Store pool distribution as CBOR blob (encode the original CBOR)
-                const poolDistrBytes = Cbor.encode(poolDistr);
-                await state
-                    .db`UPDATE pool_distr SET data = ${poolDistrBytes} WHERE id = 1`;
-                logger.debug(
-                    `Loaded pool distribution with ${rawPoolDistr.unPoolDistr.length} pools`,
-                );
-            } catch (e) {
-                // Failed to parse pool distribution, skipping
-            }
-        }
-
-        // Set last epoch modified
-        if (lastEpochModified instanceof CborUInt) {
-            await state.setLastEpochModified(BigInt(lastEpochModified.num));
-        }
-
+        await state.loadFromRawNES(rawNES);
         return state;
     }
 }

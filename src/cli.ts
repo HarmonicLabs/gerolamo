@@ -10,7 +10,13 @@ import { setDB } from "./network/sqlWorkers/sql";
 
 export async function getCbor(dbPath: string, cborFile: string) {
     const snapshotData = await fsPromises.readFile(cborFile);
-    await SQLNewEpochState.initFromSnapshot(path.resolve(dbPath), snapshotData);
+    const originalLog = console.log;
+    console.log = () => {}; // Suppress warnings from CBOR parsing
+    try {
+        await SQLNewEpochState.initFromSnapshot(path.resolve(dbPath), snapshotData);
+    } finally {
+        console.log = originalLog;
+    }
 }
 
 program.name("gerolamo");

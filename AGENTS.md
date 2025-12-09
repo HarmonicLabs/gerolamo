@@ -15,3 +15,5 @@ We have the following homegrown dependencies (among others you can find in the
 [@harmoniclabs/crypto](https://github.com/HarmonicLabs/crypto)
 [@harmoniclabs/uint8array-utils](https://github.com/HarmonicLabs/uint8array-utils)
 [@harmoniclabs/uplc](https://github.com/HarmonicLabs/uplc)
+
+If you need to read the docs, use the Context7 MCP server.

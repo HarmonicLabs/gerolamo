@@ -1,22 +1,17 @@
 import {
     Coin,
-    partialShelleyProtocolParamsToJson,
     PoolKeyHash,
     StakeCredentials,
-    StakeCredentialsType,
 } from "@harmoniclabs/cardano-ledger-ts";
 import {
     CborArray,
     CborMap,
     CborObj,
-    CborSimple,
     CborTag,
     CborUInt,
 } from "@harmoniclabs/cbor";
 import { INonMyopic, RawNonMyopic } from "./epoch_state/non_myopic";
 import { decodeCoin, ILikelihood, RawLikelihood } from "./epoch_state/common";
-import { CanBeUInteger } from "@harmoniclabs/cardano-ledger-ts/dist/utils/ints";
-import { RewardSnapshot } from "./_rewards_update";
 
 const nonCompleteUpdatesEnabled = false;
 
@@ -53,7 +48,6 @@ export class RawPulsingRewUpdate implements IPulsingRewUpdate {
         if (!(cborObj instanceof CborArray)) throw new Error();
         if ((cborObj as CborArray).array.length !== 1) throw new Error();
 
-        // WHY, CHARLES?????? WHY????????????????????????????????
         const [d] = (cborObj as CborArray).array;
         if (!(d instanceof CborArray)) throw new Error();
         if ((d as CborArray).array.length !== 2) throw new Error();

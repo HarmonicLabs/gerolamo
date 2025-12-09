@@ -1,4 +1,10 @@
-import { CborArray, CborBytes, CborObj, CborSimple, CborUInt } from "@harmoniclabs/cbor";
+import {
+    CborArray,
+    CborBytes,
+    CborObj,
+    CborSimple,
+    CborUInt,
+} from "@harmoniclabs/cbor";
 import { Coin } from "@harmoniclabs/cardano-ledger-ts";
 
 export interface ILikelihood {
@@ -51,7 +57,7 @@ export function encodeCoin(c: Coin): CborObj {
         const bytes = new Uint8Array(Math.ceil(hex.length / 2));
         for (let i = 0; i < bytes.length; i++) {
             const byteHex = hex.substr(i * 2, 2);
-            bytes[i] = parseInt(byteHex || '0', 16);
+            bytes[i] = parseInt(byteHex || "0", 16);
         }
         cu.bigNumEncoding = new CborBytes(bytes);
     }

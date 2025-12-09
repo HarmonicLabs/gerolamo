@@ -4,7 +4,6 @@ import { decodeCoin, ILikelihood, RawLikelihood } from "./common";
 
 type _Likelihoods = Map<PoolKeyHash, ILikelihood>;
 export interface ILikelihoods {
-    // get likelihoods(): _Likelihoods;
     get likelihoods(): _Likelihoods;
     set likelihoods(v: _Likelihoods);
 }

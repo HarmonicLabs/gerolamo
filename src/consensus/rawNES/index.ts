@@ -1,17 +1,5 @@
-import {
-    CborArray,
-    CborObj,
-    CborPositiveRational,
-    CborUInt,
-    isRawCborObj,
-} from "@harmoniclabs/cbor";
-import {
-    Coin,
-    defaultShelleyProtocolParameters,
-    Epoch,
-    PoolKeyHash,
-} from "@harmoniclabs/cardano-ledger-ts";
-import { uint8ArrayEq } from "@harmoniclabs/uint8array-utils";
+import { CborArray, CborObj, CborUInt } from "@harmoniclabs/cbor";
+import { Epoch } from "@harmoniclabs/cardano-ledger-ts";
 
 import { IBlocksMade, RawBlocksMade } from "./blocks";
 import { IEpochState, RawEpochState } from "./epoch_state/";

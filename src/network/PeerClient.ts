@@ -2,7 +2,6 @@ import {
     BlockFetchClient,
     ChainPoint,
     ChainSyncClient,
-    ChainSyncFindIntersect,
     ChainSyncIntersectFound,
     ChainSyncIntersectNotFound,
     ChainSyncRollBackwards,
@@ -16,11 +15,10 @@ import {
     PeerSharingClient,
     PeerSharingResponse,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { connect } from "node:net";
 import { logger } from "../utils/logger";
 import { getLastSlot } from "./sqlWorkers/sql";
-import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
+import { toHex } from "@harmoniclabs/uint8array-utils";
 import { GerolamoConfig } from "./PeerManager";
 export interface IPeerClient {
     host: string;
@@ -50,7 +48,6 @@ export class PeerClient implements IPeerClient {
     peerSlotNumber: number | null;
     private cookieCounter: number;
     private keepAliveInterval: number | null;
-    private isRangeSyncComplete: boolean = false;
 
     constructor(
         host: string,
@@ -79,10 +76,9 @@ export class PeerClient implements IPeerClient {
         this.peerSlotNumber = null;
         this.keepAliveInterval = null;
 
-        this.mplexer.on("error", (err) => {
+        this.mplexer.on("error", (_err) => {
         });
-        this.mplexer.on("data", (data) => {
-            // logger.debug(`Multiplexer data for peer ${this.peerId}:`, toHex(data));
+        this.mplexer.on("data", (_data) => {
         });
 
         this.chainSyncClient.on("error", (error) => {
@@ -135,7 +131,7 @@ export class PeerClient implements IPeerClient {
     async handShakePeer() {
         const handshake = new HandshakeClient(this.mplexer);
 
-        handshake.on("error", (err) => {
+        handshake.on("error", (_err) => {
             this.terminate();
         });
 
@@ -259,7 +255,7 @@ export class PeerClient implements IPeerClient {
         /* Not tested yet */
         // logger.debug(`Peer: ${this.peerId}...`, `Fetching multiple blocks`, points.map(p => ({ slot: p.blockHeader?.slotNumber, hash: p.blockHeader?.hash ? toHex(p.blockHeader.hash) : undefined })) );
         const blocksData: any[] = [];
-        for (const point of points) {
+        for (const _point of points) {
             // TODO: implement fetching multiple blocks
         }
         return blocksData;

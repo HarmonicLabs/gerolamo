@@ -335,11 +335,9 @@ function isHex(str: string): boolean {
 }
 
 // Create an instance for the exports
-let db: SQL;
 const storage = new SqlStorage();
 
 export function setDB(newDB: SQL) {
-    db = newDB;
     storage.db = newDB;
 }
 

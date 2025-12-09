@@ -5,7 +5,6 @@ export async function fetchBlock(
     slot: number | bigint,
     blockHeaderHash: any,
 ) {
-    // console.log("peer: ", peer)
     const block = await peer.fetchBlock(
         slot,
         blockHeaderHash,

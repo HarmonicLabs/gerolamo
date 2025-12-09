@@ -1,19 +1,15 @@
 import {
-    ChainPoint,
     ChainSyncRollBackwards,
     ChainSyncRollForward,
-    PeerAddress,
-    PeerAddressIPv4,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { MultiEraHeader, NetworkT } from "@harmoniclabs/cardano-ledger-ts";
+import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { logger } from "../utils/logger";
 import { parseTopology } from "./topology/parseTopology";
 import { Topology, TopologyRoot } from "./topology/topology";
-import { fromHex } from "@harmoniclabs/uint8array-utils";
+
 import { headerValidation } from "./headerValidation";
 import { fetchBlock } from "./fetchBlocks";
-import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
 import {
     closeDB,
     initDB,
@@ -26,10 +22,9 @@ import { SQLNewEpochState } from "../consensus/ledger";
 import { BlockValidator } from "../consensus/blockValidation";
 import { BlockApplier } from "../consensus/BlockApplication";
 import { ChainCandidate, ChainSelector } from "../consensus/chainSelection";
-import { SQL } from "bun";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
-import { Cbor, CborArray } from "@harmoniclabs/cbor";
+import { CborArray } from "@harmoniclabs/cbor";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
@@ -130,18 +125,6 @@ export class PeerManager implements IPeerManager {
             );
         }
 
-        // Assign public roots as warm peers (commented out in original)
-        // if (this.topology.publicRoots)
-        // {
-        //     this.topology.publicRoots.flatMap((root: TopologyRoot) =>
-        //         root.accessPoints.map((ap: any) => {
-        //             // const peer = new PeerClient(ap.address, ap.port);
-        //             // this.addPeer(peer, "warm");
-        //
-        //         })
-        //     );
-        // }
-
         await this.peerSyncCurrentTasks();
     }
 
@@ -188,24 +171,6 @@ export class PeerManager implements IPeerManager {
         await Promise.all(this.hotPeers.map(async (peer) => {
             peer.startSyncLoop(this.syncEventCallback.bind(this));
         }));
-    }
-
-    private addNewSharedPeers(peersAddresses: PeerAddress[]) {
-        peersAddresses.forEach((address) => {
-            if (address instanceof PeerAddressIPv4) {
-                const newPeer = new PeerClient(
-                    uint32ToIpv4(address.address),
-                    address.portNumber,
-                    this.config,
-                );
-                this.addPeer(newPeer, "new");
-                logger.log(
-                    `Added new peer ${newPeer.peerId} from network at ${
-                        uint32ToIpv4(address.address)
-                    }:${address.portNumber}`,
-                );
-            }
-        });
     }
 
     private async syncEventCallback(

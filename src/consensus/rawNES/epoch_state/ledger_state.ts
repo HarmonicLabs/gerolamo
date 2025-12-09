@@ -1,10 +1,4 @@
-import {
-    CborArray,
-    CborMap,
-    CborObj,
-    cborObjFromRaw,
-    isCborObj,
-} from "@harmoniclabs/cbor";
+import { CborArray, CborMap, CborObj, CborUInt } from "@harmoniclabs/cbor";
 import { Coin, TxOut, TxOutRef, UTxO } from "@harmoniclabs/cardano-ledger-ts";
 
 import { decodeCoin, encodeCoin } from "./common";
@@ -57,24 +51,63 @@ export class RawUTxOState implements IUTxOState {
 
     static fromCborObj(cborObj: CborObj): RawUTxOState {
         if (!(cborObj instanceof CborArray)) throw new Error();
-        const [
-            utxosUTxO,
-            utxosDeposited,
-            utxosFees,
-            govState,
-            instantStake,
-            utxosDonation,
-        ] = (cborObj as CborArray).array;
+        const array = (cborObj as CborArray).array;
+        const len = array.length;
+        const utxosUTxO = array[0];
+        const utxosDeposited = (len > 1 && array[1] instanceof CborUInt)
+            ? array[1]
+            : new CborUInt(0n);
+        const utxosFees = (len > 2 && array[2] instanceof CborUInt)
+            ? array[2]
+            : new CborUInt(0n);
+        const govState = len > 3 ? array[3] : undefined;
+        const instantStake = len > 4 ? array[4] : undefined;
+        const utxosDonation = (len > 5 && array[5] instanceof CborUInt)
+            ? array[5]
+            : new CborUInt(0n);
 
-        if (!(utxosUTxO instanceof CborMap)) throw new Error();
-        return new RawUTxOState(
-            (utxosUTxO as CborMap).map.map(
+        console.log("utxosUTxO:", utxosUTxO);
+        let utxos: UTxO[];
+        if (utxosUTxO instanceof CborMap) {
+            utxos = (utxosUTxO as CborMap).map.map(
                 (entry) =>
                     new UTxO({
                         utxoRef: TxOutRef.fromCborObj(entry.k),
                         resolved: TxOut.fromCborObj(entry.v),
                     }),
-            ),
+            );
+        } else if (utxosUTxO instanceof CborArray) {
+            const arr = (utxosUTxO as CborArray).array;
+            utxos = [];
+            for (let i = 0; i < arr.length; i += 2) {
+                if (i + 1 < arr.length) {
+                    const k = arr[i];
+                    const v = arr[i + 1];
+                    if (
+                        k instanceof CborArray && v instanceof CborArray &&
+                        k.array.length >= 2
+                    ) {
+                        const txid = k.array[0];
+                        const index = k.array[1];
+                        try {
+                            const utxo = new UTxO({
+                                utxoRef: TxOutRef.fromCborObj(
+                                    new CborArray([txid, index]),
+                                ),
+                                resolved: TxOut.fromCborObj(v),
+                            });
+                            utxos.push(utxo);
+                        } catch (e) {
+                            console.log("Failed to parse UTxO at i", i, e);
+                        }
+                    }
+                }
+            }
+        } else {
+            throw new Error("utxosUTxO is not CborMap or CborArray");
+        }
+        return new RawUTxOState(
+            utxos,
             decodeCoin(utxosDeposited),
             decodeCoin(utxosFees),
             govState,
@@ -164,8 +197,8 @@ export class RawLedgerState implements ILedgerState {
 
     static fromCborObj(cborObj: CborObj): RawLedgerState {
         if (!(cborObj instanceof CborArray)) throw new Error();
-        if ((cborObj as CborArray).array.length !== 2) throw new Error();
-        const [_lsCertState, lsUTxOState] = (cborObj as CborArray).array;
+        if ((cborObj as CborArray).array.length < 2) throw new Error();
+        const [lsUTxOState, _lsCertState] = (cborObj as CborArray).array;
 
         return new RawLedgerState(
             RawUTxOState.fromCborObj(lsUTxOState),

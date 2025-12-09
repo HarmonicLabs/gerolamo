@@ -1,4 +1,4 @@
-import { BabbageBlock, MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
+import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { SQLNewEpochState } from "./ledger";
 import { validateBlock } from "./BlockBodyValidator";
 

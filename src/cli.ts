@@ -1,22 +1,16 @@
 import { program } from "commander";
-import * as fsPromises from "node:fs/promises";
 import * as path from "node:path";
-import { Cbor } from "@harmoniclabs/cbor";
 import { SQLNewEpochState } from "./consensus/ledger";
 import { SQL } from "bun";
 import { GerolamoConfig, PeerManager } from "./network/PeerManager";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { setDB } from "./network/sqlWorkers/sql";
 
-export async function getCbor(dbPath: string, cborFile: string) {
-    const snapshotData = await fsPromises.readFile(cborFile);
-    const originalLog = console.log;
-    console.log = () => {}; // Suppress warnings from CBOR parsing
-    try {
-        await SQLNewEpochState.initFromSnapshot(path.resolve(dbPath), snapshotData);
-    } finally {
-        console.log = originalLog;
-    }
+export async function getCbor(dbPath: string, snapshotRoot: string) {
+    await SQLNewEpochState.initFromChunk(
+        path.resolve(snapshotRoot),
+        path.resolve(dbPath),
+    );
 }
 
 program.name("gerolamo");
@@ -24,17 +18,19 @@ program.name("gerolamo");
 export function Main() {
     program
         .command("import-ledger-state")
-        .description("Import and load ledger state snapshots into SQLite")
-        .argument(
-            "<cborFilePath>",
-            "path to the CBOR file containing the ledger state",
+        .description(
+            "Extract UTxO state from Mithril snapshot into LMDB database",
         )
-        .argument("<dbPath>", "path to the SQLite database file")
+        .argument(
+            "<snapshotRoot>",
+            "path to the Mithril snapshot root directory (containing ledger/ subdirectory)",
+        )
+        .argument("<outputPath>", "path to the output LMDB database file")
         .action(async (
-            cborFilePath: string,
-            dbPath: string,
+            snapshotRoot: string,
+            outputPath: string,
         ) => {
-            await getCbor(dbPath, path.normalize(cborFilePath));
+            await getCbor(outputPath, path.normalize(snapshotRoot));
         });
 
     program

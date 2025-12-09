@@ -106,7 +106,7 @@ export class Logger {
             console.log(prefix, ...stuff);
         }
     }
-    warn(...stuff: any[]) {
+    warn(..._stuff: any[]) {
         // Disabled
     }
     error(...stuff: any[]) {

@@ -1,10 +1,4 @@
-import {
-    Cbor,
-    CborArray,
-    CborBytes,
-    CborTag,
-    LazyCborArray,
-} from "@harmoniclabs/cbor";
+import { Cbor, CborBytes, CborTag, LazyCborArray } from "@harmoniclabs/cbor";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import {
     AllegraHeader,
@@ -16,33 +10,20 @@ import {
     ShelleyHeader,
 } from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { logger } from "../utils/logger";
-import {
-    calculateCardanoEpoch,
-    calculatePreProdCardanoEpoch,
-} from "./utils/epochCalculations";
+import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
 import { validateHeader } from "../consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
 import { SQLNewEpochState } from "../consensus/ledger";
-import { toHex } from "@harmoniclabs/uint8array-utils";
 export async function headerValidation(
     data: ChainSyncRollForward,
     shelleyGenesis: ShelleyGenesisConfig,
     lState: SQLNewEpochState,
 ) {
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
-    if (
-        !(
-            data.data instanceof CborArray
-        )
-    ) throw new Error("invalid CBOR for header");
-    const tipSlot = data.tip.point.blockHeader?.slotNumber;
     const blockHeaderData: Uint8Array = Cbor.encode(data.data).toBuffer();
-    // logger.debug("blockHeaderData", toHex(blockHeaderData));
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
-    // logger.debug("Lazy Header: ", lazyHeader);
     if (
         !(
             lazyHeader instanceof LazyCborArray
@@ -50,7 +31,6 @@ export async function headerValidation(
     ) throw new Error("invalid CBOR for header");
 
     const blockHeaderParsed = Cbor.parse(lazyHeader.array[1]);
-    // logger.debug("Block Header Parsed: ", blockHeaderParsed);
     if (
         !(
             blockHeaderParsed instanceof CborTag &&

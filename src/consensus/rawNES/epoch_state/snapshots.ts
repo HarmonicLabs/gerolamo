@@ -4,14 +4,13 @@ import {
     CredentialType,
     PoolKeyHash,
     PoolParams,
-    StakeCredentials,
 } from "@harmoniclabs/cardano-ledger-ts";
 
 import { CborArray, CborMap, CborObj } from "@harmoniclabs/cbor";
 import { IPoolDistr } from "../pool_distr";
 
 import { decodeCoin } from "./common";
-import { ShelleyProtocolParams } from "../../config/ShelleyGenesisTypes";
+import { ShelleyProtocolParams } from "../../../config/ShelleyGenesisTypes";
 
 const calcPoolDistrEnabled = false;
 
@@ -270,32 +269,6 @@ export class RawProtocolParams implements IProtocolParams {
 
     constructor(pparams: ShelleyProtocolParams) {
         this._pparams = pparams;
-    }
-
-    static fromCborObj(cborObj: CborObj): RawProtocolParams {
-        if (!(cborObj instanceof CborMap)) throw new Error();
-        // Parse CBOR map into ShelleyProtocolParams structure
-        // For now, return default values - this would need full implementation
-        const defaultParams: ShelleyProtocolParams = {
-            protocolVersion: { minor: 0, major: 0 },
-            decentralisationParam: 0,
-            eMax: 0,
-            extraEntropy: { tag: "NeutralNonce" },
-            maxTxSize: 0,
-            maxBlockBodySize: 0,
-            maxBlockHeaderSize: 0,
-            minFeeA: 0,
-            minFeeB: 0,
-            minUTxOValue: 0,
-            poolDeposit: 500000000,
-            minPoolCost: 340000000,
-            keyDeposit: 2000000,
-            nOpt: 150,
-            rho: 0.003,
-            tau: 0.2,
-            a0: 0.3,
-        };
-        return new RawProtocolParams(defaultParams);
     }
 
     get pparams(): ShelleyProtocolParams {

@@ -14,6 +14,11 @@
       url = "github:numtide/treefmt-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    mithril = {
+      url = "github:input-output-hk/mithril";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs = inputs@{ flake-parts, ... }:
@@ -31,8 +36,10 @@
 
         devenv.shells.default = {
           packages = with pkgs; [
+            lmdb
             sqlite
             poppler-utils
+            inputs.mithril.packages.${system}.mithril-client-cli
           ];
 
           languages = {

@@ -12,6 +12,7 @@ import {
     RawSnapshots,
 } from "./snapshots";
 import { INonMyopic, RawNonMyopic } from "./non_myopic";
+import { defaultShelleyProtocolParameters } from "@harmoniclabs/cardano-ledger-ts";
 
 export interface IEpochState {
     get chainAccountState(): IChainAccountState;
@@ -59,33 +60,12 @@ export class RawEpochState implements IEpochState {
         const [esChainAccountState, esLState, esSnapshots, esNonMyopic] =
             (cborObj as CborArray).array;
 
-        // Create default protocol parameters for now
-        const defaultPparams = new RawProtocolParams({
-            protocolVersion: { minor: 0, major: 0 },
-            decentralisationParam: 0,
-            eMax: 0,
-            extraEntropy: { tag: "NeutralNonce" },
-            maxTxSize: 0,
-            maxBlockBodySize: 0,
-            maxBlockHeaderSize: 0,
-            minFeeA: 0,
-            minFeeB: 0,
-            minUTxOValue: 0,
-            poolDeposit: 500000000,
-            minPoolCost: 340000000,
-            keyDeposit: 2000000,
-            nOpt: 150,
-            rho: 0.003,
-            tau: 0.2,
-            a0: 0.3,
-        });
-
         return new RawEpochState(
             RawChainAccountState.fromCborObj(esChainAccountState),
             RawLedgerState.fromCborObj(esLState),
             RawSnapshots.fromCborObj(esSnapshots),
             RawNonMyopic.fromCborObj(esNonMyopic),
-            defaultPparams,
+            new RawProtocolParams(defaultShelleyProtocolParameters),
         );
     }
 

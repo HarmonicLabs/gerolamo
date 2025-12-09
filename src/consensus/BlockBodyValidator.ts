@@ -1,8 +1,4 @@
-import {
-    BabbageBlock,
-    MultiEraBlock,
-    Value,
-} from "@harmoniclabs/cardano-ledger-ts";
+import { MultiEraBlock, Value } from "@harmoniclabs/cardano-ledger-ts";
 import { SQLNewEpochState } from "./ledger";
 
 export async function validateBlock(
@@ -36,8 +32,8 @@ function validateTransactionCountMatch(
 }
 
 function validateNoInvalidTxs(
-    block: any,
-    state: SQLNewEpochState,
+    _block: any,
+    _state: SQLNewEpochState,
 ): boolean {
     // TODO: Implement Phase-2 script validation
     // For now, assume all txs are valid
@@ -67,7 +63,7 @@ async function validateUTxOBalance(
 
 function validateFeesCorrect(
     block: any,
-    state: SQLNewEpochState,
+    _state: SQLNewEpochState,
 ): boolean {
     // Implementation
     const minFeeA = 44; // from preprod genesis
@@ -96,10 +92,10 @@ function validateValidityInterval(
 
 // TODO: Fill in placeholder for cert deposits
 function validateMultiAssetsBalance(
-    block: any,
+    _block: any,
     _state: SQLNewEpochState,
 ): boolean {
-    return block.transactionBodies.map((txBody) => {
+    return _block.transactionBodies.map((txBody) => {
         let inputValueMA = txBody.inputs.map((utxo) => utxo.resolved.value)
             .reduce((a, b) => Value.add(a, b), Value.zero);
         let outputValueMA = txBody.outputs.map((txOut) => txOut.value).reduce(
@@ -128,24 +124,24 @@ function validateMultiAssetsBalance(
 }
 
 function validateCollateralValid(
-    block: any,
-    state: SQLNewEpochState,
+    _block: any,
+    _state: SQLNewEpochState,
 ): boolean {
     // TODO: Implement collateral validation for Plutus scripts
     return true;
 }
 
 function validateCertificatesValid(
-    block: any,
-    state: SQLNewEpochState,
+    _block: any,
+    _state: SQLNewEpochState,
 ): boolean {
     // TODO: Implement certificate validation
     return true;
 }
 
 function validateScriptsValid(
-    block: any,
-    state: SQLNewEpochState,
+    _block: any,
+    _state: SQLNewEpochState,
 ): boolean {
     // TODO: Implement script validation
     return true;
@@ -153,7 +149,7 @@ function validateScriptsValid(
 
 function validateSizeLimits(
     block: any,
-    state: SQLNewEpochState,
+    _state: SQLNewEpochState,
 ): boolean {
     // Implementation
     const maxTxSize = 16384; // from preprod genesis

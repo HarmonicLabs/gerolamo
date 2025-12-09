@@ -1,6 +1,5 @@
-import { MultiEraHeader, PoolKeyHash } from "@harmoniclabs/cardano-ledger-ts";
+import { MultiEraHeader } from "@harmoniclabs/cardano-ledger-ts";
 import { SQLNewEpochState } from "./ledger";
-import { logger } from "../utils/logger";
 
 /**
  * Represents a candidate chain for selection
@@ -88,7 +87,7 @@ export class ChainSelector {
      * Verify a chain candidate using Mithril
      * TODO: Integrate with Mithril client
      */
-    async verifyWithMithril(candidate: ChainCandidate): Promise<boolean> {
+    async verifyWithMithril(_candidate: ChainCandidate): Promise<boolean> {
         // Placeholder: Query Mithril for certificate verification
         // Return true if the chain's tip is certified
         return false; // Stub
@@ -97,7 +96,7 @@ export class ChainSelector {
     /**
      * Calculate stake for a chain candidate
      */
-    async calculateStake(candidate: ChainCandidate): Promise<bigint> {
+    async calculateStake(_candidate: ChainCandidate): Promise<bigint> {
         // Get pool distribution from ledger state
         const poolDistr = await this.ledgerState.getPoolDistr();
         // Sum stake for pools in this chain

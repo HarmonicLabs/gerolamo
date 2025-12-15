@@ -1,282 +1,220 @@
-import { SQL } from "bun";
-import { Cbor, CborMap } from "@harmoniclabs/cbor";
-import {
-    RawLedgerState,
-    RawUTxOState,
-} from "../rawNES/epoch_state/ledger_state";
-import { RawPoolDistr } from "../rawNES/pool_distr";
-import { TxOut, TxOutRef, UTxO } from "@harmoniclabs/cardano-ledger-ts";
-import * as path from "node:path";
-import { existsSync, readdirSync, statSync } from "fs";
+import { sql } from "bun";
 
-export class SQLNewEpochState {
-    private db: SQL;
+export async function initNewEpochState() {
+    await initBlocksMade();
+    await initEpochState();
+    await initPulsingRewUpdate();
+    await initPoolDistr();
+    await initStashedAVVMAddresses();
 
-    constructor(db: SQL | string) {
-        if (typeof db === "string") {
-            this.db = new SQL(`file:${db}`);
-        } else {
-            this.db = db;
-        }
-    }
-
-    async init(): Promise<void> {
-        await this.db`PRAGMA journal_mode = DELETE`;
-        await this.db`PRAGMA synchronous = FULL`;
-
-        // Create tables for ledger state
-        await this.db`
-            CREATE TABLE IF NOT EXISTS utxo (
-                utxo_ref BLOB,
-                tx_out BLOB,
-                PRIMARY KEY (utxo_ref)
-            );
-        `;
-
-        await this.db`
-            CREATE TABLE IF NOT EXISTS cert_state (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                data BLOB
-            );
-        `;
-
-        await this.db`
-            CREATE TABLE IF NOT EXISTS ledger_state (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                utxo_deposited TEXT,
-                utxo_fees TEXT,
-                utxo_gov_state BLOB,
-                utxo_instant_stake BLOB,
-                utxo_donation TEXT,
-                cert_state_id INTEGER,
-                FOREIGN KEY (cert_state_id) REFERENCES cert_state(id)
-            );
-        `;
-    }
-
-    static async initFromSnapshot(
-        dbPath: string,
-        snapshotData: Uint8Array,
-    ): Promise<SQLNewEpochState> {
-        console.log("Parsing CBOR");
-        const cbor = Cbor.parse(snapshotData);
-        console.log("Parsed CBOR, creating RawLedgerState");
-        const rawLedgerState = RawLedgerState.fromCborObj(cbor);
-        console.log("Created RawLedgerState");
-        const state = new SQLNewEpochState(dbPath);
-        await state.init();
-        await state.loadFromRawLedgerState(rawLedgerState);
-        return state;
-    }
-
-    static async initFromChunk(
-        snapshotRoot: string,
-        dbPath: string,
-    ): Promise<SQLNewEpochState> {
-        const ledgerDir = path.join(snapshotRoot, "ledger");
-        if (!existsSync(ledgerDir)) {
-            throw new Error(`Ledger directory not found at ${ledgerDir}`);
-        }
-
-        // Find the latest slot directory in ledger
-        const slotDirs = readdirSync(ledgerDir)
-            .map((name) => ({ name, path: path.join(ledgerDir, name) }))
-            .filter((item) =>
-                statSync(item.path).isDirectory() && /^\d+$/.test(item.name)
-            )
-            .sort((a, b) => parseInt(b.name) - parseInt(a.name));
-
-        if (slotDirs.length === 0) {
-            throw new Error("No slot directories found in ledger");
-        }
-
-        const latestSlotDir = path.join(slotDirs[0].path, "tables");
-
-        // Run mdb_dump and parse output
-        const proc = Bun.spawn(["mdb_dump", latestSlotDir], {
-            stdout: "pipe",
-            stderr: "pipe",
-        });
-        const output = await new Response(proc.stdout).text();
-        const exitCode = await proc.exited;
-        if (exitCode !== 0) {
-            const stderr = await new Response(proc.stderr).text();
-            throw new Error(`mdb_dump failed: ${stderr}`);
-        }
-
-        // Parse the dump output
-        const lines = output.split("\n");
-        const utxos: UTxO[] = [];
-        let inData = false;
-        for (let i = 0; i < lines.length; i++) {
-            const line = lines[i].trim();
-            if (line === "HEADER=END") {
-                inData = true;
-                continue;
-            }
-            if (line === "DATA=END") {
-                break;
-            }
-            if (inData && line && lines[i + 1]) {
-                const keyHex = line;
-                const valueHex = lines[i + 1].trim();
-                if (keyHex === "7574786f" || keyHex === "5f64627374617465") { // skip 'utxo' and '_dbstate'
-                    i++; // skip value
-                    continue;
-                }
-                try {
-                    // Decode key and value hex to bytes
-                    const keyBytes = new Uint8Array(keyHex.length / 2);
-                    for (let j = 0; j < keyHex.length; j += 2) {
-                        keyBytes[j / 2] = parseInt(keyHex.substr(j, 2), 16);
-                    }
-                    const valueBytes = new Uint8Array(valueHex.length / 2);
-                    for (let j = 0; j < valueHex.length; j += 2) {
-                        valueBytes[j / 2] = parseInt(valueHex.substr(j, 2), 16);
-                    }
-
-                    const utxoRef = TxOutRef.fromCborObj(Cbor.parse(keyBytes));
-                    const txOut = TxOut.fromCborObj(Cbor.parse(valueBytes));
-                    utxos.push(new UTxO({ utxoRef, resolved: txOut }));
-                } catch (e) {
-                    console.log("Failed to parse entry", keyHex, e);
-                }
-                i++; // skip value line
-            }
-        }
-
-        const rawUTxOState = new RawUTxOState(
-            utxos,
-            0n,
-            0n,
-            undefined,
-            undefined,
-            0n,
+    // Create new_epoch_state table
+    await sql`
+        CREATE TABLE IF NOT EXISTS new_epoch_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            last_epoch_modified TEXT,
+            prev_blocks_id INTEGER,
+            curr_blocks_id INTEGER,
+            epoch_state_id INTEGER,
+            pulsing_rew_update_id INTEGER,
+            pool_distr_id INTEGER,
+            stashed_avvm_addresses_id INTEGER,
+            FOREIGN KEY (prev_blocks_id) REFERENCES blocks_made(id),
+            FOREIGN KEY (curr_blocks_id) REFERENCES blocks_made(id),
+            FOREIGN KEY (epoch_state_id) REFERENCES epoch_state(id),
+            FOREIGN KEY (pulsing_rew_update_id) REFERENCES pulsing_rew_update(id),
+            FOREIGN KEY (pool_distr_id) REFERENCES pool_distr(id),
+            FOREIGN KEY (stashed_avvm_addresses_id) REFERENCES stashed_avvm_addresses(id)
         );
+    `;
+}
 
-        // Create dummy certState and other fields
-        const dummyCertState = new CborMap([]); // Empty map for now
-        const rawLedgerState = new RawLedgerState(rawUTxOState, dummyCertState);
+async function initBlocksMade() {
+    // Create blocks_made table to store block production per pool per epoch
+    await sql`
+        CREATE TABLE IF NOT EXISTS blocks_made (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pool_key_hash BLOB,
+            epoch INTEGER,
+            block_count INTEGER,
+            status TEXT CHECK(status IN ('CURR', 'PREV', 'LEGACY')) NOT NULL DEFAULT 'CURR',
+            UNIQUE(pool_key_hash, epoch)
+        );
+    `;
+}
 
-        const state = new SQLNewEpochState(dbPath);
-        await state.init();
-        await state.loadFromRawLedgerState(rawLedgerState);
-        return state;
-    }
+async function initEpochState() {
+    // Create utxo table
+    await sql`
+        CREATE TABLE IF NOT EXISTS utxo (
+            utxo_ref BLOB,
+            tx_out JSONB,
+            PRIMARY KEY (utxo_ref)
+        );
+    `;
 
-    async loadFromRawLedgerState(rawLS: RawLedgerState): Promise<void> {
-        // Insert cert_state
-        const certStateId = await this.insertCertState(rawLS.certState);
+    // Create cert_state table
+    await sql`
+        CREATE TABLE IF NOT EXISTS cert_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data JSONB
+        );
+    `;
 
-        // Insert UTxO
-        try {
-            await this.insertUTxO(rawLS.UTxOState.UTxO);
-        } catch (e) {
-            console.log("Skipping UTxO insertion:", e);
-        }
+    // Create ledger_state table
+    await sql`
+        CREATE TABLE IF NOT EXISTS ledger_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            utxo_deposited INTEGER,
+            utxo_fees INTEGER,
+            utxo_gov_state BLOB,
+            utxo_instant_stake BLOB,
+            utxo_donation INTEGER,
+            cert_state_id INTEGER,
+            FOREIGN KEY (cert_state_id) REFERENCES cert_state(id)
+        );
+    `;
 
-        // Insert ledger_state
-        await this.insertLedgerState(rawLS, certStateId);
-    }
+    // Create new_epoch_state table
+    await sql`
+        CREATE TABLE IF NOT EXISTS new_epoch_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            last_epoch_modified INTEGER,
+            prev_blocks_id INTEGER,
+            curr_blocks_id INTEGER,
+            epoch_state_id INTEGER,
+            pulsing_rew_update_id INTEGER,
+            pool_distr_id INTEGER,
+            stashed_avvm_addresses_id INTEGER,
+            FOREIGN KEY (prev_blocks_id) REFERENCES blocks_made(id),
+            FOREIGN KEY (curr_blocks_id) REFERENCES blocks_made(id),
+            FOREIGN KEY (epoch_state_id) REFERENCES epoch_state(id),
+            FOREIGN KEY (pulsing_rew_update_id) REFERENCES pulsing_rew_update(id),
+            FOREIGN KEY (pool_distr_id) REFERENCES pool_distr(id),
+            FOREIGN KEY (stashed_avvm_addresses_id) REFERENCES stashed_avvm_addresses(id)
+        );
+    `;
 
-    private async insertCertState(certState: any): Promise<number> {
-        const certCbor = Cbor.encode(certState);
-        const result = await this.db`
-            INSERT INTO cert_state (data) VALUES (${certCbor})
-            RETURNING id
-        `;
-        return result[0].id as number;
-    }
+    // Create epoch_state table
+    await sql`
+        CREATE TABLE IF NOT EXISTS epoch_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chain_account_state_id INTEGER,
+            ledger_state_id INTEGER,
+            snapshots_id INTEGER,
+            non_myopic_id INTEGER,
+            pparams_id INTEGER,
+            FOREIGN KEY (chain_account_state_id) REFERENCES chain_account_state(id),
+            FOREIGN KEY (ledger_state_id) REFERENCES ledger_state(id),
+            FOREIGN KEY (snapshots_id) REFERENCES snapshots(id),
+            FOREIGN KEY (non_myopic_id) REFERENCES non_myopic(id),
+            FOREIGN KEY (pparams_id) REFERENCES protocol_params(id)
+        );
+    `;
 
-    private async insertUTxO(utxos: UTxO[]): Promise<void> {
-        for (const utxo of utxos) {
-            const utxoRefCbor = utxo.utxoRef.toCborObj();
-            const txOutCbor = utxo.resolved.toCborObj();
-            await this.db`
-                INSERT OR REPLACE INTO utxo (utxo_ref, tx_out) VALUES (${
-                Cbor.encode(utxoRefCbor)
-            }, ${Cbor.encode(txOutCbor)})
-            `;
-        }
-    }
+    // Create chain_account_state table
+    await sql`
+        CREATE TABLE IF NOT EXISTS chain_account_state (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            treasury INTEGER,
+            reserves INTEGER
+        );
+    `;
 
-    private async insertLedgerState(
-        rawLS: RawLedgerState,
-        certStateId: number,
-    ): Promise<void> {
-        const utxoState = rawLS.UTxOState;
-        await this.db`
-            INSERT INTO ledger_state (utxo_deposited, utxo_fees, utxo_gov_state, utxo_instant_stake, utxo_donation, cert_state_id)
-            VALUES (${utxoState.deposited.toString()}, ${utxoState.fees.toString()}, ${
-            utxoState.govState ? Cbor.encode(utxoState.govState as any) : null
-        }, ${
-            utxoState.instantStake
-                ? Cbor.encode(utxoState.instantStake as any)
-                : null
-        }, ${utxoState.donation.toString()}, ${certStateId})
-        `;
-    }
+    // Create snapshots table
+    await sql`
+        CREATE TABLE IF NOT EXISTS snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stake_id INTEGER,
+            rewards_id INTEGER,
+            delegations_id INTEGER,
+            FOREIGN KEY (stake_id) REFERENCES stake(id),
+            FOREIGN KEY (rewards_id) REFERENCES rewards(id),
+            FOREIGN KEY (delegations_id) REFERENCES delegations(id)
+        );
+    `;
 
-    async getUTxO(): Promise<UTxO[]> {
-        const result = await this.db`
-            SELECT utxo_ref, tx_out FROM utxo
-        `;
-        return result.map((row) => {
-            const utxoRefCbor = Cbor.parse(row.utxo_ref);
-            const txOutCbor = Cbor.parse(row.tx_out);
-            return new UTxO({
-                utxoRef: TxOutRef.fromCborObj(utxoRefCbor),
-                resolved: TxOut.fromCborObj(txOutCbor),
-            });
-        });
-    }
+    // Create stake table
+    await sql`
+        CREATE TABLE IF NOT EXISTS stake (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stake_credentials BLOB,
+            amount INTEGER
+        );
+    `;
 
-    async getPoolDistr(): Promise<RawPoolDistr> {
-        // Since pool distr is not loaded, return empty
-        return new RawPoolDistr([], 0n);
-    }
+    // Create rewards table
+    await sql`
+        CREATE TABLE IF NOT EXISTS rewards (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stake_credentials BLOB,
+            amount INTEGER
+        );
+    `;
 
-    async getTreasury(): Promise<bigint> {
-        const result = await this.db`
-            SELECT cas.treasury
-            FROM chain_account_state cas
-            JOIN epoch_state es ON cas.id = es.chain_account_state_id
-            JOIN new_epoch_state nes ON es.id = nes.epoch_state_id
-        `;
-        return result.length > 0 ? BigInt(result[0].treasury as string) : 0n;
-    }
+    // Create delegations table
+    await sql`
+        CREATE TABLE IF NOT EXISTS delegations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            stake_credentials BLOB,
+            pool_key_hash BLOB
+        );
+    `;
 
-    async setTreasury(treasury: bigint): Promise<void> {
-        await this.db`
-            UPDATE chain_account_state
-            SET treasury = ${treasury.toString()}
-            FROM epoch_state es
-            JOIN new_epoch_state nes ON es.id = nes.epoch_state_id
-            WHERE chain_account_state.id = es.chain_account_state_id
-        `;
-    }
+    // Create non_myopic table
+    await sql`
+        CREATE TABLE IF NOT EXISTS non_myopic (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            likelihoods_id INTEGER,
+            reward_pot INTEGER,
+            FOREIGN KEY (likelihoods_id) REFERENCES likelihoods(id)
+        );
+    `;
 
-    async getReserves(): Promise<bigint> {
-        const result = await this.db`
-            SELECT cas.reserves
-            FROM chain_account_state cas
-            JOIN epoch_state es ON cas.id = es.chain_account_state_id
-            JOIN new_epoch_state nes ON es.id = nes.epoch_state_id
-        `;
-        return result.length > 0 ? BigInt(result[0].reserves as string) : 0n;
-    }
+    // Create likelihoods table
+    await sql`
+        CREATE TABLE IF NOT EXISTS likelihoods (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pool_key_hash BLOB,
+            likelihood JSONB
+        );
+    `;
 
-    async setReserves(reserves: bigint): Promise<void> {
-        await this.db`
-            UPDATE chain_account_state
-            SET reserves = ${reserves.toString()}
-            FROM epoch_state es
-            JOIN new_epoch_state nes ON es.id = nes.epoch_state_id
-            WHERE chain_account_state.id = es.chain_account_state_id
-        `;
-    }
+    // Create protocol_params table
+    await sql`
+        CREATE TABLE IF NOT EXISTS protocol_params (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            params JSONB
+        );
+    `;
+}
 
-    async close(): Promise<void> {
-        this.db.close();
-    }
+async function initPulsingRewUpdate() {
+    // Create pulsing_rew_update table
+    await sql`
+        CREATE TABLE IF NOT EXISTS pulsing_rew_update (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data JSONB
+        );
+    `;
+}
+
+async function initPoolDistr() {
+    // Create pool_distr table
+    await sql`
+        CREATE TABLE IF NOT EXISTS pool_distr (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pools JSONB,
+            total_active_stake INTEGER
+        );
+    `;
+}
+
+async function initStashedAVVMAddresses() {
+    // Create stashed_avvm_addresses table
+    await sql`
+        CREATE TABLE IF NOT EXISTS stashed_avvm_addresses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            addresses BLOB
+        );
+    `;
 }

@@ -28,6 +28,7 @@
         "commander": "^14.0.2",
         "lmdb": "^3.4.4",
         "picocolors": "^1.1.1",
+        "promise.bar": "^0.1.5",
         "typescript-language-server": "^5.1.3",
         "wasm-kes": "./wasm-kes-0.2.1.tgz"
     }

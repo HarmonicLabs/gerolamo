@@ -2,6 +2,7 @@ import { program } from "commander";
 import { initNewEpochState } from "./consensus/ledger";
 import { sql } from "bun";
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { defaultShelleyProtocolParameters, ShelleyProtocolParameters } from "@harmoniclabs/cardano-ledger-ts";
 
 export async function getCbor(dbPath: string, snapshotRoot: string) {
     // TODO: Implement Mithril snapshot import
@@ -88,19 +89,13 @@ async function populateBlocksMade(api: BlockFrostAPI, currentEpoch: number) {
     const epochBlocks = await api.epochsBlocksAll(currentEpoch);
     console.log(`Found ${epochBlocks.length} blocks in epoch ${currentEpoch}`);
 
-    if (epochBlocks.length === 0) {
-        throw new Error(
-            "No blocks found for this epoch, skipping blocks_made population",
-        );
-    }
-
     // Fetch all block details and aggregate
-    const blockPromises = epochBlocks.map(async (blockHash: string) => {
-        const block = await api.blocks(blockHash);
-        return block.slot_leader;
-    });
-
-    const poolIds = await Promise.all(blockPromises);
+    const poolIds = await Promise.all(
+        epochBlocks.map(async (blockHash: string) => {
+            const block = await api.blocks(blockHash);
+            return block.slot_leader;
+        })
+    );
 
     // Aggregate and count blocks per pool
     const blocksByPool = poolIds.reduce(
@@ -115,17 +110,17 @@ async function populateBlocksMade(api: BlockFrostAPI, currentEpoch: number) {
         await sql`
             INSERT OR REPLACE
             INTO blocks_made ${
-            sql([
-                ...blocksByPool.entries().map(([poolId, count]) => {
-                    return {
-                        pool_key_hash: poolId,
-                        epoch: currentEpoch,
-                        block_count: count,
-                        status: "CURR",
-                    };
-                }),
-            ])
-        }
+                sql([
+                    ...blocksByPool.entries().map(([poolId, count]) => {
+                        return {
+                            pool_key_hash: poolId,
+                            epoch: currentEpoch,
+                            block_count: count,
+                            status: "CURR",
+                        };
+                    }),
+                ])
+            }
         `;
         console.log(
             `Inserted ${blocksByPool.size} pool block production records`,
@@ -171,6 +166,69 @@ async function populateDelegations(stakeDistribution: any[]) {
     }
 }
 
+async function populateRewards(stakeDistribution: any[], protocolParams: ShelleyProtocolParameters) {
+    console.log("Calculating rewards data...");
+
+    // Calculate total active stake
+    const totalStake = stakeDistribution
+        .filter((stake) => stake.amount !== 0)
+        .reduce((sum, stake) => sum + BigInt(stake.amount), 0n);
+
+    // Calculate total rewards for this epoch using Cardano monetary policy
+    // Formula: total_rewards = (reserve * ρ) + transaction_fees
+    // Where ρ is the monetary expansion rate and transaction_fees are from previous epoch
+
+    // Get monetary expansion parameters from protocol params
+    const rho = protocolParams.monetaryExpansion.valueOf();
+    const tau = protocolParams.treasuryCut.valueOf();
+
+    // Estimate current reserve (simplified - in reality this would be tracked)
+    // Cardano started with ~45B ADA reserve, decreases over time
+    const estimatedReserve = 45000000000000000n; // ~45B ADA in lovelace
+
+    // Calculate monetary expansion
+    const monetaryExpansion = BigInt(Math.floor(Number(estimatedReserve) * rho));
+
+    // Transaction fees from previous epoch (simplified - set to 0 for now)
+    const transactionFees = 0n;
+
+    // Total rewards available
+    const totalRewards = monetaryExpansion + transactionFees;
+
+    // Staking rewards = total_rewards * (1 - τ)
+    // τ goes to treasury, (1-τ) goes to staking rewards
+    const stakingRewards = BigInt(Math.floor(Number(totalRewards) * (1 - tau)));
+
+    console.log(`Monetary expansion: ${monetaryExpansion} lovelace`);
+    console.log(`Transaction fees: ${transactionFees} lovelace`);
+    console.log(`Total rewards: ${totalRewards} lovelace`);
+    console.log(`Staking rewards: ${stakingRewards} lovelace`);
+
+    // Calculate rewards for each stake address
+    const rewards = stakeDistribution
+        .filter((stake) => stake.amount && stake.amount > 0)
+        .map((stake) => {
+            // Proportional reward based on stake share
+            const stakeShare = Number(BigInt(stake.amount) * 1000000n / totalStake) / 1000000;
+            const rewardAmount = BigInt(Math.floor(Number(stakingRewards) * stakeShare));
+
+            return {
+                stake_credentials: stake.stake_address,
+                amount: rewardAmount,
+            };
+        });
+
+    console.log(`Calculated rewards for ${rewards.length} stake addresses`);
+
+    if (rewards.length > 0) {
+        await sql`
+            INSERT OR REPLACE
+            INTO rewards ${sql(rewards)}
+        `;
+        console.log(`Inserted ${rewards.length} reward entries`);
+    }
+}
+
 async function populateNonMyopic() {
     await sql`
         INSERT OR REPLACE INTO non_myopic ${
@@ -183,34 +241,42 @@ async function populateNonMyopic() {
     `;
 }
 
-async function populateUTxOs(api: BlockFrostAPI, addresses: any[]) {
-    console.log("Fetching and storing UTxOs...");
+async function populateUTxOs(
+    api: BlockFrostAPI,
+    stakeDistribution: { stake_address: string }[],
+) {
+    console.log("Fetching complete UTxO set...");
 
-    await Promise.all(
-        addresses.map((addr) => api.addressesUtxosAll(addr.address)),
-    )
-        .then((v) =>
-            sql`
-                INSERT OR IGNORE
-                INTO utxo ${
-                sql(v.flatMap(
-                    (arr) =>
-                        arr.map((utxo) => {
-                            return {
-                                utxo_ref:
-                                    `${utxo.tx_hash}:${utxo.output_index}`,
-                                tx_out: JSON.stringify({
-                                    address: utxo.address,
-                                    amount: utxo.amount.find((a) =>
-                                        a.unit === "lovelace"
-                                    )?.quantity || "0",
-                                }),
-                            };
-                        }),
-                ))
-            }
-            `
-        );
+    const utxos = await Promise.all(
+        [...new Set(stakeDistribution.map(stake => stake.stake_address))]
+            .map(
+                (v) =>
+                    api
+                        .accountsAddressesAll(v)
+                        .then(addrs => Promise.all(
+                            addrs.map(({ address }) => api
+                                .addressesUtxosAll(address)
+                                .then(async (utxos) => {
+                                    await sql`INSERT OR IGNORE INTO utxo ${
+                                        sql(
+                                            utxos.map((utxo) => {
+                                                return {
+                                                    utxo_ref: `${utxo.tx_hash}:${utxo.output_index}`,
+                                                    tx_out: JSON.stringify({
+                                                        address: utxo.address,
+                                                        amount: utxo.amount.find((a) =>
+                                                            a.unit === "lovelace"
+                                                        )?.quantity || "0",
+                                                    }),
+                                                };
+                                            })
+                                        )
+                                    }`;
+                                })
+                            )
+                        ))
+            )
+    );
 }
 
 async function populateLedgerState() {
@@ -290,46 +356,52 @@ export async function importFromBlockfrost(
     const api = new BlockFrostAPI({
         customBackend: "https://blockfrost-preprod.onchainapps.io/",
         rateLimiter: false,
+        // requestTimeout: 900,
     });
 
     await initNewEpochState();
 
     // Fetch all required data from Blockfrost
     const { currentEpoch } = await fetchBlockData(api, blockHash);
-    const protocolParams = await fetchProtocolParameters(api, currentEpoch);
+    // const protocolParams = await fetchProtocolParameters(api, currentEpoch);
     const stakeDistribution = await fetchStakeDistribution(api, currentEpoch);
-    const pools = await fetchPools(api);
-    const addresses = await fetchAddresses(api, blockHash);
+    // const pools = await fetchPools(api);
+    // const addresses = await fetchAddresses(api, blockHash);
 
     // Calculate derived data
-    const totalActiveStake = stakeDistribution.filter((stake) => stake.amount)
-        .reduce((sum, stake) => sum + BigInt(stake.amount), 0n);
+    // const totalActiveStake = stakeDistribution.filter((stake) => stake.amount)
+    //     .reduce((sum, stake) => sum + BigInt(stake.amount), 0n);
 
-    // === POPULATE ALL NES COMPONENTS ===
+    // // === POPULATE ALL NES COMPONENTS ===
 
-    // 1. Protocol parameters
-    await populateProtocolParams(protocolParams);
+    // // 1. Protocol parameters
+    // await populateProtocolParams(protocolParams);
 
-    // 2. Chain account state
-    await populateChainAccountState();
+    // // 2. Chain account state
+    // await populateChainAccountState();
 
-    // 3. Pool distribution
-    await populatePoolDistribution(pools, totalActiveStake);
+    // // 3. Pool distribution
+    // await populatePoolDistribution(pools, totalActiveStake);
 
-    // 4. Blocks made data
-    const blocksMadePoolCount = await populateBlocksMade(api, currentEpoch);
+    // // 4. Blocks made data
+    // const blocksMadePoolCount = await populateBlocksMade(api, currentEpoch);
 
-    // 5. Stake distribution
-    await populateStakeDistribution(stakeDistribution);
+    // // 5. Stake distribution
+    // await populateStakeDistribution(stakeDistribution);
 
-    // 6. Delegations
-    await populateDelegations(stakeDistribution);
+    // // 6. Delegations
+    // await populateDelegations(stakeDistribution);
 
-    // 7. Non-myopic data
-    await populateNonMyopic();
+    // // 7. Rewards
+    // await populateRewards(stakeDistribution, defaultShelleyProtocolParameters);
+
+    // // 8. Non-myopic data
+    // await populateNonMyopic();
 
     // 8. UTxO set
-    await populateUTxOs(api, addresses);
+    await populateUTxOs(api, stakeDistribution);
+    console.log("Done");
+    process.exit(0);
 
     // 9. Ledger state
     await populateLedgerState();
@@ -347,33 +419,36 @@ export async function importFromBlockfrost(
     await populateStashedAvvmAddresses();
 
     // 14. New epoch state (the root)
-    await populateNewEpochState(currentEpoch);
+    // await populateNewEpochState(currentEpoch);
 
-    console.log(`\n=== COMPLETE NES IMPORTED FOR EPOCH ${currentEpoch} ===`);
-    console.log(`📦 Protocol parameters: ✓`);
-    console.log(`🏦 Chain accounts: ✓ (defaults)`);
-    console.log(
-        `🏊 Pool distribution: ✓ (${pools.length} pools, ${totalActiveStake} total stake)`,
-    );
-    console.log(
-        `⛏️  Blocks made: ✓ (${blocksMadePoolCount} pools)`,
-    );
-    console.log(
-        `🪙 Stake distribution: ✓ (${stakeDistribution.length} entries)`,
-    );
-    console.log(
-        `🔗 Delegations: ✓ (${
-            stakeDistribution.filter((s) => s.pool_id).length
-        } entries)`,
-    );
-    console.log(
-        `💰 UTxO set: ✓ (${
-            (await sql`SELECT COUNT(*) from utxo`)[0]["COUNT(*)"]
-        } UTxOs from ${addresses.length} addresses)`,
-    );
-    console.log(`📊 Ledger state: ✓`);
-    console.log(`📸 Snapshots: ✓`);
-    console.log(`🎯 Complete New Epoch State imported from Blockfrost!`);
+    // console.log(`\n=== COMPLETE NES IMPORTED FOR EPOCH ${currentEpoch} ===`);
+    // console.log(`📦 Protocol parameters: ✓`);
+    // console.log(`🏦 Chain accounts: ✓ (defaults)`);
+    // console.log(
+    //     `🏊 Pool distribution: ✓ (${pools.length} pools, ${totalActiveStake} total stake)`,
+    // );
+    // console.log(
+    //     `⛏️  Blocks made: ✓ (${blocksMadePoolCount} pools)`,
+    // );
+    // console.log(
+    //     `🪙 Stake distribution: ✓ (${stakeDistribution.length} entries)`,
+    // );
+    // console.log(
+    //     `🔗 Delegations: ✓ (${
+    //         stakeDistribution.filter((s) => s.pool_id).length
+    //     } entries)`,
+    // );
+    // console.log(
+    //     `💰 Rewards: ✓ (${stakeDistribution.filter((s) => BigInt(s.amount || 0) > 0n).length} entries)`,
+    // );
+    // console.log(
+    //     `💰 UTxO set: ✓ (${
+    //         (await sql`SELECT COUNT(*) from utxo`)[0]["COUNT(*)"]
+    //     } UTxOs from ${addresses.length} addresses)`,
+    // );
+    // console.log(`📊 Ledger state: ✓`);
+    // console.log(`📸 Snapshots: ✓`);
+    // console.log(`🎯 Complete New Epoch State imported from Blockfrost!`);
 }
 
 program.name("gerolamo");

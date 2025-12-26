@@ -18,8 +18,9 @@ import {
     rollBackWards,
 } from "./sqlWorkers/sql";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
-import { SQLNewEpochState } from "../consensus/ledger";
-import { BlockValidator } from "../consensus/blockValidation";
+
+import { validateBlock } from "../consensus/BlockBodyValidator";
+import { applyBlock } from "../consensus/BlockApplication";
 import { BlockApplier } from "../consensus/BlockApplication";
 import { ChainCandidate, ChainSelector } from "../consensus/chainSelection";
 import { toHex } from "@harmoniclabs/uint8array-utils";
@@ -49,7 +50,6 @@ export interface IPeerManager {
     config: GerolamoConfig;
     topology: Topology;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-    lState: SQLNewEpochState;
 }
 
 export class PeerManager implements IPeerManager {
@@ -62,30 +62,21 @@ export class PeerManager implements IPeerManager {
     config: GerolamoConfig;
     topology: Topology;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-    lState: SQLNewEpochState;
     chainSelector: ChainSelector;
     chainCandidates: Map<string, ChainCandidate> = new Map();
     currentFollowedPeer: string | null = null;
     private chainSelectionTimeout: number | null = null;
 
-    constructor(config: GerolamoConfig, lState?: SQLNewEpochState) {
+    constructor(config: GerolamoConfig) {
         this.config = config;
-        if (lState) {
-            this.lState = lState;
-            this.chainSelector = new ChainSelector(lState);
-        }
+        this.chainSelector = new ChainSelector();
+    }
     }
 
     async init() {
         this.topology = await parseTopology(this.config.topologyFile);
         const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
-        if (!this.lState) {
-            throw new Error("Ledger state must be provided");
-        }
-        if (!this.chainSelector) {
-            this.chainSelector = new ChainSelector(this.lState);
-        }
 
         // Initialize chain sync database tables
         await initDB();
@@ -216,8 +207,6 @@ export class PeerManager implements IPeerManager {
 
         const validateHeaderRes = await headerValidation(
             data,
-            this.shelleyGenesisConfig,
-            this.lState,
         );
 
         /*This is just tempo for quick testing
@@ -245,7 +234,7 @@ export class PeerManager implements IPeerManager {
             candidate = {
                 tip: multiEraHeader,
                 stake: 0n, // Placeholder, calculate later
-                mithrilVerified: false,
+
                 length: 1,
             };
             this.chainCandidates.set(peerId, candidate);
@@ -299,11 +288,9 @@ export class PeerManager implements IPeerManager {
             );
 
             // Validate and apply the block to the ledger state
-            const blockValidator = new BlockValidator(this.lState);
-            const isValid = await blockValidator.validateBlock(block, slot);
+            const isValid = await validateBlock(block);
             if (isValid) {
-                const blockApplier = new BlockApplier(this.lState);
-                await blockApplier.applyBlock(block, slot);
+                await applyBlock(block, slot);
                 logger.debug(
                     `Block applied to stable state: slot ${slot}, hash ${
                         toHex(blockHeaderHash)

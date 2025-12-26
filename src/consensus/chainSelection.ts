@@ -1,5 +1,5 @@
 import { MultiEraHeader } from "@harmoniclabs/cardano-ledger-ts";
-import { SQLNewEpochState } from "./ledger";
+import { sql } from "bun";
 
 /**
  * Represents a candidate chain for selection
@@ -9,114 +9,82 @@ export interface ChainCandidate {
     tip: MultiEraHeader;
     /** The stake backing this chain (from pool distribution) */
     stake: bigint;
-    /** Whether this chain is verified by Mithril */
-    mithrilVerified: boolean;
     /** Chain length (number of blocks) */
     length: number;
 }
 
 /**
- * Chain selection logic for Praos consensus
- * Selects the best chain based on stake, length, and Mithril verification
+ * Compare two chain candidates and return the better one
+ * Based on Ouroboros Praos chain selection: prefer higher stake density, then longer chains, then higher slot
  */
-export class ChainSelector {
-    private ledgerState: SQLNewEpochState;
-
-    constructor(ledgerState: SQLNewEpochState) {
-        this.ledgerState = ledgerState;
+export function compareChains(
+    chainA: ChainCandidate,
+    chainB: ChainCandidate,
+): ChainCandidate {
+    // Primary: Stake density (stake per length, approximating chain quality)
+    const densityA = chainA.length > 0
+        ? Number(chainA.stake) / chainA.length
+        : 0;
+    const densityB = chainB.length > 0
+        ? Number(chainB.stake) / chainB.length
+        : 0;
+    if (densityA > densityB) {
+        return chainA;
     }
-
-    /**
-     * Compare two chain candidates and return the better one
-     * Based on Ouroboros Praos chain selection: prefer verified chains, then higher stake density, then longer chains, then higher slot
-     */
-    compareChains(
-        chainA: ChainCandidate,
-        chainB: ChainCandidate,
-    ): ChainCandidate {
-        // Primary: Mithril verification (for security)
-        if (chainA.mithrilVerified && !chainB.mithrilVerified) {
-            return chainA;
-        }
-        if (!chainA.mithrilVerified && chainB.mithrilVerified) {
-            return chainB;
-        }
-
-        // Secondary: Stake density (stake per length, approximating chain quality)
-        const densityA = chainA.length > 0
-            ? Number(chainA.stake) / chainA.length
-            : 0;
-        const densityB = chainB.length > 0
-            ? Number(chainB.stake) / chainB.length
-            : 0;
-        if (densityA > densityB) {
-            return chainA;
-        }
-        if (densityA < densityB) {
-            return chainB;
-        }
-
-        // Tertiary: Chain length
-        if (chainA.length > chainB.length) {
-            return chainA;
-        }
-        if (chainA.length < chainB.length) {
-            return chainB;
-        }
-
-        // Tiebreaker: Slot number (prefer more recent)
-        if (chainA.tip.header.body.slot > chainB.tip.header.body.slot) {
-            return chainA;
-        }
-
+    if (densityA < densityB) {
         return chainB;
     }
 
-    /**
-     * Select the best chain from a list of candidates
-     */
-    selectBestChain(candidates: ChainCandidate[]): ChainCandidate | null {
-        if (candidates.length === 0) return null;
-
-        return candidates.reduce((best, current) =>
-            this.compareChains(best, current)
-        );
+    // Secondary: Chain length
+    if (chainA.length > chainB.length) {
+        return chainA;
+    }
+    if (chainA.length < chainB.length) {
+        return chainB;
     }
 
-    /**
-     * Verify a chain candidate using Mithril
-     * TODO: Integrate with Mithril client
-     */
-    async verifyWithMithril(_candidate: ChainCandidate): Promise<boolean> {
-        // Placeholder: Query Mithril for certificate verification
-        // Return true if the chain's tip is certified
-        return false; // Stub
+    // Tiebreaker: Slot number (prefer more recent)
+    if (chainA.tip.header.body.slot > chainB.tip.header.body.slot) {
+        return chainA;
     }
 
-    /**
-     * Calculate stake for a chain candidate
-     */
-    async calculateStake(_candidate: ChainCandidate): Promise<bigint> {
-        // Get pool distribution from ledger state
-        const poolDistr = await this.ledgerState.getPoolDistr();
-        // Sum stake for pools in this chain
-        // TODO: Implement based on chain's pool distribution
-        return BigInt(poolDistr.totalActiveStake);
+    return chainB;
+}
+
+/**
+ * Select the best chain from a list of candidates
+ */
+export function selectBestChain(candidates: ChainCandidate[]): ChainCandidate | null {
+    if (candidates.length === 0) return null;
+
+    return candidates.reduce((best, current) =>
+        compareChains(best, current)
+    );
+}
+
+/**
+ * Calculate stake for a chain candidate
+ */
+export async function calculateStake(_candidate: ChainCandidate): Promise<bigint> {
+    // Query total active stake from database
+    const poolDistrRows = await sql`SELECT total_active_stake FROM pool_distr WHERE id = 1`.values() as [string][];
+    if (poolDistrRows.length === 0) {
+        return 0n;
+    }
+    return BigInt(poolDistrRows[0][0]);
+}
+
+/**
+ * Evaluate and select the best chain from peers
+ * TODO: Integrate with PeerManager
+ */
+export async function evaluateChains(
+    peerChains: ChainCandidate[],
+): Promise<ChainCandidate | null> {
+    // Calculate stake for each chain
+    for (const chain of peerChains) {
+        chain.stake = await calculateStake(chain);
     }
 
-    /**
-     * Evaluate and select the best chain from peers
-     * TODO: Integrate with PeerManager
-     */
-    async evaluateChains(
-        peerChains: ChainCandidate[],
-    ): Promise<ChainCandidate | null> {
-        // Verify each chain with Mithril
-        for (const chain of peerChains) {
-            chain.mithrilVerified = await this.verifyWithMithril(chain);
-            chain.stake = await this.calculateStake(chain);
-        }
-
-        return this.selectBestChain(peerChains);
-    }
+    return selectBestChain(peerChains);
 }

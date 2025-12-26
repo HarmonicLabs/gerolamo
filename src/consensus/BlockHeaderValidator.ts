@@ -34,7 +34,7 @@ import {
 import { PoolOperationalCert } from "@harmoniclabs/cardano-ledger-ts";
 import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
-import { SQLNewEpochState } from "./ledger";
+import { sql } from "bun";
 import * as assert from "node:assert/strict";
 import * as wasm from "wasm-kes";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
@@ -43,21 +43,76 @@ const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
     "1157920892373161954235709850086879078532699846656405640394575840079131296399360000000000000000000000000000000000",
 );
 
-function verifyKnownLeader(
+async function verifyKnownLeader(
     issuerPubKey: PoolKeyHash,
-    poolDistr: [PoolKeyHash, bigint][],
-): boolean {
-    const knownLeader = poolDistr.find(([pkh, _ps]) =>
-        uint8ArrayEq(pkh.toCborBytes(), issuerPubKey.toCborBytes())
-    )!;
-    return knownLeader[1] >= 0n;
+): Promise<boolean> {
+    // Query database using JSON functions to check if pool exists with stake > 0
+    const issuerHex = toHex(issuerPubKey.toCborBytes());
+    const result = await sql`
+        SELECT EXISTS(
+            SELECT 1 FROM json_each(pools) 
+            WHERE json_extract(value, '$.pool_id') = ${issuerHex} 
+            AND CAST(json_extract(value, '$.active_stake') AS INTEGER) > 0
+        ) as has_pool
+        FROM pool_distr WHERE id = 1
+    `.values() as [number][];
+
+    return result.length > 0 && result[0][0] === 1;
 }
 
-function verifyLeaderEligibility(
-    asc: BigDecimal,
-    leader_relative_stake: BigDecimal,
+async function verifyLeaderEligibility(
+    issuerPubKey: PoolKeyHash,
     certified_leader_vrf: bigint,
-): boolean {
+): Promise<boolean> {
+    // Query protocol parameters for active slot coefficient using JSON functions
+    const protocolRows = await sql`
+        SELECT COALESCE(
+            json_extract(params, '$.activeSlotsCoeff'),
+            json_extract(params, '$.active_slots_coeff'),
+            0.05
+        ) as activeSlotCoeff
+        FROM protocol_params WHERE id = 1
+    `.values() as [number][];
+
+    if (protocolRows.length === 0) {
+        return false;
+    }
+    const activeSlotCoeff = protocolRows[0][0];
+
+    // Query pool distribution for stake ratio using JSON functions
+    const issuerHex = toHex(issuerPubKey.toCborBytes());
+    const stakeRows = await sql`
+        SELECT
+            CAST(json_extract(value, '$.active_stake') AS INTEGER) as individual_stake,
+            total_active_stake
+        FROM pool_distr, json_each(pools)
+        WHERE id = 1 AND json_extract(value, '$.pool_id') = ${issuerHex}
+    `.values() as [bigint, string][];
+
+    let individualStake = 0n;
+    let totalActiveStake = 0n;
+
+    if (stakeRows.length > 0) {
+        const [indStake, totalStakeStr] = stakeRows[0];
+        individualStake = indStake;
+        totalActiveStake = BigInt(totalStakeStr);
+    } else {
+        // Pool not found, get total stake for ratio calculation
+        const totalRows = await sql`SELECT total_active_stake FROM pool_distr WHERE id = 1`.values() as [string][];
+        if (totalRows.length > 0) {
+            totalActiveStake = BigInt(totalRows[0][0]);
+        }
+    }
+
+    // Calculate stake ratio
+    let stakeRatio: BigDecimal;
+    if (totalActiveStake === 0n) {
+        stakeRatio = BigDecimal.from(0);
+    } else {
+        stakeRatio = BigDecimal.from(individualStake).div(BigDecimal.from(totalActiveStake));
+    }
+
+    const asc = BigDecimal.from(activeSlotCoeff);
     const denom = BigDecimal.sub(
         CERTIFIED_NATURAL_MAX,
         BigDecimal.fromBigint(certified_leader_vrf),
@@ -65,7 +120,7 @@ function verifyLeaderEligibility(
     const recip_q = BigDecimal.div(CERTIFIED_NATURAL_MAX, denom);
     // const c = Math.log(1 - asc); // This is ln, i.e., log with base e~=2.718...
     const c = BigDecimal.sub(BigDecimal.fromBigint(1n), asc).ln();
-    const x = BigDecimal.mul(leader_relative_stake, c).neg();
+    const x = BigDecimal.mul(stakeRatio, c).neg();
 
     /*
     Compare the Taylor-expansion of `x` to the threshold value `recip_q`
@@ -74,54 +129,18 @@ function verifyLeaderEligibility(
     return expCmp(x, 1000n, 3n, recip_q).estimation === ExpOrd.LT;
 }
 
-function verifyKESSignature(
-    slotKESPeriod: bigint,
-    opcertKESPeriod: bigint,
-    body: Uint8Array,
-    pubKey: KesPubKey,
-    signature: KesSignature,
-    maxKESEvo: bigint,
-): boolean {
-    if (opcertKESPeriod > slotKESPeriod) {
-        return false;
-    }
-
-    if (slotKESPeriod >= opcertKESPeriod + maxKESEvo) {
-        return false;
-    }
-
-    // Verify KES signature with pubkey and header bytes
-    const kesPeriod = Number(slotKESPeriod - opcertKESPeriod);
-    if (kesPeriod < 0) {
-        return false;
-    }
-
-    return wasm.verify(
-        signature,
-        kesPeriod,
-        pubKey,
-        body,
-    );
-}
-
-// Assume latestSeqNum is well-defined for now
 function verifyOpCertError(
     cert: PoolOperationalCert,
     issuer: PublicKey,
-    latestSeqNum: bigint | undefined,
 ): boolean {
-    return latestSeqNum === undefined || (
-        latestSeqNum <= cert.sequenceNumber &&
-        cert.sequenceNumber - BigInt(latestSeqNum) <= 1 &&
-        verifyEd25519Signature_sync(
-            cert.signature,
-            concatUint8Array(
-                cert.kesPubKey,
-                fromHex(cert.sequenceNumber.toString(16).padStart(16, "0")),
-                fromHex(cert.kesPeriod.toString(16).padStart(16, "0")),
-            ),
-            issuer.toBuffer(),
-        )
+    return verifyEd25519Signature_sync(
+        cert.signature,
+        concatUint8Array(
+            cert.kesPubKey,
+            fromHex(cert.sequenceNumber.toString(16).padStart(16, "0")),
+            fromHex(cert.kesPeriod.toString(16).padStart(16, "0")),
+        ),
+        issuer.toBuffer(),
     );
 }
 
@@ -133,19 +152,10 @@ function verifyVrfProof(
     era: "pre-babbage" | "post-babbage", // Add era detection; e.g., based on block protocol version
 ): boolean {
     const proof = VrfProof03.fromBytes(cert.proof); // Assuming this works for all eras (proof format is compatible)
-    const verify = proof.verify(leaderPubKey, input);
-
-    let computedOutput: Uint8Array;
-    if (era === "pre-babbage") {
-        // Pre-Babbage: hash of full proof bytes
-        computedOutput = blake2b_256(proof.toBytes());
-    } else {
-        // Babbage+: hash of gamma (via toHash, assuming it extracts/hashes gamma)
-        computedOutput = proof.toHash();
-    }
-
-    const out = uint8ArrayEq(computedOutput, output);
-    return verify && out;
+    return proof.verify(leaderPubKey, input) && uint8ArrayEq(
+        (era === "pre-babbage") ? blake2b_256(proof.toBytes()) : proof.toHash(),
+        output
+    );
 }
 
 function getVrfInput(
@@ -200,24 +210,60 @@ function getEraHeader(
     return h.header;
 }
 
+function verifyKESSignature(
+    slotKESPeriod: bigint,
+    opcertKESPeriod: bigint,
+    body: Uint8Array,
+    pubKey: KesPubKey,
+    signature: KesSignature,
+    maxKESEvo: bigint,
+): boolean {
+    if (opcertKESPeriod > slotKESPeriod) {
+        return false;
+    }
+
+    if (slotKESPeriod >= opcertKESPeriod + maxKESEvo) {
+        return false;
+    }
+
+    // Verify KES signature with pubkey and header bytes
+    const kesPeriod = Number(slotKESPeriod - opcertKESPeriod);
+    if (kesPeriod < 0) {
+        return false;
+    }
+
+    return wasm.verify(
+        signature,
+        kesPeriod,
+        pubKey,
+        body,
+    );
+}
+
 export async function validateHeader(
     h: MultiEraHeader,
     nonce: Uint8Array,
-    shelleyGenesis: ShelleyGenesisConfig,
-    lState: SQLNewEpochState,
-    sequenceNumber?: bigint, //only used for Amaru test
 ): Promise<boolean> {
+    // Query protocol parameters from database
+    const protocolRows = await sql`
+        SELECT
+            COALESCE(json_extract(params, '$.maxKESEvolutions'), json_extract(params, '$.max_kes_evolutions'), 62) as maxKESEvolutions,
+            COALESCE(json_extract(params, '$.slotsPerKESPeriod'), json_extract(params, '$.slots_per_kes_period'), 129600) as slotsPerKESPeriod
+        FROM protocol_params WHERE id = 1
+    `.values() as [number, number][];
+
+    if (protocolRows.length === 0) {
+        return false;
+    }
+
+    const [maxKESEvolutions, slotsPerKESPeriod] = protocolRows[0];
+
     const header = getEraHeader(h);
-    const opCerts: PoolOperationalCert = header.body.opCert;
-    const activeSlotCoeff = shelleyGenesis.activeSlotsCoeff!;
-    const maxKesEvo = BigInt(shelleyGenesis.maxKESEvolutions!);
-    const slotsPerKESPeriod = BigInt(shelleyGenesis.slotsPerKESPeriod!);
+    const maxKesEvo = BigInt(maxKESEvolutions);
+    const slotsPerKESPeriodBig = BigInt(slotsPerKESPeriod);
 
     const issuer = new PoolKeyHash(header.body.issuerPubKey);
-    const isKnownLeader = verifyKnownLeader(
-        issuer,
-        [[issuer, 0n]],
-    );
+    const isKnownLeader = await verifyKnownLeader(issuer);
     const leaderVrfOut = concatUint8Array(
         Buffer.from("L"),
         header.body.leaderVrfOutput(),
@@ -265,47 +311,21 @@ export async function validateHeader(
         );
     }
 
-    const poolDistr = await lState.getPoolDistr();
-    const totalActiveStake = poolDistr.totalActiveStake;
-    const individualStake =
-        poolDistr.unPoolDistr.find(([pkh, _]) =>
-            uint8ArrayEq(pkh.toCborBytes(), issuer.toCborBytes())
-        )?.[1].individualTotalPoolStake || 0n;
-
-    // If total active stake is zero, check if individual stake is also zero
-    // If both are zero, the stake ratio is undefined, but we can still validate other aspects
-    let stakeRatio: BigDecimal;
-    if (totalActiveStake === 0n) {
-        if (individualStake === 0n) {
-            // Both are zero - this is an edge case, but let's use 0 as the ratio
-            stakeRatio = BigDecimal.from(0);
-        } else {
-            // Individual stake exists but total is zero - this shouldn't happen in practice
-            return false;
-        }
-    } else {
-        stakeRatio = BigDecimal.from(individualStake).div(
-            BigDecimal.from(totalActiveStake),
-        );
-    }
-
-    const verifyLeaderStake = verifyLeaderEligibility(
-        BigDecimal.from(activeSlotCoeff),
-        stakeRatio,
+    const verifyLeaderStake = await verifyLeaderEligibility(
+        issuer,
         BigInt(`0x${toHex(leaderVrfOut)}`),
     );
 
     const verifyOpCertValidity = verifyOpCertError(
         header.body.opCert,
         new PublicKey(header.body.issuerPubKey),
-        sequenceNumber ? sequenceNumber : opCerts.sequenceNumber,
     );
 
     const header_body_bytes = Cbor.encode(header.toCborObj().array[0])
         .toBuffer();
 
     const verifyKES = verifyKESSignature(
-        header.body.slot / slotsPerKESPeriod,
+        header.body.slot / slotsPerKESPeriodBig,
         header.body.opCert.kesPeriod,
         header_body_bytes,
         header.body.opCert.kesPubKey,

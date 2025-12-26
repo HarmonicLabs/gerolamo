@@ -15,11 +15,8 @@ import { validateHeader } from "../consensus/BlockHeaderValidator";
 import { blockFrostFetchEra } from "./utils/blockFrostFetchEra";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
-import { SQLNewEpochState } from "../consensus/ledger";
 export async function headerValidation(
     data: ChainSyncRollForward,
-    shelleyGenesis: ShelleyGenesisConfig,
-    lState: SQLNewEpochState,
 ) {
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
     const blockHeaderData: Uint8Array = Cbor.encode(data.data).toBuffer();
@@ -91,8 +88,6 @@ export async function headerValidation(
     const validateHeaderRes = await validateHeader(
         multiEraHeader,
         fromHex(epochNonce.nonce),
-        shelleyGenesis,
-        lState,
     );
     // logger.debug("Header validation result: ", validateHeaderRes);
 

@@ -1,5 +1,5 @@
 import { program } from "commander";
-import { initNewEpochState } from "./consensus/ledger";
+import { initNewEpochState } from "./consensus/ledger.ts";
 import { sql } from "bun";
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
 import { defaultShelleyProtocolParameters, ShelleyProtocolParameters } from "@harmoniclabs/cardano-ledger-ts";
@@ -247,36 +247,62 @@ async function populateUTxOs(
 ) {
     console.log("Fetching complete UTxO set...");
 
-    const utxos = await Promise.all(
-        [...new Set(stakeDistribution.map(stake => stake.stake_address))]
-            .map(
-                (v) =>
-                    api
-                        .accountsAddressesAll(v)
-                        .then(addrs => Promise.all(
-                            addrs.map(({ address }) => api
-                                .addressesUtxosAll(address)
-                                .then(async (utxos) => {
-                                    await sql`INSERT OR IGNORE INTO utxo ${
-                                        sql(
-                                            utxos.map((utxo) => {
-                                                return {
-                                                    utxo_ref: `${utxo.tx_hash}:${utxo.output_index}`,
-                                                    tx_out: JSON.stringify({
-                                                        address: utxo.address,
-                                                        amount: utxo.amount.find((a) =>
-                                                            a.unit === "lovelace"
-                                                        )?.quantity || "0",
-                                                    }),
-                                                };
-                                            })
-                                        )
-                                    }`;
-                                })
-                            )
-                        ))
-            )
-    );
+    const uniqueStakeAddrs = [...new Set(stakeDistribution.map(stake => stake.stake_address))];
+
+    console.log(`Pulling data from ${uniqueStakeAddrs.length} unique stake addresses`)
+
+    console.log(`Processing ${uniqueStakeAddrs.length} stake addresses...`);
+
+    const accountAddrs = await Promise.all(uniqueStakeAddrs.map(async (stakeAddr, index) => {
+        if (index % 1000 === 0) {
+            console.log(`Processed ${index}/${uniqueStakeAddrs.length} stake addresses`);
+        }
+        try {
+            return await api.accountsAddressesAll(stakeAddr);
+        } catch (error) {
+            console.warn(`Failed to get addresses for stake ${stakeAddr}:`, error);
+            return [];
+        }
+    }));
+
+    const flatAccountAddrs = accountAddrs.flat();
+    console.log(`Pulling data from ${flatAccountAddrs.length} associated account addresses`)
+
+    console.log(`Fetching UTxOs from ${flatAccountAddrs.length} addresses...`);
+    const utxos = await Promise.all(flatAccountAddrs.map(async (addr, index) => {
+        if (index % 1000 === 0) {
+            console.log(`Fetched UTxOs for ${index}/${flatAccountAddrs.length} addresses`);
+        }
+        try {
+            return await api.addressesUtxosAll(addr.address);
+        } catch (error) {
+            console.warn(`Failed to get UTxOs for address ${addr.address}:`, error);
+            return [];
+        }
+    })).then((utxoArrays) => utxoArrays.flat());
+
+    console.log(`Found ${utxos.length} UTxOs`)
+
+    if (utxos.length === 0) {
+        console.log("No UTxOs found, skipping insertion");
+        return;
+    }
+
+    await sql`INSERT OR IGNORE INTO utxo ${
+        sql(
+            utxos.map((utxo) => {
+                return {
+                    utxo_ref: `${utxo.tx_hash}:${utxo.output_index}`,
+                    tx_out: JSON.stringify({
+                        address: utxo.address,
+                        amount: utxo.amount.find((a) =>
+                            a.unit === "lovelace"
+                        )?.quantity || "0",
+                    }),
+                };
+            })
+        )
+    }`;
 }
 
 async function populateLedgerState() {
@@ -363,45 +389,43 @@ export async function importFromBlockfrost(
 
     // Fetch all required data from Blockfrost
     const { currentEpoch } = await fetchBlockData(api, blockHash);
-    // const protocolParams = await fetchProtocolParameters(api, currentEpoch);
+    const protocolParams = await fetchProtocolParameters(api, currentEpoch);
     const stakeDistribution = await fetchStakeDistribution(api, currentEpoch);
-    // const pools = await fetchPools(api);
+    const pools = await fetchPools(api);
     // const addresses = await fetchAddresses(api, blockHash);
 
     // Calculate derived data
-    // const totalActiveStake = stakeDistribution.filter((stake) => stake.amount)
-    //     .reduce((sum, stake) => sum + BigInt(stake.amount), 0n);
+    const totalActiveStake = stakeDistribution.filter((stake) => stake.amount)
+        .reduce((sum, stake) => sum + BigInt(stake.amount), 0n);
 
-    // // === POPULATE ALL NES COMPONENTS ===
+    // === POPULATE ALL NES COMPONENTS ===
 
-    // // 1. Protocol parameters
-    // await populateProtocolParams(protocolParams);
+    // 1. Protocol parameters
+    await populateProtocolParams(protocolParams);
 
-    // // 2. Chain account state
-    // await populateChainAccountState();
+    // 2. Chain account state
+    await populateChainAccountState();
 
-    // // 3. Pool distribution
-    // await populatePoolDistribution(pools, totalActiveStake);
+    // 3. Pool distribution
+    await populatePoolDistribution(pools, totalActiveStake);
 
-    // // 4. Blocks made data
-    // const blocksMadePoolCount = await populateBlocksMade(api, currentEpoch);
+    // 4. Blocks made data
+    const blocksMadePoolCount = await populateBlocksMade(api, currentEpoch);
 
-    // // 5. Stake distribution
-    // await populateStakeDistribution(stakeDistribution);
+    // 5. Stake distribution
+    await populateStakeDistribution(stakeDistribution);
 
-    // // 6. Delegations
-    // await populateDelegations(stakeDistribution);
+    // 6. Delegations
+    await populateDelegations(stakeDistribution);
 
-    // // 7. Rewards
-    // await populateRewards(stakeDistribution, defaultShelleyProtocolParameters);
+    // 7. Rewards
+    await populateRewards(stakeDistribution, defaultShelleyProtocolParameters);
 
-    // // 8. Non-myopic data
-    // await populateNonMyopic();
+    // 8. Non-myopic data
+    await populateNonMyopic();
 
-    // 8. UTxO set
+    // 9. UTxO set
     await populateUTxOs(api, stakeDistribution);
-    console.log("Done");
-    process.exit(0);
 
     // 9. Ledger state
     await populateLedgerState();

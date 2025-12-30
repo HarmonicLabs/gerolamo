@@ -6,6 +6,7 @@ export async function initNewEpochState() {
     await initPulsingRewUpdate();
     await initPoolDistr();
     await initStashedAVVMAddresses();
+    await initStableState();
 
     // Create new_epoch_state table
     await sql`
@@ -43,6 +44,15 @@ async function initBlocksMade() {
 }
 
 async function initEpochState() {
+    // Create blocks table for volatile block storage
+    await sql`
+        CREATE TABLE IF NOT EXISTS blocks (
+            hash BLOB PRIMARY KEY,
+            data JSONB NOT NULL,
+            slot INTEGER NOT NULL
+        );
+    `;
+
     // Create utxo table
     await sql`
         CREATE TABLE IF NOT EXISTS utxo (
@@ -214,7 +224,38 @@ async function initStashedAVVMAddresses() {
     await sql`
         CREATE TABLE IF NOT EXISTS stashed_avvm_addresses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            addresses BLOB
+            addresses JSONB
         );
+    `;
+}
+
+async function initStableState() {
+    // Create immutable_blocks table for permanent chain storage
+    await sql`
+        CREATE TABLE IF NOT EXISTS immutable_blocks (
+            slot INTEGER PRIMARY KEY,
+            hash BLOB NOT NULL,
+            block_data JSONB NOT NULL,
+            prev_hash BLOB,
+            UNIQUE(hash)
+        );
+    `;
+
+    // Create stable_state table to track immutable tip and metadata
+    await sql`
+        CREATE TABLE IF NOT EXISTS stable_state (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            immutable_tip_hash BLOB,
+            immutable_tip_slot INTEGER,
+            total_blocks INTEGER DEFAULT 0,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+        );
+    `;
+
+    // Insert initial stable state if not exists
+    await sql`
+        INSERT OR IGNORE INTO stable_state (id, immutable_tip_hash, immutable_tip_slot, total_blocks)
+        VALUES (1, NULL, 0, 0);
     `;
 }

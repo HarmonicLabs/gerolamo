@@ -54,20 +54,24 @@ export function compareChains(
 /**
  * Select the best chain from a list of candidates
  */
-export function selectBestChain(candidates: ChainCandidate[]): ChainCandidate | null {
+export function selectBestChain(
+    candidates: ChainCandidate[],
+): ChainCandidate | null {
     if (candidates.length === 0) return null;
 
-    return candidates.reduce((best, current) =>
-        compareChains(best, current)
-    );
+    return candidates.reduce((best, current) => compareChains(best, current));
 }
 
 /**
  * Calculate stake for a chain candidate
  */
-export async function calculateStake(_candidate: ChainCandidate): Promise<bigint> {
+export async function calculateStake(
+    _candidate: ChainCandidate,
+): Promise<bigint> {
     // Query total active stake from database
-    const poolDistrRows = await sql`SELECT total_active_stake FROM pool_distr WHERE id = 1`.values() as [string][];
+    const poolDistrRows =
+        await sql`SELECT total_active_stake FROM pool_distr WHERE id = 1`
+            .values() as [string][];
     if (poolDistrRows.length === 0) {
         return 0n;
     }
@@ -81,10 +85,14 @@ export async function calculateStake(_candidate: ChainCandidate): Promise<bigint
 export async function evaluateChains(
     peerChains: ChainCandidate[],
 ): Promise<ChainCandidate | null> {
-    // Calculate stake for each chain
-    for (const chain of peerChains) {
-        chain.stake = await calculateStake(chain);
-    }
+    // Calculate stake for each chain in parallel
+    await Promise.all(
+        peerChains.map((chain) =>
+            calculateStake(chain).then((stake) => {
+                chain.stake = stake;
+            })
+        ),
+    );
 
     return selectBestChain(peerChains);
 }

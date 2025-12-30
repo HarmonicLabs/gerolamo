@@ -2,7 +2,10 @@ import { program } from "commander";
 import { initNewEpochState } from "./consensus/ledger.ts";
 import { sql } from "bun";
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { defaultShelleyProtocolParameters, ShelleyProtocolParameters } from "@harmoniclabs/cardano-ledger-ts";
+import {
+    defaultShelleyProtocolParameters,
+    ShelleyProtocolParameters,
+} from "@harmoniclabs/cardano-ledger-ts";
 
 export async function getCbor(dbPath: string, snapshotRoot: string) {
     // TODO: Implement Mithril snapshot import
@@ -94,7 +97,7 @@ async function populateBlocksMade(api: BlockFrostAPI, currentEpoch: number) {
         epochBlocks.map(async (blockHash: string) => {
             const block = await api.blocks(blockHash);
             return block.slot_leader;
-        })
+        }),
     );
 
     // Aggregate and count blocks per pool
@@ -110,17 +113,17 @@ async function populateBlocksMade(api: BlockFrostAPI, currentEpoch: number) {
         await sql`
             INSERT OR REPLACE
             INTO blocks_made ${
-                sql([
-                    ...blocksByPool.entries().map(([poolId, count]) => {
-                        return {
-                            pool_key_hash: poolId,
-                            epoch: currentEpoch,
-                            block_count: count,
-                            status: "CURR",
-                        };
-                    }),
-                ])
-            }
+            sql([
+                ...blocksByPool.entries().map(([poolId, count]) => {
+                    return {
+                        pool_key_hash: poolId,
+                        epoch: currentEpoch,
+                        block_count: count,
+                        status: "CURR",
+                    };
+                }),
+            ])
+        }
         `;
         console.log(
             `Inserted ${blocksByPool.size} pool block production records`,
@@ -166,7 +169,10 @@ async function populateDelegations(stakeDistribution: any[]) {
     }
 }
 
-async function populateRewards(stakeDistribution: any[], protocolParams: ShelleyProtocolParameters) {
+async function populateRewards(
+    stakeDistribution: any[],
+    protocolParams: ShelleyProtocolParameters,
+) {
     console.log("Calculating rewards data...");
 
     // Calculate total active stake
@@ -187,7 +193,9 @@ async function populateRewards(stakeDistribution: any[], protocolParams: Shelley
     const estimatedReserve = 45000000000000000n; // ~45B ADA in lovelace
 
     // Calculate monetary expansion
-    const monetaryExpansion = BigInt(Math.floor(Number(estimatedReserve) * rho));
+    const monetaryExpansion = BigInt(
+        Math.floor(Number(estimatedReserve) * rho),
+    );
 
     // Transaction fees from previous epoch (simplified - set to 0 for now)
     const transactionFees = 0n;
@@ -209,8 +217,11 @@ async function populateRewards(stakeDistribution: any[], protocolParams: Shelley
         .filter((stake) => stake.amount && stake.amount > 0)
         .map((stake) => {
             // Proportional reward based on stake share
-            const stakeShare = Number(BigInt(stake.amount) * 1000000n / totalStake) / 1000000;
-            const rewardAmount = BigInt(Math.floor(Number(stakingRewards) * stakeShare));
+            const stakeShare =
+                Number(BigInt(stake.amount) * 1000000n / totalStake) / 1000000;
+            const rewardAmount = BigInt(
+                Math.floor(Number(stakingRewards) * stakeShare),
+            );
 
             return {
                 stake_credentials: stake.stake_address,
@@ -247,41 +258,61 @@ async function populateUTxOs(
 ) {
     console.log("Fetching complete UTxO set...");
 
-    const uniqueStakeAddrs = [...new Set(stakeDistribution.map(stake => stake.stake_address))];
+    const uniqueStakeAddrs = [
+        ...new Set(stakeDistribution.map((stake) => stake.stake_address)),
+    ];
 
-    console.log(`Pulling data from ${uniqueStakeAddrs.length} unique stake addresses`)
+    console.log(
+        `Pulling data from ${uniqueStakeAddrs.length} unique stake addresses`,
+    );
 
     console.log(`Processing ${uniqueStakeAddrs.length} stake addresses...`);
 
-    const accountAddrs = await Promise.all(uniqueStakeAddrs.map(async (stakeAddr, index) => {
-        if (index % 1000 === 0) {
-            console.log(`Processed ${index}/${uniqueStakeAddrs.length} stake addresses`);
-        }
-        try {
-            return await api.accountsAddressesAll(stakeAddr);
-        } catch (error) {
-            console.warn(`Failed to get addresses for stake ${stakeAddr}:`, error);
-            return [];
-        }
-    }));
+    const accountAddrs = await Promise.all(
+        uniqueStakeAddrs.map(async (stakeAddr, index) => {
+            if (index % 1000 === 0) {
+                console.log(
+                    `Processed ${index}/${uniqueStakeAddrs.length} stake addresses`,
+                );
+            }
+            try {
+                return await api.accountsAddressesAll(stakeAddr);
+            } catch (error) {
+                console.warn(
+                    `Failed to get addresses for stake ${stakeAddr}:`,
+                    error,
+                );
+                return [];
+            }
+        }),
+    );
 
     const flatAccountAddrs = accountAddrs.flat();
-    console.log(`Pulling data from ${flatAccountAddrs.length} associated account addresses`)
+    console.log(
+        `Pulling data from ${flatAccountAddrs.length} associated account addresses`,
+    );
 
     console.log(`Fetching UTxOs from ${flatAccountAddrs.length} addresses...`);
-    const utxos = await Promise.all(flatAccountAddrs.map(async (addr, index) => {
-        if (index % 1000 === 0) {
-            console.log(`Fetched UTxOs for ${index}/${flatAccountAddrs.length} addresses`);
-        }
-        try {
-            return await api.addressesUtxosAll(addr.address);
-        } catch (error) {
-            console.warn(`Failed to get UTxOs for address ${addr.address}:`, error);
-            return [];
-        }
-    })).then((utxoArrays) => utxoArrays.flat());
+    const utxos = await Promise.all(
+        flatAccountAddrs.map(async (addr, index) => {
+            if (index % 1000 === 0) {
+                console.log(
+                    `Fetched UTxOs for ${index}/${flatAccountAddrs.length} addresses`,
+                );
+            }
+            try {
+                return await api.addressesUtxosAll(addr.address);
+            } catch (error) {
+                console.warn(
+                    `Failed to get UTxOs for address ${addr.address}:`,
+                    error,
+                );
+                return [];
+            }
+        }),
+    ).then((utxoArrays) => utxoArrays.flat());
 
-    console.log(`Found ${utxos.length} UTxOs`)
+    console.log(`Found ${utxos.length} UTxOs`);
 
     if (utxos.length === 0) {
         console.log("No UTxOs found, skipping insertion");
@@ -300,7 +331,7 @@ async function populateUTxOs(
                         )?.quantity || "0",
                     }),
                 };
-            })
+            }),
         )
     }`;
 }

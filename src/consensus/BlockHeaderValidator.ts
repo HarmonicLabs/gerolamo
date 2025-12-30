@@ -98,7 +98,9 @@ async function verifyLeaderEligibility(
         totalActiveStake = BigInt(totalStakeStr);
     } else {
         // Pool not found, get total stake for ratio calculation
-        const totalRows = await sql`SELECT total_active_stake FROM pool_distr WHERE id = 1`.values() as [string][];
+        const totalRows =
+            await sql`SELECT total_active_stake FROM pool_distr WHERE id = 1`
+                .values() as [string][];
         if (totalRows.length > 0) {
             totalActiveStake = BigInt(totalRows[0][0]);
         }
@@ -109,7 +111,9 @@ async function verifyLeaderEligibility(
     if (totalActiveStake === 0n) {
         stakeRatio = BigDecimal.from(0);
     } else {
-        stakeRatio = BigDecimal.from(individualStake).div(BigDecimal.from(totalActiveStake));
+        stakeRatio = BigDecimal.from(individualStake).div(
+            BigDecimal.from(totalActiveStake),
+        );
     }
 
     const asc = BigDecimal.from(activeSlotCoeff);
@@ -154,7 +158,7 @@ function verifyVrfProof(
     const proof = VrfProof03.fromBytes(cert.proof); // Assuming this works for all eras (proof format is compatible)
     return proof.verify(leaderPubKey, input) && uint8ArrayEq(
         (era === "pre-babbage") ? blake2b_256(proof.toBytes()) : proof.toHash(),
-        output
+        output,
     );
 }
 

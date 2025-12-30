@@ -71,7 +71,6 @@ export class PeerManager implements IPeerManager {
         this.config = config;
         this.chainSelector = new ChainSelector();
     }
-    }
 
     async init() {
         this.topology = await parseTopology(this.config.topologyFile);

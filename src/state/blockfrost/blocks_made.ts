@@ -1,0 +1,50 @@
+import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { sql } from "bun";
+
+export async function populateBlocksMade(api: BlockFrostAPI, currentEpoch: number) {
+    console.log("Fetching block production data for epoch...");
+
+    // Get all block hashes for the current epoch
+    const epochBlocks = await api.epochsBlocksAll(currentEpoch);
+    console.log(`Found ${epochBlocks.length} blocks in epoch ${currentEpoch}`);
+
+    // Fetch all block details and aggregate
+    const poolIds = await Promise.all(
+        epochBlocks.map(async (blockHash: string) => {
+            const block = await api.blocks(blockHash);
+            return block.slot_leader;
+        }),
+    );
+
+    // Aggregate and count blocks per pool
+    const blocksByPool = poolIds.reduce(
+        (bbp: Map<string, number>, pool: string) =>
+            bbp.set(pool, (bbp.get(pool) ?? 0) + 1),
+        new Map<string, number>(),
+    );
+
+    console.log(`Aggregated block production for ${blocksByPool.size} pools`);
+
+    if (blocksByPool.size > 0) {
+        await sql`
+            INSERT OR REPLACE
+            INTO blocks_made ${
+            sql([
+                ...Array.from(blocksByPool.entries()).map(([poolId, count]) => {
+                    return {
+                        pool_key_hash: poolId,
+                        epoch: currentEpoch,
+                        block_count: count,
+                        status: "CURR",
+                    };
+                }),
+            ])
+        }
+        `;
+        console.log(
+            `Inserted ${blocksByPool.size} pool block production records`,
+        );
+    }
+
+    return blocksByPool.size;
+}

@@ -87,22 +87,22 @@ async function verifyLeaderEligibility(
             total_active_stake
         FROM pool_distr, json_each(pools)
         WHERE id = 1 AND json_extract(value, '$.pool_id') = ${issuerHex}
-    `.values() as [bigint, string][];
+    `.values() as [bigint, bigint][];
 
     let individualStake = 0n;
     let totalActiveStake = 0n;
 
     if (stakeRows.length > 0) {
-        const [indStake, totalStakeStr] = stakeRows[0];
+        const [indStake, totalStake] = stakeRows[0];
         individualStake = indStake;
-        totalActiveStake = BigInt(totalStakeStr);
+        totalActiveStake = totalStake;
     } else {
         // Pool not found, get total stake for ratio calculation
         const totalRows =
             await sql`SELECT total_active_stake FROM pool_distr WHERE id = 1`
-                .values() as [string][];
+                .values() as [bigint][];
         if (totalRows.length > 0) {
-            totalActiveStake = BigInt(totalRows[0][0]);
+            totalActiveStake = totalRows[0][0];
         }
     }
 

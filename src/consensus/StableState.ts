@@ -119,7 +119,7 @@ export async function transitionToStable(
     if (blocks.length === 0) return;
 
     // Sort blocks by slot to ensure proper ordering
-    blocks.sort((a, b) => Number(a.slot - b.slot));
+    blocks.sort((a, b) => (a.slot < b.slot ? -1 : a.slot > b.slot ? 1 : 0));
 
     // Prepare bulk insert data
     const insertData = blocks.map((block) => [
@@ -463,7 +463,7 @@ const CHUNK_SIZE = 1000; // Blocks per chunk
 
 // Get chunk index for a slot
 function getChunkIndex(slot: bigint): number {
-    return Math.floor(Number(slot) / CHUNK_SIZE);
+    return Number(slot / BigInt(CHUNK_SIZE));
 }
 
 // Get chunk file path (conceptual - in a real implementation this would be a file path)
@@ -515,15 +515,16 @@ export async function validateAllChunks(): Promise<boolean> {
 
     const maxChunkIndex = getChunkIndex(tip.slot);
 
-    for (let i = 0; i <= maxChunkIndex; i++) {
-        const isValid = await validateChunk(i);
+    const validationResults = await Promise.all(
+        Array.from({ length: maxChunkIndex + 1 }, (_, i) => validateChunk(i))
+    );
+
+    return validationResults.every((isValid, i) => {
         if (!isValid) {
             console.error(`Chunk ${i} validation failed`);
-            return false;
         }
-    }
-
-    return true;
+        return isValid;
+    });
 }
 
 // Resource registry for managing iterators and resources (simplified)
@@ -535,11 +536,13 @@ export class ResourceRegistry {
     }
 
     async release(): Promise<void> {
-        for (const resource of this.resources) {
-            if (resource.close && typeof resource.close === "function") {
-                await resource.close();
-            }
-        }
+        await Promise.all(
+            Array.from(this.resources).map(async (resource) => {
+                if (resource.close && typeof resource.close === "function") {
+                    await resource.close();
+                }
+            })
+        );
         this.resources.clear();
     }
 }

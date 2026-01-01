@@ -71,11 +71,11 @@ export async function calculateStake(
     // Query total active stake from database
     const poolDistrRows =
         await sql`SELECT total_active_stake FROM pool_distr WHERE id = 1`
-            .values() as [string][];
+            .values() as [bigint][];
     if (poolDistrRows.length === 0) {
         return 0n;
     }
-    return BigInt(poolDistrRows[0][0]);
+    return poolDistrRows[0][0];
 }
 
 /**

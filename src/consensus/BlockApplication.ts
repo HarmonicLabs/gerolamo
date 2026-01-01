@@ -15,21 +15,19 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 export async function applyBlock(
     block: MultiEraBlock,
     _slot: bigint,
+    blockHash: Uint8Array,
 ): Promise<void> {
-    if (!block.block) return; // Skip if block not parsed
-
     const actualBlock = block.block;
 
-    // Process all transactions in the block concurrently
+    // Apply all transactions concurrently
     await Promise.all(
-        actualBlock.transactionBodies.map((txBody) => applyTransaction(txBody)),
+        actualBlock.transactionBodies.map((txBody)=>
+            applyTransaction(txBody, blockHash)
+        )
     );
-
-    // TODO: Update other ledger state components (certificates, rewards, etc.)
-    // For now, only UTxO updates are implemented
 }
 
-async function applyTransaction(txBody: TxBody): Promise<void> {
+async function applyTransaction(txBody: TxBody, blockHash: Uint8Array): Promise<void> {
     // Compute transaction ID (hash of tx body)
     const txId = toHex(blake2b_256(txBody.toCborBytes()));
 
@@ -38,7 +36,27 @@ async function applyTransaction(txBody: TxBody): Promise<void> {
         `${input.utxoRef.id.toString()}:${input.utxoRef.index}`
     );
 
-    // Bulk delete spent UTxOs
+    // Bulk query existing UTxOs and log as deltas
+    if (inputRefs.length > 0) {
+        const existingUtxos = await sql`
+            SELECT utxo_ref, tx_out FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}
+        `.values() as [string, string][];
+
+        // Bulk insert spend deltas
+        const spendDeltas = existingUtxos.map(([utxo_ref, tx_out]) => [
+            blockHash,
+            'spend',
+            tx_out
+        ]);
+
+        if (spendDeltas.length > 0) {
+            await sql`
+                INSERT INTO utxo_deltas (block_hash, action, utxo)
+                VALUES ${sql(spendDeltas)}
+            `;
+        }
+    }
+    // Bulk delete spent UTxOs (for now, but deltas allow rollback)
     if (inputRefs.length > 0) {
         await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
     }
@@ -64,6 +82,19 @@ async function applyTransaction(txBody: TxBody): Promise<void> {
         return [utxoRef, txOutJson];
     });
 
+    // Bulk insert create deltas
+    const createDeltas = outputData.map(([_ref, json]) => [
+        blockHash,
+        'create',
+        json
+    ]);
+
+    if (createDeltas.length > 0) {
+        await sql`
+            INSERT INTO utxo_deltas (block_hash, action, utxo)
+            VALUES ${sql(createDeltas)}
+        `;
+    }
     // Bulk insert new UTxOs
     if (outputData.length > 0) {
         await sql`
@@ -72,26 +103,57 @@ async function applyTransaction(txBody: TxBody): Promise<void> {
         `;
     }
 
-    // Handle certificates
+    // Handle certificates (log as deltas)
     if (txBody.certs) {
-        await applyCertificates(txBody.certs);
+        await applyCertificates(txBody.certs, blockHash);
     }
 
-    // Handle withdrawals
+    // Handle withdrawals (log as deltas)
     if (txBody.withdrawals) {
-        await applyWithdrawals(txBody.withdrawals);
+        await applyWithdrawals(txBody.withdrawals, blockHash);
     }
 
-    // Handle fees (add to treasury)
+    // Handle fees (log as delta)
     if (txBody.fee) {
+        await sql`
+            INSERT INTO utxo_deltas (block_hash, action, utxo)
+            VALUES (${blockHash}, 'fee', ${JSON.stringify({ amount: txBody.fee.toString() })})
+        `;
         await sql`UPDATE chain_account_state SET treasury = treasury + ${txBody.fee} WHERE id = 1`;
     }
 
     // TODO: Handle minting, burning, collateral, etc.
 }
 
-async function applyCertificates(certs: Certificate[]): Promise<void> {
-    for (const cert of certs) {
+async function applyCertificates(certs: Certificate[], blockHash: Uint8Array): Promise<void> {
+    // Bulk insert certificate deltas
+    const certDeltas = certs.map((cert) => {
+        const certAny = cert as any; // Type assertion due to union type complexity
+        const stakeCred = certAny.stakeCredential?.hash?.toBuffer() ||
+            certAny.stakeCredential?.toBuffer();
+
+        return [
+            blockHash,
+            'cert',
+            JSON.stringify({
+                type: cert.certType,
+                stakeCred: stakeCred ? toHex(stakeCred) : null,
+                poolId: certAny.poolKeyHash?.toString()
+                    || certAny.poolParams?.operator?.toString()
+                    || certAny.poolHash?.toString()
+            })
+        ];
+    });
+
+    if (certDeltas.length > 0) {
+        await sql`
+            INSERT INTO utxo_deltas (block_hash, action, utxo)
+            VALUES ${sql(certDeltas)}
+        `;
+    }
+
+    // Apply certificate changes concurrently
+    await Promise.all(certs.map(async (cert) => {
         const certAny = cert as any; // Type assertion due to union type complexity
         const stakeCred = certAny.stakeCredential?.hash?.toBuffer() ||
             certAny.stakeCredential?.toBuffer();
@@ -127,7 +189,7 @@ async function applyCertificates(certs: Certificate[]): Promise<void> {
                 if (poolId) {
                     // Add new pool to the JSON array in-database
                     const newPoolJson = JSON.stringify({
-                        pool_id: poolId,
+                        pool_id: toHex(poolId),
                         active_stake: "0", // Will be updated when stake is delegated
                         // Add other pool parameters as needed
                     });
@@ -147,7 +209,7 @@ async function applyCertificates(certs: Certificate[]): Promise<void> {
                         SET pools = (
                             SELECT json_group_array(json(value))
                             FROM json_each(pools)
-                            WHERE json_extract(value, '$.pool_id') != ${retiringPoolId}
+                            WHERE json_extract(value, '$.pool_id') != ${toHex(retiringPoolId)}
                         )
                         WHERE id = 1
                     `;
@@ -155,16 +217,36 @@ async function applyCertificates(certs: Certificate[]): Promise<void> {
                 break;
                 // Handle other certificate types as needed
         }
-    }
+    }));
 }
 
-async function applyWithdrawals(withdrawals: TxWithdrawals): Promise<void> {
-    // withdrawals.map is TxWithdrawalsMapBigInt
-    for (const { rewardAccount, amount } of withdrawals.map) {
-        const stakeCred = rewardAccount.toBuffer();
+async function applyWithdrawals(withdrawals: TxWithdrawals, blockHash: Uint8Array): Promise<void> {
+    if (withdrawals.map.length === 0) return;
+
+    // Prepare withdrawal data
+    const withdrawalData = withdrawals.map.map(({ rewardAccount, amount }) => ({
+        stakeCred: rewardAccount.toBuffer(),
+        amount
+    }));
+
+    // Update rewards asynchronously (using individual updates since each has different WHERE clause)
+    await Promise.all(
+        withdrawalData.map(({ stakeCred, amount }) =>
+            sql`UPDATE rewards SET amount = amount - ${amount} WHERE stake_credentials = ${stakeCred}`
+        )
+    );
+
+    // Log withdrawal deltas
+    const withdrawalDeltas = withdrawalData.map(({ stakeCred, amount }) => [
+        blockHash,
+        'withdrawal',
+        JSON.stringify({ stakeCred: toHex(stakeCred), amount: amount.toString() })
+    ]);
+
+    if (withdrawalDeltas.length > 0) {
         await sql`
-            UPDATE rewards SET amount = amount - ${amount}
-            WHERE stake_credentials = ${stakeCred}
+            INSERT INTO utxo_deltas (block_hash, action, utxo)
+            VALUES ${sql(withdrawalDeltas)}
         `;
     }
 }

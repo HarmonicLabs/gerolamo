@@ -66,4 +66,4 @@ export type {
 export { MissingBlockError, ResourceRegistry } from "./StableState";
 
 // Ledger initialization
-export { initNewEpochState } from "./ledger";
+export { initNewEpochState } from "../state/ledger";

@@ -1,34 +1,25 @@
 import {
     ChainSyncRollBackwards,
     ChainSyncRollForward,
+    PeerAddress,
+    PeerAddressIPv4,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { logger } from "../utils/logger";
 import { parseTopology } from "./topology/parseTopology";
 import { Topology, TopologyRoot } from "./topology/topology";
-
-import { headerValidation } from "./headerValidation";
-import { fetchBlock } from "./fetchBlocks";
-import {
-    closeDB,
-    initDB,
-    putBlock,
-    putHeader,
-    rollBackWards,
-} from "./sqlWorkers/sql";
+import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
+import { closeDB } from "./lmdbWorkers/lmdb";
 import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
+import { RawNewEpochState } from "../rawNES";
 
-import { validateBlock } from "../consensus/BlockBodyValidator";
-import { applyBlock } from "../consensus/BlockApplication";
-import { BlockApplier } from "../consensus/BlockApplication";
-import { ChainCandidate, ChainSelector } from "../consensus/chainSelection";
-import { toHex } from "@harmoniclabs/uint8array-utils";
-import { calculatePreProdCardanoEpoch } from "./utils/epochCalculations";
-import { CborArray } from "@harmoniclabs/cbor";
+//This class is not being used anymore in flavor of workers however
+//still need to move the interfaces from here.
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
+    readonly networkMagic: number;
     readonly topologyFile: string;
     readonly syncFromTip: boolean;
     readonly syncFromGenesis: boolean;
@@ -38,6 +29,8 @@ export interface GerolamoConfig {
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
     readonly shelleyGenesisFile: string;
+    readonly enableMinibf?: boolean;
+    allPeers: Map<string, PeerClient>;
 }
 
 export interface IPeerManager {
@@ -62,23 +55,18 @@ export class PeerManager implements IPeerManager {
     config: GerolamoConfig;
     topology: Topology;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-    chainSelector: ChainSelector;
-    chainCandidates: Map<string, ChainCandidate> = new Map();
-    currentFollowedPeer: string | null = null;
-    private chainSelectionTimeout: number | null = null;
+    lState: RawNewEpochState;
 
-    constructor(config: GerolamoConfig) {
+    constructor() {}
+
+    async init(config: GerolamoConfig) {
         this.config = config;
-        this.chainSelector = new ChainSelector();
-    }
-
-    async init() {
+        // logger.debug("Reading config file: ", this.config);
         this.topology = await parseTopology(this.config.topologyFile);
+        // logger.debug("Parsed topology:", this.topology);
         const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
         this.shelleyGenesisConfig = await shelleyGenesisFile.json();
-
-        // Initialize chain sync database tables
-        await initDB();
+        this.lState = RawNewEpochState.init();
 
         // Assign bootstrap peers
         if (this.topology.bootstrapPeers) {
@@ -115,7 +103,23 @@ export class PeerManager implements IPeerManager {
             );
         }
 
+        // Assign public roots as warm peers (commented out in original)
+        // if (this.topology.publicRoots)
+        // {
+        //     this.topology.publicRoots.flatMap((root: TopologyRoot) =>
+        //         root.accessPoints.map((ap: any) => {
+        //             // const peer = new PeerClient(ap.address, ap.port);
+        //             // this.addPeer(peer, "warm");
+        //
+        //         })
+        //     );
+        // }
+
         await this.peerSyncCurrentTasks();
+    }
+
+    public getAllPeers(): ReadonlyArray<PeerClient> {
+        return Array.from(this.allPeers.values());
     }
 
     private addPeer(
@@ -158,203 +162,68 @@ export class PeerManager implements IPeerManager {
     }
 
     private async peerSyncCurrentTasks() {
+        // logger.debug("Starting peer sync tasks...");
+        // logger.log("this allpeers", this.allPeers);
         await Promise.all(this.hotPeers.map(async (peer) => {
-            peer.startSyncLoop(this.syncEventCallback.bind(this));
+            try {
+                logger.log(
+                    `Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync`,
+                );
+                peer.startSyncLoop();
+                // const peersAddresses = await peer.askForPeers();
+                // console.log("peersAddresses: ", peersAddresses);
+                // this.addNewSharedPeers(peersAddresses);
+            } catch (error) {
+                logger.error(
+                    `Failed to initialize hot peer ${peer.peerId}:`,
+                    error,
+                );
+                this.removePeer(peer.peerId);
+            }
         }));
     }
 
-    private async syncEventCallback(
-        peerId: string,
-        type: "rollForward" | "rollBackwards",
-        data: ChainSyncRollForward | ChainSyncRollBackwards,
-    ) {
-        if (
-            type === "rollBackwards" && data instanceof ChainSyncRollBackwards
-        ) {
-            const slotNumber = data.tip.point.blockHeader?.slotNumber;
-            if (slotNumber === undefined) {
-                return;
-            }
-            logger.debug(
-                `Received rollback to slot ${slotNumber} from peer ${peerId}`,
-            );
-
-            // Rollback volatile state
-            const success = await rollBackWards(slotNumber);
-            if (!success) {
-                logger.error(
-                    `Rollback failed for peer ${peerId}: rollback point not found`,
+    private addNewSharedPeers(peersAddresses: PeerAddress[]) {
+        logger.log("Adding new shared peers from network...");
+        peersAddresses.forEach((address) => {
+            if (address instanceof PeerAddressIPv4) {
+                const newPeer = new PeerClient(
+                    uint32ToIpv4(address.address),
+                    address.portNumber,
+                    this.config,
                 );
-                this.removePeer(peerId);
-                return;
-            }
-            logger.debug(
-                `Rolled back to slot ${slotNumber} for peer ${peerId}`,
-            );
-            // Note: Ledger state rollback not implemented; assumes linear chain
-
-            return;
-        }
-
-        // For rollForward
-        if (!(data instanceof ChainSyncRollForward)) return;
-        if (
-            !(
-                data.data instanceof CborArray
-            )
-        ) throw new Error("invalid CBOR for header");
-
-        const validateHeaderRes = await headerValidation(
-            data,
-        );
-
-        /*This is just tempo for quick testing
-        const blockPeerTest = this.allPeers.get(peerId);
-        if (!blockPeerTest) return;
-        const blockTest = await fetchBlock(blockPeerTest, 102379274, fromHex("9122f44b2848ff4bb91f872ee01636b666fd3418a87edbe0d9b70a2df417941d"));
-
-        */
-        if (!validateHeaderRes) return;
-
-        const tipSlot = data.tip.point.blockHeader?.slotNumber;
-        const { slot, blockHeaderHash, multiEraHeader } = validateHeaderRes;
-
-        // Store validated header in LMDB (as JSON) using worker
-        await putHeader(slot, blockHeaderHash, multiEraHeader.toCborBytes());
-        logger.debug(
-            `Header added to volatile state: slot ${slot}, hash ${
-                toHex(blockHeaderHash)
-            }`,
-        );
-
-        // Update chain candidate for this peer
-        let candidate = this.chainCandidates.get(peerId);
-        if (!candidate) {
-            candidate = {
-                tip: multiEraHeader,
-                stake: 0n, // Placeholder, calculate later
-
-                length: 1,
-            };
-            this.chainCandidates.set(peerId, candidate);
-        } else {
-            candidate.tip = multiEraHeader;
-            candidate.length += 1;
-        }
-
-        // Perform chain selection after updating candidate
-        if (this.chainSelectionTimeout) {
-            clearTimeout(this.chainSelectionTimeout);
-        }
-        this.chainSelectionTimeout = setTimeout(async () => {
-            await this.performChainSelection();
-            this.chainSelectionTimeout = null;
-        }, 100);
-
-        const headerEpoch = calculatePreProdCardanoEpoch(Number(slot));
-        logger.debug(
-            `Validated - Era: ${multiEraHeader.era} - Epoch: ${headerEpoch} - Slot: ${slot} of ${tipSlot} - Percent Complete: ${
-                ((Number(slot) / Number(tipSlot)) * 100).toFixed(2)
-            }%`,
-        );
-
-        // Fetch and store the corresponding block
-        const blockPeer = this.allPeers.get(peerId);
-        if (!blockPeer) return;
-        /**
-         * Calculating block_body_hash
-         * The block_body_hash is not a simple blake2b_256 hash of the entire serialized block body.
-         * Instead, it is a Merkle root-like hash (often referred to as a "Merkle triple root" or quadruple root, depending on the era) of the key components of the block body.
-         * This design allows for efficient verification of the block's contents (transactions, witnesses, metadata, etc.) without re-serializing the entire body,
-         * while enabling segregated witness handling (introduced in the Alonzo era and carried forward).
-         * blake2b_256(
-            concatUint8Arr(
-                blake2b_256( tx_bodies ),
-                blake2b_256( tx_witnesses ),
-                blake2b_256( tx_metadatas ),
-                blake2b_256( tx_invalidTxsIdxs ),
-            )
-        )
-        */
-        const block = await fetchBlock(blockPeer, slot, blockHeaderHash);
-
-        if (block) {
-            await putBlock(blockHeaderHash, block.toCborBytes());
-            logger.debug(
-                `Block added to volatile state: slot ${slot}, hash ${
-                    toHex(blockHeaderHash)
-                }`,
-            );
-
-            // Validate and apply the block to the ledger state
-            const isValid = await validateBlock(block);
-            if (isValid) {
-                await applyBlock(block, slot);
-                logger.debug(
-                    `Block applied to stable state: slot ${slot}, hash ${
-                        toHex(blockHeaderHash)
-                    }`,
+                this.addPeer(newPeer, "new");
+                logger.log(
+                    `Added new peer ${newPeer.peerId} from network at ${
+                        uint32ToIpv4(address.address)
+                    }:${address.portNumber}`,
                 );
             }
-        }
+        });
     }
-
-    private async performChainSelection() {
-        const candidates = Array.from(this.chainCandidates.values());
-        if (candidates.length === 0) return;
-
-        logger.debug(
-            `Performing chain selection with ${candidates.length} candidates`,
-        );
-        if (candidates.length > 1) {
-            logger.warn(`Fork detected: ${candidates.length} competing chains`);
-            candidates.forEach((cand, idx) => {
-                logger.warn(
-                    `Candidate ${idx}: tip slot ${cand.tip.header.body.slot}, length ${cand.length}, stake ${cand.stake}`,
-                );
-            });
-        }
-
-        const bestChain = await this.chainSelector.evaluateChains(candidates);
-        if (bestChain) {
-            // Find the peer ID of the best chain
-            const bestPeerId = Array.from(this.chainCandidates.entries()).find((
-                [_id, cand],
-            ) => cand === bestChain)?.[0];
-            if (bestPeerId) {
-                if (bestPeerId !== this.currentFollowedPeer) {
-                    logger.info(
-                        `Switching chain selection from peer ${
-                            this.currentFollowedPeer || "none"
-                        } to ${bestPeerId} (tip slot ${bestChain.tip.header.body.slot})`,
-                    );
-                    this.currentFollowedPeer = bestPeerId;
-                    // Disconnect other hot peers to follow only the best
-                    this.hotPeers = this.hotPeers.filter((p) =>
-                        p.peerId === bestPeerId
-                    );
-                    // Remove from allPeers as well, but keep the best
-                    for (const peer of Array.from(this.allPeers.values())) {
-                        if (peer.peerId !== bestPeerId) {
-                            this.removePeer(peer.peerId);
-                        }
-                    }
-                } else {
-                    logger.debug(
-                        `Continuing to follow peer ${bestPeerId} as best chain`,
-                    );
-                }
-            }
-        }
-    }
+    s;
 
     async shutdown() {
+        logger.debug("Shutting down PeerManager");
         for (const peer of this.allPeers.values()) {
             peer.terminate();
-        }
+        };
         try {
             await closeDB();
+            logger.debug("LMDB worker closed");
         } catch (error) {
-        }
-    }
+            logger.error(`Error closing LMDB worker: ${error}`);
+        };
+    };
+};
+
+// Initialize the peer manager
+/*
+export async function start(config: Bun.BunFile) {
+    const peerManager = new PeerManager();
+    peerManager.init(config).catch((error) => {
+        logger.error("Error initializing PeerManager:", error);
+    });
 }
+start().catch((error) => console.error("Failed to start:", error));
+*/

@@ -1,7 +1,7 @@
-import { Worker } from "node:worker_threads";
-import { fromHex } from "@harmoniclabs/uint8array-utils";
+import { Worker } from "worker_threads";
+import { fromHex } from "@harmoniclabs/uint8array-utils"; // Add this import for hex handling in convenience functions
 
-const worker = new Worker("./src/network/sqlWorkers/sqlWorker.ts");
+const worker = new Worker("./src/network/lmdbWorkers/lmdbWorker.ts");
 let idCounter = 0;
 const pendingPromises = new Map<number, (value: any) => void>();
 
@@ -9,17 +9,23 @@ worker.on("message", (msg: any) => {
     if (msg.type === "done") {
         const resolve = pendingPromises.get(msg.id);
         if (resolve) {
-            resolve(undefined);
-            pendingPromises.delete(msg.id);
+        resolve(undefined);
+        pendingPromises.delete(msg.id);
         }
     } else if (msg.type === "result") {
         const resolve = pendingPromises.get(msg.id);
         if (resolve) {
-            resolve(msg.data);
-            pendingPromises.delete(msg.id);
+        resolve(msg.data);
+        pendingPromises.delete(msg.id);
         }
     }
 });
+
+export function startLmdbWorker() {
+  return worker;
+}
+
+
 
 export async function putHeader(
     slot: number | bigint,
@@ -43,15 +49,6 @@ export async function putBlock(
 ): Promise<void> {
     const curId = idCounter++;
     worker.postMessage({ type: "putBlock", blockHeaderHash, block, id: curId });
-    return new Promise((resolve) => pendingPromises.set(curId, resolve));
-}
-
-export async function getHeader(
-    slot: string | bigint,
-    blockHeaderHash: Uint8Array,
-): Promise<any> {
-    const curId = idCounter++;
-    worker.postMessage({ type: "getHeader", slot, blockHeaderHash, id: curId });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
 }
 
@@ -91,6 +88,14 @@ export async function getBlockByHash(
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
 }
 
+// Existing getHeader (kept for backward compatibility; it uses slot to fetch via index)
+export async function getHeader(
+    slot: number | bigint,
+    blockHeaderHash: Uint8Array, // Ignored in worker, but kept for signature
+): Promise<Uint8Array | undefined> {
+    return getHeaderBySlot(slot);
+}
+
 // Helper: Get hash by slot (for internal use or queries)
 export async function getHashBySlot(
     slot: number | bigint,
@@ -99,6 +104,34 @@ export async function getHashBySlot(
     worker.postMessage({ type: "getHashBySlot", slot, id: curId });
     return new Promise((resolve) => pendingPromises.set(curId, resolve));
 }
+export async function getLastSlot(): Promise<
+    { slot: number; hash: Uint8Array } | null
+> {
+    const curId = idCounter++;
+    worker.postMessage({ type: "getLastSlot", id: curId });
+    return new Promise((resolve) => pendingPromises.set(curId, resolve));
+}
+export async function rollBackWards(
+    slot: number | bigint,
+) {
+    const curId = idCounter++;
+    worker.postMessage({
+        type: "rollBackwards",
+        rollbackPoint: slot,
+        id: curId,
+    });
+    return new Promise<boolean>((resolve) =>
+        pendingPromises.set(curId, resolve)
+    );
+}
+
+export async function closeDB(): Promise<void> {
+    if (worker) {
+        const curId = idCounter++;
+        worker.postMessage({ type: "closeDB", id: curId });
+        return new Promise((resolve) => pendingPromises.set(curId, resolve));
+    }
+};
 
 // Utility to check if a string is a valid 64-char hex hash32
 function isHex(str: string): boolean {

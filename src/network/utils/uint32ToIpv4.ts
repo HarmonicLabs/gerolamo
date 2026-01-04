@@ -8,4 +8,4 @@ export function uint32ToIpv4(address: number): string {
         (address >> 8) & 0xFF,
         address & 0xFF,
     ].join(".");
-}
+};

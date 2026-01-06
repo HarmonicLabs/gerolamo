@@ -29,7 +29,6 @@ export type { StoreUpdate, VolatileState } from "./AnchoredVolatileState";
 // Stable state management
 export {
     appendBlock,
-    closeDB,
     createStreamFromExclusive,
     createStreamFromInclusive,
     createStreamIterator,

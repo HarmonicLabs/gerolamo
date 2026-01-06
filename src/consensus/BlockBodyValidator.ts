@@ -402,12 +402,18 @@ async function validateCertificatesValid(
     block: CardanoBlock,
 ): Promise<boolean> {
     // Query current stake distribution and delegations
-    const stakeRows: [Uint8Array, any][] = await sql`SELECT * FROM stake`.values();
-    const delegationRows: [Uint8Array, any][] = await sql`SELECT * FROM delegations`.values();
+    const stakeRows: [Uint8Array, any][] = await sql`SELECT * FROM stake`
+        .values();
+    const delegationRows: [Uint8Array, any][] =
+        await sql`SELECT * FROM delegations`.values();
 
     // Create lookup maps with string keys for reliable comparison
-    const stakeMap = new Map(stakeRows.map(([key, value]) => [toHex(key), value]));
-    const delegationMap = new Map(delegationRows.map(([key, value]) => [toHex(key), value]));
+    const stakeMap = new Map(
+        stakeRows.map(([key, value]) => [toHex(key), value]),
+    );
+    const delegationMap = new Map(
+        delegationRows.map(([key, value]) => [toHex(key), value]),
+    );
 
     for (const txBody of block.transactionBodies) {
         if (!txBody.certs) continue;
@@ -416,27 +422,42 @@ async function validateCertificatesValid(
             switch (cert.certType) {
                 case CertificateType.StakeRegistration:
                     // Check if stake key is not already registered
-                    const stakeKeyReg = toHex(cert.stakeCredential.hash.toBuffer());
+                    const stakeKeyReg = toHex(
+                        cert.stakeCredential.hash.toBuffer(),
+                    );
                     if (stakeMap.has(stakeKeyReg)) {
-                        console.error(`Stake key already registered: ${stakeKeyReg}`);
+                        console.error(
+                            `Stake key already registered: ${stakeKeyReg}`,
+                        );
                         return false;
                     }
                     break;
 
                 case CertificateType.StakeDeRegistration:
                     // Check if stake key is registered
-                    const stakeKeyDereg = toHex(cert.stakeCredential.hash.toBuffer());
+                    const stakeKeyDereg = toHex(
+                        cert.stakeCredential.hash.toBuffer(),
+                    );
                     if (!stakeMap.has(stakeKeyDereg)) {
-                        console.error(`Stake key not registered: ${stakeKeyDereg}`);
+                        console.error(
+                            `Stake key not registered: ${stakeKeyDereg}`,
+                        );
                         return false;
                     }
                     break;
 
                 case CertificateType.StakeDelegation:
                     // Check if stake key exists (either registered or delegating)
-                    const stakeKeyDel = toHex(cert.stakeCredential.hash.toBuffer());
-                    if (!stakeMap.has(stakeKeyDel) && !delegationMap.has(stakeKeyDel)) {
-                        console.error(`Cannot delegate unregistered stake key: ${stakeKeyDel}`);
+                    const stakeKeyDel = toHex(
+                        cert.stakeCredential.hash.toBuffer(),
+                    );
+                    if (
+                        !stakeMap.has(stakeKeyDel) &&
+                        !delegationMap.has(stakeKeyDel)
+                    ) {
+                        console.error(
+                            `Cannot delegate unregistered stake key: ${stakeKeyDel}`,
+                        );
                         return false;
                     }
                     break;

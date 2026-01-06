@@ -13,7 +13,7 @@ export function calculateCardanoEpoch(
         (Number(totalSlots) - byron_total_slots) / shelley_slots_per_epoch,
     );
     return byron_epochs + shelleyEpochs;
-};
+}
 export function calculatePreProdCardanoEpoch(
     absoluteSlot: number | bigint,
 ): number | bigint {
@@ -28,5 +28,5 @@ export function calculatePreProdCardanoEpoch(
     } else {
         const shelleyRelativeSlot = slot - shelleyTransitionSlot;
         return byronEpochOffset + (shelleyRelativeSlot / shelleySlotsPerEpoch);
-    };
-};
+    }
+}

@@ -5,9 +5,19 @@
 export { initNewEpochState } from "./ledger";
 
 // Blockfrost-related functionality (all populate functions and import)
-export { fetchProtocolParameters, populateProtocolParams } from "./blockfrost/protocol_params";
-export { fetchStakeDistribution, populateStakeDistribution, populateDelegations } from "./blockfrost/stake_distribution";
-export { fetchPools, populatePoolDistribution } from "./blockfrost/pool_distribution";
+export {
+    fetchProtocolParameters,
+    populateProtocolParams,
+} from "./blockfrost/protocol_params";
+export {
+    fetchStakeDistribution,
+    populateDelegations,
+    populateStakeDistribution,
+} from "./blockfrost/stake_distribution";
+export {
+    fetchPools,
+    populatePoolDistribution,
+} from "./blockfrost/pool_distribution";
 export { populateBlocksMade } from "./blockfrost/blocks_made";
 export { populateChainAccountState } from "./blockfrost/chain_account_state";
 export { populateRewards } from "./blockfrost/rewards";
@@ -19,5 +29,5 @@ export { populateEpochState } from "./blockfrost/epoch_state";
 export { populatePulsingRewUpdate } from "./blockfrost/pulsing_rew_update";
 export { populateStashedAvvmAddresses } from "./blockfrost/stashed_avvm_addresses";
 export { populateNewEpochState } from "./blockfrost/new_epoch_state";
-export { fetchBlockData, fetchAddresses } from "./blockfrost/block_data";
+export { fetchAddresses, fetchBlockData } from "./blockfrost/block_data";
 export { importChain, importFromBlockfrost } from "./blockfrost/index";

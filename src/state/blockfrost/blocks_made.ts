@@ -1,7 +1,10 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
 import { sql } from "bun";
 
-export async function populateBlocksMade(api: BlockFrostAPI, currentEpoch: number) {
+export async function populateBlocksMade(
+    api: BlockFrostAPI,
+    currentEpoch: number,
+) {
     console.log("Fetching block production data for epoch...");
 
     // Get all block hashes for the current epoch

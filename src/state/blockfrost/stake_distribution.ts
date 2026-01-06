@@ -37,7 +37,10 @@ export async function populateDelegations(stakeDistribution: any[]) {
     }
 }
 
-export async function fetchStakeDistribution(api: BlockFrostAPI, epoch: number) {
+export async function fetchStakeDistribution(
+    api: BlockFrostAPI,
+    epoch: number,
+) {
     console.log("Fetching epoch stake distribution...");
     const stakeDistribution = await api.epochsStakesAll(epoch);
     console.log(`Found ${stakeDistribution.length} stake entries`);

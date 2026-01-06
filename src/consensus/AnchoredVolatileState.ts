@@ -100,7 +100,9 @@ export async function rollbackBlock(blockHash: Hash32): Promise<void> {
             .values();
     if (blockRows.length === 0) {
         throw new Error(
-            `Block ${toHex(blockHash.toBuffer())} not found in volatile storage`,
+            `Block ${
+                toHex(blockHash.toBuffer())
+            } not found in volatile storage`,
         );
     }
 

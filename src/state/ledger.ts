@@ -272,8 +272,9 @@ async function initBlocks() {
     await sql`
         CREATE TABLE IF NOT EXISTS blocks (
             hash BLOB PRIMARY KEY,
-            data JSONB NOT NULL,
-            slot INTEGER NOT NULL
+            slot INTEGER NOT NULL,
+            header_data BLOB,
+            block_data BLOB
         );
     `;
 }

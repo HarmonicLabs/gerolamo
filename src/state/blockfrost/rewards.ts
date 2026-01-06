@@ -16,8 +16,10 @@ export async function populateRewards(
     // Where ρ is the monetary expansion rate and transaction_fees are from previous epoch
 
     // Get monetary expansion parameters from protocol params
-    const rho = protocolParams.monetaryExpansion?.valueOf() || protocolParams.rho?.valueOf() || 0.003;
-    const tau = protocolParams.treasuryCut?.valueOf() || protocolParams.tau?.valueOf() || 0.2;
+    const rho = protocolParams.monetaryExpansion?.valueOf() ||
+        protocolParams.rho?.valueOf() || 0.003;
+    const tau = protocolParams.treasuryCut?.valueOf() ||
+        protocolParams.tau?.valueOf() || 0.2;
 
     // Estimate current reserve (simplified - in reality this would be tracked)
     // Cardano started with ~45B ADA reserve, decreases over time

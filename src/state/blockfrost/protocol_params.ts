@@ -8,7 +8,10 @@ export async function populateProtocolParams(protocolParams: any) {
     `;
 }
 
-export async function fetchProtocolParameters(api: BlockFrostAPI, epoch: number) {
+export async function fetchProtocolParameters(
+    api: BlockFrostAPI,
+    epoch: number,
+) {
     console.log("Fetching protocol parameters...");
     const protocolParams = await api.epochsParameters(epoch);
     console.log("Protocol parameters fetched");

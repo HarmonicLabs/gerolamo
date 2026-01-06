@@ -4,8 +4,15 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
 import { sql } from "bun";
 import { Buffer } from "node:buffer";
-import { fetchProtocolParameters, populateProtocolParams } from "./protocol_params";
-import { fetchStakeDistribution, populateStakeDistribution, populateDelegations } from "./stake_distribution";
+import {
+    fetchProtocolParameters,
+    populateProtocolParams,
+} from "./protocol_params";
+import {
+    fetchStakeDistribution,
+    populateDelegations,
+    populateStakeDistribution,
+} from "./stake_distribution";
 import { fetchPools, populatePoolDistribution } from "./pool_distribution";
 import { populateBlocksMade } from "./blocks_made";
 import { populateChainAccountState } from "./chain_account_state";
@@ -23,7 +30,13 @@ import { fetchBlockData } from "./block_data";
 // Main import function for ledger state from Blockfrost
 export async function importFromBlockfrost(
     blockHash: string,
-    options?: { projectId?: string; customBackend?: string; importChain?: boolean; fromSlot?: number; count?: number },
+    options?: {
+        projectId?: string;
+        customBackend?: string;
+        importChain?: boolean;
+        fromSlot?: number;
+        count?: number;
+    },
 ) {
     const apiConfig: any = {
         rateLimiter: false,
@@ -34,7 +47,8 @@ export async function importFromBlockfrost(
         apiConfig.projectId = options.projectId;
     } else {
         // Use custom backend (default)
-        apiConfig.customBackend = options?.customBackend || "https://blockfrost-preprod.onchainapps.io/";
+        apiConfig.customBackend = options?.customBackend ||
+            "https://blockfrost-preprod.onchainapps.io/";
     }
 
     const api = new BlockFrostAPI(apiConfig);
@@ -70,7 +84,9 @@ export async function importFromBlockfrost(
     await populateDelegations(stakeDistribution);
 
     // 7. Rewards
-    const { defaultShelleyProtocolParameters } = await import("@harmoniclabs/cardano-ledger-ts");
+    const { defaultShelleyProtocolParameters } = await import(
+        "@harmoniclabs/cardano-ledger-ts"
+    );
     await populateRewards(stakeDistribution, defaultShelleyProtocolParameters);
 
     // 8. Non-myopic data
@@ -96,7 +112,9 @@ export async function importFromBlockfrost(
 
     // Import chain if requested
     if (options?.importChain && options.fromSlot && options.count) {
-        console.log(`Importing chain from slot ${options.fromSlot} for ${options.count} blocks...`);
+        console.log(
+            `Importing chain from slot ${options.fromSlot} for ${options.count} blocks...`,
+        );
         await importChain(api, options.fromSlot, options.count);
         console.log("Chain import completed.");
     }
@@ -119,7 +137,9 @@ export async function importFromBlockfrost(
         } entries)`,
     );
     console.log(
-        `💰 Rewards: ✓ (${stakeDistribution.filter((s) => BigInt(s.amount || 0) > 0n).length} entries)`,
+        `💰 Rewards: ✓ (${
+            stakeDistribution.filter((s) => BigInt(s.amount || 0) > 0n).length
+        } entries)`,
     );
     const { sql } = await import("bun");
     console.log(
@@ -133,11 +153,19 @@ export async function importFromBlockfrost(
 }
 
 // Import chain blocks from Blockfrost
-export async function importChain(api: BlockFrostAPI, fromSlot: number, count: number) {
+export async function importChain(
+    api: BlockFrostAPI,
+    fromSlot: number,
+    count: number,
+) {
     // Generate array of slots to fetch (from newest to oldest)
-    const slots = Array.from({ length: count }, (_, i) => fromSlot - i).filter(slot => slot >= 0);
+    const slots = Array.from({ length: count }, (_, i) => fromSlot - i).filter(
+        (slot) => slot >= 0,
+    );
 
-    console.log(`Fetching ${slots.length} blocks starting from slot ${fromSlot}...`);
+    console.log(
+        `Fetching ${slots.length} blocks starting from slot ${fromSlot}...`,
+    );
 
     // Fetch all blocks in parallel
     const blockDataPromises = slots.map(async (slot) => {
@@ -152,9 +180,11 @@ export async function importChain(api: BlockFrostAPI, fromSlot: number, count: n
     });
 
     const blockDataArray = await Promise.all(blockDataPromises);
-    const validBlocks = blockDataArray.filter(block => block !== null);
+    const validBlocks = blockDataArray.filter((block) => block !== null);
 
-    console.log(`Successfully fetched ${validBlocks.length} blocks out of ${slots.length} requested`);
+    console.log(
+        `Successfully fetched ${validBlocks.length} blocks out of ${slots.length} requested`,
+    );
 
     if (validBlocks.length === 0) {
         console.log("No blocks to import");
@@ -164,17 +194,23 @@ export async function importChain(api: BlockFrostAPI, fromSlot: number, count: n
     // Insert all blocks into database
     await sql`
         INSERT OR IGNORE INTO blocks (hash, slot, prev_hash, header_cbor, body_cbor, issuer_hash, size)
-        VALUES ${sql(
+        VALUES ${
+        sql(
             validBlocks.map((blockData) => [
-                Buffer.from(blockData.hash, 'hex'),
+                Buffer.from(blockData.hash, "hex"),
                 blockData.slot || 0,
-                blockData.previous_block ? Buffer.from(blockData.previous_block, 'hex') : null,
+                blockData.previous_block
+                    ? Buffer.from(blockData.previous_block, "hex")
+                    : null,
                 null, // CBOR header not available from Blockfrost (BLOB field, nullable)
                 null, // CBOR body not available from Blockfrost
-                blockData.slot_leader ? Buffer.from(blockData.slot_leader, 'hex') : null,
+                blockData.slot_leader
+                    ? Buffer.from(blockData.slot_leader, "hex")
+                    : null,
                 blockData.size,
-            ])
-        )}
+            ]),
+        )
+    }
     `;
 
     // Update current tip to the most recent block (highest slot)
@@ -183,8 +219,12 @@ export async function importChain(api: BlockFrostAPI, fromSlot: number, count: n
     );
 
     await sql`
-        UPDATE current_tip SET hash = ${Buffer.from(latestBlock.hash, 'hex')}, slot = ${latestBlock.slot || 0} WHERE id = 1;
+        UPDATE current_tip SET hash = ${
+        Buffer.from(latestBlock.hash, "hex")
+    }, slot = ${latestBlock.slot || 0} WHERE id = 1;
     `;
 
-    console.log(`Imported ${validBlocks.length} blocks, updated tip to slot ${latestBlock.slot}`);
+    console.log(
+        `Imported ${validBlocks.length} blocks, updated tip to slot ${latestBlock.slot}`,
+    );
 }

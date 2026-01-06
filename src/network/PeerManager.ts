@@ -5,225 +5,226 @@ import {
     PeerAddressIPv4,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
-import { PeerClient } from "./PeerClient";
+import {
+    BlockFetchedCallback,
+    createPeer,
+    handshakePeer,
+    HeaderValidatedCallback,
+    initializePeerNetwork,
+    PeerState,
+    RollbackCallback,
+    startKeepAlive,
+    startSyncLoop,
+    terminatePeer,
+} from "./PeerClient";
 import { logger } from "../utils/logger";
-import { parseTopology } from "./topology/parseTopology";
-import { Topology, TopologyRoot } from "./topology/topology";
+import {
+    adaptLegacyTopology,
+    isLegacyTopology,
+    isTopology,
+    Topology,
+    TopologyRoot,
+} from "./topology";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { closeDB } from "./lmdbWorkers/lmdb";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
-import { RawNewEpochState } from "../rawNES";
+import topologyJson from "../config/topology.json" with { type: "json" };
+
+import { ChainManager } from "./ChainManager";
+import { putHeader } from "./sql";
+import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
 
 //This class is not being used anymore in flavor of workers however
 //still need to move the interfaces from here.
 
-export interface GerolamoConfig {
-    readonly network: NetworkT;
-    readonly networkMagic: number;
-    readonly topologyFile: string;
-    readonly syncFromTip: boolean;
-    readonly syncFromGenesis: boolean;
-    readonly genesisBlockHash: string;
-    readonly syncFromPoint: boolean;
-    readonly syncFromPointSlot: bigint;
-    readonly syncFromPointBlockHash: string;
-    readonly logLevel: string;
-    readonly shelleyGenesisFile: string;
-    readonly enableMinibf?: boolean;
-    allPeers: Map<string, PeerClient>;
+export interface PeerManagerState {
+    allPeers: Map<string, PeerState>;
+    hotPeers: PeerState[];
+    warmPeers: PeerState[];
+    coldPeers: PeerState[];
+    newPeers: PeerState[];
+    bootstrapPeers: PeerState[];
+    networkMagic: number;
+    topology: Topology;
 }
 
-export interface IPeerManager {
-    allPeers: Map<string, PeerClient>;
-    hotPeers: PeerClient[];
-    warmPeers: PeerClient[];
-    coldPeers: PeerClient[];
-    newPeers: PeerClient[];
-    bootstrapPeers: PeerClient[];
-    config: GerolamoConfig;
-    topology: Topology;
-    shelleyGenesisConfig: ShelleyGenesisConfig;
+/**
+ * Creates an initial PeerManager state object
+ */
+export function createPeerManager(): PeerManagerState {
+    return {
+        allPeers: new Map<string, PeerState>(),
+        hotPeers: [],
+        warmPeers: [],
+        coldPeers: [],
+        newPeers: [],
+        bootstrapPeers: [],
+        networkMagic: 0,
+        topology: {} as Topology, // Will be set in initPeerManager
+    };
 }
 
-export class PeerManager implements IPeerManager {
-    allPeers = new Map<string, PeerClient>();
-    hotPeers: PeerClient[] = [];
-    warmPeers: PeerClient[] = [];
-    coldPeers: PeerClient[] = [];
-    newPeers: PeerClient[] = [];
-    bootstrapPeers: PeerClient[] = [];
-    config: GerolamoConfig;
-    topology: Topology;
-    shelleyGenesisConfig: ShelleyGenesisConfig;
-    lState: RawNewEpochState;
+/**
+ * Initializes the peer manager state with network configuration
+ */
+export async function initPeerManager(
+    state: PeerManagerState,
+    networkMagic: number,
+): Promise<void> {
+    state.networkMagic = networkMagic;
 
-    constructor() {}
+    // Validate the imported topology JSON
+    let topology = topologyJson as any;
 
-    async init(config: GerolamoConfig) {
-        this.config = config;
-        // logger.debug("Reading config file: ", this.config);
-        this.topology = await parseTopology(this.config.topologyFile);
-        // logger.debug("Parsed topology:", this.topology);
-        const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
-        this.shelleyGenesisConfig = await shelleyGenesisFile.json();
-        this.lState = RawNewEpochState.init();
+    // Handle legacy topology format if needed
+    topology = isLegacyTopology(topology)
+        ? adaptLegacyTopology(topology)
+        : topology;
 
-        // Assign bootstrap peers
-        if (this.topology.bootstrapPeers) {
-            await Promise.all(
-                this.topology.bootstrapPeers.map(async (ap: any) => {
-                    const peer = new PeerClient(
-                        ap.address,
-                        ap.port,
-                        this.config,
+    // Validate the topology structure
+    if (!isTopology(topology)) {
+        throw new Error("Invalid topology configuration");
+    }
+
+    state.topology = topology;
+    // logger.debug("Validated topology:", state.topology);
+}
+
+/**
+ * Gets all peer states as a readonly array
+ */
+export function getAllPeers(state: PeerManagerState): ReadonlyArray<PeerState> {
+    return Array.from(state.allPeers.values());
+}
+
+/**
+ * Removes a peer from the manager state and terminates its connection
+ */
+export function removePeerFromManager(
+    state: PeerManagerState,
+    peerId: string,
+): void {
+    const peerState = state.allPeers.get(peerId);
+    if (peerState) {
+        // Terminate the peer connection
+        terminatePeer(peerState);
+        state.allPeers.delete(peerId);
+        // Remove from all categories
+        state.hotPeers = state.hotPeers.filter((p) => p.peerId !== peerId);
+        state.warmPeers = state.warmPeers.filter((p) => p.peerId !== peerId);
+        state.coldPeers = state.coldPeers.filter((p) => p.peerId !== peerId);
+        state.bootstrapPeers = state.bootstrapPeers.filter((p) =>
+            p.peerId !== peerId
+        );
+        state.newPeers = state.newPeers.filter((p) => p.peerId !== peerId);
+    }
+}
+
+/**
+ * Starts chain sync tasks for all hot peers
+ */
+export async function peerSyncCurrentTasks(
+    state: PeerManagerState,
+): Promise<void> {
+    // logger.debug("Starting peer sync tasks...");
+    // logger.log("this allpeers", state.allPeers);
+    await Promise.all(state.hotPeers.map(async (peerState) => {
+        try {
+            logger.log(
+                `Connecting to hot peer ${peerState.peerId} at ${peerState.host}:${peerState.port} for current sync`,
+            );
+            await startSyncLoop(peerState);
+            // const peersAddresses = await peer.askForPeers();
+            // console.log("peersAddresses: ", peersAddresses);
+            // this.addNewSharedPeers(peersAddresses);
+        } catch (error) {
+            logger.error(
+                `Failed to initialize hot peer ${peerState.peerId}:`,
+                error,
+            );
+            removePeerFromManager(state, peerState.peerId);
+        }
+    }));
+}
+
+/**
+ * Adds a new peer to the manager state
+ */
+export async function addPeerToManager(
+    state: PeerManagerState,
+    host: string,
+    port: number | bigint,
+    category: string,
+): Promise<string> {
+    try {
+        // Create peer state
+        const peerState = await createPeer(host, port, state.networkMagic, {
+            onHeaderValidated: (data) => {
+                // Store header data
+                putHeader(data.slot, data.header).catch((error) => {
+                    logger.error(
+                        `Failed to store header for peer ${data.peerId}`,
+                        error,
                     );
-                    await peer.handShakePeer();
-                    peer.startKeepAlive();
-                    this.addPeer(peer, "bootstrap");
-                    this.addPeer(peer, "hot");
-                }),
-            );
-        }
+                });
+                logger.debug(
+                    `Header validated: ${data.peerId}, slot ${data.slot}`,
+                );
+            },
+            onBlockFetched: (data) => {
+                logger.debug(
+                    `Block fetched: ${data.peerId}, slot ${data.slot}`,
+                );
+            },
+            onRollback: (data) => {
+                logger.debug(
+                    `Roll back: ${data.peerId}, point ${data.point.blockHeader?.slotNumber}`,
+                );
+            },
+        });
 
-        // Assign local roots as hot peers
-        if (this.topology.localRoots) {
-            await Promise.all(
-                this.topology.localRoots.flatMap((root: TopologyRoot) =>
-                    root.accessPoints.map(async (ap: any) => {
-                        const peer = new PeerClient(
-                            ap.address,
-                            ap.port,
-                            this.config,
-                        );
-                        await peer.handShakePeer();
-                        peer.startKeepAlive();
-                        this.addPeer(peer, "hot");
-                    })
-                ),
-            );
-        }
+        // Initialize network components
+        initializePeerNetwork(peerState);
 
-        // Assign public roots as warm peers (commented out in original)
-        // if (this.topology.publicRoots)
-        // {
-        //     this.topology.publicRoots.flatMap((root: TopologyRoot) =>
-        //         root.accessPoints.map((ap: any) => {
-        //             // const peer = new PeerClient(ap.address, ap.port);
-        //             // this.addPeer(peer, "warm");
-        //
-        //         })
-        //     );
-        // }
+        // Perform handshake
+        await handshakePeer(peerState);
 
-        await this.peerSyncCurrentTasks();
-    }
+        // Start keep-alive
+        startKeepAlive(peerState);
 
-    public getAllPeers(): ReadonlyArray<PeerClient> {
-        return Array.from(this.allPeers.values());
-    }
-
-    private addPeer(
-        peer: PeerClient,
-        category: "hot" | "warm" | "cold" | "bootstrap" | "new",
-    ) {
-        this.allPeers.set(peer.peerId, peer);
+        // Add to appropriate category
+        state.allPeers.set(peerState.peerId, peerState);
         switch (category) {
             case "hot":
-                this.hotPeers.push(peer);
+                state.hotPeers.push(peerState);
                 break;
             case "warm":
-                this.warmPeers.push(peer);
+                state.warmPeers.push(peerState);
                 break;
             case "cold":
-                this.coldPeers.push(peer);
+                state.coldPeers.push(peerState);
                 break;
             case "bootstrap":
-                this.bootstrapPeers.push(peer);
+                state.bootstrapPeers.push(peerState);
                 break;
             case "new":
-                this.newPeers.push(peer);
+                state.newPeers.push(peerState);
                 break;
         }
+        logger.debug(`Added peer ${peerState.peerId} to ${category}`);
+        return peerState.peerId;
+    } catch (error) {
+        logger.error(`Failed to add peer ${host}:${port}`, error);
+        throw error;
     }
-
-    private removePeer(peerId: string) {
-        const peer = this.allPeers.get(peerId);
-        if (peer) {
-            this.allPeers.delete(peerId);
-            this.hotPeers = this.hotPeers.filter((p) => p.peerId !== peerId);
-            this.warmPeers = this.warmPeers.filter((p) => p.peerId !== peerId);
-            this.coldPeers = this.coldPeers.filter((p) => p.peerId !== peerId);
-            this.bootstrapPeers = this.bootstrapPeers.filter((p) =>
-                p.peerId !== peerId
-            );
-            this.newPeers = this.newPeers.filter((p) => p.peerId !== peerId);
-            peer.terminate();
-        }
-    }
-
-    private async peerSyncCurrentTasks() {
-        // logger.debug("Starting peer sync tasks...");
-        // logger.log("this allpeers", this.allPeers);
-        await Promise.all(this.hotPeers.map(async (peer) => {
-            try {
-                logger.log(
-                    `Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync`,
-                );
-                peer.startSyncLoop();
-                // const peersAddresses = await peer.askForPeers();
-                // console.log("peersAddresses: ", peersAddresses);
-                // this.addNewSharedPeers(peersAddresses);
-            } catch (error) {
-                logger.error(
-                    `Failed to initialize hot peer ${peer.peerId}:`,
-                    error,
-                );
-                this.removePeer(peer.peerId);
-            }
-        }));
-    }
-
-    private addNewSharedPeers(peersAddresses: PeerAddress[]) {
-        logger.log("Adding new shared peers from network...");
-        peersAddresses.forEach((address) => {
-            if (address instanceof PeerAddressIPv4) {
-                const newPeer = new PeerClient(
-                    uint32ToIpv4(address.address),
-                    address.portNumber,
-                    this.config,
-                );
-                this.addPeer(newPeer, "new");
-                logger.log(
-                    `Added new peer ${newPeer.peerId} from network at ${
-                        uint32ToIpv4(address.address)
-                    }:${address.portNumber}`,
-                );
-            }
-        });
-    }
-    s;
-
-    async shutdown() {
-        logger.debug("Shutting down PeerManager");
-        for (const peer of this.allPeers.values()) {
-            peer.terminate();
-        };
-        try {
-            await closeDB();
-            logger.debug("LMDB worker closed");
-        } catch (error) {
-            logger.error(`Error closing LMDB worker: ${error}`);
-        };
-    };
-};
-
-// Initialize the peer manager
-/*
-export async function start(config: Bun.BunFile) {
-    const peerManager = new PeerManager();
-    peerManager.init(config).catch((error) => {
-        logger.error("Error initializing PeerManager:", error);
-    });
 }
-start().catch((error) => console.error("Failed to start:", error));
-*/
+
+/**
+ * Shuts down the peer manager and terminates all peer connections
+ */
+export async function shutdownPeerManager(
+    state: PeerManagerState,
+): Promise<void> {
+    logger.debug("Shutting down PeerManager");
+    for (const peerState of state.allPeers.values()) {
+        terminatePeer(peerState);
+    }
+}

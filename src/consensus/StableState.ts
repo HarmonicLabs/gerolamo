@@ -42,7 +42,11 @@ export interface StreamTo {
 // Missing block error
 export class MissingBlockError extends Error {
     constructor(public point: Point) {
-        super(`Block not found at slot ${point.slot}, hash ${toHex(point.hash.toBuffer())}`);
+        super(
+            `Block not found at slot ${point.slot}, hash ${
+                toHex(point.hash.toBuffer())
+            }`,
+        );
     }
 }
 
@@ -367,7 +371,9 @@ export async function validateIntegrity(): Promise<boolean> {
             const currentBlock = blocks[i];
 
             // Check that prev_hash matches
-            if (currentBlock.data.prevHash !== toHex(prevBlock.hash.toBuffer())) {
+            if (
+                currentBlock.data.prevHash !== toHex(prevBlock.hash.toBuffer())
+            ) {
                 console.error(
                     `Chain validation failed at slot ${currentBlock.slot}: prev_hash mismatch`,
                 );
@@ -516,7 +522,7 @@ export async function validateAllChunks(): Promise<boolean> {
     const maxChunkIndex = getChunkIndex(tip.slot);
 
     const validationResults = await Promise.all(
-        Array.from({ length: maxChunkIndex + 1 }, (_, i) => validateChunk(i))
+        Array.from({ length: maxChunkIndex + 1 }, (_, i) => validateChunk(i)),
     );
 
     return validationResults.every((isValid, i) => {
@@ -541,7 +547,7 @@ export class ResourceRegistry {
                 if (resource.close && typeof resource.close === "function") {
                     await resource.close();
                 }
-            })
+            }),
         );
         this.resources.clear();
     }

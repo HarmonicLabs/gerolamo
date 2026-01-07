@@ -1,32 +1,26 @@
-import {
-    addPeerToManager,
-    createPeerManager,
-    initPeerManager,
-    PeerManagerState,
-    peerSyncCurrentTasks,
-} from "./PeerManager";
+import { PeerManager } from "./PeerManager";
 import { logger } from "../utils/logger";
 
 export async function startPeerManager(
     networkMagic: number,
-): Promise<PeerManagerState> {
-    const peerManagerState = createPeerManager();
-    await initPeerManager(peerManagerState, networkMagic);
+): Promise<PeerManager> {
+    const peerManager = new PeerManager();
+    await peerManager.init(networkMagic);
 
-    // Get topology from peerManagerState (already loaded and validated)
-    const topology = peerManagerState.topology;
+    // Get topology from peerManager (already loaded and validated)
+    const topology = peerManager.topology;
 
     // Add bootstrap peers concurrently
     if (topology.bootstrapPeers) {
         const bootstrapPromises = topology.bootstrapPeers.flatMap((ap) => [
-            addPeerToManager(peerManagerState, ap.address, ap.port, "bootstrap")
+            peerManager.addPeer(ap.address, ap.port, "bootstrap")
                 .catch((error) => {
                     logger.error(
                         `Failed to add bootstrap peer ${ap.address}:${ap.port}`,
                         error,
                     );
                 }),
-            addPeerToManager(peerManagerState, ap.address, ap.port, "hot")
+            peerManager.addPeer(ap.address, ap.port, "hot")
                 .catch((error) => {
                     logger.error(
                         `Failed to add hot peer ${ap.address}:${ap.port}`,
@@ -41,7 +35,7 @@ export async function startPeerManager(
     if (topology.localRoots) {
         const localRootPromises = topology.localRoots.flatMap((root) =>
             root.accessPoints.map((ap) =>
-                addPeerToManager(peerManagerState, ap.address, ap.port, "hot")
+                peerManager.addPeer(ap.address, ap.port, "hot")
                     .catch((error) => {
                         logger.error(
                             `Failed to add local root peer ${ap.address}:${ap.port}`,
@@ -54,8 +48,8 @@ export async function startPeerManager(
     }
 
     // Start sync for hot peers
-    await peerSyncCurrentTasks(peerManagerState);
+    await peerManager.startPeerSync();
 
     logger.debug("PeerManager started successfully");
-    return peerManagerState;
+    return peerManager;
 }

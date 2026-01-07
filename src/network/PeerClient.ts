@@ -63,7 +63,7 @@ export type RollbackCallback = (data: {
     point: ChainPoint;
 }) => void;
 
-export interface PeerState {
+export class PeerClient {
     host: string;
     port: number | bigint;
     peerId: string;
@@ -82,361 +82,361 @@ export interface PeerState {
     onHeaderValidated?: HeaderValidatedCallback;
     onBlockFetched?: BlockFetchedCallback;
     onRollback?: RollbackCallback;
-}
 
-/**
- * Creates and initializes a new peer state object
- */
-export async function createPeer(
-    host: string,
-    port: number | bigint,
-    networkMagic: number,
-    callbacks?: {
-        onHeaderValidated?: HeaderValidatedCallback;
-        onBlockFetched?: BlockFetchedCallback;
-        onRollback?: RollbackCallback;
-    },
-): Promise<PeerState> {
-    const unixTimestamp = Math.floor(Date.now() / 1000);
-    const peerId = `${host}:${port}:${unixTimestamp}`;
-
-    const peerState: PeerState = {
-        host,
-        port,
-        peerId,
-        networkMagic,
-        cookieCounter: 0,
-        peerSlotNumber: null,
-        keepAliveInterval: null,
-        isRangeSyncComplete: false,
-        onHeaderValidated: callbacks?.onHeaderValidated,
-        onBlockFetched: callbacks?.onBlockFetched,
-        onRollback: callbacks?.onRollback,
-    };
-
-    return peerState;
-}
-
-/**
- * Initializes network components for a peer
- */
-export function initializePeerNetwork(peerState: PeerState): void {
-    if (peerState.mplexer || peerState.chainSyncClient) {
-        throw new Error("Peer network already initialized");
-    }
-
-    peerState.mplexer = new Multiplexer({
-        connect: () => {
-            logger.info(`Attempt connection to peer ${peerState.peerId}`);
-            return connect({
-                host: peerState.host,
-                port: Number(peerState.port),
-            }) as any;
+    constructor(
+        host: string,
+        port: number | bigint,
+        networkMagic: number,
+        callbacks?: {
+            onHeaderValidated?: HeaderValidatedCallback;
+            onBlockFetched?: BlockFetchedCallback;
+            onRollback?: RollbackCallback;
         },
-        protocolType: "node-to-node",
-    });
+    ) {
+        const unixTimestamp = Math.floor(Date.now() / 1000);
+        const peerId = `${host}:${port}:${unixTimestamp}`;
 
-    peerState.chainSyncClient = new ChainSyncClient(peerState.mplexer);
-    peerState.blockFetchClient = new BlockFetchClient(peerState.mplexer);
-    peerState.keepAliveClient = new KeepAliveClient(peerState.mplexer);
-    peerState.peerSharingClient = new PeerSharingClient(peerState.mplexer);
-    peerState.cookieCounter = 0;
-    peerState.peerSlotNumber = null;
-    peerState.keepAliveInterval = null;
-
-    peerState.mplexer.on("error", (err) => {
-        logger.error(`Multiplexer error for peer ${peerState.peerId}:`, err);
-        terminatePeer(peerState);
-    });
-}
-
-/**
- * Performs handshake with the peer
- */
-export async function handshakePeer(peerState: PeerState): Promise<void> {
-    if (!peerState.mplexer) {
-        throw new Error("Peer network not initialized");
+        this.host = host;
+        this.port = port;
+        this.peerId = peerId;
+        this.networkMagic = networkMagic;
+        this.cookieCounter = 0;
+        this.peerSlotNumber = null;
+        this.keepAliveInterval = null;
+        this.isRangeSyncComplete = false;
+        this.onHeaderValidated = callbacks?.onHeaderValidated;
+        this.onBlockFetched = callbacks?.onBlockFetched;
+        this.onRollback = callbacks?.onRollback;
     }
 
-    const handshake = new HandshakeClient(peerState.mplexer);
 
-    handshake.on("error", (err) => {
-        logger.error(`Handshake error for peer ${peerState.peerId}:`, err);
-        terminatePeer(peerState);
-    });
 
-    const handshakeResult = await handshake.propose({
-        networkMagic: peerState.networkMagic,
-        query: false,
-    });
+    /**
+     * Terminates the peer connection and cleans up resources
+     */
+    terminate(): void {
+        logger.info(`Terminating connections for peer ${this.peerId}...`);
 
-    if (!(handshakeResult instanceof HandshakeAcceptVersion)) {
-        logger.error(
-            `Handshake failed for peer ${peerState.peerId}:`,
-            handshakeResult,
-        );
-        throw new Error("Handshake failed");
-    }
-
-    logger.debug(`Handshake success for peer ${peerState.peerId}`);
-}
-
-/**
- * Starts the chain sync loop for the peer
- */
-export async function startSyncLoop(peerState: PeerState): Promise<void> {
-    if (!peerState.chainSyncClient) {
-        throw new Error("Peer network not initialized");
-    }
-
-    logger.debug(`Starting sync loop for peer ${peerState.peerId}...`);
-
-    peerState.chainSyncClient.on(
-        "rollForward",
-        async (rollForward: ChainSyncRollForward) => {
-            const tip = rollForward.tip.point.blockHeader?.slotNumber;
-
-            // Parse and validate header inline using consensus logic
-            if (!(rollForward.data instanceof CborArray)) {
-                await peerState.chainSyncClient!.requestNext();
-                return;
-            }
-
-            const blockHeaderData: Uint8Array = Cbor.encode(rollForward.data)
-                .toBuffer();
-            const lazyHeader = Cbor.parseLazy(blockHeaderData);
-            if (!(lazyHeader instanceof LazyCborArray)) {
-                await peerState.chainSyncClient!.requestNext();
-                return;
-            }
-
-            const blockHeaderParsed = Cbor.parse(lazyHeader.array[1]);
-            if (
-                !(blockHeaderParsed instanceof CborTag &&
-                    blockHeaderParsed.data instanceof CborBytes)
-            ) {
-                await peerState.chainSyncClient!.requestNext();
-                return;
-            }
-
-            const blockHeaderBodyLazy = Cbor.parseLazy(
-                blockHeaderParsed.data.bytes,
+        if (this.chainSyncClient) {
+            this.chainSyncClient.removeAllListeners("rollForward");
+            this.chainSyncClient.removeAllListeners("rollBackwards");
+            logger.debug(
+                `Removed all ChainSyncClient listeners for peer ${this.peerId}`,
             );
-            if (!(blockHeaderBodyLazy instanceof LazyCborArray)) {
-                await peerState.chainSyncClient!.requestNext();
-                return;
-            }
+            this.chainSyncClient.done();
+        }
 
-            // Add +1 to era since multiplexer enums start at 0
-            const blockHeaderBodyEra = lazyHeader.array[0][0] + 1;
+        if (this.blockFetchClient) {
+            this.blockFetchClient.done();
+        }
 
-            // Parse header based on era
-            let parsedHeader;
-            switch (blockHeaderBodyEra) {
-                case 2:
-                    parsedHeader = ShelleyHeader.fromCbor(
-                        blockHeaderParsed.data.bytes,
-                    );
-                    break;
-                case 3:
-                    parsedHeader = AllegraHeader.fromCbor(
-                        blockHeaderParsed.data.bytes,
-                    );
-                    break;
-                case 4:
-                    parsedHeader = MaryHeader.fromCbor(
-                        blockHeaderParsed.data.bytes,
-                    );
-                    break;
-                case 5:
-                    parsedHeader = AlonzoHeader.fromCbor(
-                        blockHeaderParsed.data.bytes,
-                    );
-                    break;
-                case 6:
-                    parsedHeader = BabbageHeader.fromCbor(
-                        blockHeaderParsed.data.bytes,
-                    );
-                    break;
-                case 7:
-                    parsedHeader = ConwayHeader.fromCbor(
-                        blockHeaderParsed.data.bytes,
-                    );
-                    break;
-                default:
-                    await peerState.chainSyncClient!.requestNext();
+        if (this.keepAliveClient) {
+            this.keepAliveClient.done();
+        }
+
+        if (this.peerSharingClient) {
+            this.peerSharingClient.done();
+        }
+
+        if (this.keepAliveInterval) {
+            clearInterval(this.keepAliveInterval as unknown as number);
+            this.keepAliveInterval = null;
+        }
+
+        if (this.mplexer) {
+            this.mplexer.close();
+        }
+    }
+
+    /**
+     * Initializes network components for the peer
+     */
+    initNetwork(): void {
+        if (this.mplexer || this.chainSyncClient) {
+            throw new Error("Peer network already initialized");
+        }
+
+        this.mplexer = new Multiplexer({
+            connect: () => {
+                logger.info(`Attempt connection to peer ${this.peerId}`);
+                return connect({
+                    host: this.host,
+                    port: Number(this.port),
+                }) as any;
+            },
+            protocolType: "node-to-node",
+        });
+
+        this.chainSyncClient = new ChainSyncClient(this.mplexer);
+        this.blockFetchClient = new BlockFetchClient(this.mplexer);
+        this.keepAliveClient = new KeepAliveClient(this.mplexer);
+        this.peerSharingClient = new PeerSharingClient(this.mplexer);
+        this.cookieCounter = 0;
+        this.peerSlotNumber = null;
+        this.keepAliveInterval = null;
+
+        this.mplexer.on("error", (err) => {
+            logger.error(`Multiplexer error for peer ${this.peerId}:`, err);
+            this.terminate();
+        });
+    }
+
+    /**
+     * Performs handshake with the peer
+     */
+    async handshake(): Promise<void> {
+        if (!this.mplexer) {
+            throw new Error("Peer network not initialized");
+        }
+
+        const handshake = new HandshakeClient(this.mplexer);
+
+        handshake.on("error", (err) => {
+            logger.error(`Handshake error for peer ${this.peerId}:`, err);
+            this.terminate();
+        });
+
+        const handshakeResult = await handshake.propose({
+            networkMagic: this.networkMagic,
+            query: false,
+        });
+
+        if (!(handshakeResult instanceof HandshakeAcceptVersion)) {
+            logger.error(
+                `Handshake failed for peer ${this.peerId}:`,
+                handshakeResult,
+            );
+            throw new Error("Handshake failed");
+        }
+
+        logger.debug(`Handshake success for peer ${this.peerId}`);
+    }
+
+    /**
+     * Starts the chain sync loop for the peer
+     */
+    async startSync(): Promise<void> {
+        if (!this.chainSyncClient) {
+            throw new Error("Peer network not initialized");
+        }
+
+        logger.debug(`Starting sync loop for peer ${this.peerId}...`);
+
+        this.chainSyncClient.on(
+            "rollForward",
+            async (rollForward: ChainSyncRollForward) => {
+                const tip = rollForward.tip.point.blockHeader?.slotNumber;
+
+                // Parse and validate header inline using consensus logic
+                if (!(rollForward.data instanceof CborArray)) {
+                    await this.chainSyncClient!.requestNext();
                     return;
-            }
-
-            const multiEraHeader = new MultiEraHeader({
-                era: blockHeaderBodyEra,
-                header: parsedHeader,
-            });
-
-            const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
-            const headerEpoch = calculatePreProdCardanoEpoch(
-                Number(multiEraHeader.header.body.slot),
-            );
-            const epochNonce = await blockFrostFetchEra(headerEpoch as number);
-
-            // Validate header using consensus
-            const isValid = await validateHeader(
-                multiEraHeader,
-                fromHex(epochNonce.nonce),
-            );
-
-            if (!isValid) {
-                await peerState.chainSyncClient!.requestNext();
-                return;
-            }
-
-            peerState.onHeaderValidated?.({
-                peerId: peerState.peerId,
-                era: blockHeaderBodyEra,
-                epoch: headerEpoch,
-                slot: multiEraHeader.header.body.slot,
-                blockHeaderHash,
-                header: multiEraHeader,
-                tip: tip ? Number(tip) : undefined,
-            });
-
-            const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock =
-                await fetchBlock(
-                    peerState,
-                    multiEraHeader.header.body.slot,
-                    blockHeaderHash,
-                );
-
-            // Validate and apply block inline using consensus logic
-            if (newBlockRes instanceof BlockFetchBlock) {
-                const newMultiEraBlock = MultiEraBlock.fromCbor(
-                    newBlockRes.blockData,
-                );
-
-                // Validate the block using consensus logic
-                const isValid = await validateBlock(newMultiEraBlock);
-                if (!isValid) {
-                    throw new Error("Block validation failed");
                 }
 
-                // Apply the block to the ledger state
-                await applyBlock(
-                    newMultiEraBlock,
-                    multiEraHeader.header.body.slot,
+                const blockHeaderData: Uint8Array = Cbor.encode(rollForward.data)
+                    .toBuffer();
+                const lazyHeader = Cbor.parseLazy(blockHeaderData);
+                if (!(lazyHeader instanceof LazyCborArray)) {
+                    await this.chainSyncClient!.requestNext();
+                    return;
+                }
+
+                const blockHeaderParsed = Cbor.parse(lazyHeader.array[1]);
+                if (
+                    !(blockHeaderParsed instanceof CborTag &&
+                        blockHeaderParsed.data instanceof CborBytes)
+                ) {
+                    await this.chainSyncClient!.requestNext();
+                    return;
+                }
+
+                const blockHeaderBodyLazy = Cbor.parseLazy(
+                    blockHeaderParsed.data.bytes,
+                );
+                if (!(blockHeaderBodyLazy instanceof LazyCborArray)) {
+                    await this.chainSyncClient!.requestNext();
+                    return;
+                }
+
+                // Add +1 to era since multiplexer enums start at 0
+                const blockHeaderBodyEra = lazyHeader.array[0][0] + 1;
+
+                // Parse header based on era
+                let parsedHeader;
+                switch (blockHeaderBodyEra) {
+                    case 2:
+                        parsedHeader = ShelleyHeader.fromCbor(
+                            blockHeaderParsed.data.bytes,
+                        );
+                        break;
+                    case 3:
+                        parsedHeader = AllegraHeader.fromCbor(
+                            blockHeaderParsed.data.bytes,
+                        );
+                        break;
+                    case 4:
+                        parsedHeader = MaryHeader.fromCbor(
+                            blockHeaderParsed.data.bytes,
+                        );
+                        break;
+                    case 5:
+                        parsedHeader = AlonzoHeader.fromCbor(
+                            blockHeaderParsed.data.bytes,
+                        );
+                        break;
+                    case 6:
+                        parsedHeader = BabbageHeader.fromCbor(
+                            blockHeaderParsed.data.bytes,
+                        );
+                        break;
+                    case 7:
+                        parsedHeader = ConwayHeader.fromCbor(
+                            blockHeaderParsed.data.bytes,
+                        );
+                        break;
+                    default:
+                        await this.chainSyncClient!.requestNext();
+                        return;
+                }
+
+                const multiEraHeader = new MultiEraHeader({
+                    era: blockHeaderBodyEra,
+                    header: parsedHeader,
+                });
+
+                const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
+                const headerEpoch = calculatePreProdCardanoEpoch(
+                    Number(multiEraHeader.header.body.slot),
+                );
+                const epochNonce = await blockFrostFetchEra(headerEpoch as number);
+
+                // Validate header using consensus
+                const isValid = await validateHeader(
+                    multiEraHeader,
+                    fromHex(epochNonce.nonce),
+                );
+
+                if (!isValid) {
+                    await this.chainSyncClient!.requestNext();
+                    return;
+                }
+
+                this.onHeaderValidated?.({
+                    peerId: this.peerId,
+                    era: blockHeaderBodyEra,
+                    epoch: headerEpoch,
+                    slot: multiEraHeader.header.body.slot,
                     blockHeaderHash,
-                );
+                    header: multiEraHeader,
+                    tip: tip ? Number(tip) : undefined,
+                });
 
-                logger.info(
-                    `Block applied successfully: slot ${multiEraHeader.header.body.slot}`,
-                );
-            }
+                const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock =
+                    await this.fetchBlock(
+                        multiEraHeader.header.body.slot,
+                        blockHeaderHash,
+                    );
 
-            peerState.onBlockFetched?.({
-                peerId: peerState.peerId,
-                slot: multiEraHeader.header.body.slot,
-                blockHeaderHash,
-                blockData: newBlockRes,
-            });
+                // Validate and apply block inline using consensus logic
+                if (newBlockRes instanceof BlockFetchBlock) {
+                    const newMultiEraBlock = MultiEraBlock.fromCbor(
+                        newBlockRes.blockData,
+                    );
 
-            await peerState.chainSyncClient!.requestNext();
-        },
-    );
+                    // Validate the block using consensus logic
+                    const isValid = await validateBlock(newMultiEraBlock);
+                    if (!isValid) {
+                        throw new Error("Block validation failed");
+                    }
 
-    peerState.chainSyncClient.on(
-        "rollBackwards",
-        async (rollBack: ChainSyncRollBackwards) => {
-            if (!rollBack.point.blockHeader) return;
-            const tip = rollBack.tip.point;
-            logger.debug(
-                `Rolled back tip for peer ${peerState.peerId}`,
-                tip.blockHeader?.slotNumber,
-            );
-            peerState.onRollback?.({
-                peerId: peerState.peerId,
-                point: rollBack.point,
-            });
-            await peerState.chainSyncClient!.requestNext();
-        },
-    );
-}
+                    // Apply the block to the ledger state
+                    await applyBlock(
+                        newMultiEraBlock,
+                        multiEraHeader.header.body.slot,
+                        blockHeaderHash,
+                    );
 
-/**
- * Fetches a block from the peer
- */
-export async function fetchBlock(
-    peerState: PeerState,
-    slot: number | bigint,
-    blockHeaderHash: Uint8Array,
-): Promise<BlockFetchNoBlocks | BlockFetchBlock> {
-    if (!peerState.blockFetchClient) {
-        throw new Error("Peer network not initialized");
-    }
+                    logger.info(
+                        `Block applied successfully: slot ${multiEraHeader.header.body.slot}`,
+                    );
+                }
 
-    const result = await peerState.blockFetchClient.request(
-        new ChainPoint({
-            blockHeader: {
-                slotNumber: Number(slot),
-                hash: blockHeaderHash,
+                this.onHeaderValidated?.({
+                    peerId: this.peerId,
+                    era: blockHeaderBodyEra,
+                    epoch: headerEpoch,
+                    slot: multiEraHeader.header.body.slot,
+                    blockHeaderHash,
+                    header: multiEraHeader,
+                    tip: tip ? Number(tip) : undefined,
+                });
+
+                this.onBlockFetched?.({
+                    peerId: this.peerId,
+                    slot: multiEraHeader.header.body.slot,
+                    blockHeaderHash,
+                    blockData: newBlockRes,
+                });
+
+                await this.chainSyncClient!.requestNext();
             },
-        }),
-    );
-    return result[0];
-}
-
-/**
- * Starts keep-alive protocol for the peer
- */
-export function startKeepAlive(
-    peerState: PeerState,
-    interval: number = 60000,
-): void {
-    if (!peerState.keepAliveClient) {
-        throw new Error("Peer network not initialized");
-    }
-
-    peerState.keepAliveInterval = setInterval(() => {
-        peerState.cookieCounter = ((peerState.cookieCounter || 0) + 1) % 65536;
-        logger.debug(
-            `Sending keepAliveRequest cookie for peer ${peerState.peerId}:`,
-            peerState.cookieCounter,
         );
-        peerState.keepAliveClient!.request(peerState.cookieCounter!);
-    }, interval) as unknown as NodeJS.Timeout;
-}
 
-/**
- * Terminates the peer connection and cleans up resources
- */
-export function terminatePeer(peerState: PeerState): void {
-    logger.info(`Terminating connections for peer ${peerState.peerId}...`);
-
-    if (peerState.chainSyncClient) {
-        peerState.chainSyncClient.removeAllListeners("rollForward");
-        peerState.chainSyncClient.removeAllListeners("rollBackwards");
-        logger.debug(
-            `Removed all ChainSyncClient listeners for peer ${peerState.peerId}`,
+        this.chainSyncClient.on(
+            "rollBackwards",
+            async (rollBack: ChainSyncRollBackwards) => {
+                if (!rollBack.point.blockHeader) return;
+                const tip = rollBack.tip.point;
+                logger.debug(
+                    `Rolled back tip for peer ${this.peerId}`,
+                    tip.blockHeader?.slotNumber,
+                );
+                this.onRollback?.({
+                    peerId: this.peerId,
+                    point: rollBack.point,
+                });
+                await this.chainSyncClient!.requestNext();
+            },
         );
-        peerState.chainSyncClient.done();
     }
 
-    if (peerState.blockFetchClient) {
-        peerState.blockFetchClient.done();
+    /**
+     * Fetches a block from the peer
+     */
+    async fetchBlock(
+        slot: number | bigint,
+        blockHeaderHash: Uint8Array,
+    ): Promise<BlockFetchNoBlocks | BlockFetchBlock> {
+        if (!this.blockFetchClient) {
+            throw new Error("Peer network not initialized");
+        }
+
+        const result = await this.blockFetchClient.request(
+            new ChainPoint({
+                blockHeader: {
+                    slotNumber: Number(slot),
+                    hash: blockHeaderHash,
+                },
+            }),
+        );
+        return result[0];
     }
 
-    if (peerState.keepAliveClient) {
-        peerState.keepAliveClient.done();
-    }
+    /**
+     * Starts keep-alive protocol for the peer
+     */
+    startKeepAlive(interval: number = 60000): void {
+        if (!this.keepAliveClient) {
+            throw new Error("Peer network not initialized");
+        }
 
-    if (peerState.peerSharingClient) {
-        peerState.peerSharingClient.done();
-    }
-
-    if (peerState.keepAliveInterval) {
-        clearInterval(peerState.keepAliveInterval as unknown as number);
-        peerState.keepAliveInterval = null;
-    }
-
-    if (peerState.mplexer) {
-        peerState.mplexer.close();
+        this.keepAliveInterval = setInterval(() => {
+            this.cookieCounter = ((this.cookieCounter || 0) + 1) % 65536;
+            logger.debug(
+                `Sending keepAliveRequest cookie for peer ${this.peerId}:`,
+                this.cookieCounter,
+            );
+            this.keepAliveClient!.request(this.cookieCounter!);
+        }, interval) as unknown as NodeJS.Timeout;
     }
 }

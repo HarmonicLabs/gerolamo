@@ -23,6 +23,7 @@ import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
 import topologyJson from "../config/topology.json" with { type: "json" };
 
 import { ChainManager } from "./ChainManager";
+import { ChainCandidate, ChainSelectionMode } from "../consensus/chainSelection";
 import { putHeader } from "./sql";
 import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
 
@@ -38,6 +39,7 @@ export class PeerManager {
     bootstrapPeers: PeerClient[];
     networkMagic: number;
     topology: Topology;
+    chainManager: ChainManager;
 
     constructor() {
         this.allPeers = new Map<string, PeerClient>();
@@ -48,6 +50,7 @@ export class PeerManager {
         this.bootstrapPeers = [];
         this.networkMagic = 0;
         this.topology = {} as Topology; // Will be set in initPeerManager
+        this.chainManager = new ChainManager();
     }
 
     /**
@@ -146,8 +149,26 @@ export class PeerManager {
                             error,
                         );
                     });
+
+                    // Calculate block number from header
+                    // This is simplified - real implementation would track block numbers properly
+                    const blockNumber = Number(data.header.header.body.blockNumber) || 1;
+
+                    // Add chain candidate for chain selection
+                    this.chainManager.addChainCandidate(
+                        data.peerId,
+                        data.header,
+                        blockNumber, // Block count from genesis
+                        blockNumber, // Current block number
+                    ).catch((error) => {
+                        logger.error(
+                            `Failed to add chain candidate for peer ${data.peerId}`,
+                            error,
+                        );
+                    });
+
                     logger.debug(
-                        `Header validated: ${data.peerId}, slot ${data.slot}`,
+                        `Header validated: ${data.peerId}, slot ${data.slot}, block ${blockNumber}`,
                     );
                 },
                 onBlockFetched: (data) => {
@@ -196,6 +217,37 @@ export class PeerManager {
             logger.error(`Failed to add peer ${host}:${port}`, error);
             throw error;
         }
+    }
+
+    /**
+     * Evaluate chain candidates and switch to the best chain if needed
+     */
+    async evaluateAndSwitchChain(
+        mode: ChainSelectionMode = 'praos',
+        securityParamK: number = 2160,
+    ): Promise<void> {
+        try {
+            const shouldSwitch = await this.chainManager.shouldSwitchChain(mode, securityParamK);
+            if (shouldSwitch) {
+                logger.info("Switching to better chain...");
+                await this.chainManager.applyBestChain(mode, securityParamK);
+                logger.info("Successfully switched to best chain");
+            } else {
+                logger.debug("Current chain is still the best");
+            }
+        } catch (error) {
+            logger.error("Failed to evaluate and switch chain:", error);
+        }
+    }
+
+    /**
+     * Start periodic chain evaluation
+     */
+    startChainEvaluation(interval: number = 30000): void {
+        setInterval(async () => {
+            await this.evaluateAndSwitchChain();
+        }, interval);
+        logger.info(`Started chain evaluation every ${interval}ms`);
     }
 
     /**

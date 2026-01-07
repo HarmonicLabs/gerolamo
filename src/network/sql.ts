@@ -38,6 +38,21 @@ export async function putBlock(
 }
 
 /**
+ * Store a complete block with both header and body data in SQLite
+ */
+export async function storeBlock(
+    blockHash: Uint8Array,
+    slot: number,
+    headerData: Uint8Array,
+    blockData: Uint8Array,
+): Promise<void> {
+    await sql`
+        INSERT OR REPLACE INTO blocks (hash, slot, header_data, block_data)
+        VALUES (${blockHash}, ${slot}, ${headerData}, ${blockData})
+    `;
+}
+
+/**
  * Get header by slot number
  */
 export async function getHeaderBySlot(

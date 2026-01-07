@@ -17,6 +17,7 @@ import { logger } from "../utils/logger";
 import { validateHeader } from "../consensus/BlockHeaderValidator";
 import { validateBlock } from "../consensus/BlockBodyValidator";
 import { applyBlock } from "../consensus/BlockApplication";
+import { storeBlock } from "./sql";
 import {
     Cbor,
     CborArray,
@@ -348,6 +349,14 @@ export class PeerClient {
                     if (!isValid) {
                         throw new Error("Block validation failed");
                     }
+
+                    // Store the block data in the database
+                    await storeBlock(
+                        blockHeaderHash,
+                        Number(multiEraHeader.header.body.slot),
+                        multiEraHeader.toCborBytes(),
+                        newBlockRes.blockData,
+                    );
 
                     // Apply the block to the ledger state
                     await applyBlock(

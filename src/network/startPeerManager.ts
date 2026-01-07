@@ -50,6 +50,9 @@ export async function startPeerManager(
     // Start sync for hot peers
     await peerManager.startPeerSync();
 
+    // Start periodic chain evaluation
+    peerManager.startChainEvaluation();
+
     logger.debug("PeerManager started successfully");
     return peerManager;
 }

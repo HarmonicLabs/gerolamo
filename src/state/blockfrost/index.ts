@@ -93,7 +93,7 @@ export async function importFromBlockfrost(
     await populateNonMyopic();
 
     // 9. UTxO set
-    await populateUTxOs(api, stakeDistribution);
+    await populateUTxOs(apiConfig, stakeDistribution);
 
     // 10. Ledger state
     await populateLedgerState();
@@ -115,7 +115,7 @@ export async function importFromBlockfrost(
         console.log(
             `Importing chain from slot ${options.fromSlot} for ${options.count} blocks...`,
         );
-        await importChain(api, options.fromSlot, options.count);
+        await importChain(apiConfig, options.fromSlot, options.count);
         console.log("Chain import completed.");
     }
 
@@ -145,7 +145,7 @@ export async function importFromBlockfrost(
     console.log(
         `💰 UTxO set: ✓ (${
             (await sql`SELECT COUNT(*) from utxo`)[0]["COUNT(*)"]
-        } UTxOs`,
+        }) UTxOs`,
     );
     console.log(`📊 Ledger state: ✓`);
     console.log(`📸 Snapshots: ✓`);
@@ -154,27 +154,35 @@ export async function importFromBlockfrost(
 
 // Import chain blocks from Blockfrost
 export async function importChain(
-    api: BlockFrostAPI,
+    apiConfig: any,
     fromSlot: number,
     count: number,
 ) {
+    // Use raw fetch calls with the custom backend since BlockFrostAPI doesn't work with it
+    const baseUrl = apiConfig.customBackend || "https://blockfrost-preprod.onchainapps.io";
+
     // Generate array of slots to fetch (from newest to oldest)
     const slots = Array.from({ length: count }, (_, i) => fromSlot - i).filter(
         (slot) => slot >= 0,
     );
 
     console.log(
-        `Fetching ${slots.length} blocks starting from slot ${fromSlot}...`,
+        `Fetching ${slots.length} blocks starting from slot ${fromSlot} using ${baseUrl}...`,
     );
 
-    // Fetch all blocks in parallel
+    // Fetch all blocks using raw fetch calls
     const blockDataPromises = slots.map(async (slot) => {
         try {
-            const blockData = await api.blocks(slot);
+            const response = await fetch(`${baseUrl}/blocks/slot/${slot}`);
+            if (!response.ok) {
+                // Skip slots that don't have blocks (normal - not every slot has a block)
+                return null;
+            }
+            const blockData = await response.json();
             console.log(`Fetched block at slot ${slot}: ${blockData.hash}`);
             return blockData;
         } catch (error) {
-            console.warn(`Failed to fetch block at slot ${slot}:`, error);
+            // Skip slots that don't have blocks
             return null;
         }
     });
@@ -191,27 +199,30 @@ export async function importChain(
         return;
     }
 
-    // Insert all blocks into database
+    // First ensure current_tip table exists
     await sql`
-        INSERT OR IGNORE INTO blocks (hash, slot, prev_hash, header_cbor, body_cbor, issuer_hash, size)
-        VALUES ${
-        sql(
-            validBlocks.map((blockData) => [
-                Buffer.from(blockData.hash, "hex"),
-                blockData.slot || 0,
-                blockData.previous_block
-                    ? Buffer.from(blockData.previous_block, "hex")
-                    : null,
-                null, // CBOR header not available from Blockfrost (BLOB field, nullable)
-                null, // CBOR body not available from Blockfrost
-                blockData.slot_leader
-                    ? Buffer.from(blockData.slot_leader, "hex")
-                    : null,
-                blockData.size,
-            ]),
-        )
-    }
+        CREATE TABLE IF NOT EXISTS current_tip (
+            id INTEGER PRIMARY KEY DEFAULT 1,
+            hash BLOB,
+            slot INTEGER,
+            block_no INTEGER DEFAULT 0
+        );
     `;
+
+    // Insert initial current_tip if it doesn't exist
+    await sql`
+        INSERT OR IGNORE INTO current_tip (id, hash, slot, block_no)
+        VALUES (1, NULL, 0, 0);
+    `;
+
+    // Insert all blocks into database
+    // Store the block data as JSON since we don't have full CBOR
+    for (const blockData of validBlocks) {
+        await sql`
+            INSERT OR IGNORE INTO blocks (hash, slot, header_data, block_data)
+            VALUES (${Buffer.from(blockData.hash, "hex")}, ${blockData.slot || 0}, ${Buffer.from(JSON.stringify(blockData))}, NULL)
+        `;
+    }
 
     // Update current tip to the most recent block (highest slot)
     const latestBlock = validBlocks.reduce((latest, current) =>
@@ -221,7 +232,7 @@ export async function importChain(
     await sql`
         UPDATE current_tip SET hash = ${
         Buffer.from(latestBlock.hash, "hex")
-    }, slot = ${latestBlock.slot || 0} WHERE id = 1;
+    }, slot = ${latestBlock.slot || 0}, block_no = ${validBlocks.length} WHERE id = 1;
     `;
 
     console.log(

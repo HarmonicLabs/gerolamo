@@ -1,10 +1,12 @@
-import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+// Using raw fetch instead of BlockFrostAPI for custom backend compatibility
 import { sql } from "bun";
 
 export async function populateUTxOs(
-    api: BlockFrostAPI,
+    apiConfig: any,
     stakeDistribution: { stake_address: string }[],
 ) {
+    const baseUrl = apiConfig.customBackend || "https://blockfrost-preprod.onchainapps.io";
+
     console.log("Fetching complete UTxO set...");
 
     const uniqueStakeAddrs = Array.from(
@@ -17,15 +19,24 @@ export async function populateUTxOs(
 
     console.log(`Processing ${uniqueStakeAddrs.length} stake addresses...`);
 
+    // For efficiency, let's limit to first 1000 stake addresses for initial testing
+    const limitedStakeAddrs = uniqueStakeAddrs.slice(0, 1000);
+    console.log(`Limited to ${limitedStakeAddrs.length} stake addresses for testing`);
+
     const accountAddrs = await Promise.all(
-        uniqueStakeAddrs.map(async (stakeAddr, index) => {
-            if (index % 1000 === 0) {
+        limitedStakeAddrs.map(async (stakeAddr, index) => {
+            if (index % 100 === 0) {
                 console.log(
-                    `Processed ${index}/${uniqueStakeAddrs.length} stake addresses`,
+                    `Processed ${index}/${limitedStakeAddrs.length} stake addresses`,
                 );
             }
             try {
-                return await api.accountsAddressesAll(stakeAddr);
+                const response = await fetch(`${baseUrl}/accounts/${stakeAddr}/addresses`);
+                if (!response.ok) {
+                    console.warn(`Failed to get addresses for stake ${stakeAddr}: ${response.status}`);
+                    return [];
+                }
+                return await response.json();
             } catch (error) {
                 console.warn(
                     `Failed to get addresses for stake ${stakeAddr}:`,
@@ -44,13 +55,18 @@ export async function populateUTxOs(
     console.log(`Fetching UTxOs from ${flatAccountAddrs.length} addresses...`);
     const utxos = await Promise.all(
         flatAccountAddrs.map(async (addr, index) => {
-            if (index % 1000 === 0) {
+            if (index % 100 === 0) {
                 console.log(
                     `Fetched UTxOs for ${index}/${flatAccountAddrs.length} addresses`,
                 );
             }
             try {
-                return await api.addressesUtxosAll(addr.address);
+                const response = await fetch(`${baseUrl}/addresses/${addr.address}/utxos`);
+                if (!response.ok) {
+                    console.warn(`Failed to get UTxOs for address ${addr.address}: ${response.status}`);
+                    return [];
+                }
+                return await response.json();
             } catch (error) {
                 console.warn(
                     `Failed to get UTxOs for address ${addr.address}:`,

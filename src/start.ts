@@ -1,23 +1,26 @@
-import { startPeerManager } from "./network/peerManagerWorkers/startPeerManager"
+import path from 'path';
+import { startPeerManager } from "./network/peerManagerWorkers/startPeerManager";
+import { DB } from "./db/DB";
 import type { GerolamoConfig } from "./network/peerManagerWorkers/peerManagerWorker";
-import { initDB } from "./db/initDB";
-import "./network/peerServer/peerBlockServer.ts";
+import { logger } from "./utils/logger";
+import { getBasePath } from './utils/paths.js';
 
-// const BASE_PATH: string = path.resolve(__dirname, `./`);
-// const resolvePath = (relativePath: string): string => path.join(BASE_PATH, relativePath);
+export const getConfigPath = (network: string): string => path.join(getBasePath(), 'config', network, 'config.json');
 
-await initDB();
+const network = process.env.NETWORK ?? "preprod";
+const configFilePath = getConfigPath(network);
+
 async function loadConfig(filePath: string): Promise<GerolamoConfig> {
     const configFile = Bun.file(filePath);
     if (!(await configFile.exists())) {
         throw new Error(`Config file not found: ${filePath}`);
     }
     const configData = await configFile.json();
-    // Validate or cast to GerolamoConfig (add checks as needed)
     return configData as GerolamoConfig;
 }
-const configFilePath = "./src/config/preprod/config.json"; // Adjust path as needed
 
 const config = await loadConfig(configFilePath);
-
+logger.setLogConfig(config.logs);
+await new DB(config.dbPath).ensureInitialized();
+await import("./network/peerServer/peerBlockServer.ts");
 await startPeerManager(config);

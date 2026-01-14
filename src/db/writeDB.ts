@@ -1,27 +1,7 @@
 import { Database } from 'bun:sqlite';
 import { logger } from '../utils/logger';
-
-const DB_PATH = './src/db/chain/Gerolamo.db';
-let db: Database | null = null;
-let pragmasRun = false;  // Track to run PRAGMAs only once (safe outside tx)
-
-function getDB(): Database {
-    if (!db) {
-        db = new Database(DB_PATH, { create: true });
-    }
-    if (!pragmasRun) {
-        db.run(`
-            PRAGMA journal_mode = WAL;
-            PRAGMA synchronous = NORMAL;
-            PRAGMA wal_autocheckpoint = 100;
-            PRAGMA busy_timeout = 5000;
-            PRAGMA cache_size = 10000;
-            PRAGMA temp_store = MEMORY;
-        `);
-        pragmasRun = true;
-    }
-    return db;
-};
+import { getDB } from './dbUtils.js';
+import type { AugmentedBlockRow } from './types.js';
 
 interface HeaderInsertData {
     slot: bigint;
@@ -38,11 +18,7 @@ interface BlockInsertData {
     block_fetch_RawCbor: Uint8Array;
 };
 
-export async function insertHeaderBatchVolatile(records: Array<{
-    slot: bigint;
-    headerHash: string;
-    rollforward_header_cbor: Uint8Array;
-}>) {
+export async function insertHeaderBatchVolatile(dbPath: string, records: Array<HeaderInsertData>) {
     if (records.length === 0) return;
 
     // Pre-check for dups in batch (debug only; Map prevents)
@@ -51,8 +27,8 @@ export async function insertHeaderBatchVolatile(records: Array<{
         logger.warn(`Batch has ${records.length - hashes.size} duplicate hashes!`);
     }
 
-    const tx = getDB().transaction(() => {
-        const stmt = getDB().prepare(`
+    const tx = getDB(dbPath).transaction(() => {
+        const stmt = getDB(dbPath).prepare(`
             INSERT OR IGNORE INTO volatile_headers 
             (slot, header_hash, rollforward_header_cbor)
             VALUES (?, ?, ?)
@@ -69,8 +45,8 @@ export async function insertHeaderBatchVolatile(records: Array<{
     logger.debug(`Inserted ${records.length} volatile headers (ignored dups)`);
 }
 
-export async function insertBlockVolatile(block: BlockInsertData): Promise<void> {
-    const stmt = getDB().prepare(`
+export async function insertBlockVolatile(dbPath: string, block: BlockInsertData): Promise<void> {
+    const stmt = getDB(dbPath).prepare(`
         INSERT INTO volatile_blocks (slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor)
         VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(block_hash) DO UPDATE SET
@@ -90,7 +66,7 @@ export async function insertBlockVolatile(block: BlockInsertData): Promise<void>
     );
 };
 
-export async function insertBlockBatchVolatile(records: Array<{
+export async function insertBlockBatchVolatile(dbPath: string, records: Array<{
     slot: bigint;
     blockHash: string;
     prevHash: string;
@@ -106,8 +82,8 @@ export async function insertBlockBatchVolatile(records: Array<{
         logger.warn(`Batch has ${records.length - hashes.size} duplicate hashes!`);
     }
 
-    const tx = getDB().transaction(() => {
-        const stmt = getDB().prepare(`
+    const tx = getDB(dbPath).transaction(() => {
+        const stmt = getDB(dbPath).prepare(`
             INSERT OR IGNORE INTO volatile_blocks 
             (slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor, is_valid)
             VALUES (?, ?, ?, ?, ?, ?, TRUE)
@@ -128,8 +104,8 @@ export async function insertBlockBatchVolatile(records: Array<{
     logger.debug(`Inserted ${records.length} volatile blocks (ignored dups)`);
 }
 
-export function insertChunk(chunk: { chunk_no: number; tip_hash: string; tip_slot_no: bigint; slot_range_start: bigint; slot_range_end: bigint; }): number {
-    const stmt = getDB().prepare(`
+export function insertChunk(dbPath: string, chunk: { chunk_no: number; tip_hash: string; tip_slot_no: bigint; slot_range_start: bigint; slot_range_end: bigint; }): number {
+    const stmt = getDB(dbPath).prepare(`
         INSERT INTO immutable_chunks (chunk_no, tip_hash, tip_slot_no, slot_range_start, slot_range_end)
         VALUES (?, ?, ?, ?, ?)
         RETURNING chunk_id
@@ -144,8 +120,8 @@ export function insertChunk(chunk: { chunk_no: number; tip_hash: string; tip_slo
     return result.chunk_id;
 };
 
-export function insertImmutableBlocks(blocks: any[], chunk_id: number): void {
-    const stmt = getDB().prepare(`
+export function insertImmutableBlocks(dbPath: string, blocks: AugmentedBlockRow[], chunk_id: number): void {
+    const stmt = getDB(dbPath).prepare(`
         INSERT INTO immutable_blocks (slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor, rollforward_header_cbor, chunk_id)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT DO NOTHING
@@ -155,8 +131,8 @@ export function insertImmutableBlocks(blocks: any[], chunk_id: number): void {
     }
 };
 
-export function deleteVolatileBlocks(blockHashes: string[]): void {
-    const stmt = getDB().prepare(`
+export function deleteVolatileBlocks(dbPath: string, blockHashes: string[]): void {
+    const stmt = getDB(dbPath).prepare(`
         DELETE FROM volatile_blocks
         WHERE block_hash = ?;
     `);
@@ -165,8 +141,8 @@ export function deleteVolatileBlocks(blockHashes: string[]): void {
     }
 };
 
-export function deleteVolatileHeaders(headerHashes: string[]): void {
-    const stmt = getDB().prepare(`
+export function deleteVolatileHeaders(dbPath: string, headerHashes: string[]): void {
+    const stmt = getDB(dbPath).prepare(`
         DELETE FROM volatile_headers
         WHERE header_hash = ?;
     `);

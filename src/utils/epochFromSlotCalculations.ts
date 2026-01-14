@@ -1,4 +1,4 @@
-import { ShelleyGenesisConfig } from "../config/preprod/ShelleyGenesisTypes";
+import { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 
 export function calculateCardanoEpoch(
     absoluteSlot: number | bigint,

@@ -106,16 +106,14 @@ export async function blockParser(
         lazyBlock instanceof LazyCborArray
     )) throw new Error("invalid CBOR for block");
     
-    const newMultiEraBlock = MultiEraBlock.fromCbor(toHex(newBlock.blockData));
+    const newMultiEraBlock = MultiEraBlock.fromCbor(newBlock.blockData);
 
-    // logger.debug("MultiEra Block: ", newMultiEraBlock);
-    return (newMultiEraBlock)
-
+    return newMultiEraBlock;
 };
 
-//**
+//** Calculating block_body_hash **//
 /**
-     * Calculating block_body_hash
+     
      * The block_body_hash is not a simple blake2b_256 hash of the entire serialized block body.
      * Instead, it is a Merkle root-like hash (often referred to as a "Merkle triple root" or quadruple root, depending on the era) of the key components of the block body.
      * This design allows for efficient verification of the block's contents (transactions, witnesses, metadata, etc.) without re-serializing the entire body,

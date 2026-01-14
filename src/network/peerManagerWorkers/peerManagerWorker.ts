@@ -2,7 +2,7 @@ import { parentPort, workerData, Worker } from "worker_threads";
 import { logger } from "../../utils/logger";
 import { parseTopology } from "../topology/parseTopology";
 import { type Topology } from "../topology/topology";
-import type { ShelleyGenesisConfig } from "../../config/preprod/ShelleyGenesisTypes";
+import type { ShelleyGenesisConfig } from "../../types/ShelleyGenesisTypes";
 import type { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "../peerClientWorkers/PeerClient";
@@ -21,6 +21,12 @@ export interface GerolamoConfig {
     readonly logLevel: string;
     readonly shelleyGenesisFile: string;
     readonly enableMinibf?: boolean;
+    readonly dbPath: string;
+	readonly logs: {
+		readonly logToFile: boolean;
+		readonly logToConsole: boolean;
+		readonly logDirectory: string;
+	};
 	allPeers: Map<string, PeerClient>;
 };
 
@@ -145,6 +151,7 @@ async function addPeer(host: string, port: number | bigint, category: string) {
 parentPort!.on("message", async (msg: any) => {
 	if (msg.type === "init") {
 		config = workerData as GerolamoConfig;
+		logger.setLogConfig(config.logs);
 		topology = await parseTopology(config.topologyFile);
 		const shelleyGenesisFile = Bun.file(config.shelleyGenesisFile);
 		shelleyGenesisConfig = await shelleyGenesisFile.json();

@@ -1,7 +1,7 @@
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { logger } from "./logger";
 import { getEpochNonce, putEpochNonce, getEpochVrfOutputs } from '../lmdbWorkers/lmdbWorker';
-import { ShelleyGenesisConfig } from '../config/preprod/ShelleyGenesisTypes';
+import { ShelleyGenesisConfig } from '../types/ShelleyGenesisTypes';
 import { toHex } from '@harmoniclabs/uint8array-utils';
 
 export async function calcEpochNonce(endedEpoch: number, genesis: ShelleyGenesisConfig, slot: number): Promise<void> {

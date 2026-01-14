@@ -3,10 +3,11 @@ import { connect } from "node:net";
 import { logger } from "../../utils/logger";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import type { GerolamoConfig } from "../peerManagerWorkers/peerManagerWorker";
-import type { ShelleyGenesisConfig } from "../../config/preprod/ShelleyGenesisTypes";
+import type { ShelleyGenesisConfig } from "../../types/ShelleyGenesisTypes";
 import { parentPort } from "worker_threads";
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { getBlockBySlot } from "../../db/readDB";
+import { DB } from "../../db/DB";
 
 export interface IPeerClient {
     host: string;
@@ -21,6 +22,7 @@ export interface IPeerClient {
     syncPointFrom?: ChainPoint | null;
     syncPointTo?: ChainPoint | null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
+	db: DB;
 }
 
 export class PeerClient implements IPeerClient {
@@ -38,7 +40,8 @@ export class PeerClient implements IPeerClient {
     private keepAliveInterval: NodeJS.Timeout | null;
     private isRangeSyncComplete: boolean = false;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-
+	db: DB;
+	
     constructor(
         host: string,
         port: number | bigint,
@@ -50,6 +53,7 @@ export class PeerClient implements IPeerClient {
         const unixTimestamp = Math.floor(Date.now() / 1000);
         this.peerId = `${host}:${port}:${unixTimestamp}`; // Set after host/port
         this.shelleyGenesisConfig = {} as ShelleyGenesisConfig;
+		this.db = new DB(this.config.dbPath);
 
         this.mplexer = new Multiplexer({
             connect: () => {
@@ -154,86 +158,65 @@ export class PeerClient implements IPeerClient {
 
         logger.debug(`Handshake success for peer ${this.peerId}`);
         // return "handshake success";
-    }
+    };
 
     async syncToTip(): Promise<ChainPoint> {
         logger.debug(`Starting chain sync for peer ${this.peerId}...`);
-        let intersectResult: ChainSyncIntersectFound | ChainSyncIntersectNotFound = await this.chainSyncClient.findIntersect([new ChainPoint({})]);
-        let tipPoint = intersectResult.tip.point;
-        if (
-            !this.config.syncFromTip && !this.config.syncFromGenesis &&
-            !this.config.syncFromPoint
-        ) throw new Error("Invalid sync configuration in config file");
 
-        if (this.config.syncFromGenesis) {
-            logger.debug(`Syncing from genesis for peer ${this.peerId}...`);
-            const genesisBlock = new ChainPoint({
-                blockHeader: {
-                    slotNumber: 2n,
-                    hash: fromHex(this.config.genesisBlockHash),
-                },
-            });
-            intersectResult = await this.chainSyncClient.findIntersect([
-                genesisBlock,
-            ]);
+        // Get peer's tip
+        const intersectEmpty = await this.chainSyncClient.findIntersect([]);
+        const peerTipPoint = intersectEmpty.tip.point;
+
+        // Get DB tip
+        let dbTipPoint: ChainPoint | null = null;
+        try {
+            const maxSlot = await this.db.getMaxSlot();
+            if (maxSlot > 0n) {
+                const row = this.db.getBlockBySlot(maxSlot);
+				logger.debug("DB Tip Row: ", row);
+                if (row) {
+                    dbTipPoint = new ChainPoint({
+                        blockHeader: {
+                            slotNumber: maxSlot,
+                            hash: fromHex(row.block_hash)
+                        }
+                    });
+                }
+            }
+        } catch (err) {
+            logger.warn(`Failed to get DB tip for peer ${this.peerId}:`, err);
         }
 
-        if (this.config.syncFromTip) {
-            const dbTipPoint = await getBlockBySlot(-1n); // get latest block
-            logger.debug(`DB Tip Point: `, dbTipPoint);
-            if (!dbTipPoint) {
-                throw new Error("No blocks found in database for syncFromTip");
-            }
-
-            const lastPointDb = {
-                slot: 0n,
-                hash: new Uint8Array(),
-            }
-            logger.debug(`Last point in DB: `, lastPointDb);
-            logger.debug(`Syncing to latest point for peer ${this.peerId}...`);
-            if (
-                lastPointDb &&
-                lastPointDb.slot < tipPoint.blockHeader?.slotNumber!
-            ) {
-                tipPoint = new ChainPoint({
-                    blockHeader: {
-                        slotNumber: lastPointDb.slot,
-                        hash: lastPointDb.hash,
-                    },
-                });
-            }
-            intersectResult = await this.chainSyncClient.findIntersect([
-                tipPoint,
-            ]);
-        };
-
-        if (this.config.syncFromPoint && !this.config.syncFromTip) {
-            logger.debug(
-                `Syncing from configured point for peer ${this.peerId}...`,
-                this.config.syncFromPoint,
-            );
-           
-            const newChainPoint = new ChainPoint({
+        let startPoint: ChainPoint;
+		logger.debug("dbTipPoint: ", dbTipPoint);
+        if (this.config.syncFromPoint) {
+            startPoint = dbTipPoint || new ChainPoint({
                 blockHeader: {
                     slotNumber: this.config.syncFromPointSlot,
                     hash: fromHex(this.config.syncFromPointBlockHash)
                 }
-            })
-            
-            intersectResult = await this.chainSyncClient.findIntersect([newChainPoint]);
-            if (intersectResult instanceof ChainSyncIntersectNotFound) {
-                throw new Error("Configured syncFromPoint not found on peer");
-            };
-            logger.debug("Sync from Point ", intersectResult.point.blockHeader?.slotNumber)
+            });
+        } else {
+            // syncFromTip (default)
+            startPoint = dbTipPoint || new ChainPoint({});
         };
 
-        // logger.debug("intersectResult: ", intersectResult);
-        return intersectResult.tip.point; 
-    }
+        if (!this.config.syncFromTip && !this.config.syncFromPoint) {
+            throw new Error("Invalid sync configuration: enable syncFromTip or syncFromPoint");
+        };
+
+        const intersectResult = await this.chainSyncClient.findIntersect([startPoint]);
+        if (intersectResult instanceof ChainSyncIntersectFound) {
+            logger.debug(`Intersect found at slot ${intersectResult.point.blockHeader?.slotNumber} for peer ${this.peerId}`);
+        } else {
+            logger.warn(`No intersect found for peer ${this.peerId}, proceeding with tip`);
+        };
+        return intersectResult.tip.point;
+    };
 
     // starts sync loop for all peers in parrallel
     async startSyncLoop(): Promise<void> {
-        let timeout = 25;
+        let timeout = 83;
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
         this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
             const tip = rollForward.tip.point.blockHeader?.slotNumber;
@@ -295,7 +278,7 @@ export class PeerClient implements IPeerClient {
         const blockData = await this.blockFetchClient.request(chainPoint);
         // logger.debug(`Fetched block at slot ${slot} for peer ${this.peerId}`);
         return blockData;
-    }
+    };
 
     async fetchMultipleBlocks(points: ChainPoint[]): Promise<any[]> {
         /* Not tested yet */

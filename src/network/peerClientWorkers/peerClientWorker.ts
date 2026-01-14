@@ -9,10 +9,10 @@ import { prettyBlockValidationLog } from "../../tui/tui";
 import { calculatePreProdCardanoEpoch } from "../../utils/epochFromSlotCalculations";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
-import { insertBlockVolatile, insertBlockBatchVolatile, insertHeaderBatchVolatile } from "../../db/writeDB";
-import { gcVolatileToImmutable } from "../../db/volatileDBTools";
+import { DB } from "../../db/DB";
 
 let config: GerolamoConfig;
+let db: DB;
 let allPeers = new Map<string, PeerClient>();
 let hotPeers: PeerClient[] = [];
 let warmPeers: PeerClient[] = [];
@@ -39,6 +39,8 @@ let batchHeaderRecords: Map<string, {
 parentPort!.on("message", async (msg: any) => {
 	if (msg.type === "init") {
 		config = msg.config;
+		db = new DB(config.dbPath);
+		logger.setLogConfig(config.logs);
 		logger.debug("PeerClient worker initialized");
 		parentPort!.postMessage({ type: "started" });
 	}
@@ -110,9 +112,15 @@ parentPort!.on("message", async (msg: any) => {
 		let firstEpochSlot: number | null = null;
 
 		const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await peer.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
-		const multiEraBlock: MultiEraBlock | undefined = await blockParser(newBlockRes);
 		
-		// logger.debug("Parsed MultiEraBlock: ", multiEraBlock);
+		let multiEraBlock: MultiEraBlock | undefined;
+		try {
+		    multiEraBlock = await blockParser(newBlockRes);
+		} catch (e: any) {
+		    logger.error(`Block parse failed for peer ${peerId} at slot ${headerValidationRes.slot}:`, e.message || e, `BlockHash: ${toHex(headerValidationRes.blockHeaderHash)}`, `BlockData: ${toHex((newBlockRes as BlockFetchBlock).blockData || new Uint8Array())}`);
+		    return;
+		}
+		
 		if (!(multiEraBlock instanceof MultiEraBlock)) 
 		{
 		    logger.log(`Block validation failed for peer ${peerId} at slot ${headerValidationRes.slot}`);			
@@ -160,8 +168,8 @@ parentPort!.on("message", async (msg: any) => {
 
 		if (batchBlockRecords.size >= 50) 
 		{
-			await insertBlockBatchVolatile(Array.from(batchBlockRecords.values()));
-			await insertHeaderBatchVolatile(Array.from(batchHeaderRecords.values()));  // Batch headers
+			await db.insertBlockBatchVolatile(Array.from(batchBlockRecords.values()));
+			await db.insertHeaderBatchVolatile(Array.from(batchHeaderRecords.values()));  // Batch headers
 			batchBlockRecords.clear();
 			batchHeaderRecords.clear();
 		};	
@@ -171,9 +179,9 @@ parentPort!.on("message", async (msg: any) => {
 		{
 			// logger.debug("Running volatile to immutable DB GC...");
 			volatileDbGcCounter = 0;
-			await gcVolatileToImmutable();
+			await db.compact();
 		};
-		// logger.debug(`Validated - Era: ${era} - Epoch: ${blockEpoch} - Block Header Hash: ${toHex(blockHeaderHash)} - Absolute Slot: ${blockSlot} of ${msg.tip} - Total Percent Complete: ${((Number(blockSlot) / Number(msg.tip)) * 100).toFixed(2)}%`);
+		// logger.debug(`Validated - Era: ${era} - Epoch: ${blockEpoch} - Block Header Hash: ${toHex(blockHeaderHash)} - Absolute Slot: ${blockSlot} - Total Percent Complete: ${((Number(blockSlot) / Number(msg.tip)) * 100).toFixed(2)}%`);
 		prettyBlockValidationLog(era, Number(blockEpoch), blockHeaderHash, blockSlot, tip, volatileDbGcCounter, batchBlockRecords.size);			
 	};
 

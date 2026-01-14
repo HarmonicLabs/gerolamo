@@ -3,7 +3,7 @@ import {
     adaptLegacyTopology,
     isLegacyTopology,
     isTopology,
-    Topology,
+    type Topology,
 } from "./topology";
 
 export async function parseTopology(path: string): Promise<Topology> {

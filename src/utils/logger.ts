@@ -1,4 +1,6 @@
 import color from "picocolors";
+import * as fs from "fs";
+import path from "path";
 
 export enum LogLevel {
     DEBUG = 0,
@@ -28,10 +30,16 @@ export function logLevelFromString(str: string): LogLevel {
 
 export interface LoggerConfig {
     logLevel: LogLevel;
+    logDirectory?: string;
+    logToFile?: boolean;
+    logToConsole?: boolean;
 }
 
 const defaultLoggerConfig: LoggerConfig = {
     logLevel: LogLevel.INFO,
+    logDirectory: "./logs",
+    logToFile: true,
+    logToConsole: true,
 };
 
 export class Logger {
@@ -43,6 +51,19 @@ export class Logger {
             ...defaultLoggerConfig,
             ...config,
         };
+        this.updatePaths();
+    }
+
+    private updatePaths() {
+        const dir = this.config.logDirectory || "./logs";
+        try {
+            fs.mkdirSync(dir, { recursive: true });
+        } catch {}
+    }
+
+    public setLogConfig(config: Partial<LoggerConfig>) {
+        Object.assign(this.config, config);
+        this.updatePaths();
     }
 
     get logLevel() {
@@ -70,40 +91,94 @@ export class Logger {
         this.config.logLevel = level;
     }
 
+    private appendLog(level: string, stuff: any[]) {
+        const logFilePath = path.join(this.config.logDirectory || "./logs", `${level.toLowerCase()}.jsonl`);
+        const entry = {
+            timestamp: new Date().toISOString(),
+            level,
+            args: stuff.map((arg: any) => {
+                if (arg instanceof Error) {
+                    return {
+                        message: arg.message,
+                        stack: arg.stack,
+                        name: arg.name
+                    };
+                }
+                if (typeof arg === "bigint") {
+                    return arg.toString();
+                }
+                try {
+                    return JSON.parse(JSON.stringify(arg));
+                } catch {
+                    return String(arg);
+                }
+            })
+        };
+        try {
+            fs.appendFileSync(logFilePath, JSON.stringify(entry) + "\n");
+        } catch (logErr) {
+            console.error("Failed to write log:", logErr);
+        }
+    }
+
     debug(...stuff: any[]) {
         if (!this.canDebug()) return;
+        const LEVEL = "DEBUG";
 
-        let prefix = `[Debug][${new Date().toUTCString()}]:`;
-        if (this._colors) prefix = color.magenta(prefix);
+        if (this.config.logToConsole) {
+            let prefix = `[${LEVEL}][${new Date().toUTCString()}]:`;
+            if (this._colors) prefix = color.magenta(prefix);
+            console.log(prefix, ...stuff);
+        }
 
-        console.log(prefix, ...stuff);
+        if (this.config.logToFile) {
+            this.appendLog(LEVEL, stuff);
+        }
     }
     log(...stuff: any[]) {
         this.info(...stuff);
     }
     info(...stuff: any[]) {
         if (!this.canInfo()) return;
+        const LEVEL = "INFO";
 
-        let prefix = `[Info ][${new Date().toUTCString()}]:`;
-        if (this._colors) prefix = color.cyan(prefix);
+        if (this.config.logToConsole) {
+            let prefix = `[${LEVEL} ][${new Date().toUTCString()}]:`;
+            if (this._colors) prefix = color.cyan(prefix);
+            console.log(prefix, ...stuff);
+        }
 
-        console.log(prefix, ...stuff);
+        if (this.config.logToFile) {
+            this.appendLog(LEVEL, stuff);
+        }
     }
     warn(...stuff: any[]) {
         if (!this.canWarn()) return;
+        const LEVEL = "WARN";
 
-        let prefix = `[Warn ][${new Date().toUTCString()}]:`;
-        if (this._colors) prefix = color.yellow(prefix);
+        if (this.config.logToConsole) {
+            let prefix = `[${LEVEL} ][${new Date().toUTCString()}]:`;
+            if (this._colors) prefix = color.yellow(prefix);
+            console.warn(prefix, ...stuff);
+        }
 
-        console.warn(prefix, ...stuff);
+        if (this.config.logToFile) {
+            this.appendLog(LEVEL, stuff);
+        }
     }
     error(...stuff: any[]) {
         if (!this.canError()) return;
+        const LEVEL = "ERROR";
 
-        let prefix = `[Error][${new Date().toUTCString()}]:`;
-        if (this._colors) prefix = color.red(prefix);
+        if (this.config.logToConsole) {
+            let prefix = `[${LEVEL}][${new Date().toUTCString()}]:`;
+            if (this._colors) prefix = color.red(prefix);
+            console.error(prefix, ...stuff);
+        }
 
-        console.error(prefix, ...stuff);
+        if (this.config.logToFile) {
+            this.appendLog(LEVEL, stuff);
+        }
     }
 }
 

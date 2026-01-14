@@ -6,7 +6,6 @@ import type { GerolamoConfig } from "../peerManagerWorkers/peerManagerWorker";
 import type { ShelleyGenesisConfig } from "../../types/ShelleyGenesisTypes";
 import { parentPort } from "worker_threads";
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { getBlockBySlot } from "../../db/readDB";
 import { DB } from "../../db/DB";
 
 export interface IPeerClient {

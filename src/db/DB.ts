@@ -1,37 +1,40 @@
 import { Database } from 'bun:sqlite';
-import { getDB } from './dbUtils.js';
 import fs from 'fs';
-import { logger } from '../utils/logger.js';
-import { getBasePath } from '../utils/paths.js';
+import { logger } from '../utils/logger';
+import { getBasePath } from '../utils/paths';
 
 interface HeaderInsertData {
-	slot: bigint;
-	headerHash: string;
-	rollforward_header_cbor: Uint8Array;
+    slot: bigint;
+    headerHash: string;
+    rollforward_header_cbor: Uint8Array;
 }
 
 interface BlockInsertData {
-	slot: bigint;
-	blockHash: string;
-	prevHash: string;
-	headerData: Uint8Array;
-	blockData: Uint8Array;
-	block_fetch_RawCbor: Uint8Array;
+    slot: bigint;
+    blockHash: string;
+    prevHash: string;
+    headerData: Uint8Array;
+    blockData: Uint8Array;
+    block_fetch_RawCbor: Uint8Array;
 }
 
 interface ImmutableChunk {
-	chunk_no: number;
-	tip_hash: string;
-	tip_slot_no: bigint;
-	slot_range_start: bigint;
-	slot_range_end: bigint;
+    chunk_no: number;
+    tip_hash: string;
+    tip_slot_no: bigint;
+    slot_range_start: bigint;
+    slot_range_end: bigint;
 }
 
 export class DB {
+  private _db: Database | undefined;
   constructor(private readonly dbPath: string) {}
 
   get db(): Database {
-    return getDB(this.dbPath);
+    if (!this._db) {
+      this._db = new Database(this.dbPath);
+    }
+    return this._db;
   }
 
   async ensureInitialized(): Promise<void> {

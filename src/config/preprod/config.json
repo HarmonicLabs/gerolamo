@@ -1,0 +1,23 @@
+{
+    "p2p": "enabled",
+    "topologyFile": "./src/config/preprod/topology.json",
+    "byronGenesisFile": "./src/config/preprod/byron-genesis.json",
+    "byronGenesisHash": "d4b8de7a11d929a323373cbab6c1a9bdc931beffff11db111cf9d57356ee1937",
+    "shelleyGenesisFile": "./src/config/preprod/shelley-genesis.json",
+    "shelleyGenesisHash": "162d29c4e1cf6b8a84f2d692e67a3ac6bc7851bc3e6e4afe64d15778bed8bd86",
+    "alonzoGenesisFile": "./src/config/preprod/alonzo-genesis.json",
+    "alonzoGenesisHash": "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
+    "conwayGenesisFile": "./src/config/preprod/conway-genesis.json",
+    "conwayGenesisHash": "0eb6adaec3fcb1fe286c1b4ae0da2a117eafc3add51e17577d36dd39eddfc3db",
+    "syncFromTip": false,
+    "syncFromGenesis": false,
+    "genesisBlockHash": "1d031daf47281f69cd95ab929c269fd26b1434a56a5bbbd65b7afe85ef96b233",
+    "syncFromPoint": true,
+    "syncFromPointSlot": 3542390,
+    "syncFromPointBlockHash": "f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f",
+    "logLevel": "Error",
+    "minibf": true,
+    "minibfPort": 3000,
+    "network": "testnet",
+    "networkMagic": 1
+}

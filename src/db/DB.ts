@@ -1,8 +1,8 @@
 import { Database } from 'bun:sqlite';
-import { getDB } from './dbUtils';
+import { getDB } from './dbUtils.js';
 import fs from 'fs';
-import { logger } from '../utils/logger';
-import { getBasePath } from '../utils/paths';
+import { logger } from '../utils/logger.js';
+import { getBasePath } from '../utils/paths.js';
 
 interface HeaderInsertData {
 	slot: bigint;
@@ -27,15 +27,6 @@ interface ImmutableChunk {
 	slot_range_end: bigint;
 }
 
-interface CommonBlockRow {
-    slot: bigint;
-    block_hash: string;
-    prev_hash: string;
-    header_data: Uint8Array;
-    block_data: Uint8Array;
-    block_fetch_RawCbor: Uint8Array;
-  }
-
 export class DB {
   constructor(private readonly dbPath: string) {}
 
@@ -54,26 +45,14 @@ export class DB {
     logger.info("DB initialized with WAL mode for concurrency");
   }
 
-  getBlockByHash(hash: string): CommonBlockRow | undefined {
-    const stmt = this.db.prepare(`
-      SELECT slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor
-      FROM volatile_blocks WHERE block_hash = ?
-      UNION ALL
-      SELECT slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor
-      FROM immutable_blocks WHERE block_hash = ?
-    `);
-    return stmt.get(hash, hash) as CommonBlockRow | undefined;
+  getBlockByHash(hash: string): any {
+    const stmt = this.db.prepare('SELECT * FROM volatile_blocks WHERE block_hash = ? UNION SELECT * FROM immutable_blocks WHERE block_hash = ?');
+    return stmt.get(hash, hash);
   }
 
-  getBlockBySlot(slot: bigint): CommonBlockRow | undefined {
-    const stmt = this.db.prepare(`
-      SELECT slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor
-      FROM volatile_blocks WHERE slot = ?
-      UNION ALL
-      SELECT slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor
-      FROM immutable_blocks WHERE slot = ?
-    `);
-    return stmt.get(slot, slot) as CommonBlockRow | undefined;
+  getBlockBySlot(slot: bigint): any {
+    const stmt = this.db.prepare('SELECT * FROM volatile_blocks WHERE slot = ? UNION SELECT * FROM immutable_blocks WHERE slot = ?');
+    return stmt.get(slot, slot);
   }
 
   getTransactionByTxId(txid: string): any {
@@ -290,7 +269,7 @@ export class DB {
 
 		if (oldBlocks.length === 0) return;  // Chunk only if blocks; headers follow
 
-		// Map headers by hash for denorm to blocks (1:1, header_hash == block_hash however block_hash !== block_body_hash)
+		// Map headers by hash for denorm to blocks (1:1, header_hash == block_hash)
 		const headerMap = new Map(oldHeaders.map((h: any) => [h.header_hash, h.rollforward_header_cbor]));
 		for (const block of oldBlocks) {
 			block.rollforward_header_cbor = headerMap.get(block.block_hash) ?? new Uint8Array(0);

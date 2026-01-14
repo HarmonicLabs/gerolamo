@@ -1,6 +1,8 @@
 import { startPeerManager } from "./network/peerManagerWorkers/startPeerManager"
 import type { GerolamoConfig } from "./network/peerManagerWorkers/peerManagerWorker";
-import { initDB } from "./db/writeDB";
+import { initDB } from "./db/initDB";
+import "./network/peerServer/peerBlockServer.ts";
+
 // const BASE_PATH: string = path.resolve(__dirname, `./`);
 // const resolvePath = (relativePath: string): string => path.join(BASE_PATH, relativePath);
 

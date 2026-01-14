@@ -21,7 +21,7 @@ Gerolamo Network is a TypeScript implementation of a Cardano node/relay using Bu
 - **Run**: `bun run index.ts` (extend to start peer manager via `startPeerManager.ts`).
 - **Sync Chain**: Configure `GerolamoConfig` in topology/config files; init starts handshake and sync loop.
 - **Debug Peers**: Set `logLevel` in config; logs peer connections, sync progress.
-- **Storage**: Blocks/headers stored in SQLite3; schema based on Kupo for efficiency.
+- **Storage**: Blocks/headers stored in SQLite3 with an efficient schema.
 
 ## Project-Specific Conventions
 - **Peer Categories**: Add/move peers via worker messages; hot peers sync actively (see `addPeer` in worker). Preserve worker message types.
@@ -50,6 +50,5 @@ https://github.com/HarmonicLabs/ts-best-practices
 
 ## Extra Information and refrences
 Cardanno Node Github Repository (https://github.com/IntersectMBO/cardano-node)
-Kupo Github Repository (https://github.com/CardanoSolutions/kupo/blob/master/src/Kupo/Data/Database.hs)
 
 Refer to `README.md` for basic setup. When editing, preserve worker message types and any remaining LMDB schemas during transition to SQLite3.

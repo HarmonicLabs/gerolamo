@@ -1,11 +1,23 @@
 import { Database } from 'bun:sqlite';
 
-const DB_PATH = './src/db/Gerolamo.db';
+const DB_PATH = './src/db/chain/Gerolamo.db';
 let db: Database | null = null;
+let pragmasRun = false;  // Track to run PRAGMAs only once (safe outside tx)
 
 function getDB(): Database {
     if (!db) {
-        db = new Database(DB_PATH);
+        db = new Database(DB_PATH, { create: true });
+    }
+    if (!pragmasRun) {
+        db.run(`
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA wal_autocheckpoint = 100;
+            PRAGMA busy_timeout = 5000;
+            PRAGMA cache_size = 10000;
+            PRAGMA temp_store = MEMORY;
+        `);
+        pragmasRun = true;
     }
     return db;
 };

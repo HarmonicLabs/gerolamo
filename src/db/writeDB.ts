@@ -1,20 +1,26 @@
 import { Database } from 'bun:sqlite';
 import { logger } from '../utils/logger';
 
-const DB_PATH = './src/db/Gerolamo.db';
+const DB_PATH = './src/db/chain/Gerolamo.db';
 let db: Database | null = null;
+let pragmasRun = false;  // Track to run PRAGMAs only once (safe outside tx)
 
 function getDB(): Database {
     if (!db) {
         db = new Database(DB_PATH, { create: true });
     }
+    if (!pragmasRun) {
+        db.run(`
+            PRAGMA journal_mode = WAL;
+            PRAGMA synchronous = NORMAL;
+            PRAGMA wal_autocheckpoint = 100;
+            PRAGMA busy_timeout = 5000;
+            PRAGMA cache_size = 10000;
+            PRAGMA temp_store = MEMORY;
+        `);
+        pragmasRun = true;
+    }
     return db;
-};
-
-export async function initDB(): Promise<void> {
-    const schemaFile = Bun.file('./src/db/schemas.sql');
-    const schema = await schemaFile.text();
-    getDB().run(schema);
 };
 
 interface HeaderInsertData {
@@ -140,8 +146,8 @@ export function insertChunk(chunk: { chunk_no: number; tip_hash: string; tip_slo
 
 export function insertImmutableBlocks(blocks: any[], chunk_id: number): void {
     const stmt = getDB().prepare(`
-        INSERT INTO immutable_blocks (slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor, rollforward_header_cbor, is_valid, chunk_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, TRUE, ?)
+        INSERT INTO immutable_blocks (slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor, rollforward_header_cbor, chunk_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT DO NOTHING
     `);
     for (const block of blocks) {

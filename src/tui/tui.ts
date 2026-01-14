@@ -1,14 +1,50 @@
 import { stdout } from 'process';
 import { toHex } from '@harmoniclabs/uint8array-utils';
 
-let logLines = 0;
 let startTime: number | null = null;
 let isFirstRender = true;
-const DASHBOARD_HEIGHT = 20; // Fixed based on your outputLines count
+let lastSlot = 0n;
+let lastTime = 0;
+
+const DASHBOARD_HEIGHT = 22;
+const INNER_WIDTH = 80;
+const PROGRESS_WIDTH = 48;
+
+const colors = {
+  hlRed: '\x1b[91m',              // Bright ANSI red – main accent
+  hlRedDeep: '\x1b[38;5;160m',    // Deeper crimson for headers
+  hlRedBright: '\x1b[38;5;196m',  // Intense for alerts/purge
+  gray: '\x1b[90m',               // Dim background for progress
+  lightGray: '\x1b[37m',
+  white: '\x1b[97m',
+  dim: '\x1b[2m',
+  reset: '\x1b[0m',
+  bold: '\x1b[1m',
+};
+
+const glow = colors.bold;
 
 function visibleLength(str: string): number {
   return str.replace(/\x1b\[[0-9;]*m/g, '').length;
 }
+
+function center(text: string, width = INNER_WIDTH): string {
+  const visLen = visibleLength(text);
+  if (visLen > width) return text.slice(0, width - 3) + '...';
+  const padTotal = width - visLen;
+  const left = Math.floor(padTotal / 2);
+  return `${colors.hlRed}│${colors.reset}${' '.repeat(left)}${text}${' '.repeat(padTotal - left)}${colors.hlRed}│${colors.reset}`;
+}
+
+function formatNum(n: number): string {
+  return n.toLocaleString('en-US');
+}
+
+const LAB_HEADER = [
+  `${colors.hlRed}${glow}  ╔══════════════════════════════════════════════╗  ${colors.reset}`,
+  `${colors.hlRed}  ║      HARMONIC LABS – GEROLAMO NODE           ║  ${colors.reset}`,
+  `${colors.hlRed}  ╚══════════════════════════════════════════════╝  ${colors.reset}`,
+];
 
 export function prettyBlockValidationLog(
   era: number,
@@ -19,97 +55,83 @@ export function prettyBlockValidationLog(
   volatileDbGcCounter: number,
   batchInsertCounter?: number,
 ): void {
-  if (startTime === null) {
-    startTime = Date.now();
-  }
-  const now = Date.now();
-  const elapsedMs = now - startTime;
-  const elapsedSeconds = Math.floor(elapsedMs / 1000);
-  const hours = Math.floor(elapsedSeconds / 3600);
-  const minutes = Math.floor((elapsedSeconds % 3600) / 60);
-  const seconds = elapsedSeconds % 60;
-  const runningTime = `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')} `;
+  if (startTime === null) startTime = Date.now();
 
-  const currentDateTime = new Date(now).toLocaleString();
+  const now = Date.now();
+  const elapsedSec = Math.floor((now - startTime) / 1000);
+
+  const days = Math.floor(elapsedSec / 86400);
+  const h = Math.floor((elapsedSec % 86400) / 3600);
+  const m = Math.floor((elapsedSec % 3600) / 60);
+  const s = elapsedSec % 60;
+  const runtime = days > 0
+    ? `${days}d ${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`
+    : `${h.toString().padStart(2,'0')}:${m.toString().padStart(2,'0')}:${s.toString().padStart(2,'0')}`;
 
   const slotNum = Number(blockSlot);
   const tipNum = Number(tip);
-  const percent = ((slotNum / tipNum) * 100).toFixed(2);
-  const hashHex = toHex ? toHex(blockHeaderHash) : blockHeaderHash.toString();
-  const shortHash = hashHex.slice(0, 16) + '...';
 
-  const progressWidth = 50;
-  const filled = Math.floor((slotNum / tipNum) * progressWidth);
-  const progressBar = '█'.repeat(filled) + '░'.repeat(progressWidth - filled);
+  const progress = tipNum > 0 ? Math.max(0, Math.min(1, slotNum / tipNum)) : 0;
+  const percent = (progress * 100).toFixed(2);
 
-  const green = '\x1b[32m';
-  const yellow = '\x1b[33m';
-  const red = '\x1b[31m';
-  const reset = '\x1b[0m';
-  const bold = '\x1b[1m';
-  const clearLine = '\r\x1b[K';
+  const hashShort = toHex(blockHeaderHash).slice(0, 10).toUpperCase() + '..';
 
-  const asciiHeader = [
-    `${red}Harmonic Labs${reset}`,
-    `${red}•Gerolamo•${reset}`
-  ];
+  // Progress bar: red fill + gray background
+  const filled = Math.round(progress * PROGRESS_WIDTH);
+  const bar = '█'.repeat(filled) + '░'.repeat(PROGRESS_WIDTH - filled);
 
-  const innerWidth = 70;
-  const titleText = `${green}${bold}(Era: ${era})${reset}`;
-  const details = `Epoch: ${blockEpoch.toString().padStart(4)} | Slot: ${slotNum.toLocaleString().padStart(8)} / ${tipNum.toLocaleString()} (${percent}%)`;
-  const dbDetails = `${green}Volatile DB GC Counter: ${volatileDbGcCounter.toString().padStart(4)}${batchInsertCounter !== undefined ? ` | Batch Insert Counter: ${batchInsertCounter.toString().padStart(4)}` : ''}${reset}`;
-  const timeDetails = `Running Time: ${runningTime} | Current Time: ${currentDateTime}`;
-  const gcVolatileMsg = `${green}${bold}Running Volatile→Immutable...${reset}`;
-  const batchInsertMsg = `${green}${bold}Running Batch Insert Volatile DB...${reset}`;
-  const hashLine = `Header Hash: ${shortHash}`;
-  const progressLine = `Progress: [${progressBar}] ${percent}%`;
-  const footer = `${yellow}Gerolamo Syncing ${reset}`;
+  // Speed
+  let speed = '';
+  if (lastTime > 0 && now - lastTime > 4000) {
+    const delta = Math.abs(Number(blockSlot) - Number(lastSlot));
+    const minDelta = (now - lastTime) / 60000;
+    if (minDelta > 0) {
+      const bpm = Math.round(delta / minDelta);
+      speed = bpm > 0 ? ` ${bpm} b/min` : ' STALLED';
+    }
+  }
+  lastSlot = BigInt(blockSlot);
+  lastTime = now;
 
-  const frameTop = '╔' + '═'.repeat(innerWidth) + '╗';
-  const frameMid = '║' + ' '.repeat(innerWidth) + '║';
-  const frameBot = '╚' + '═'.repeat(innerWidth) + '╝';
+  const frameTop = `${colors.hlRed}╔${'═'.repeat(INNER_WIDTH)}╗${colors.reset}`;
+  const frameBot = `${colors.hlRed}╚${'═'.repeat(INNER_WIDTH)}╝${colors.reset}`;
 
-  const center = (text: string) => {
-    const visLen = visibleLength(text);
-    const leftPad = Math.floor((innerWidth - visLen) / 2);
-    const rightPad = innerWidth - visLen - leftPad;
-    return '║' + ' '.repeat(leftPad) + text + ' '.repeat(rightPad) + '║';
-  };
-
-  const outputLines = [
+  const lines = [
     frameTop,
-    ...asciiHeader.map(center),
-    frameMid,
-    center(titleText),
-    frameMid,
-    center(details),
-    center(dbDetails),
-    center(timeDetails),
-    Number(volatileDbGcCounter) < 2100 ? center('') : center(gcVolatileMsg),
-    Number(batchInsertCounter) < 40 ? center('') : center(batchInsertMsg),
-    center(hashLine),
-    center(progressLine),
-    center(footer),
-    frameBot
+    ...LAB_HEADER.map(line => center(line, INNER_WIDTH - 0)),
+    center(''),
+    center(`${colors.hlRedDeep}${glow}PREPROD`),
+    center(`${colors.hlRedDeep}${glow}ERA ${era}${colors.reset}`),
+    center(`${colors.lightGray}EPOCH ${blockEpoch.toString().padStart(3,'0')}   SLOT ${formatNum(slotNum).padStart(11)} / ${formatNum(tipNum).padStart(11)}${colors.reset}`),
+    center(`${colors.hlRed}PROGRESS [${bar}] ${percent}%${speed}${colors.reset}`),
+    center(`${colors.gray}HASH ${hashShort}${colors.reset}`),
+    center(`${colors.white}GC CYCLES: ${volatileDbGcCounter.toString().padStart(5)}   BATCH: ${(batchInsertCounter ?? '---').toString().padStart(3)}${colors.reset}`),
+    center(`${colors.dim}UPTIME ${runtime}   ${new Date(now).toLocaleString('en-US', { hour12: true })}${colors.reset}`),
+
+    volatileDbGcCounter >= 2150
+      ? center(`${colors.hlRedBright}${glow}!!! VOLATILE → IMMUTABLE PURGE ACTIVE !!!${colors.reset}`)
+      : center(''),
+
+    (batchInsertCounter ?? 0) >= 40
+      ? center(`${colors.hlRed}${glow}»»» BATCH INSERT SEQUENCE ACTIVE «««${colors.reset}`)
+      : center(''),
+
+    center(''),
+    center(`${colors.gray}${glow}... GEROLAMO – CARDANO SYNC STABLE ...${colors.reset}`),
+    frameBot,
   ];
 
+  // Terminal control
   if (isFirstRender) {
-    const termHeight = process.stdout.rows || 12; // Default if undetectable
-    const scrollTop = 1;
-    const scrollBottom = termHeight - DASHBOARD_HEIGHT;
-    stdout.write(`\x1b[2J`); // Clear entire screen initially
-    stdout.write(`\x1b[${scrollTop};${scrollBottom}r`); // Set scroll region for logs
-    stdout.write(`\x1b[${scrollBottom + 1};1H`); // Move to start of TUI area
+    stdout.write('\x1b[2J\x1b[?25l');
     isFirstRender = false;
   } else {
-    stdout.write(`\x1b[${process.stdout.rows - DASHBOARD_HEIGHT + 1};1H`); // Move to TUI start
-    stdout.write(`\x1b[0J`); // Clear from cursor to end (clears old TUI)
+    stdout.write(`\x1b[${process.stdout.rows - DASHBOARD_HEIGHT + 1};1H\x1b[0J`);
   }
 
-  outputLines.forEach((line) => {
-    stdout.write(clearLine + line + '\n');
-  });
+  const clearLine = '\r\x1b[K';
 
-  // Reset cursor to top of scroll region for any subsequent logs
-  stdout.write(`\x1b[${process.stdout.rows - DASHBOARD_HEIGHT};1H\x1b[1;1H`);
+  lines.forEach(line => stdout.write(clearLine + line + '\n'));
+
+  stdout.write(`\x1b[${process.stdout.rows - DASHBOARD_HEIGHT};1H`);
 }

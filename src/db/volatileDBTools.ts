@@ -29,7 +29,7 @@ export async function createChunk(oldBlocks: any[]): Promise<ImmutableChunk> {
         slot_range_start: firstBlock.slot,
         slot_range_end: lastBlock.slot
     };
-}
+};
 
 export async function gcVolatileToImmutable() {
     const cutoff = (await getMaxSlot()) - 2160n;

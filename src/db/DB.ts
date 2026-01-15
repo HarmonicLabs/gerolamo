@@ -43,19 +43,24 @@ export class DB {
 		logger.log(`Database path: ${this.dbPath}`);
 		const dir = this.dbPath.substring(0, this.dbPath.lastIndexOf('/'));
 		fs.mkdirSync(dir, { recursive: true });
-		const schemaFile = Bun.file(`${getBasePath()}/db/schemas.sql`);
+		const schemaFile = Bun.file(`${getBasePath()}/db/hari_schema.sql`);
 		const schema = await schemaFile.text();
 		logger.info("Initializing Database...");
-		this.db.run(schema);
+		try {
+			this.db.run(schema);
+		} catch (err) {
+			logger.error("Failed to initialize database schema:", err);
+			throw err;
+		}
 		logger.info("DB initialized with WAL mode for concurrency");
 	};
 
 	getBlockByHash(hash: string): any {
 		const stmt = this.db.prepare(`
-		SELECT id, NULL as chunk_id, slot, block_hash, prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
-		FROM volatile_blocks WHERE block_hash = ?
+		SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
+		FROM blocks WHERE hash = ?
 		UNION
-		SELECT id, chunk_id, slot, block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
+		SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
 		FROM immutable_blocks WHERE block_hash = ?
 		`);
 		return stmt.get(hash, hash);
@@ -63,10 +68,10 @@ export class DB {
 
 	getBlockBySlot(slot: bigint): any {
 		const stmt = this.db.prepare(`
-		SELECT id, NULL as chunk_id, slot, block_hash, prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
-		FROM volatile_blocks WHERE slot = ?
+		SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
+		FROM blocks WHERE slot = ?
 		UNION
-		SELECT id, chunk_id, slot, block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
+		SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
 		FROM immutable_blocks WHERE slot = ?
 		`);
 		return stmt.get(slot, slot);
@@ -91,7 +96,7 @@ export class DB {
 	};
 
 	async getMaxSlot(): Promise<bigint> {
-		const stmt = this.db.prepare('SELECT MAX(slot) as max_slot FROM volatile_blocks');
+		const stmt = this.db.prepare('SELECT MAX(slot) as max_slot FROM blocks');
 		const row = stmt.get() as { max_slot: number | null } | undefined;
 		return BigInt(row?.max_slot ?? 0);
 	};
@@ -108,7 +113,7 @@ export class DB {
 
 	async getValidBlocksBefore(cutoffSlot: bigint): Promise<any[]> {
 		const stmt = this.db.prepare(`
-		SELECT * FROM volatile_blocks
+		SELECT * FROM blocks
 		WHERE slot < ? AND is_valid = TRUE
 		ORDER BY slot ASC
 		`);
@@ -150,7 +155,12 @@ export class DB {
 				);
 			};
 		});
-		tx();
+		try {
+			tx();
+		} catch (err) {
+			logger.error("Failed to insert header batch:", err);
+			throw err;
+		}
 		logger.debug(`Inserted ${records.length} volatile headers (ignored dups)`);
 	};
 
@@ -165,14 +175,19 @@ export class DB {
 				block_data = excluded.block_data,
 				block_fetch_RawCbor = excluded.block_fetch_RawCbor
 		`);
-		stmt.run(
-			block.slot,
-			block.blockHash,
-			block.prevHash,
-			block.headerData,
-			block.blockData,
-			block.block_fetch_RawCbor
-		);
+		try {
+			stmt.run(
+				block.slot,
+				block.blockHash,
+				block.prevHash,
+				block.headerData,
+				block.blockData,
+				block.block_fetch_RawCbor
+			);
+		} catch (err) {
+			logger.error("Failed to insert volatile block:", err);
+			throw err;
+		}
 	};
 
 	async insertBlockBatchVolatile(records: Array<{
@@ -194,22 +209,27 @@ export class DB {
 
 		const tx = this.db.transaction(() => {
 			const stmt = this.db.prepare(`
-				INSERT OR IGNORE INTO volatile_blocks 
-				(slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor, is_valid)
-				VALUES (?, ?, ?, ?, ?, ?, TRUE)
+				INSERT OR IGNORE INTO blocks 
+				(hash, slot, header_data, block_data, block_fetch_RawCbor, is_valid, prev_hash)
+				VALUES (?, ?, ?, ?, ?, TRUE, ?)
 			`);
 			for (const record of records) {
 				stmt.run(
-					Number(record.slot),
 					record.blockHash,
-					record.prevHash,
+					Number(record.slot),
 					record.headerData,
 					record.blockData,
-					record.block_fetch_RawCbor
+					record.block_fetch_RawCbor,
+					record.prevHash
 				);
 			}
 		});
-		tx();
+		try {
+			tx();
+		} catch (err) {
+			logger.error("Failed to insert block batch:", err);
+			throw err;
+		}
 		logger.debug(`Inserted ${records.length} volatile blocks (ignored dups)`);
 	};
 
@@ -219,14 +239,19 @@ export class DB {
 			VALUES (?, ?, ?, ?, ?)
 			RETURNING chunk_id
 		`);
-		const result = stmt.get(
-			chunk.chunk_no,
-			chunk.tip_hash,
-			chunk.tip_slot_no,
-			chunk.slot_range_start,
-			chunk.slot_range_end
-		) as { chunk_id: number };
-		return result.chunk_id;
+		try {
+			const result = stmt.get(
+				chunk.chunk_no,
+				chunk.tip_hash,
+				chunk.tip_slot_no,
+				chunk.slot_range_start,
+				chunk.slot_range_end
+			) as { chunk_id: number };
+			return result.chunk_id;
+		} catch (err) {
+			logger.error("Failed to insert chunk:", err);
+			throw err;
+		}
 	};
 
 	insertImmutableBlocks(blocks: any[], chunk_id: number): void {
@@ -235,19 +260,29 @@ export class DB {
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT DO NOTHING
 		`);
-		for (const block of blocks) {
-			stmt.run(block.slot, block.block_hash, block.prev_hash, block.header_data, block.block_data, block.block_fetch_RawCbor, block.rollforward_header_cbor, chunk_id);
-		};
+		try {
+			for (const block of blocks) {
+				stmt.run(block.slot, block.hash, block.prev_hash, block.header_data, block.block_data, block.block_fetch_RawCbor, block.rollforward_header_cbor, chunk_id);
+			};
+		} catch (err) {
+			logger.error("Failed to insert immutable blocks:", err);
+			throw err;
+		}
 	};
 
 	deleteVolatileBlocks(blockHashes: string[]): void {
 		const stmt = this.db.prepare(`
-			DELETE FROM volatile_blocks
-			WHERE block_hash = ?;
+			DELETE FROM blocks
+			WHERE hash = ?;
 		`);
-		for (const hash of blockHashes) {
-			stmt.run(hash);
-		};
+		try {
+			for (const hash of blockHashes) {
+				stmt.run(hash);
+			};
+		} catch (err) {
+			logger.error("Failed to delete volatile blocks:", err);
+			throw err;
+		}
 	};
 
 	deleteVolatileHeaders(headerHashes: string[]): void {
@@ -255,9 +290,14 @@ export class DB {
 			DELETE FROM volatile_headers
 			WHERE header_hash = ?;
 		`);
-		for (const hash of headerHashes) {
-			stmt.run(hash);
-		};
+		try {
+			for (const hash of headerHashes) {
+				stmt.run(hash);
+			};
+		} catch (err) {
+			logger.error("Failed to delete volatile headers:", err);
+			throw err;
+		}
 	};
 
 	async createChunk(oldBlocks: any[]): Promise<ImmutableChunk> {
@@ -273,7 +313,7 @@ export class DB {
 
 		return {
 			chunk_no,
-			tip_hash: lastBlock.block_hash,
+			tip_hash: lastBlock.hash,
 			tip_slot_no: lastBlock.slot,
 			slot_range_start: firstBlock.slot,
 			slot_range_end: lastBlock.slot
@@ -290,14 +330,35 @@ export class DB {
 		// Map headers by hash for denorm to blocks (1:1, header_hash == block_hash)
 		const headerMap = new Map(oldHeaders.map((h: any) => [h.header_hash, h.rollforward_header_cbor]));
 		for (const block of oldBlocks) {
-			block.rollforward_header_cbor = headerMap.get(block.block_hash) ?? new Uint8Array(0);
+			block.rollforward_header_cbor = headerMap.get(block.hash) ?? new Uint8Array(0);
 		}
 
 		const chunk = await this.createChunk(oldBlocks);
-		const chunk_id = this.insertChunk(chunk);
-		this.insertImmutableBlocks(oldBlocks, chunk_id);
-		this.deleteVolatileBlocks(oldBlocks.map((b: any) => b.block_hash));
-		this.deleteVolatileHeaders(oldHeaders.map((h: any) => h.header_hash));
+		let chunk_id: number;
+		try {
+			chunk_id = this.insertChunk(chunk);
+		} catch (err) {
+			logger.error("Failed to insert chunk:", err);
+			throw err;
+		}
+		try {
+			this.insertImmutableBlocks(oldBlocks, chunk_id);
+		} catch (err) {
+			logger.error("Failed to insert immutable blocks:", err);
+			throw err;
+		}
+		try {
+			this.deleteVolatileBlocks(oldBlocks.map((b: any) => b.hash));
+		} catch (err) {
+			logger.error("Failed to delete volatile blocks:", err);
+			throw err;
+		}
+		try {
+			this.deleteVolatileHeaders(oldHeaders.map((h: any) => h.header_hash));
+		} catch (err) {
+			logger.error("Failed to delete volatile headers:", err);
+			throw err;
+		}
 		logger.debug(`GC'd ${oldBlocks.length} blocks + ${oldHeaders.length} headers (w/ RawCbor + rollforward_header_cbor) to chunk ${chunk.chunk_no}`);
 	};
 };

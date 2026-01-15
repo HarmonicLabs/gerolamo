@@ -7,7 +7,7 @@ Gerolamo Network is a TypeScript implementation of a Cardano node/relay using Bu
 - **Data Flow**: Peers handshake, sync chain, fetch headers/blocks, store in SQLite3 database.
 - **Why Structured This Way**: Worker threads for concurrent peer handling; modular design for Cardano compatibility; SQLite3 for storage (transitioning from LMDB).
 
-**Note**: Currently simplifying to focus on networking and storage. Not handling consensus validation yet. Fetch headers, perform basic validation, fetch blocks, and store in SQLite3 using schema inspired by Cardano node
+**Note**: Currently focusing on post-Babbage era validation and syncing. Fetch headers, perform validation for Babbage/Conway eras, fetch blocks, and store in SQLite3 using schema inspired by Cardano node
 
 ## Key Files and Directories
 - `src/network/peerManagerWorkers/peerManagerWorker.ts`: Core peer orchestration and sync logic.
@@ -39,6 +39,7 @@ Gerolamo Network is a TypeScript implementation of a Cardano node/relay using Bu
 - Ouroboros Mini-Protocols TS: https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts
 - Cardano Ledger TS: https://github.com/HarmonicLabs/cardano-ledger-ts
 - Cardano Specifications:
+  - Shelley Ledger Spec: https://github.com/intersectmbo/cardano-ledger/releases/latest/download/shelley-ledger.pdf
   - Network Spec: https://ouroboros-network.cardano.intersectmbo.org/pdfs/network-spec/network-spec.pdf
   - Ledger Spec: https://intersectmbo.github.io/formal-ledger-specifications/cardano-ledger.pdf
 - Cardano Node Repository: https://github.com/IntersectMBO/cardano-node

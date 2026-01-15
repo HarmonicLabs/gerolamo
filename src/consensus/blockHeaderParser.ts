@@ -6,7 +6,7 @@ import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "../utils/logger";
 import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
 import { blockFrostFetchEra } from "../utils/blockFrostFetchEra";
-import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
+import { toHex } from "@harmoniclabs/uint8array-utils";
 
 export async function headerParser(rollForward: Uint8Array) {
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
@@ -78,18 +78,16 @@ export async function headerParser(rollForward: Uint8Array) {
     const headerEpoch = calculatePreProdCardanoEpoch(
         Number(multiEraHeader.header.body.slot),
     );
-    // const epochNonce = await blockFrostFetchEra(headerEpoch as number);
-
+    const epochNonce = await blockFrostFetchEra(headerEpoch as number);
     const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
-    // logger.debug("validator bytes", toHex(blockHeaderParsed.data.bytes))
     const slot = multiEraHeader.header.body.slot;
-    // logger.debug("\nBlockheader hash from validation: ", toHex(blockHeaderHash));
-    // logger.debug("Multiera Header: ", multiEraHeader);
 
     return ({   
         slot,
         blockHeaderHash,
         era: blcokHeaderBodyEra,
+        multiEraHeader,
+        epochNonce,
     });
 }
 

@@ -83,34 +83,38 @@ export interface IMsg {
 
 function setupPeerClientListener() {
 	peerClientWorker.on("message", async (msg: IMsg) => {
-		if (msg.type === "headerValidated"){
+		try {
+			if (msg.type === "headerValidated"){
 
-		};
+			};
 		
-		if (msg.type === "blockFetched")
-		{
+			if (msg.type === "blockFetched")
+			{
 
-		};
-		if (msg.type === "rollForward")
-		{
-			// ** FOrwarding the rollForward to peerClientWorker now, later this will be sent to consensus worker ** //
-			peerClientWorker.postMessage({ 
-				type: "rollForward",
-				peerId: msg.peerId,
-				rollForwardCborBytes: msg.rollForwardCborBytes,
-				tip: msg.tip
-			});	
-		};
-		if (msg.type === "rollBack")
-		{
-			logger.debug(`Roll back: ${msg.peerId}, point ${msg.point.blockHeader?.slotNumber}`);
-		};
+			};
+			if (msg.type === "rollForward")
+			{
+				// ** FOrwarding the rollForward to peerClientWorker now, later this will be sent to consensus worker ** //
+				peerClientWorker.postMessage({ 
+					type: "rollForward",
+					peerId: msg.peerId,
+					rollForwardCborBytes: msg.rollForwardCborBytes,
+					tip: msg.tip
+				});	
+			};
+			if (msg.type === "rollBack")
+			{
+				logger.debug(`Roll back: ${msg.peerId}, point ${msg.point.blockHeader?.slotNumber}`);
+			};
 
-		if (msg.type === "peerAdded")
-		{
-			peerAddedResolvers.get(msg.addId)?.(msg.peerId);
-			peerAddedResolvers.delete(msg.addId);
-		};
+			if (msg.type === "peerAdded")
+			{
+				peerAddedResolvers.get(msg.addId)?.(msg.peerId);
+				peerAddedResolvers.delete(msg.addId);
+			};
+		} catch (error) {
+			logger.error("Error in peerClientWorker message handler:", error);
+		}
 	});
 };
 
@@ -149,6 +153,7 @@ async function addPeer(host: string, port: number | bigint, category: string) {
 };
 
 parentPort!.on("message", async (msg: any) => {
+	try {
 	if (msg.type === "init") {
 		config = workerData as GerolamoConfig;
 		logger.setLogConfig(config.logs);
@@ -188,4 +193,7 @@ parentPort!.on("message", async (msg: any) => {
 			}
 		});
 	};
+	} catch (error) {
+		logger.error("Error in peerManager message handler:", error);
+	}
 });

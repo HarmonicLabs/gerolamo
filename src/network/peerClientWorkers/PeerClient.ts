@@ -215,7 +215,7 @@ export class PeerClient implements IPeerClient {
 
     // starts sync loop for all peers in parrallel
     async startSyncLoop(): Promise<void> {
-        let timeout = 83;
+        let timeout = 0;
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
         this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
             const tip = rollForward.tip.point.blockHeader?.slotNumber;
@@ -227,9 +227,9 @@ export class PeerClient implements IPeerClient {
                     tip: tip
             });
             
-                setTimeout(async () => {
-                    await this.chainSyncClient.requestNext();
-                }, timeout);
+                
+                await this.chainSyncClient.requestNext();
+                
         });
 
         this.chainSyncClient.on( "rollBackwards", async (rollBack: ChainSyncRollBackwards) => {
@@ -246,9 +246,8 @@ export class PeerClient implements IPeerClient {
                         point: rollBack.point,
                     });
                 }
-                setTimeout(async () => {
-                    await this.chainSyncClient.requestNext();
-                }, timeout);
+                
+                await this.chainSyncClient.requestNext();
             },
         );
 
@@ -260,9 +259,7 @@ export class PeerClient implements IPeerClient {
         });
 
         await this.syncToTip();
-        setTimeout(async () => {
-            await this.chainSyncClient.requestNext();
-        }, timeout);
+        await this.chainSyncClient.requestNext();
     }
 
     async fetchBlock(

@@ -3,6 +3,7 @@ import { PeerClient } from "./PeerClient";
 import type { GerolamoConfig } from "../peerManagerWorkers/peerManagerWorker";
 import { logger } from "../../utils/logger";
 import { headerParser, blockParser } from "../../consensus/blockHeaderParser";
+import { validateHeader } from "../../consensus/BlockHeaderValidator";
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import type { BlockFetchNoBlocks, BlockFetchBlock } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { prettyBlockValidationLog } from "../../tui/tui";
@@ -10,7 +11,6 @@ import { calculatePreProdCardanoEpoch } from "../../utils/epochFromSlotCalculati
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { DB } from "../../db/DB";
-import { getShelleyGenesisConfig } from "../../utils/paths";
 
 let config: GerolamoConfig;
 let db: DB;
@@ -95,97 +95,105 @@ parentPort!.on("message", async (msg: any) => {
 	};
 
 	if (msg.type === "rollForward") {
-	const { peerId, rollForwardCborBytes, tip } = msg;
-		const peer = allPeers.get(peerId);
-		if(!(peer)) {
-			logger.error(`Peer ${peerId} not found for rollForward processing`);
-			return;
-		};
-		const shelleyGenesisConfig = await getShelleyGenesisConfig(config);
-		const headerValidationRes = await headerParser(rollForwardCborBytes);
-
-		if (!(
-			headerValidationRes
-		)) {
-			logger.debug("header validaiotn failed");
-			return;
-		};
-
-		let currentEpoch: number | null = null;
-		let firstEpochSlot: number | null = null;
-
-		const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await peer.fetchBlock(headerValidationRes.slot, headerValidationRes.blockHeaderHash);
-		
-		let multiEraBlock: MultiEraBlock | undefined;
 		try {
-			multiEraBlock = await blockParser(newBlockRes);
-		} catch (e: any) {
-			logger.error(`Block parse failed for peer ${peerId} at slot ${headerValidationRes.slot}:`, e.message || e, `BlockHash: ${toHex(headerValidationRes.blockHeaderHash)}`, `BlockData: ${toHex((newBlockRes as BlockFetchBlock).blockData || new Uint8Array())}`);
-			return;
+			const { peerId, rollForwardCborBytes, tip } = msg;
+			const peer = allPeers.get(peerId);
+			if(!(peer)) {
+				logger.error(`Peer ${peerId} not found for rollForward processing`);
+				return;
+			};
+
+			const parsedHeader = await headerParser(rollForwardCborBytes);
+
+			if (!parsedHeader) {
+				logger.debug("header parsing failed");
+				return;
+			};
+
+			const isValid = await validateHeader(parsedHeader.multiEraHeader, parsedHeader.epochNonce.nonce, config);
+			if (!isValid) {
+			 	logger.debug(`Header validation failed for slot ${parsedHeader.slot} with hash ${toHex(parsedHeader.blockHeaderHash)}`);
+			 	return;
+			};
+
+			let currentEpoch: number | null = null;
+			let firstEpochSlot: number | null = null;
+
+			const newBlockRes: BlockFetchNoBlocks | BlockFetchBlock = await peer.fetchBlock(parsedHeader.slot, parsedHeader.blockHeaderHash);
+			
+			let multiEraBlock: MultiEraBlock | undefined;
+			try {
+				multiEraBlock = await blockParser(newBlockRes);
+			} catch (e: any) {
+				logger.error(`Block parse failed for peer ${peerId} at slot ${parsedHeader.slot}:`, e.message || e, `BlockHash: ${toHex(parsedHeader.blockHeaderHash)}`, `BlockData: ${toHex((newBlockRes as BlockFetchBlock).blockData || new Uint8Array())}`);
+				return;
+			};
+			
+			if (!(multiEraBlock instanceof MultiEraBlock)) 
+			{
+				logger.log(`Block validation failed for peer ${peerId} at slot ${parsedHeader.slot}`);			
+				return;
+			};		
+			// logger.debug(`Block fetched: ${peerId}, tip ${tip}`);
+			// logger.debug("Block: ", toHex(multiEraBlock.block.toCborBytes()))
+			const era = multiEraBlock.era;
+			// logger.debug("Era: ", era);
+			const blockHeader = multiEraBlock.block.header;
+			// logger.debug("Block Header: ", toHex(blockHeader.toCborBytes()));
+			const blockData = multiEraBlock.block.toCborBytes();
+			// logger.debug("Block Data: ", toHex(blockData));
+			const blockSlot = Number(blockHeader.body.slot);
+			// logger.debug("blockSlot: ", blockSlot);
+			const blockEpoch = calculatePreProdCardanoEpoch(Number(blockSlot));
+			// logger.debug("Epoch: ", blockEpoch);
+			const blockHeaderHash = blake2b_256(blockHeader.toCborBytes());
+			// logger.debug("Block Header Hash: ", toHex(blockHeaderHash));
+			if ( currentEpoch === null) currentEpoch = Number(blockEpoch);
+			if ( firstEpochSlot === null) firstEpochSlot = Number(blockSlot);
+
+			if ( currentEpoch && currentEpoch < blockEpoch ) firstEpochSlot = Number(blockSlot);
+			if ( currentEpoch && currentEpoch < blockEpoch ) currentEpoch = Number(blockEpoch);
+			
+			const blockHash = toHex(blockHeaderHash);
+
+			const recordHeaders = {
+				slot: BigInt(blockSlot),
+				headerHash: blockHash,
+				rollforward_header_cbor: rollForwardCborBytes.slice()  // Direct Uint8Array
+			};
+			
+			const recordBlocks = {
+				slot: BigInt(blockSlot),
+				blockHash,
+				prevHash: blockHeader.body.prevHash ? toHex(blockHeader.body.prevHash) : "",
+				headerData: blockHeader.toCborBytes(),  // Uint8Array native
+				blockData: multiEraBlock.block.toCborBytes(),  // Uint8Array
+				block_fetch_RawCbor: newBlockRes.toCborBytes()  // Uint8Array
+			};
+
+			batchBlockRecords.set(blockHash, recordBlocks);
+			batchHeaderRecords.set(blockHash, recordHeaders);
+
+			if (batchBlockRecords.size >= 50) 
+			{
+				await db.insertBlockBatchVolatile(Array.from(batchBlockRecords.values()));
+				await db.insertHeaderBatchVolatile(Array.from(batchHeaderRecords.values()));  // Batch headers
+				batchBlockRecords.clear();
+				batchHeaderRecords.clear();
+			};	
+
+			volatileDbGcCounter++;
+			if (volatileDbGcCounter >= 2160) 
+			{
+				// logger.debug("Running volatile to immutable DB GC...");
+				volatileDbGcCounter = 0;
+				await db.compact();
+			};
+			// logger.debug(`Validated - Era: ${era} - Epoch: ${blockEpoch} - Block Header Hash: ${toHex(blockHeaderHash)} - Absolute Slot: ${blockSlot} - Total Percent Complete: ${((Number(blockSlot) / Number(msg.tip)) * 100).toFixed(2)}%`);
+			prettyBlockValidationLog(era, Number(blockEpoch), blockHeaderHash, blockSlot, tip, volatileDbGcCounter, batchBlockRecords.size);			
+		} catch (error) {
+			logger.error(`Error processing rollForward for peer ${msg.peerId}:`, error);
 		}
-		
-		if (!(multiEraBlock instanceof MultiEraBlock)) 
-		{
-			logger.log(`Block validation failed for peer ${peerId} at slot ${headerValidationRes.slot}`);			
-			return;
-		};		
-		// logger.debug(`Block fetched: ${peerId}, tip ${tip}`);
-		// logger.debug("Block: ", toHex(multiEraBlock.block.toCborBytes()))
-		const era = multiEraBlock.era;
-		// logger.debug("Era: ", era);
-		const blockHeader = multiEraBlock.block.header;
-		// logger.debug("Block Header: ", toHex(blockHeader.toCborBytes()));
-		const blockData = multiEraBlock.block.toCborBytes();
-		// logger.debug("Block Data: ", toHex(blockData));
-		const blockSlot = Number(blockHeader.body.slot);
-		// logger.debug("blockSlot: ", blockSlot);
-		const blockEpoch = calculatePreProdCardanoEpoch(Number(blockSlot));
-		// logger.debug("Epoch: ", blockEpoch);
-		const blockHeaderHash = blake2b_256(blockHeader.toCborBytes());
-		// logger.debug("Block Header Hash: ", toHex(blockHeaderHash));
-		if ( currentEpoch === null) currentEpoch = Number(blockEpoch);
-		if ( firstEpochSlot === null) firstEpochSlot = Number(blockSlot);
-
-		if ( currentEpoch && currentEpoch < blockEpoch ) firstEpochSlot = Number(blockSlot);
-		if ( currentEpoch && currentEpoch < blockEpoch ) currentEpoch = Number(blockEpoch);
-		
-		const blockHash = toHex(blockHeaderHash);
-
-		const recordHeaders = {
-			slot: BigInt(blockSlot),
-			headerHash: blockHash,
-			rollforward_header_cbor: rollForwardCborBytes.slice()  // Direct Uint8Array
-		};
-		
-		const recordBlocks = {
-			slot: BigInt(blockSlot),
-			blockHash,
-			prevHash: "",  // TODO: blockHeader.body.prevHash.toHex()
-			headerData: blockHeader.toCborBytes(),  // Uint8Array native
-			blockData: multiEraBlock.block.toCborBytes(),  // Uint8Array
-			block_fetch_RawCbor: newBlockRes.toCborBytes()  // Uint8Array
-		};
-
-		batchBlockRecords.set(blockHash, recordBlocks);
-		batchHeaderRecords.set(blockHash, recordHeaders);
-
-		if (batchBlockRecords.size >= 50) 
-		{
-			await db.insertBlockBatchVolatile(Array.from(batchBlockRecords.values()));
-			await db.insertHeaderBatchVolatile(Array.from(batchHeaderRecords.values()));  // Batch headers
-			batchBlockRecords.clear();
-			batchHeaderRecords.clear();
-		};	
-
-		volatileDbGcCounter++;
-		if (volatileDbGcCounter >= 2160) 
-		{
-			// logger.debug("Running volatile to immutable DB GC...");
-			volatileDbGcCounter = 0;
-			await db.compact();
-		};
-		// logger.debug(`Validated - Era: ${era} - Epoch: ${blockEpoch} - Block Header Hash: ${toHex(blockHeaderHash)} - Absolute Slot: ${blockSlot} - Total Percent Complete: ${((Number(blockSlot) / Number(msg.tip)) * 100).toFixed(2)}%`);
-		prettyBlockValidationLog(era, Number(blockEpoch), blockHeaderHash, blockSlot, tip, volatileDbGcCounter, batchBlockRecords.size);			
 	};
 
 	if (msg.type === "terminate") 

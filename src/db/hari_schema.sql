@@ -1,6 +1,14 @@
 -- DB storage location: store/db/{network}/
 -- Where {network} is 'mainnet' or 'preprod'
 
+-- Volatile headers table
+CREATE TABLE IF NOT EXISTS volatile_headers (
+    slot BIGINT PRIMARY KEY,
+    header_hash TEXT NOT NULL UNIQUE,
+    rollforward_header_cbor BLOB NOT NULL,
+    is_valid BOOLEAN DEFAULT TRUE
+);
+
 -- Protocol parameters table
 CREATE TABLE IF NOT EXISTS protocol_params (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -148,13 +156,30 @@ CREATE TABLE IF NOT EXISTS new_epoch_state (
     FOREIGN KEY (stashed_avvm_addresses_id) REFERENCES stashed_avvm_addresses(id)
 );
 
+-- Immutable chunks table
+CREATE TABLE IF NOT EXISTS immutable_chunks (
+    chunk_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chunk_no INTEGER NOT NULL UNIQUE,
+    tip_hash TEXT NOT NULL,
+    tip_slot_no BIGINT NOT NULL,
+    slot_range_start BIGINT NOT NULL,
+    slot_range_end BIGINT NOT NULL,
+    inserted_at TIMESTAMP DEFAULT (strftime('%s','now'))
+);
+
 -- Immutable blocks table
 CREATE TABLE IF NOT EXISTS immutable_blocks (
     slot INTEGER PRIMARY KEY,
-    hash BLOB NOT NULL,
+    block_hash BLOB NOT NULL,
     block_data JSONB NOT NULL,
     prev_hash BLOB,
-    UNIQUE(hash)
+    header_data BLOB,
+    rollforward_header_cbor BLOB,
+    block_fetch_RawCbor BLOB,
+    chunk_id INTEGER,
+    inserted_at TIMESTAMP DEFAULT (strftime('%s','now')),
+    UNIQUE(block_hash),
+    FOREIGN KEY (chunk_id) REFERENCES immutable_chunks(chunk_id) ON DELETE CASCADE
 );
 
 -- Stable state table
@@ -172,7 +197,11 @@ CREATE TABLE IF NOT EXISTS blocks (
     hash BLOB PRIMARY KEY,
     slot INTEGER NOT NULL,
     header_data BLOB,
-    block_data BLOB
+    block_data BLOB,
+    block_fetch_RawCbor BLOB,
+    is_valid BOOLEAN DEFAULT TRUE,
+    prev_hash BLOB,
+    inserted_at TIMESTAMP DEFAULT (strftime('%s','now'))
 );
 
 -- UTxO deltas table
@@ -183,3 +212,24 @@ CREATE TABLE IF NOT EXISTS utxo_deltas (
     utxo JSONB NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Indexes for volatile_headers
+CREATE INDEX IF NOT EXISTS idx_volatile_headers_hash ON volatile_headers(header_hash);
+CREATE INDEX IF NOT EXISTS idx_volatile_headers_slot ON volatile_headers(slot);
+
+-- Indexes for volatile blocks
+CREATE INDEX IF NOT EXISTS idx_volatile_slot ON blocks (slot);
+CREATE INDEX IF NOT EXISTS idx_volatile_hash ON blocks (hash);
+CREATE INDEX IF NOT EXISTS idx_volatile_prev_hash ON blocks (prev_hash);
+
+-- Indexes for immutable blocks
+CREATE INDEX IF NOT EXISTS idx_immutable_slot ON immutable_blocks (slot);
+CREATE INDEX IF NOT EXISTS idx_immutable_hash ON immutable_blocks (block_hash);
+CREATE INDEX IF NOT EXISTS idx_immutable_chunk ON immutable_blocks (chunk_id);
+
+-- Trigger GC (delete invalid old blocks; customize k=2160)
+CREATE TRIGGER IF NOT EXISTS gc_volatile AFTER INSERT ON blocks
+BEGIN
+    DELETE FROM blocks WHERE slot < (SELECT MAX(slot) - 2160 FROM blocks) AND is_valid = FALSE;
+    DELETE FROM volatile_headers WHERE slot < (SELECT MAX(slot) - 2160 FROM volatile_headers) AND is_valid = FALSE;
+END;

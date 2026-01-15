@@ -52,4 +52,9 @@ https://github.com/HarmonicLabs/ts-best-practices
 ## Extra Information and refrences
 Cardanno Node Github Repository (https://github.com/IntersectMBO/cardano-node)
 
+If you're not sure about sometthing, pause and ask the user for clarification.
+Especially if it's about a structure of any cardano CBOR or CDDL.
+
+Most answers about Cardano structure can be found in Cardano ledger ts Eras folder under CDDL files.
+
 Refer to `README.md` for basic setup. When editing, preserve worker message types and any remaining LMDB schemas during transition to SQLite3.

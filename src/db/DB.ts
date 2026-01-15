@@ -57,22 +57,22 @@ export class DB {
 
 	getBlockByHash(hash: string): any {
 		const stmt = this.db.prepare(`
-		SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
-		FROM blocks WHERE hash = ?
-		UNION
-		SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
-		FROM immutable_blocks WHERE block_hash = ?
+			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
+			FROM blocks WHERE hash = ?
+			UNION
+			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
+			FROM immutable_blocks WHERE block_hash = ?
 		`);
 		return stmt.get(hash, hash);
 	};
 
 	getBlockBySlot(slot: bigint): any {
 		const stmt = this.db.prepare(`
-		SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
-		FROM blocks WHERE slot = ?
-		UNION
-		SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
-		FROM immutable_blocks WHERE slot = ?
+			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
+			FROM blocks WHERE slot = ?
+			UNION
+			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
+			FROM immutable_blocks WHERE slot = ?
 		`);
 		return stmt.get(slot, slot);
 	};
@@ -84,13 +84,13 @@ export class DB {
 
 	getBlocksInEpoch(epoch: number): any[] {
 		const stmt = this.db.prepare(`
-		SELECT * FROM volatile_blocks vb
-		INNER JOIN transactions t ON vb.block_hash = t.block_hash
-		WHERE t.epoch = ?
-		UNION
-		SELECT * FROM immutable_blocks ib
-		INNER JOIN transactions t ON ib.block_hash = t.block_hash
-		WHERE t.epoch = ?
+			SELECT * FROM volatile_blocks vb
+			INNER JOIN transactions t ON vb.block_hash = t.block_hash
+			WHERE t.epoch = ?
+			UNION
+			SELECT * FROM immutable_blocks ib
+			INNER JOIN transactions t ON ib.block_hash = t.block_hash
+			WHERE t.epoch = ?
 		`);
 		return stmt.all(epoch, epoch);
 	};
@@ -103,9 +103,9 @@ export class DB {
 
 	async getValidHeadersBefore(cutoffSlot: bigint): Promise<any[]> {
 		const stmt = this.db.prepare(`
-		SELECT * FROM volatile_headers
-		WHERE slot < ? AND is_valid = TRUE
-		ORDER BY slot ASC
+			SELECT * FROM volatile_headers
+			WHERE slot < ? AND is_valid = TRUE
+			ORDER BY slot ASC
 		`);
 		const rows = stmt.all(cutoffSlot);
 		return rows;
@@ -360,5 +360,26 @@ export class DB {
 			throw err;
 		}
 		logger.debug(`GC'd ${oldBlocks.length} blocks + ${oldHeaders.length} headers (w/ RawCbor + rollforward_header_cbor) to chunk ${chunk.chunk_no}`);
+	};
+
+	async getUtxosByRefs(utxoRefs: string[]): Promise<Array<{ utxo_ref: string; amount: any }>> {
+		if (utxoRefs.length === 0) return [];
+		const placeholders = utxoRefs.map(() => '?').join(',');
+		const stmt = this.db.prepare(`
+			SELECT utxo_ref, json_extract(tx_out, '$.amount') as amount 
+			FROM utxo 
+			WHERE utxo_ref IN (${placeholders})
+		`);
+		return stmt.all(...utxoRefs) as Array<{ utxo_ref: string; amount: any }>;
+	};
+
+	async getAllStake(): Promise<Array<{ stake_credentials: Uint8Array; amount: number }>> {
+		const stmt = this.db.prepare(`SELECT stake_credentials, amount FROM stake`);
+		return stmt.all() as Array<{ stake_credentials: Uint8Array; amount: number }>;
+	};
+
+	async getAllDelegations(): Promise<Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>> {
+		const stmt = this.db.prepare(`SELECT stake_credentials, pool_key_hash FROM delegations`);
+		return stmt.all() as Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>;
 	};
 };

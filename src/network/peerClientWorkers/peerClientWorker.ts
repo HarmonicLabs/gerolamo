@@ -4,6 +4,7 @@ import type { GerolamoConfig } from "../peerManagerWorkers/peerManagerWorker";
 import { logger } from "../../utils/logger";
 import { headerParser, blockParser } from "../../consensus/blockHeaderParser";
 import { validateHeader } from "../../consensus/BlockHeaderValidator";
+import { validateBlock } from "../../consensus/BlockBodyValidator";
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import type { BlockFetchNoBlocks, BlockFetchBlock } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { prettyBlockValidationLog } from "../../tui/tui";
@@ -129,6 +130,12 @@ parentPort!.on("message", async (msg: any) => {
 				return;
 			};
 			
+			const isBlockValid = await validateBlock(multiEraBlock!, config, db);
+			if (!isBlockValid) {
+				logger.log(`Block validation failed for peer ${peerId} at slot ${parsedHeader.slot}`);			
+				return;
+			};
+			
 			if (!(multiEraBlock instanceof MultiEraBlock)) 
 			{
 				logger.log(`Block validation failed for peer ${peerId} at slot ${parsedHeader.slot}`);			
@@ -190,7 +197,7 @@ parentPort!.on("message", async (msg: any) => {
 				await db.compact();
 			};
 			// logger.debug(`Validated - Era: ${era} - Epoch: ${blockEpoch} - Block Header Hash: ${toHex(blockHeaderHash)} - Absolute Slot: ${blockSlot} - Total Percent Complete: ${((Number(blockSlot) / Number(msg.tip)) * 100).toFixed(2)}%`);
-			prettyBlockValidationLog(era, Number(blockEpoch), blockHeaderHash, blockSlot, tip, volatileDbGcCounter, batchBlockRecords.size);			
+			// prettyBlockValidationLog(era, Number(blockEpoch), blockHeaderHash, blockSlot, tip, volatileDbGcCounter, batchBlockRecords.size);			
 		} catch (error) {
 			logger.error(`Error processing rollForward for peer ${msg.peerId}:`, error);
 		}

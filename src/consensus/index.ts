@@ -63,6 +63,3 @@ export type {
     Tip,
 } from "./StableState";
 export { MissingBlockError, ResourceRegistry } from "./StableState";
-
-// Ledger initialization
-export { initNewEpochState } from "../state/ledger";

@@ -1,15 +1,8 @@
-import { sql } from "bun";
+import { Database } from "bun:sqlite";
 
-export async function populateLedgerState() {
-    await sql`
-        INSERT OR REPLACE INTO ledger_state ${
-        sql({
-            id: 1,
-            utxo_deposited: 0,
-            utxo_fees: 0,
-            utxo_donation: 0,
-            cert_state_id: null,
-        })
-    }
-    `;
+export async function populateLedgerState(db: Database) {
+    db.run(
+        `INSERT OR REPLACE INTO ledger_state (id, utxo_deposited, utxo_fees, utxo_donation, cert_state_id) VALUES (?, ?, ?, ?, ?)`,
+        [1, 0, 0, 0, null]
+    );
 }

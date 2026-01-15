@@ -1,11 +1,11 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { sql } from "bun";
+import { Database } from "bun:sqlite";
 
-export async function populateProtocolParams(protocolParams: any) {
-    await sql`
-        INSERT OR REPLACE INTO protocol_params (id, params)
-        VALUES (1, json(${JSON.stringify(protocolParams)}))
-    `;
+export async function populateProtocolParams(db: Database, protocolParams: any) {
+    db.run(
+        `INSERT OR REPLACE INTO protocol_params (id, params) VALUES (?, ?)`,
+        [1, JSON.stringify(protocolParams)]
+    );
 }
 
 export async function fetchProtocolParameters(

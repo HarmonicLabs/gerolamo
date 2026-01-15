@@ -1,13 +1,8 @@
-import { sql } from "bun";
+import { Database } from "bun:sqlite";
 
-export async function populateChainAccountState() {
-    await sql`
-        INSERT OR REPLACE INTO chain_account_state ${
-        sql({
-            id: 1,
-            treasury: 0,
-            reserves: 0,
-        })
-    }
-    `;
+export async function populateChainAccountState(db: Database) {
+    db.run(
+        `INSERT OR REPLACE INTO chain_account_state (id, treasury, reserves) VALUES (?, ?, ?)`,
+        [1, 0, 0]
+    );
 }

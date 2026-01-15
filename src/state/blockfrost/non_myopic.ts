@@ -1,13 +1,8 @@
-import { sql } from "bun";
+import { Database } from "bun:sqlite";
 
-export async function populateNonMyopic() {
-    await sql`
-        INSERT OR REPLACE INTO non_myopic ${
-        sql({
-            id: 1,
-            reward_pot: 0,
-            likelihoods_id: null,
-        })
-    }
-    `;
+export async function populateNonMyopic(db: Database) {
+    db.run(
+        `INSERT OR REPLACE INTO non_myopic (id, reward_pot, likelihoods_id) VALUES (?, ?, ?)`,
+        [1, 0, null]
+    );
 }

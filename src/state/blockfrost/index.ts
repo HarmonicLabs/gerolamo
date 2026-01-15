@@ -1,8 +1,8 @@
 // Blockfrost-related state management functions
 // This module provides main import functions for ledger state from Blockfrost API
 
+import { Database } from "bun:sqlite";
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { sql } from "bun";
 import { Buffer } from "node:buffer";
 import {
     fetchProtocolParameters,
@@ -29,11 +29,11 @@ import { fetchBlockData } from "./block_data";
 
 // Main import function for ledger state from Blockfrost
 export async function importFromBlockfrost(
+    db: Database,
     blockHash: string,
     options?: {
         projectId?: string;
         customBackend?: string;
-        importChain?: boolean;
         fromSlot?: number;
         count?: number;
     },
@@ -66,58 +66,52 @@ export async function importFromBlockfrost(
     // === POPULATE ALL NES COMPONENTS ===
 
     // 1. Protocol parameters
-    await populateProtocolParams(protocolParams);
+    await populateProtocolParams(db, protocolParams);
 
     // 2. Chain account state
-    await populateChainAccountState();
+    await populateChainAccountState(db);
 
     // 3. Pool distribution
-    await populatePoolDistribution(pools, totalActiveStake);
+    await populatePoolDistribution(db, pools, totalActiveStake);
 
     // 4. Blocks made data
-    const blocksMadePoolCount = await populateBlocksMade(api, currentEpoch);
+    const blocksMadePoolCount = await populateBlocksMade(db, api, currentEpoch);
 
     // 5. Stake distribution
-    await populateStakeDistribution(stakeDistribution);
+    await populateStakeDistribution(db, stakeDistribution);
 
     // 6. Delegations
-    await populateDelegations(stakeDistribution);
+    await populateDelegations(db, stakeDistribution);
 
     // 7. Rewards
     const { defaultShelleyProtocolParameters } = await import(
         "@harmoniclabs/cardano-ledger-ts"
     );
-    await populateRewards(stakeDistribution, defaultShelleyProtocolParameters);
+    await populateRewards(db, stakeDistribution, defaultShelleyProtocolParameters);
 
     // 8. Non-myopic data
-    await populateNonMyopic();
+    await populateNonMyopic(db);
 
     // 9. UTxO set
-    await populateUTxOs(api, stakeDistribution);
+    await populateUTxOs(db, api, stakeDistribution);
 
     // 10. Ledger state
-    await populateLedgerState();
+    await populateLedgerState(db);
 
     // 11. Snapshots
-    await populateSnapshots();
+    await populateSnapshots(db);
 
     // 12. Epoch state
-    await populateEpochState();
+    await populateEpochState(db);
 
     // 13. Pulsing reward update
-    await populatePulsingRewUpdate();
+    await populatePulsingRewUpdate(db);
 
     // 14. Stashed AVVM addresses
-    await populateStashedAvvmAddresses();
+    await populateStashedAvvmAddresses(db);
 
-    // Import chain if requested
-    if (options?.importChain && options.fromSlot && options.count) {
-        console.log(
-            `Importing chain from slot ${options.fromSlot} for ${options.count} blocks...`,
-        );
-        await importChain(api, options.fromSlot, options.count);
-        console.log("Chain import completed.");
-    }
+    // 15. New epoch state
+    await populateNewEpochState(db, currentEpoch);
 
     console.log(`\n=== COMPLETE NES IMPORTED FOR EPOCH ${currentEpoch} ===`);
     console.log(`📦 Protocol parameters: ✓`);
@@ -125,106 +119,17 @@ export async function importFromBlockfrost(
     console.log(
         `🏊 Pool distribution: ✓ (${pools.length} pools, ${totalActiveStake} total stake)`,
     );
-    console.log(
-        `⛏️  Blocks made: ✓ (${blocksMadePoolCount} pools)`,
-    );
-    console.log(
-        `🪙 Stake distribution: ✓ (${stakeDistribution.length} entries)`,
-    );
-    console.log(
-        `🔗 Delegations: ✓ (${
-            stakeDistribution.filter((s) => s.pool_id).length
-        } entries)`,
-    );
-    console.log(
-        `💰 Rewards: ✓ (${
-            stakeDistribution.filter((s) => BigInt(s.amount || 0) > 0n).length
-        } entries)`,
-    );
-    const { sql } = await import("bun");
-    console.log(
-        `💰 UTxO set: ✓ (${
-            (await sql`SELECT COUNT(*) from utxo`)[0]["COUNT(*)"]
-        } UTxOs`,
-    );
-    console.log(`📊 Ledger state: ✓`);
-    console.log(`📸 Snapshots: ✓`);
-    console.log(`🎯 Complete New Epoch State imported from Blockfrost!`);
-}
-
-// Import chain blocks from Blockfrost
-export async function importChain(
-    api: BlockFrostAPI,
-    fromSlot: number,
-    count: number,
-) {
-    // Generate array of slots to fetch (from newest to oldest)
-    const slots = Array.from({ length: count }, (_, i) => fromSlot - i).filter(
-        (slot) => slot >= 0,
-    );
-
-    console.log(
-        `Fetching ${slots.length} blocks starting from slot ${fromSlot}...`,
-    );
-
-    // Fetch all blocks in parallel
-    const blockDataPromises = slots.map(async (slot) => {
-        try {
-            const blockData = await api.blocks(slot);
-            console.log(`Fetched block at slot ${slot}: ${blockData.hash}`);
-            return blockData;
-        } catch (error) {
-            console.warn(`Failed to fetch block at slot ${slot}:`, error);
-            return null;
-        }
-    });
-
-    const blockDataArray = await Promise.all(blockDataPromises);
-    const validBlocks = blockDataArray.filter((block) => block !== null);
-
-    console.log(
-        `Successfully fetched ${validBlocks.length} blocks out of ${slots.length} requested`,
-    );
-
-    if (validBlocks.length === 0) {
-        console.log("No blocks to import");
-        return;
-    }
-
-    // Insert all blocks into database
-    await sql`
-        INSERT OR IGNORE INTO blocks (hash, slot, prev_hash, header_cbor, body_cbor, issuer_hash, size)
-        VALUES ${
-        sql(
-            validBlocks.map((blockData) => [
-                Buffer.from(blockData.hash, "hex"),
-                blockData.slot || 0,
-                blockData.previous_block
-                    ? Buffer.from(blockData.previous_block, "hex")
-                    : null,
-                null, // CBOR header not available from Blockfrost (BLOB field, nullable)
-                null, // CBOR body not available from Blockfrost
-                blockData.slot_leader
-                    ? Buffer.from(blockData.slot_leader, "hex")
-                    : null,
-                blockData.size,
-            ]),
-        )
-    }
-    `;
-
-    // Update current tip to the most recent block (highest slot)
-    const latestBlock = validBlocks.reduce((latest, current) =>
-        (current.slot || 0) > (latest.slot || 0) ? current : latest
-    );
-
-    await sql`
-        UPDATE current_tip SET hash = ${
-        Buffer.from(latestBlock.hash, "hex")
-    }, slot = ${latestBlock.slot || 0} WHERE id = 1;
-    `;
-
-    console.log(
-        `Imported ${validBlocks.length} blocks, updated tip to slot ${latestBlock.slot}`,
-    );
+    console.log(`🏗️  Blocks made: ✓ (${blocksMadePoolCount} pools produced blocks)`);
+    console.log(`💰 Stake distribution: ✓`);
+    console.log(`🔗 Delegations: ✓`);
+    console.log(`💸 Rewards: ✓`);
+    console.log(`👁️  Non-myopic: ✓ (defaults)`);
+    console.log(`💳 UTxO set: ✓`);
+    console.log(`📜 Ledger state: ✓ (defaults)`);
+    console.log(`📸 Snapshots: ✓ (defaults)`);
+    console.log(`🌅 Epoch state: ✓`);
+    console.log(`⚡ Pulsing reward update: ✓ (defaults)`);
+    console.log(`🏷️  Stashed AVVM addresses: ✓ (defaults)`);
+    console.log(`🆕 New epoch state: ✓`);
+    console.log(`\n🎉 Blockfrost NES import completed successfully!\n`);
 }

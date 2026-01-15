@@ -43,21 +43,53 @@ export class BlockBodyValidator {
         const actualBlock = this.getEraBlock(block);
         if (actualBlock === null) return null; // Unsupported era
         
+        logger.debug(`Starting block body validation for slot ${actualBlock.header.body.slot}`);
+
         const genesis = await getCachedShelleyGenesis(this.config);
         if (!genesis) return false;
 
-        return (
-            this.validateTransactionCountMatch(actualBlock) &&
-            this.validateNoInvalidTxs(actualBlock) &&
-            await this.validateUTxOBalance(actualBlock) &&
-            await this.validateFeesCorrect(actualBlock, genesis) &&
-            this.validateValidityInterval(actualBlock) &&
-            await this.validateMultiAssetsBalance(actualBlock, genesis) &&
-            await this.validateCollateralValid(actualBlock) &&
-            await this.validateCertificatesValid(actualBlock) &&
-            this.validateScriptsValid(actualBlock) &&
-            await this.validateSizeLimits(actualBlock, genesis)
-        );
+        const txCountValid = this.validateTransactionCountMatch(actualBlock);
+        logger.debug(`Transaction count match: ${txCountValid}`);
+        if (!txCountValid) return false;
+
+        const noInvalidTxs = this.validateNoInvalidTxs(actualBlock);
+        logger.debug(`No invalid txs: ${noInvalidTxs}`);
+        if (!noInvalidTxs) return false;
+
+        const utxoBalanceValid = await this.validateUTxOBalance(actualBlock);
+        logger.debug(`UTxO balance valid: ${utxoBalanceValid}`);
+        if (!utxoBalanceValid) return false;
+
+        const feesValid = await this.validateFeesCorrect(actualBlock, genesis);
+        logger.debug(`Fees correct: ${feesValid}`);
+        if (!feesValid) return false;
+
+        const validityIntervalValid = this.validateValidityInterval(actualBlock);
+        logger.debug(`Validity interval valid: ${validityIntervalValid}`);
+        if (!validityIntervalValid) return false;
+
+        const multiAssetsValid = await this.validateMultiAssetsBalance(actualBlock, genesis);
+        logger.debug(`Multi-assets balance valid: ${multiAssetsValid}`);
+        if (!multiAssetsValid) return false;
+
+        const collateralValid = await this.validateCollateralValid(actualBlock);
+        logger.debug(`Collateral valid: ${collateralValid}`);
+        if (!collateralValid) return false;
+
+        const certsValid = await this.validateCertificatesValid(actualBlock);
+        logger.debug(`Certificates valid: ${certsValid}`);
+        if (!certsValid) return false;
+
+        const scriptsValid = this.validateScriptsValid(actualBlock);
+        logger.debug(`Scripts valid: ${scriptsValid}`);
+        if (!scriptsValid) return false;
+
+        const sizeLimitsValid = await this.validateSizeLimits(actualBlock, genesis);
+        logger.debug(`Size limits valid: ${sizeLimitsValid}`);
+        if (!sizeLimitsValid) return false;
+
+        logger.debug(`All block body validations passed for slot ${actualBlock.header.body.slot}`);
+        return true;
     }
 
     private validateTransactionCountMatch(
@@ -113,7 +145,7 @@ export class BlockBodyValidator {
 
                 const row = utxoMap.get(utxoRef);
                 if (!row) {
-                    logger.error(`UTxO not found: ${utxoRef}`);
+                    logger.warn(`UTxO not found: ${utxoRef}`);
                     return false;
                 }
 
@@ -164,6 +196,7 @@ export class BlockBodyValidator {
     private validateValidityInterval(
         block: CardanoBlock,
     ): boolean {
+        if (block.transactionBodies.length === 0) return true;
         // Implementation
         return block.transactionBodies.map(
             (txBody) =>
@@ -382,11 +415,12 @@ export class BlockBodyValidator {
         const delegationRows = await this.db.getAllDelegations();
 
         // Create lookup maps with string keys for reliable comparison
+        const getKey = (cred: Uint8Array | string) => typeof cred === 'string' ? cred : toHex(cred);
         const stakeMap = new Map(
-            stakeRows.map(({ stake_credentials, amount }) => [toHex(stake_credentials), amount]),
+            stakeRows.map(({ stake_credentials, amount }) => [getKey(stake_credentials), amount]),
         );
         const delegationMap = new Map(
-            delegationRows.map(({ stake_credentials, pool_key_hash }) => [toHex(stake_credentials), pool_key_hash]),
+            delegationRows.map(({ stake_credentials, pool_key_hash }) => [getKey(stake_credentials), pool_key_hash]),
         );
 
         for (const txBody of block.transactionBodies) {

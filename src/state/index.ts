@@ -1,9 +1,6 @@
 // State module exports for ledger state management
 // This module provides all functions for importing and populating ledger state components
 
-// Ledger initialization
-export { initNewEpochState } from "./ledger";
-
 // Blockfrost-related functionality (all populate functions and import)
 export {
     fetchProtocolParameters,
@@ -30,4 +27,4 @@ export { populatePulsingRewUpdate } from "./blockfrost/pulsing_rew_update";
 export { populateStashedAvvmAddresses } from "./blockfrost/stashed_avvm_addresses";
 export { populateNewEpochState } from "./blockfrost/new_epoch_state";
 export { fetchAddresses, fetchBlockData } from "./blockfrost/block_data";
-export { importChain, importFromBlockfrost } from "./blockfrost/index";
+export { importFromBlockfrost } from "./blockfrost/index";

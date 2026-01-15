@@ -1,16 +1,8 @@
-import { sql } from "bun";
+import { Database } from "bun:sqlite";
 
-export async function populateEpochState() {
-    await sql`
-        INSERT OR REPLACE INTO epoch_state ${
-        sql({
-            id: 1,
-            chain_account_state_id: 1,
-            ledger_state_id: 1,
-            snapshots_id: 1,
-            non_myopic_id: 1,
-            pparams_id: 1,
-        })
-    }
-    `;
+export async function populateEpochState(db: Database) {
+    db.run(
+        `INSERT OR REPLACE INTO epoch_state (id, chain_account_state_id, ledger_state_id, snapshots_id, non_myopic_id, pparams_id) VALUES (?, ?, ?, ?, ?, ?)`,
+        [1, 1, 1, 1, 1, 1]
+    );
 }

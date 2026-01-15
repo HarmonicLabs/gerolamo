@@ -6,7 +6,7 @@ import type { ShelleyGenesisConfig } from "../../types/ShelleyGenesisTypes";
 import type { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "../peerClientWorkers/PeerClient";
-import { toHex } from "@harmoniclabs/uint8array-utils";
+
 
 export interface GerolamoConfig {
 	readonly network: NetworkT;
@@ -26,6 +26,10 @@ export interface GerolamoConfig {
 		readonly logToFile: boolean;
 		readonly logToConsole: boolean;
 		readonly logDirectory: string;
+	};
+	readonly snapshot: {
+		readonly enable: boolean;
+		readonly source: string;
 	};
 	allPeers: Map<string, PeerClient>;
 };

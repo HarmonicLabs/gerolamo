@@ -1,7 +1,8 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { sql } from "bun";
+import { Database } from "bun:sqlite";
 
 export async function populateUTxOs(
+    db: Database,
     api: BlockFrostAPI,
     stakeDistribution: { stake_address: string }[],
 ) {
@@ -68,19 +69,16 @@ export async function populateUTxOs(
         return;
     }
 
-    await sql`INSERT OR IGNORE INTO utxo ${
-        sql(
-            utxos.map((utxo) => {
-                return {
-                    utxo_ref: `${utxo.tx_hash}:${utxo.output_index}`,
-                    tx_out: JSON.stringify({
-                        address: utxo.address,
-                        amount: utxo.amount.find((a) =>
-                            a.unit === "lovelace"
-                        )?.quantity || "0",
-                    }),
-                };
-            }),
-        )
-    }`;
+    const stmt = db.prepare(`
+        INSERT OR IGNORE INTO utxo (utxo_ref, tx_out)
+        VALUES (?, ?)
+    `);
+    for (const utxo of utxos) {
+        const utxoRef = `${utxo.tx_hash}:${utxo.output_index}`;
+        const txOut = JSON.stringify({
+            address: utxo.address,
+            amount: utxo.amount.find((a) => a.unit === "lovelace")?.quantity || "0",
+        });
+        stmt.run(utxoRef, txOut);
+    }
 }

@@ -1,39 +1,29 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { sql } from "bun";
+import { Database } from "bun:sqlite";
 
-export async function populateStakeDistribution(stakeDistribution: any[]) {
+export async function populateStakeDistribution(db: Database, stakeDistribution: any[]) {
     if (stakeDistribution.length > 0) {
-        await sql`
-            INSERT OR REPLACE
-            INTO stake ${
-            sql(stakeDistribution.map((stake) => {
-                return {
-                    stake_credentials: stake.stake_address,
-                    amount: stake.amount,
-                };
-            }))
+        const stmt = db.prepare(`
+            INSERT OR REPLACE INTO stake (stake_credentials, amount)
+            VALUES (?, ?)
+        `);
+        for (const stake of stakeDistribution) {
+            stmt.run(stake.stake_address, stake.amount);
         }
-        `;
     }
 }
 
-export async function populateDelegations(stakeDistribution: any[]) {
+export async function populateDelegations(db: Database, stakeDistribution: any[]) {
     if (stakeDistribution.length > 0) {
-        await sql`
-            INSERT OR REPLACE
-            INTO delegations ${
-            sql(
-                stakeDistribution
-                    .filter((stake) => stake.pool_id.trim() !== "")
-                    .map((stake) => {
-                        return {
-                            stake_credentials: stake.stake_address,
-                            pool_key_hash: stake.pool_id,
-                        };
-                    }),
-            )
+        const stmt = db.prepare(`
+            INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash)
+            VALUES (?, ?)
+        `);
+        for (const stake of stakeDistribution) {
+            if (stake.pool_id.trim() !== "") {
+                stmt.run(stake.stake_address, stake.pool_id);
+            }
         }
-        `;
     }
 }
 

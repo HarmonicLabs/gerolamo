@@ -126,19 +126,19 @@ parentPort!.on("message", async (msg: any) => {
 			try {
 				multiEraBlock = await blockParser(newBlockRes);
 			} catch (e: any) {
-				logger.error(`Block parse failed for peer ${peerId} at slot ${parsedHeader.slot}:`, e.message || e, `BlockHash: ${toHex(parsedHeader.blockHeaderHash)}`, `BlockData: ${toHex((newBlockRes as BlockFetchBlock).blockData || new Uint8Array())}`);
+				logger.warn(`Block parse failed for peer ${peerId} at slot ${parsedHeader.slot}:`, e.message || e, `BlockHash: ${toHex(parsedHeader.blockHeaderHash)}`, `BlockData: ${toHex((newBlockRes as BlockFetchBlock).blockData || new Uint8Array())}`);
 				return;
 			};
 			
 			const isBlockValid = await validateBlock(multiEraBlock!, config, db);
 			if (!isBlockValid) {
-				logger.log(`Block validation failed for peer ${peerId} at slot ${parsedHeader.slot}`);			
+				logger.warn(`Block validation failed for peer ${peerId} at slot ${parsedHeader.slot}`);			
 				return;
 			};
 			
 			if (!(multiEraBlock instanceof MultiEraBlock)) 
 			{
-				logger.log(`Block validation failed for peer ${peerId} at slot ${parsedHeader.slot}`);			
+				logger.warn(`Invalid multiEraBlock failed for peer ${peerId} at slot ${parsedHeader.slot} blockHash ${toHex(parsedHeader.blockHeaderHash)}`);			
 				return;
 			};		
 			// logger.debug(`Block fetched: ${peerId}, tip ${tip}`);

@@ -22,5 +22,9 @@
         "logToFile": true,
         "logToConsole": true,
         "logDirectory": "./src/logs/preprod/"
+    },
+    "snapshot": {
+        "enable": true,
+        "source": "blockfrost"
     }
 }

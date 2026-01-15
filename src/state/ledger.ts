@@ -1,3 +1,7 @@
+// DEPRECATED: This file is no longer needed as ledger tables are initialized via hari_schema.sql in DB.ts.
+// Tables are created during DB.ensureInitialized() which loads the schema.
+// This file can be removed once confirmed no other dependencies exist.
+
 import { sql } from "bun";
 
 export async function initNewEpochState() {

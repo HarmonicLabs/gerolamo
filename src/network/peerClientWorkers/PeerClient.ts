@@ -7,6 +7,7 @@ import type { ShelleyGenesisConfig } from "../../types/ShelleyGenesisTypes";
 import { parentPort } from "worker_threads";
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { DB } from "../../db/DB";
+import { getShelleyGenesisConfig } from "../../utils/paths";
 
 export interface IPeerClient {
     host: string;
@@ -21,7 +22,7 @@ export interface IPeerClient {
     syncPointFrom?: ChainPoint | null;
     syncPointTo?: ChainPoint | null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-	db: DB;
+    db: DB;
 }
 
 export class PeerClient implements IPeerClient {
@@ -39,8 +40,8 @@ export class PeerClient implements IPeerClient {
     private keepAliveInterval: NodeJS.Timeout | null;
     private isRangeSyncComplete: boolean = false;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-	db: DB;
-	
+    db: DB;
+    
     constructor(
         host: string,
         port: number | bigint,
@@ -52,7 +53,7 @@ export class PeerClient implements IPeerClient {
         const unixTimestamp = Math.floor(Date.now() / 1000);
         this.peerId = `${host}:${port}:${unixTimestamp}`; // Set after host/port
         this.shelleyGenesisConfig = {} as ShelleyGenesisConfig;
-		this.db = new DB(this.config.dbPath);
+        this.db = new DB(this.config.dbPath);
 
         this.mplexer = new Multiplexer({
             connect: () => {
@@ -172,7 +173,6 @@ export class PeerClient implements IPeerClient {
             const maxSlot = await this.db.getMaxSlot();
             if (maxSlot > 0n) {
                 const row = this.db.getBlockBySlot(maxSlot);
-				logger.debug("DB Tip Row: ", row);
                 if (row) {
                     dbTipPoint = new ChainPoint({
                         blockHeader: {
@@ -187,7 +187,7 @@ export class PeerClient implements IPeerClient {
         }
 
         let startPoint: ChainPoint;
-		logger.debug("dbTipPoint: ", dbTipPoint);
+
         if (this.config.syncFromPoint) {
             startPoint = dbTipPoint || new ChainPoint({
                 blockHeader: {
@@ -327,10 +327,4 @@ export class PeerClient implements IPeerClient {
             this.keepAliveClient.request(this.cookieCounter);
         }, interval);
     }
-}
-
-async function getShelleyGenesisConfig(config: GerolamoConfig) {
-    const shelleyGenesisFile = Bun.file(config.shelleyGenesisFile);
-    const shelleyGenesisConfig = await shelleyGenesisFile.json();
-    return shelleyGenesisConfig;
-}
+};

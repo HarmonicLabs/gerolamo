@@ -4,114 +4,128 @@ import { logger } from '../utils/logger';
 import { getBasePath } from '../utils/paths';
 
 interface HeaderInsertData {
-    slot: bigint;
-    headerHash: string;
-    rollforward_header_cbor: Uint8Array;
-}
+	slot: bigint;
+	headerHash: string;
+	rollforward_header_cbor: Uint8Array;
+};
 
 interface BlockInsertData {
-    slot: bigint;
-    blockHash: string;
-    prevHash: string;
-    headerData: Uint8Array;
-    blockData: Uint8Array;
-    block_fetch_RawCbor: Uint8Array;
-}
+	slot: bigint;
+	blockHash: string;
+	prevHash: string;
+	headerData: Uint8Array;
+	blockData: Uint8Array;
+	block_fetch_RawCbor: Uint8Array;
+};
 
 interface ImmutableChunk {
-    chunk_no: number;
-    tip_hash: string;
-    tip_slot_no: bigint;
-    slot_range_start: bigint;
-    slot_range_end: bigint;
-}
+	chunk_no: number;
+	tip_hash: string;
+	tip_slot_no: bigint;
+	slot_range_start: bigint;
+	slot_range_end: bigint;
+};
 
 export class DB {
-  private _db: Database | undefined;
-  constructor(private readonly dbPath: string) {}
+	private _db: Database | undefined;
+	constructor(private readonly dbPath: string) 
+	{
 
-  get db(): Database {
-    if (!this._db) {
-      this._db = new Database(this.dbPath);
-    }
-    return this._db;
-  }
+	}
+	get db(): Database {
+		if (!this._db) {
+		this._db = new Database(this.dbPath);
+		}
+		return this._db;
+	};
 
-  async ensureInitialized(): Promise<void> {
-    logger.log(`Database path: ${this.dbPath}`);
-    const dir = this.dbPath.substring(0, this.dbPath.lastIndexOf('/'));
-    fs.mkdirSync(dir, { recursive: true });
-    const schemaFile = Bun.file(`${getBasePath()}/db/schemas.sql`);
-    const schema = await schemaFile.text();
-    logger.info("Initializing Database...");
-    this.db.run(schema);
-    logger.info("DB initialized with WAL mode for concurrency");
-  }
+	async ensureInitialized(): Promise<void> {
+		logger.log(`Database path: ${this.dbPath}`);
+		const dir = this.dbPath.substring(0, this.dbPath.lastIndexOf('/'));
+		fs.mkdirSync(dir, { recursive: true });
+		const schemaFile = Bun.file(`${getBasePath()}/db/schemas.sql`);
+		const schema = await schemaFile.text();
+		logger.info("Initializing Database...");
+		this.db.run(schema);
+		logger.info("DB initialized with WAL mode for concurrency");
+	};
 
-  getBlockByHash(hash: string): any {
-    const stmt = this.db.prepare('SELECT * FROM volatile_blocks WHERE block_hash = ? UNION SELECT * FROM immutable_blocks WHERE block_hash = ?');
-    return stmt.get(hash, hash);
-  }
+	getBlockByHash(hash: string): any {
+		const stmt = this.db.prepare(`
+		SELECT id, NULL as chunk_id, slot, block_hash, prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
+		FROM volatile_blocks WHERE block_hash = ?
+		UNION
+		SELECT id, chunk_id, slot, block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
+		FROM immutable_blocks WHERE block_hash = ?
+		`);
+		return stmt.get(hash, hash);
+	};
 
-  getBlockBySlot(slot: bigint): any {
-    const stmt = this.db.prepare('SELECT * FROM volatile_blocks WHERE slot = ? UNION SELECT * FROM immutable_blocks WHERE slot = ?');
-    return stmt.get(slot, slot);
-  }
+	getBlockBySlot(slot: bigint): any {
+		const stmt = this.db.prepare(`
+		SELECT id, NULL as chunk_id, slot, block_hash, prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
+		FROM volatile_blocks WHERE slot = ?
+		UNION
+		SELECT id, chunk_id, slot, block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
+		FROM immutable_blocks WHERE slot = ?
+		`);
+		return stmt.get(slot, slot);
+	};
 
-  getTransactionByTxId(txid: string): any {
-    const stmt = this.db.prepare('SELECT * FROM transactions WHERE txid = ?');
-    return stmt.get(txid);
-  }
+	getTransactionByTxId(txid: string): any {
+		const stmt = this.db.prepare('SELECT * FROM transactions WHERE txid = ?');
+		return stmt.get(txid);
+	};
 
-  getBlocksInEpoch(epoch: number): any[] {
-    const stmt = this.db.prepare(`
-      SELECT * FROM volatile_blocks vb
-      INNER JOIN transactions t ON vb.block_hash = t.block_hash
-      WHERE t.epoch = ?
-      UNION
-      SELECT * FROM immutable_blocks ib
-      INNER JOIN transactions t ON ib.block_hash = t.block_hash
-      WHERE t.epoch = ?
-    `);
-    return stmt.all(epoch, epoch);
-  }
+	getBlocksInEpoch(epoch: number): any[] {
+		const stmt = this.db.prepare(`
+		SELECT * FROM volatile_blocks vb
+		INNER JOIN transactions t ON vb.block_hash = t.block_hash
+		WHERE t.epoch = ?
+		UNION
+		SELECT * FROM immutable_blocks ib
+		INNER JOIN transactions t ON ib.block_hash = t.block_hash
+		WHERE t.epoch = ?
+		`);
+		return stmt.all(epoch, epoch);
+	};
 
-  async getMaxSlot(): Promise<bigint> {
-    const stmt = this.db.prepare('SELECT MAX(slot) as max_slot FROM volatile_blocks');
-    const row = stmt.get() as { max_slot: number | null } | undefined;
-    return BigInt(row?.max_slot ?? 0);
-  }
+	async getMaxSlot(): Promise<bigint> {
+		const stmt = this.db.prepare('SELECT MAX(slot) as max_slot FROM volatile_blocks');
+		const row = stmt.get() as { max_slot: number | null } | undefined;
+		return BigInt(row?.max_slot ?? 0);
+	};
 
-  async getValidHeadersBefore(cutoffSlot: bigint): Promise<any[]> {
-    const stmt = this.db.prepare(`
-      SELECT * FROM volatile_headers
-      WHERE slot < ? AND is_valid = TRUE
-      ORDER BY slot ASC
-    `);
-    const rows = stmt.all(cutoffSlot);
-    return rows;
-  }
+	async getValidHeadersBefore(cutoffSlot: bigint): Promise<any[]> {
+		const stmt = this.db.prepare(`
+		SELECT * FROM volatile_headers
+		WHERE slot < ? AND is_valid = TRUE
+		ORDER BY slot ASC
+		`);
+		const rows = stmt.all(cutoffSlot);
+		return rows;
+	};
 
-  async getValidBlocksBefore(cutoffSlot: bigint): Promise<any[]> {
-    const stmt = this.db.prepare(`
-      SELECT * FROM volatile_blocks
-      WHERE slot < ? AND is_valid = TRUE
-      ORDER BY slot ASC
-    `);
-    const rows = stmt.all(cutoffSlot);
-    return rows;
-  }
+	async getValidBlocksBefore(cutoffSlot: bigint): Promise<any[]> {
+		const stmt = this.db.prepare(`
+		SELECT * FROM volatile_blocks
+		WHERE slot < ? AND is_valid = TRUE
+		ORDER BY slot ASC
+		`);
+		const rows = stmt.all(cutoffSlot);
+		return rows;
+	};
 
-  async getNextChunk(): Promise<{ next_chunk: number }> {
-    const stmt = this.db.prepare('SELECT COALESCE(MAX(chunk_no), 0) + 1 as next_chunk FROM immutable_chunks');
-    const row = stmt.get() as { next_chunk: number };
-    return row;
-  }
+	async getNextChunk(): Promise<{ next_chunk: number }> {
+		const stmt = this.db.prepare('SELECT COALESCE(MAX(chunk_no), 0) + 1 as next_chunk FROM immutable_chunks');
+		const row = stmt.get() as { next_chunk: number };
+		return row;
+	};
 
-  getLedgerSnapshot(snapshotNo: number): any {
-    const stmt = this.db.prepare('SELECT * FROM ledger_snapshots WHERE snapshot_no = ?');
-    return stmt.get(snapshotNo);
-  }
+	getLedgerSnapshot(snapshotNo: number): any {
+		const stmt = this.db.prepare('SELECT * FROM ledger_snapshots WHERE snapshot_no = ?');
+		return stmt.get(snapshotNo);
+	};
 
 	async insertHeaderBatchVolatile(records: Array<HeaderInsertData>): Promise<void> {
 		if (records.length === 0) return;
@@ -120,7 +134,7 @@ export class DB {
 		const hashes = new Set(records.map(r => r.headerHash));
 		if (hashes.size !== records.length) {
 			logger.warn(`Batch has ${records.length - hashes.size} duplicate hashes!`);
-		}
+		};
 
 		const tx = this.db.transaction(() => {
 			const stmt = this.db.prepare(`
@@ -134,11 +148,11 @@ export class DB {
 					record.headerHash,
 					record.rollforward_header_cbor
 				);
-			}
+			};
 		});
 		tx();
 		logger.debug(`Inserted ${records.length} volatile headers (ignored dups)`);
-	}
+	};
 
 	insertBlockVolatile(block: BlockInsertData): void {
 		const stmt = this.db.prepare(`
@@ -159,7 +173,7 @@ export class DB {
 			block.blockData,
 			block.block_fetch_RawCbor
 		);
-	}
+	};
 
 	async insertBlockBatchVolatile(records: Array<{
 		slot: bigint;
@@ -168,14 +182,15 @@ export class DB {
 		headerData: Uint8Array;
 		blockData: Uint8Array;
 		block_fetch_RawCbor: Uint8Array;
-	}>): Promise<void> {
+	}>): Promise<void> 
+	{
 		if (records.length === 0) return;
 
 		// Pre-check for dups in batch (debug only; Map prevents)
 		const hashes = new Set(records.map(r => r.blockHash));
 		if (hashes.size !== records.length) {
 			logger.warn(`Batch has ${records.length - hashes.size} duplicate hashes!`);
-		}
+		};
 
 		const tx = this.db.transaction(() => {
 			const stmt = this.db.prepare(`
@@ -196,7 +211,7 @@ export class DB {
 		});
 		tx();
 		logger.debug(`Inserted ${records.length} volatile blocks (ignored dups)`);
-	}
+	};
 
 	insertChunk(chunk: { chunk_no: number; tip_hash: string; tip_slot_no: bigint; slot_range_start: bigint; slot_range_end: bigint; }): number {
 		const stmt = this.db.prepare(`
@@ -212,7 +227,7 @@ export class DB {
 			chunk.slot_range_end
 		) as { chunk_id: number };
 		return result.chunk_id;
-	}
+	};
 
 	insertImmutableBlocks(blocks: any[], chunk_id: number): void {
 		const stmt = this.db.prepare(`
@@ -222,8 +237,8 @@ export class DB {
 		`);
 		for (const block of blocks) {
 			stmt.run(block.slot, block.block_hash, block.prev_hash, block.header_data, block.block_data, block.block_fetch_RawCbor, block.rollforward_header_cbor, chunk_id);
-		}
-	}
+		};
+	};
 
 	deleteVolatileBlocks(blockHashes: string[]): void {
 		const stmt = this.db.prepare(`
@@ -232,8 +247,8 @@ export class DB {
 		`);
 		for (const hash of blockHashes) {
 			stmt.run(hash);
-		}
-	}
+		};
+	};
 
 	deleteVolatileHeaders(headerHashes: string[]): void {
 		const stmt = this.db.prepare(`
@@ -242,8 +257,8 @@ export class DB {
 		`);
 		for (const hash of headerHashes) {
 			stmt.run(hash);
-		}
-	}
+		};
+	};
 
 	async createChunk(oldBlocks: any[]): Promise<ImmutableChunk> {
 		if (oldBlocks.length === 0) throw new Error('No blocks to chunk');
@@ -263,7 +278,7 @@ export class DB {
 			slot_range_start: firstBlock.slot,
 			slot_range_end: lastBlock.slot
 		};
-	}
+	};
 
 	async compact(): Promise<void> {
 		const cutoff = (await this.getMaxSlot()) - 2160n;
@@ -284,5 +299,5 @@ export class DB {
 		this.deleteVolatileBlocks(oldBlocks.map((b: any) => b.block_hash));
 		this.deleteVolatileHeaders(oldHeaders.map((h: any) => h.header_hash));
 		logger.debug(`GC'd ${oldBlocks.length} blocks + ${oldHeaders.length} headers (w/ RawCbor + rollforward_header_cbor) to chunk ${chunk.chunk_no}`);
-	}
-}
+	};
+};

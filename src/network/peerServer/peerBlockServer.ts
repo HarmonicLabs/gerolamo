@@ -2,13 +2,12 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 import { getBasePath } from '../../utils/paths';
 import { DB } from '../../db/DB';
 import { logger } from '../../utils/logger';
+
 const BASE_PATH = getBasePath();
 const network = process.env.NETWORK ?? "preprod";
-
 const loadConfigFile = Bun.file(`${BASE_PATH}/config/${network}/config.json`);
 const configText = await loadConfigFile.text();
 const config = JSON.parse(configText);
-
 const dbInstance = new DB(config.dbPath);
 
 interface BlockRow {

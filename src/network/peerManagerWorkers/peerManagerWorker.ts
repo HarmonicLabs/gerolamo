@@ -9,19 +9,19 @@ import { PeerClient } from "../peerClientWorkers/PeerClient";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
 export interface GerolamoConfig {
-    readonly network: NetworkT;
-    readonly networkMagic: number;
-    readonly topologyFile: string;
-    readonly syncFromTip: boolean;
-    readonly syncFromGenesis: boolean;
-    readonly genesisBlockHash: string;
-    readonly syncFromPoint: boolean;
-    readonly syncFromPointSlot: bigint;
-    readonly syncFromPointBlockHash: string;
-    readonly logLevel: string;
-    readonly shelleyGenesisFile: string;
-    readonly enableMinibf?: boolean;
-    readonly dbPath: string;
+	readonly network: NetworkT;
+	readonly networkMagic: number;
+	readonly topologyFile: string;
+	readonly syncFromTip: boolean;
+	readonly syncFromGenesis: boolean;
+	readonly genesisBlockHash: string;
+	readonly syncFromPoint: boolean;
+	readonly syncFromPointSlot: bigint;
+	readonly syncFromPointBlockHash: string;
+	readonly logLevel: string;
+	readonly shelleyGenesisFile: string;
+	readonly enableMinibf?: boolean;
+	readonly dbPath: string;
 	readonly logs: {
 		readonly logToFile: boolean;
 		readonly logToConsole: boolean;

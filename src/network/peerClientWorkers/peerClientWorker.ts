@@ -2,7 +2,7 @@ import { parentPort, workerData } from "worker_threads";
 import { PeerClient } from "./PeerClient";
 import type { GerolamoConfig } from "../peerManagerWorkers/peerManagerWorker";
 import { logger } from "../../utils/logger";
-import { headerParser, blockParser } from "../../utils/blockParsers";
+import { headerParser, blockParser } from "../../consensus/blockHeaderParser";
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import type { BlockFetchNoBlocks, BlockFetchBlock } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { prettyBlockValidationLog } from "../../tui/tui";
@@ -10,6 +10,7 @@ import { calculatePreProdCardanoEpoch } from "../../utils/epochFromSlotCalculati
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { DB } from "../../db/DB";
+import { getShelleyGenesisConfig } from "../../utils/paths";
 
 let config: GerolamoConfig;
 let db: DB;
@@ -22,18 +23,18 @@ let newPeers: PeerClient[] = [];
 let volatileDbGcCounter = 0;
 
 let batchBlockRecords: Map<string, {
-    slot: bigint;
-    blockHash: string;
-    prevHash: string;
-    headerData: Uint8Array;
-    blockData: Uint8Array;
-    block_fetch_RawCbor: Uint8Array;
+	slot: bigint;
+	blockHash: string;
+	prevHash: string;
+	headerData: Uint8Array;
+	blockData: Uint8Array;
+	block_fetch_RawCbor: Uint8Array;
 }> = new Map();
 
 let batchHeaderRecords: Map<string, {
-    slot: bigint;
-    headerHash: string;
-    rollforward_header_cbor: Uint8Array;
+	slot: bigint;
+	headerHash: string;
+	rollforward_header_cbor: Uint8Array;
 }> = new Map();
 
 parentPort!.on("message", async (msg: any) => {
@@ -94,18 +95,20 @@ parentPort!.on("message", async (msg: any) => {
 	};
 
 	if (msg.type === "rollForward") {
-    const { peerId, rollForwardCborBytes, tip } = msg;
+	const { peerId, rollForwardCborBytes, tip } = msg;
 		const peer = allPeers.get(peerId);
 		if(!(peer)) {
 			logger.error(`Peer ${peerId} not found for rollForward processing`);
 			return;
 		};
+		const shelleyGenesisConfig = await getShelleyGenesisConfig(config);
 		const headerValidationRes = await headerParser(rollForwardCborBytes);
+
 		if (!(
-		    headerValidationRes
+			headerValidationRes
 		)) {
-		    logger.debug("header validaiotn failed");
-		    return;
+			logger.debug("header validaiotn failed");
+			return;
 		};
 
 		let currentEpoch: number | null = null;
@@ -115,16 +118,16 @@ parentPort!.on("message", async (msg: any) => {
 		
 		let multiEraBlock: MultiEraBlock | undefined;
 		try {
-		    multiEraBlock = await blockParser(newBlockRes);
+			multiEraBlock = await blockParser(newBlockRes);
 		} catch (e: any) {
-		    logger.error(`Block parse failed for peer ${peerId} at slot ${headerValidationRes.slot}:`, e.message || e, `BlockHash: ${toHex(headerValidationRes.blockHeaderHash)}`, `BlockData: ${toHex((newBlockRes as BlockFetchBlock).blockData || new Uint8Array())}`);
-		    return;
+			logger.error(`Block parse failed for peer ${peerId} at slot ${headerValidationRes.slot}:`, e.message || e, `BlockHash: ${toHex(headerValidationRes.blockHeaderHash)}`, `BlockData: ${toHex((newBlockRes as BlockFetchBlock).blockData || new Uint8Array())}`);
+			return;
 		}
 		
 		if (!(multiEraBlock instanceof MultiEraBlock)) 
 		{
-		    logger.log(`Block validation failed for peer ${peerId} at slot ${headerValidationRes.slot}`);			
-		    return;
+			logger.log(`Block validation failed for peer ${peerId} at slot ${headerValidationRes.slot}`);			
+			return;
 		};		
 		// logger.debug(`Block fetched: ${peerId}, tip ${tip}`);
 		// logger.debug("Block: ", toHex(multiEraBlock.block.toCborBytes()))

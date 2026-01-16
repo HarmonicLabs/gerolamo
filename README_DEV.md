@@ -3,7 +3,7 @@
 ## Overview
 Gerolamo Network is a TypeScript Cardano relay/node using Bun runtime, `@harmoniclabs/ouroboros-miniprotocols-ts` for P2P (Mux/Handshake/ChainSync/BlockFetch), `@harmoniclabs/cardano-ledger-ts` for serialization/parsing, SQLite WAL for storage (volatile/immutable/ledger snapshots). Focus: networking + storage; consensus/NES/Praos pending.
 
-**Current Status**: Syncs headers/blocks from preprod peers, stores raw CBOR in `volatile_blocks`/`volatile_headers` (batch 50, GC 2160 slots), serves via HTTP/UDS (`peerBlockServer.ts`). Parse error on blocks ~slot 10M+ (fix below). No validation/NES yet.
+**Current Status**: Full chain sync (headers/blocks post-Babbage), parsing, batch storage in SQLite3 (`volatile_*` → GC to immutable), HTTP serve. Consensus validation/NES/Praos pending.
 
 ## Key Files
 - `src/start.ts`: Entry → load config → `initDB` → dynamic `peerBlockServer` → `startPeerManager`
@@ -30,13 +30,18 @@ PeerClient.chainSync.on('rollForward' header CBOR)
 - `ledger_snapshots`: NES BLOB snapshots (todo)
 - `transactions`: Unified txs (todo extract/parse)
 
+## Logging
+- `src/utils/logger.ts`: Levels DEBUG/INFO/WARN/ERROR.
+- Console: Colored.
+- Files: `./logs/preprod/{debug|info|warn|error}.jsonl` (JSONL: timestamp/level/args).
+- Config via `config.json`.
+
 ## Setup/Run/Debug
 ```
 bun install
-bun src/initDB.ts  # or auto in start.ts
-bun src/start.ts   # preprod default
-tail -f src/logs/preprod/info.jsonl | jq
-curl --unix-socket Gerolamo.sock http://gerolamo/block/9158475  # serve raw blockFetch CBOR
+bun src/start.ts   # preprod default (includes initDB)
+tail -f logs/preprod/info.jsonl | jq
+curl http://localhost:3030/block/9158475  # HTTP port 3030, raw CBOR
 ```
 
 ## Current Issues & Fixes
@@ -44,20 +49,18 @@ curl --unix-socket Gerolamo.sock http://gerolamo/block/9158475  # serve raw bloc
 2. **Relay Loop**: Replace manager relay → post parsed block/NES events to consensus.
 3. **No Validation**: Header hash check only (todo body hash, tx valid).
 
-## TODOs (Priority Order)
-1. **Fix Parse**: Edit `blockParsers.ts` (bytes). Rerun → stores blocks.
-2. **Consensus Worker**:
-   - Create `peerManagerWorkers/consensusWorker.ts`: recv `rollForward` → headerParser → post 'fetchBlock' {peerId,slot,hash} → clientWorker fetch → post back 'blockReady' → consensus: blockParser → basic validate (prevHash?) → if epoch boundary: load prev NES → applyBlock → store `ledger_snapshots` BLOB.
-   - Remove relay.
-3. **NES/Praos**:
-   - `@harmoniclabs/cardano-*-ts`: `NewEpochStateShelley.fromCbor`, `applyBlock`, epochNonce (Blockfrost/calc).
-   - Snapshots per epoch start: `state_data` CBOR.
-4. **Immutable GC**: `gcVolatileToImmutable` → chunk → `immutable_blocks`.
-5. **Tx Extract**: Parse `MultiEraBlock.txs` → `transactions` table.
-6. **Peer Mgmt**: Promote new→warm→hot, askForPeers, topology update.
-7. **Serve**: `peerBlockServer.ts` raw CBOR → parsed JSON? Multi-era TxOut etc.
-8. **Multi-Era Full**: Byron/era0? Validate signatures/UTxO rules.
-9. **Mainnet**: Config switch.
+## TODOs (Priority)
+1. **Consensus Components**:
+   - Implement `./src/consensus/chainSelection.ts` (chain selection logic).
+   - `./src/consensus/StableState.ts` (stable chain state).
+   - `./src/consensus/AnchoredVolatileState.ts` (volatile state).
+   - `./src/consensus/BlockApplication.ts` (block application/validation).
+2. **NES/Praos**: Load/apply NewEpochState, epochNonce (Blockfrost/calc).
+3. **Immutable GC**: Populate `immutable_*` chunks.
+4. **Tx Parsing**: Extract/parse txs to `transactions` table.
+5. **Peer Promotion**: new→warm→hot, PeerSharing.
+6. **Multi-Era**: Full Byron/Shelley validation.
+7. **Mainnet Sync**.
 
 ## Libs/Resources
 - Ouroboros Mini-Protocols: [GitHub](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts)

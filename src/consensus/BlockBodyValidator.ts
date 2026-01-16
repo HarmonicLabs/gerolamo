@@ -42,53 +42,71 @@ export class BlockBodyValidator {
         if (!block.block) return true; // Skip if block not parsed
         const actualBlock = this.getEraBlock(block);
         if (actualBlock === null) return null; // Unsupported era
-        
-        logger.debug(`Starting block body validation for slot ${actualBlock.header.body.slot}`);
 
         const genesis = await getCachedShelleyGenesis(this.config);
         if (!genesis) return false;
 
         const txCountValid = this.validateTransactionCountMatch(actualBlock);
-        logger.debug(`Transaction count match: ${txCountValid}`);
-        if (!txCountValid) return false;
+        if (!txCountValid) {
+            logger.warn(`Block body validation failed: transaction count mismatch`);
+            return false;
+        }
 
         const noInvalidTxs = this.validateNoInvalidTxs(actualBlock);
-        logger.debug(`No invalid txs: ${noInvalidTxs}`);
-        if (!noInvalidTxs) return false;
+        if (!noInvalidTxs) {
+            logger.warn(`Block body validation failed: invalid transactions present`);
+            return false;
+        }
 
         const utxoBalanceValid = await this.validateUTxOBalance(actualBlock);
-        logger.debug(`UTxO balance valid: ${utxoBalanceValid}`);
-        if (!utxoBalanceValid) return false;
+        if (!utxoBalanceValid) {
+            logger.warn(`Block body validation failed: UTxO balance invalid`);
+            return false;
+        }
 
         const feesValid = await this.validateFeesCorrect(actualBlock, genesis);
-        logger.debug(`Fees correct: ${feesValid}`);
-        if (!feesValid) return false;
+        if (!feesValid) {
+            logger.warn(`Block body validation failed: fees incorrect`);
+            return false;
+        }
 
         const validityIntervalValid = this.validateValidityInterval(actualBlock);
-        logger.debug(`Validity interval valid: ${validityIntervalValid}`);
-        if (!validityIntervalValid) return false;
+        if (!validityIntervalValid) {
+            logger.warn(`Block body validation failed: validity interval invalid`);
+            return false;
+        }
 
         const multiAssetsValid = await this.validateMultiAssetsBalance(actualBlock, genesis);
-        logger.debug(`Multi-assets balance valid: ${multiAssetsValid}`);
-        if (!multiAssetsValid) return false;
+        if (!multiAssetsValid) {
+            logger.warn(`Block body validation failed: multi-assets balance invalid`);
+            return false;
+        }
 
         const collateralValid = await this.validateCollateralValid(actualBlock);
-        logger.debug(`Collateral valid: ${collateralValid}`);
-        if (!collateralValid) return false;
+        if (!collateralValid) {
+            logger.warn(`Block body validation failed: collateral invalid`);
+            return false;
+        }
 
         const certsValid = await this.validateCertificatesValid(actualBlock);
-        logger.debug(`Certificates valid: ${certsValid}`);
-        if (!certsValid) return false;
+        if (!certsValid) {
+            logger.warn(`Block body validation failed: certificates invalid`);
+            return false;
+        }
 
         const scriptsValid = this.validateScriptsValid(actualBlock);
-        logger.debug(`Scripts valid: ${scriptsValid}`);
-        if (!scriptsValid) return false;
+        if (!scriptsValid) {
+            logger.warn(`Block body validation failed: scripts invalid`);
+            return false;
+        }
 
         const sizeLimitsValid = await this.validateSizeLimits(actualBlock, genesis);
-        logger.debug(`Size limits valid: ${sizeLimitsValid}`);
-        if (!sizeLimitsValid) return false;
+        if (!sizeLimitsValid) {
+            logger.warn(`Block body validation failed: size limits exceeded`);
+            return false;
+        }
 
-        logger.debug(`All block body validations passed for slot ${actualBlock.header.body.slot}`);
+        logger.debug(`Block body validation passed all checks for slot ${actualBlock.header.body.slot}`);
         return true;
     }
 
@@ -145,7 +163,7 @@ export class BlockBodyValidator {
 
                 const row = utxoMap.get(utxoRef);
                 if (!row) {
-                    logger.warn(`UTxO not found: ${utxoRef}`);
+                   // logger.warn(`UTxO not found: ${utxoRef}`);
                     return false;
                 }
 

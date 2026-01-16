@@ -1,27 +1,31 @@
 # Gerolamo Network Copilot Instructions
 
 ## Project Overview
-Gerolamo Network is a TypeScript implementation of a Cardano node/relay using Bun runtime. It handles P2P networking, chain synchronization, block fetching, and storage. Key components include:
-- **Peer Management**: Manages peers in categories (hot, warm, cold, bootstrap, new) via workers (`peerManagerWorker.ts`, `peerClientWorker.ts`).
-- **Chain Sync & Block Fetch**: Uses `@harmoniclabs/ouroboros-miniprotocols-ts` for mini-protocols; syncs from genesis, tip, or specific point (see `GerolamoConfig` in `peerManagerWorker.ts`).
-- **Data Flow**: Peers handshake, sync chain, fetch headers/blocks, store in SQLite3 database.
-- **Why Structured This Way**: Worker threads for concurrent peer handling; modular design for Cardano compatibility; SQLite3 for storage (transitioning from LMDB).
+Gerolamo Network is a TypeScript Cardano node/relay using Bun. **SQLite3 fully integrated** for blocks/headers (volatile/immutable, WAL/GC). P2P sync/fetch complete. **Consensus pending**: chainSelection, StableState, AnchoredVolatileState, BlockApplication.
 
-**Note**: Currently focusing on post-Babbage era validation and syncing. Fetch headers, perform validation for Babbage/Conway eras, fetch blocks, and store in SQLite3 using schema inspired by Cardano node
+**Note**: Post-Babbage/Conway sync & store achieved. Next: consensus validation in `./src/consensus/*.ts`.
 
 ## Key Files and Directories
-- `src/network/peerManagerWorkers/peerManagerWorker.ts`: Core peer orchestration and sync logic.
-- `src/network/peerClientWorkers/PeerClient.ts`: Individual peer handling, mini-protocol clients.
-- `src/network/utils/`: Utilities like `calcEpochNonce.ts` (may be deprecated during simplification).
+- `src/network/peerManagerWorkers/peerManagerWorker.ts`: Peer orchestration/sync.
+- `src/network/peerClientWorkers/PeerClient.ts`: Mini-protocol clients.
+- `src/db/DB.ts`: SQLite storage (init/read/write/GC).
+- `src/consensus/`: Pending - `chainSelection.ts`, `StableState.ts`, `AnchoredVolatileState.ts`, `BlockApplication.ts`.
+- `src/utils/logger.ts`: Structured JSONL logging.
 - `src/config/preprod/`: Cardano preprod genesis/config files; similar for mainnet.
-- (Upcoming) SQLite3 integration for block/header storage, replacing `src/network/lmdbWorkers/lmdbWorker.ts`.
 
 ## Developer Workflows
-- **Setup**: Run `bun install` to install deps (Bun-specific). Install SQLite3 if needed.
-- **Run**: `bun run index.ts` (extend to start peer manager via `startPeerManager.ts`).
-- **Sync Chain**: Configure `GerolamoConfig` in topology/config files; init starts handshake and sync loop.
-- **Debug Peers**: Set `logLevel` in config; logs peer connections, sync progress.
-- **Storage**: Blocks/headers stored in SQLite3 with an efficient schema.
+- **Setup**: `bun install`
+- **Run**: `bun src/start.ts` (loads config, starts peer server/API/manager).
+- **Sync**: Config `syncFromTip`/`syncFromPointSlot` etc.
+- **Debug**: Logs `./logs/preprod/*.jsonl`; `tail -f logs/preprod/info.jsonl | jq`
+- **Storage**: SQLite `store/db/preprod/Gerolamo.db` (or config.dbPath).
+
+## Logging Architecture
+- `src/utils/logger.ts`: `Logger` class, levels DEBUG/INFO/WARN/ERROR/NONE.
+- **Console**: Colored timestamps/prefixes.
+- **Files**: Per-level JSONL `./logs/preprod/{debug,info,warn,error}.jsonl`.
+- **Format**: `{"timestamp":"ISO","level":"INFO","args":[...JSON-safe...]}` (BigInt→str, Error→obj).
+- Configurable via `GerolamoConfig.logs`.
 
 ## Project-Specific Conventions
 - **Peer Categories**: Add/move peers via worker messages; hot peers sync actively (see `addPeer` in worker). Preserve worker message types.

@@ -205,7 +205,7 @@ export class ValidatePostBabbageHeader {
             maxKesEvo,
         );
 
-        // logger.debug(`Post-Babbage Header Validation Results - Known Leader: ${isKnownLeader}, Correct Proof: ${correctProof}, Leader Stake: ${verifyLeaderStake}, OpCert Validity: ${verifyOpCertValidity}, KES Validity: ${verifyKES}`);
+        logger.debug(`Header validation for era ${h.era} slot ${header.body.slot}: ${isKnownLeader ? '' : 'leader fail,'}${correctProof ? '' : 'vrf fail,'}${verifyLeaderStake ? '' : 'stake fail,'}${verifyOpCertValidity ? '' : 'opcert fail,'}${verifyKES ? '' : 'kes fail,'} ${verifyLeaderStake && correctProof && verifyOpCertValidity && verifyKES ? 'PASSED' : 'FAILED'}`);
 
         // Temporarily allow non-genesis leaders for post-Babbage testing
         return (
@@ -294,13 +294,13 @@ export class ValidatePreBabbageHeader {
         const verify = proof.verify(leaderPubKey, input);
         const computedOutput = era === "pre-babbage" ? blake2b_256(proof.toBytes()) : proof.toHash();
         const out = uint8ArrayEq(computedOutput, output);
-        logger.debug("VRF input:", toHex(input));
-        logger.debug("VRF leaderPubKey:", toHex(leaderPubKey));
-        logger.debug("VRF proof bytes:", toHex(cert.proof));
-        logger.debug("VRF verify result:", verify);
-        logger.debug("VRF computedOutput:", toHex(computedOutput));
-        logger.debug("VRF expected output:", toHex(output));
-        logger.debug("VRF output match:", out);
+        // logger.debug("VRF input:", toHex(input));
+        // logger.debug("VRF leaderPubKey:", toHex(leaderPubKey));
+        // logger.debug("VRF proof bytes:", toHex(cert.proof));
+        // logger.debug("VRF verify result:", verify);
+        // logger.debug("VRF computedOutput:", toHex(computedOutput));
+        // logger.debug("VRF expected output:", toHex(output));
+        // logger.debug("VRF output match:", out);
         // Temporarily only check output match, as verify may have issues
         return out;
     }
@@ -418,7 +418,7 @@ export class ValidatePreBabbageHeader {
             maxKesEvo,
         );
 
-        // logger.debug(`Pre-Babbage Header Validation Results - Known Leader: ${isKnownLeader}, Correct Proof: ${correctProof}, Leader Stake: ${verifyLeaderStake}, OpCert Validity: ${verifyOpCertValidity}, KES Validity: ${verifyKES}`);
+        logger.debug(`Header validation for era ${h.era} slot ${header.body.slot}: ${isKnownLeader ? '' : 'leader fail,'}${correctProof ? '' : 'vrf fail,'}${verifyLeaderStake ? '' : 'stake fail,'}${verifyOpCertValidity ? '' : 'opcert fail,'}${verifyKES ? '' : 'kes fail,'} ${isKnownLeader && correctProof && verifyLeaderStake && verifyOpCertValidity && verifyKES ? 'PASSED' : 'FAILED'}`);
 
         return (
             isKnownLeader &&

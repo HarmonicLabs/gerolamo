@@ -133,3 +133,5 @@ export async function importFromBlockfrost(
     console.log(`🆕 New epoch state: ✓`);
     console.log(`\n🎉 Blockfrost NES import completed successfully!\n`);
 }
+
+export { populateEpochState } from "./populateEpochState";

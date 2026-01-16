@@ -1,28 +1,38 @@
 import { stdout } from 'process';
 import { toHex } from '@harmoniclabs/uint8array-utils';
+import { logger } from "../utils/logger";
+import * as path from "path";
 
 let startTime: number | null = null;
 let isFirstRender = true;
 let lastSlot = 0n;
 let lastTime = 0;
 
-const DASHBOARD_HEIGHT = 22;
+const DASHBOARD_HEIGHT = 28;  // Increased for log pane
 const INNER_WIDTH = 80;
 const PROGRESS_WIDTH = 48;
 
 const colors = {
-hlRed: '\x1b[91m',              // Bright ANSI red – main accent
-hlRedDeep: '\x1b[38;5;160m',    // Deeper crimson for headers
-hlRedBright: '\x1b[38;5;196m',  // Intense for alerts/purge
-gray: '\x1b[90m',               // Dim background for progress
-lightGray: '\x1b[37m',
-white: '\x1b[97m',
-dim: '\x1b[2m',
-reset: '\x1b[0m',
-bold: '\x1b[1m',
+	hlRed: '\x1b[91m',              // Bright ANSI red – main accent
+	hlRedDeep: '\x1b[38;5;160m',    // Deeper crimson for headers
+	hlRedBright: '\x1b[38;5;196m',  // Intense for alerts/purge
+	// Remove non-red colors to keep theme pure
+	gray: '\x1b[90m',               // Dim background for progress
+	lightGray: '\x1b[37m',
+	white: '\x1b[97m',
+	dim: '\x1b[2m',
+	reset: '\x1b[0m',
+	bold: '\x1b[1m',
 };
 
 const glow = colors.bold;
+
+const logColors: Record<string, string> = {
+	DEBUG: colors.gray,
+	INFO: colors.lightGray,
+	WARN: colors.hlRedDeep,
+	ERROR: colors.hlRedBright,
+};
 
 function visibleLength(str: string): number {
 return str.replace(/\x1b\[[0-9;]*m/g, '').length;
@@ -41,12 +51,12 @@ return n.toLocaleString('en-US');
 }
 
 const LAB_HEADER = [
-`${colors.hlRed}${glow}  ╔══════════════════════════════════════════════╗  ${colors.reset}`,
-`${colors.hlRed}  ║      HARMONIC LABS – GEROLAMO NODE           ║  ${colors.reset}`,
-`${colors.hlRed}  ╚══════════════════════════════════════════════╝  ${colors.reset}`,
+	`${colors.hlRedDeep}${glow}  ╔══════════════════════════════════════════════╗  ${colors.reset}`,
+	`${colors.hlRed}  ║      ${colors.hlRedBright}${glow}HARMONIC LABS${colors.reset} ${colors.hlRedDeep}${glow}–${colors.reset} ${colors.hlRedBright}${glow}GEROLAMO NODE${colors.reset}           ║  ${colors.reset}`,
+	`${colors.hlRedBright}${glow}  ╚══════════════════════════════════════════════╝  ${colors.reset}`,
 ];
 
-export function prettyBlockValidationLog(
+export async function prettyBlockValidationLog(
 	era: number,
 	blockEpoch: number,
 	blockHeaderHash: Uint8Array,
@@ -54,7 +64,7 @@ export function prettyBlockValidationLog(
 	tip: bigint | number,
 	volatileDbGcCounter: number,
 	batchInsertCounter?: number,
-): void 
+): Promise<void> 
 {
 	if (startTime === null) startTime = Date.now();
 
@@ -109,11 +119,18 @@ export function prettyBlockValidationLog(
 		center(`${colors.white}GC CYCLES: ${volatileDbGcCounter.toString().padStart(5)}   BATCH: ${(batchInsertCounter ?? '---').toString().padStart(3)}${colors.reset}`),
 		center(`${colors.dim}UPTIME ${runtime}   ${new Date(now).toLocaleString('en-US', { hour12: true })}${colors.reset}`),
 
-		volatileDbGcCounter >= 2150
+		// Insert log pane
+		center(`${colors.hlRedDeep}${glow}RECENT LOGS${colors.reset}`),
+		...(await getRecentLogs(20)).map((log) => {
+			const color = logColors[log.level as keyof typeof logColors] || colors.reset;
+			return center(`${color}[${log.timestamp}] ${log.level.padEnd(5)} ${log.message}${colors.reset}`);
+		}),
+
+		volatileDbGcCounter >= 2158
 		? center(`${colors.hlRedBright}${glow}!!! VOLATILE → IMMUTABLE PURGE ACTIVE !!!${colors.reset}`)
 		: center(''),
 
-		(batchInsertCounter ?? 0) >= 40
+		(batchInsertCounter ?? 0) >= 48
 		? center(`${colors.hlRed}${glow}»»» BATCH INSERT SEQUENCE ACTIVE «««${colors.reset}`)
 		: center(''),
 
@@ -135,4 +152,40 @@ export function prettyBlockValidationLog(
 		lines.forEach(line => stdout.write(clearLine + line + '\n'));
 
 		stdout.write(`\x1b[${process.stdout.rows - DASHBOARD_HEIGHT};1H`);
+}
+
+const LOG_LEVELS = ["DEBUG", "INFO", "WARN", "ERROR"] as const;
+
+async function getRecentLogs(numLines: number = 20): Promise<Array<{ timestamp: string; level: string; message: string; }>> {
+	const allLogs: Array<{ timestamp: string; level: string; message: string; ts: number }> = [];
+	for (const level of LOG_LEVELS) {
+		try {
+			const logPath = logger.getLogPath(level);
+			const content = await Bun.file(logPath).text();
+			const lines = content.split("\n").filter(Boolean).slice(-numLines);
+			for (const line of lines) {
+				const entry = JSON.parse(line);
+				let message = "";
+				if (Array.isArray(entry.args)) {
+					message = entry.args.map((arg: any) => {
+						if (typeof arg === "string") return arg;
+						if (typeof arg === "object") return JSON.stringify(arg).slice(0, 50);
+						return String(arg);
+					}).join(" ");
+				} else {
+					message = String(entry.args);
+				}
+				allLogs.push({
+					timestamp: entry.timestamp.slice(11, 19),
+					level: entry.level,
+					message: message.slice(0, 60) + (message.length > 60 ? "..." : ""),
+					ts: new Date(entry.timestamp).getTime()
+				});
+			}
+		} catch (e) {
+			// ignore missing files
+		}
+	}
+	allLogs.sort((a, b) => b.ts - a.ts);
+	return allLogs.slice(0, 5).map(({ timestamp, level, message }) => ({ timestamp, level, message }));
 }

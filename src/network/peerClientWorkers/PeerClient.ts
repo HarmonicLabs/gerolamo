@@ -1,4 +1,4 @@
-import { BlockFetchBlock, BlockFetchClient, BlockFetchNoBlocks, ChainPoint, ChainSyncClient, ChainSyncIntersectFound, ChainSyncIntersectNotFound, ChainSyncRollBackwards, ChainSyncRollForward, HandshakeAcceptVersion, HandshakeClient, KeepAliveClient, KeepAliveResponse, Multiplexer, PeerSharingClient, PeerSharingResponse } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { BlockFetchBlock, TxSubmitClient, BlockFetchClient, BlockFetchNoBlocks, ChainPoint, ChainSyncClient, ChainSyncIntersectFound, ChainSyncIntersectNotFound, ChainSyncRollBackwards, ChainSyncRollForward, HandshakeAcceptVersion, HandshakeClient, KeepAliveClient, KeepAliveResponse, Multiplexer, PeerSharingClient, PeerSharingResponse } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { connect } from "node:net";
 import { logger } from "../../utils/logger";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
@@ -8,6 +8,10 @@ import { parentPort } from "worker_threads";
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { DB } from "../../db/DB";
 import { getShelleyGenesisConfig } from "../../utils/paths";
+import { toHex } from "@harmoniclabs/uint8array-utils";
+import { GlobalSharedMempool } from "../SharedMempool";
+import { SharedMempool } from "@harmoniclabs/shared-cardano-mempool-ts";
+import { TxBody, Tx } from "@harmoniclabs/cardano-ledger-ts";
 
 export interface IPeerClient {
     host: string;
@@ -23,6 +27,7 @@ export interface IPeerClient {
     syncPointTo?: ChainPoint | null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
     db: DB;
+    sharedMempool: SharedMempool;
 }
 
 export class PeerClient implements IPeerClient {
@@ -41,7 +46,9 @@ export class PeerClient implements IPeerClient {
     private isRangeSyncComplete: boolean = false;
     shelleyGenesisConfig: ShelleyGenesisConfig;
     db: DB;
-    
+    readonly txSubmitClient: TxSubmitClient;
+    readonly sharedMempool: SharedMempool;
+
     constructor(
         host: string,
         port: number | bigint,
@@ -63,13 +70,20 @@ export class PeerClient implements IPeerClient {
             protocolType: "node-to-node",
         });
 
-        this.chainSyncClient = new ChainSyncClient(this.mplexer);
-        this.blockFetchClient = new BlockFetchClient(this.mplexer);
-        this.keepAliveClient = new KeepAliveClient(this.mplexer);
-        this.peerSharingClient = new PeerSharingClient(this.mplexer);
+        
+
+        //* Load up the mini protocls into the pear and mplexer *//
+        this.chainSyncClient    =  new ChainSyncClient( this.mplexer );
+        this.blockFetchClient   = new BlockFetchClient( this.mplexer);
+        this.keepAliveClient    =  new KeepAliveClient( this.mplexer );
+        this.peerSharingClient  = new PeerSharingClient( this.mplexer );
+        this.sharedMempool     = GlobalSharedMempool.getInstance();
+        this.txSubmitClient     = new TxSubmitClient( this.mplexer, this.sharedMempool );
+
         this.cookieCounter = 0;
         this.peerSlotNumber = null;
         this.keepAliveInterval = null;
+        
         getShelleyGenesisConfig(this.config)
             .then((cfg) => {
                 this.shelleyGenesisConfig = cfg;
@@ -103,7 +117,6 @@ export class PeerClient implements IPeerClient {
                 error,
             );
         });
-
         // this.keepAliveClient.on("response", (response: KeepAliveResponse) => {
         //     logger.debug(
         //         `KeepAliveResponse received for peer ${this.peerId}:`,
@@ -117,7 +130,7 @@ export class PeerClient implements IPeerClient {
         process.on("beforeExit", () => {
             this.terminate();
         });
-    }
+    };
 
     terminate() {
         logger.info(`Terminating connections for peer ${this.peerId}...`);
@@ -196,20 +209,22 @@ export class PeerClient implements IPeerClient {
                 }
             });
         } else {
-            // syncFromTip (default)
-            startPoint = dbTipPoint || new ChainPoint({});
+            logger.info(`Syncing to tip for peer ${this.peerId}...`);
+            startPoint = peerTipPoint;
         };
 
         if (!this.config.syncFromTip && !this.config.syncFromPoint) {
             throw new Error("Invalid sync configuration: enable syncFromTip or syncFromPoint");
         };
-
+        // logger.info(`Finding intersect from point for peer ${this.peerId}:`, startPoint);
         const intersectResult = await this.chainSyncClient.findIntersect([startPoint]);
+        // logger.info(`Intersect result for peer ${this.peerId}:`, intersectResult);
         if (intersectResult instanceof ChainSyncIntersectFound) {
             logger.debug(`Intersect found at slot ${intersectResult.point.blockHeader?.slotNumber} for peer ${this.peerId}`);
         } else {
             logger.warn(`No intersect found for peer ${this.peerId}, proceeding with tip`);
         };
+        logger.info(`Got chain sync for peer ${this.peerId}`);
         return intersectResult.tip.point;
     };
 
@@ -298,7 +313,8 @@ export class PeerClient implements IPeerClient {
         return blocksData;
     }
 
-    async askForPeers(): Promise<PeerAddress[]> {
+    async askForPeers(): Promise<PeerAddress[]> 
+    {
         logger.debug(`Requesting peers from peer ${this.peerId}...`);
         const peerResponse = await this.peerSharingClient.request(10);
         logger.debug(
@@ -312,8 +328,23 @@ export class PeerClient implements IPeerClient {
         ) throw new Error("Invalid PeerSharingResponse");
 
         return peerResponse.peerAddresses;
-    }
+    };
 
+    async submitToSharedMempool(txCbor: Uint8Array): Promise<any> {
+        const tx = Tx.fromCbor(txCbor);
+        try {
+            const result = await this.txSubmitClient.mempool.append(
+                tx.body.hash.toBuffer(),
+                tx.toCborBytes()
+            );
+            logger.mempool(`Tx submission result from peer ${this.peerId}`, result);
+            return result;
+        } catch (e) {
+            logger.mempool(`Failed to submit tx to peer ${this.peerId}`, e);
+            throw e;
+        }
+    };
+    
     startKeepAlive(interval: number = 60000) {
         this.keepAliveInterval = setInterval(() => {
             this.cookieCounter = (this.cookieCounter + 1) % 65536;

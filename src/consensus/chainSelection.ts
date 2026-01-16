@@ -1,6 +1,6 @@
 import { MultiEraHeader } from "@harmoniclabs/cardano-ledger-ts";
 import { sql } from "bun";
-
+import { logger } from "../utils/logger";
 /**
  * Represents a candidate chain for selection
  */
@@ -121,8 +121,6 @@ export async function compareChainsPraos(
     };
 }
 
-
-
 /**
  * Select best chain using specified selection mode
  */
@@ -158,6 +156,7 @@ export async function selectBestChain(
         }
     }
 
+    logger.info(`Chain selection complete: ${bestCandidate ? `candidate slot ${bestCandidate.slotNumber} (rollback ${bestComparison!.rollbackDistance})` : 'current chain preferred'}`);
     return { candidate: bestCandidate, comparison: bestComparison };
 }
 

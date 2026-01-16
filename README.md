@@ -29,14 +29,14 @@ bun src/start.ts
 ```
 - Syncs **preprod** chain (edit `NETWORK=mainnet` for mainnet).
 - Starts **peer server** (port 3000), **block API** (port 3030).
-- Logs: `./src/logs/preprod/*.jsonl` (debug/info/warn/error).
+- Logs: `./logs/preprod/*.jsonl` (debug/info/warn/error).
 
 **Done!** Gerolamo handshakes peers, syncs chain, stores blocks.
 
 ### 3. Monitor
 ```bash
 # Tail logs
-tail -f src/logs/preprod/*.jsonl | jq -r '.level, .args[] | @text'
+tail -f logs/preprod/*.jsonl | jq -r '.level, .args[] | @text'
 
 # Block API test
 curl http://localhost:3030/block/3542390  # Slot → hex CBOR
@@ -53,9 +53,9 @@ curl http://localhost:3030/block/f93e682d5b91a94d8660e748aef229c19cb285bfb9830db
   "network": "preprod",  // or "mainnet\"
   "networkMagic": 1,       // Preprod=1, Mainnet=0
   "topologyFile": "./src/config/preprod/topology.json",  // Peers list
-  "dbPath": "./src/db/preprod/Gerolamo.db",  // SQLite DB
+  "dbPath": "./store/db/preprod/Gerolamo.db",  // SQLite DB
   "logs": {
-    "logDirectory": "./src/logs/preprod/",  // JSONL logs
+    "logDirectory": "./logs/preprod/",  // JSONL logs
     "logToFile": true,
     "logToConsole": true
   },
@@ -65,7 +65,7 @@ curl http://localhost:3030/block/f93e682d5b91a94d8660e748aef229c19cb285bfb9830db
   "syncFromPointBlockHash": "f93e682d...",
   "shelleyGenesisFile": "...",  // Era genesis (auto-loaded)
   "ip": "0.0.0.0",
-  "port": 3000             // P2P listen
+  "port": 3000             // P2P listenbun
 }```
 
 - **Topology** (`topology.json`): Add relays under `localRoots.accessPoints` / `bootstrapPeers`.
@@ -108,13 +108,22 @@ start.ts ──(config)──> initDB (SQLite schema/WAL)
 - `immutable_blocks/headers`: Chunked (slot ranges).
 - Indexes/triggers for perf.
 
-## 🔍 Block Fetching API
+## 🔍 API Endpoints
 
-**GET** `http://localhost:3030/block/{slot|hash}`
-- **Slot**: `curl http://localhost:3030/block/3542390` → hex `83a...` (RawCbor).
+### GET /block/{slot|hash}
+- **Slot**: `curl http://localhost:3030/block/3542390` → hex CBOR (RawCbor).
 - **Hash**: `curl http://localhost:3030/block/f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f`
-- **Response**: `application/cbor` hex (decode: `cbhex <hex>`).
+- **Response**: `application/cbor` hex (decode: `cbhex &lt;hex&gt;`).
 - Serves from SQLite (volatile + immutable).
+
+### GET /utxo/{txhash:index}
+- **UTXO Ref**: `curl http://localhost:3030/utxo/f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f:0`
+- **Response**: JSON with UTXO details (address, amount, assets).
+- Returns 404 if not found.
+
+### POST /txsubmit
+- Submit CBOR transaction: `curl -X POST http://localhost:3030/txsubmit --data-binary @tx.cbor -H "Content-Type: application/cbor"`
+- **Response**: 202 Accepted if relayed to peers.
 
 ## 🛠️ Development
 
@@ -132,6 +141,43 @@ NETWORK=mainnet  # Switch network
 ### Build/Run Workers
 - No build (Bun native TS).
 - `bun --inspect src/start.ts` debug.
+
+## 📊 Logging Architecture
+
+**src/utils/logger.ts** provides structured logging:
+
+- **Levels**: `DEBUG=0`, `INFO=1`, `WARN=2`, `ERROR=3`
+- **Output**:
+  - **Console**: Colored prefixes e.g. `[INFO ][Wed, 15 Jan 2026 12:00:00 GMT]: message`
+  - **Files**: `./logs/preprod/{debug,info,warn,error}.jsonl`
+- **JSONL Format**:
+  ```json
+  {"timestamp":"2026-01-15T12:00:00Z","level":"INFO","args":["msg",123n,"str"]}
+  ```
+  - Handles `BigInt`→string, `Error`→{name,message,stack}
+- **Config**: `logLevel`, `logDirectory`, `logToFile=true`, `logToConsole=true`
+- **Usage**: `logger.info("Sync", peerId, slot);`
+
+**Monitor**:
+```bash
+tail -f logs/preprod/info.jsonl | jq -r '.timestamp, .level, (.args[] | @text)'
+multitail logs/preprod/*.jsonl
+```
+
+## 🚧 Roadmap
+
+### Implemented
+- P2P peer management (hot/bootstrap peers)
+- Ouroboros mini-protocols: Handshake, ChainSync, BlockFetch
+- Multi-era header/block parsing & storage (SQLite3 WAL, volatile→immutable GC)
+- HTTP Block API (`/block/{slot|hash}` → raw CBOR)
+- Structured JSONL logging
+
+### Pending (Consensus)
+- `./src/consensus/chainSelection.ts`
+- `./src/consensus/StableState.ts`
+- `./src/consensus/AnchoredVolatileState.ts`
+- `./src/consensus/BlockApplication.ts`
 
 ## 📚 Resources
 - [Cardano Ouroboros](https://ouroboros-network.cardano.intersectmbo.org/)

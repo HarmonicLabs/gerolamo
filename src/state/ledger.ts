@@ -1,4 +1,4 @@
-// DEPRECATED: This file is no longer needed as ledger tables are initialized via hari_schema.sql in DB.ts.
+// DEPRECATED: This file is no longer needed as ledger tables are initialized via Gerolamo_schema.sqlin DB.ts.
 // Tables are created during DB.ensureInitialized() which loads the schema.
 // This file can be removed once confirmed no other dependencies exist.
 

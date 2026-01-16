@@ -6,6 +6,7 @@ import type { ShelleyGenesisConfig } from "../../types/ShelleyGenesisTypes";
 import type { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "../peerClientWorkers/PeerClient";
+import { GlobalSharedMempool } from "../SharedMempool";
 
 
 export interface GerolamoConfig {
@@ -22,6 +23,8 @@ export interface GerolamoConfig {
 	readonly shelleyGenesisFile: string;
 	readonly enableMinibf?: boolean;
 	readonly dbPath: string;
+	readonly port?: number;
+	readonly unixSocket?: boolean;
 	readonly logs: {
 		readonly logToFile: boolean;
 		readonly logToConsole: boolean;
@@ -31,6 +34,7 @@ export interface GerolamoConfig {
 		readonly enable: boolean;
 		readonly source: string;
 	};
+	readonly tuiEnabled?: boolean;
 	allPeers: Map<string, PeerClient>;
 };
 
@@ -116,6 +120,7 @@ function setupPeerClientListener() {
 				peerAddedResolvers.get(msg.addId)?.(msg.peerId);
 				peerAddedResolvers.delete(msg.addId);
 			};
+
 		} catch (error) {
 			logger.error("Error in peerClientWorker message handler:", error);
 		}
@@ -158,45 +163,55 @@ async function addPeer(host: string, port: number | bigint, category: string) {
 
 parentPort!.on("message", async (msg: any) => {
 	try {
-	if (msg.type === "init") {
-		config = workerData as GerolamoConfig;
-		logger.setLogConfig(config.logs);
-		topology = await parseTopology(config.topologyFile);
-		const shelleyGenesisFile = Bun.file(config.shelleyGenesisFile);
-		shelleyGenesisConfig = await shelleyGenesisFile.json();
-		await initPeerClientWorker();
-		setupPeerClientListener();
-		logger.debug("PeerManager worker initialized");
+		if (msg.type === "init") {
+			config = workerData as GerolamoConfig;
+			logger.setLogConfig(config.logs);
+			if (config.tuiEnabled) {
+				logger.setLogConfig({ logToConsole: false });
+			}
+			topology = await parseTopology(config.topologyFile);
+			const shelleyGenesisFile = Bun.file(config.shelleyGenesisFile);
+			shelleyGenesisConfig = await shelleyGenesisFile.json();
+			await initPeerClientWorker();
+			GlobalSharedMempool.getInstance();
+			logger.mempool("Global SharedMempool initialized in PeerManagerWorker");
+			setupPeerClientListener();
+			logger.debug("PeerManager worker initialized");
 
-		if (topology.bootstrapPeers) {
-			for (const ap of topology.bootstrapPeers) {
-				await addPeer(ap.address, ap.port, "bootstrap");
-				await addPeer(ap.address, ap.port, "hot");
-			};
-		};
-
-		if (topology.localRoots) {
-			for (const root of topology.localRoots) {
-				for (const ap of root.accessPoints) {
+			if (topology.bootstrapPeers) {
+				for (const ap of topology.bootstrapPeers) {
+					await addPeer(ap.address, ap.port, "bootstrap");
 					await addPeer(ap.address, ap.port, "hot");
 				};
 			};
+
+			if (topology.localRoots) {
+				for (const root of topology.localRoots) {
+					for (const ap of root.accessPoints) {
+						await addPeer(ap.address, ap.port, "hot");
+					};
+				};
+			};
+
+			logger.debug("All handshakes completed, sending startSync for hot peers");
+			peerClientWorker.postMessage({ type: "startSync", peerIds: hotPeerIds });
+			parentPort!.postMessage({ type: "started" });
 		};
 
-		logger.debug("All handshakes completed, sending startSync for hot peers");
-		peerClientWorker.postMessage({ type: "startSync", peerIds: hotPeerIds });
-		parentPort!.postMessage({ type: "started" });
-	};
+		if (msg.type === "submitTx") {
+			// logger.info(`PeerManagerWorker: forwarding submitTx to peerClientWorker`, msg);
+			peerClientWorker.postMessage(msg);
+		};		
 
-	if (msg.type === "shutdown") {
-		peerClientWorker.postMessage({ type: "shutdown" });
-		peerClientWorker.on("message", (msg) => {
-			if (msg.type === "shutdownComplete") {
-				logger.debug("PeerManager worker shut down");
-				parentPort!.postMessage({ type: "shutdownComplete" });
-			}
-		});
-	};
+		if (msg.type === "shutdown") {
+			peerClientWorker.postMessage({ type: "shutdown" });
+			peerClientWorker.on("message", (msg) => {
+				if (msg.type === "shutdownComplete") {
+					logger.debug("PeerManager worker shut down");
+					parentPort!.postMessage({ type: "shutdownComplete" });
+				}
+			});
+		};
 	} catch (error) {
 		logger.error("Error in peerManager message handler:", error);
 	}

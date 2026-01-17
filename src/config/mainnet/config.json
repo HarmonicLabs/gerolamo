@@ -9,28 +9,28 @@
     "conwayGenesisHash": "15a199f895e461ec0ffc6dd4e4028af28a492ab4e806d39cb674c88f7643ef62",
     "p2p": "enabled",
     "topologyFile": "./src/config/mainnet/topology.json",
-    "syncFromTip": false,
-    "syncFromPoint": true,
-    "syncFromPointSlot": 3542390,
-    "syncFromPointBlockHash": "f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f",
+    "syncFromTip": true,
+    "syncFromPoint": false,
+    "syncFromPointSlot": 72316796,
+    "syncFromPointBlockHash": "c58a24ba8203e7629422a24d9dc68ce2ed495420bf40d9dab124373655161a20",
     "host": "0.0.0.0",
     "port": 3030,
     "unixSocket": false,
     "network": "mainnet",
-    "networkMagic": 0,
+    "networkMagic": 764824073,
     "dbPath": "./src/store/db/mainnet/Gerolamo.db",
+    "tuiEnabled": true,
     "logs":{
         "logToFile": true,
         "logToConsole": false,
         "logDirectory": "./src/logs/mainnet/",
-        "logLevel": "error"
+        "logLevel": "DEBUG"
     },
     "snapshot": {
-        "enable": true,
+        "enable": false,
         "source": "blockfrost",
         "fromEpoch": 4
     },
-    "tuiEnabled": true,
     "mempool": {
         "enabled": true,
         "maxSize": 262144,

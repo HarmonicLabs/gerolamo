@@ -15,7 +15,10 @@ export async function headerParser(rollForward: Uint8Array) {
 
     if (!(
         data.data instanceof CborArray
-    )) throw new Error("invalid CBOR for header");
+    )) {
+        logger.error("Invalid CBOR for header: data not CborArray");
+        throw new Error("invalid CBOR for header");
+    }
 
     const blockHeaderData: Uint8Array = Cbor.encode(data.data).toBuffer();
     // logger.debug("blockHeaderData", toHex(blockHeaderData));
@@ -23,26 +26,38 @@ export async function headerParser(rollForward: Uint8Array) {
     // logger.debug("Lazy Header: ", lazyHeader);
     if (!(
         lazyHeader instanceof LazyCborArray
-    ) || !lazyHeader.array[1]) throw new Error("invalid CBOR for header");
+    ) || !lazyHeader.array[1]) {
+        logger.error("Invalid CBOR for header: lazyHeader not LazyCborArray or missing array[1]");
+        throw new Error("invalid CBOR for header");
+    }
 
     const blockHeaderParsed = Cbor.parse(lazyHeader.array[1]);
     // logger.debug("Block Header Parsed: ", blockHeaderParsed);
     if (!(
         blockHeaderParsed instanceof CborTag &&
         blockHeaderParsed.data instanceof CborBytes
-    )) throw new Error("invalid CBOR for header body");
+    )) {
+        logger.error("Invalid CBOR for header body: not CborTag with CborBytes");
+        throw new Error("invalid CBOR for header body");
+    }
 
     const blockHeaderBodyLazy = Cbor.parseLazy(blockHeaderParsed.data.bytes);
     if (!(
         blockHeaderBodyLazy instanceof LazyCborArray
-    )) throw new Error("invalid CBOR for header body");
+    )) {
+        logger.error("Invalid CBOR for header body: not LazyCborArray");
+        throw new Error("invalid CBOR for header body");
+    }
     // logger.debug("Block Header Body Lazy: ", blockHeaderBodyLazy.array);
     /*
      * We add +1 to era in multiplexer because it enums starts at 0 for the HFC.
      */
     if (!(
         lazyHeader.array[0] !== undefined && lazyHeader.array[0][0] !== undefined
-    )) throw new Error("Missing Era in MultiEra header");
+    )) {
+        logger.error("Missing Era in MultiEra header");
+        throw new Error("Missing Era in MultiEra header");
+    }
     const blcokHeaderBodyEra = lazyHeader.array[0][0] + 1;
     // logger.debug("Multiplexer Era: ", toHex(lazyHeader.array[1]), " Header Era: ", blcokHeaderBodyEra);
     // Parse the header based on era
@@ -82,6 +97,12 @@ export async function headerParser(rollForward: Uint8Array) {
     const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
     const slot = multiEraHeader.header.body.slot;
 
+    logger.info("Parsed header successfully", {
+        era: blcokHeaderBodyEra,
+        slot: slot.toString(),
+        hash: toHex(blockHeaderHash)
+    });
+
     return ({   
         slot,
         blockHeaderHash,
@@ -102,9 +123,17 @@ export async function blockParser(
     const lazyBlock = Cbor.parseLazy(newBlock.blockData);
     if (!(
         lazyBlock instanceof LazyCborArray
-    )) throw new Error("invalid CBOR for block");
+    )) {
+        logger.error("Invalid CBOR for block: not LazyCborArray");
+        throw new Error("invalid CBOR for block");
+    }
     
     const newMultiEraBlock = MultiEraBlock.fromCbor(newBlock.blockData);
+
+    logger.debug("Parsed block successfully", {
+        era: newMultiEraBlock.era,
+        slot: newMultiEraBlock.block.header.body.slot.toString()
+    });
 
     return newMultiEraBlock;
 };

@@ -45,6 +45,7 @@ export class ConsensusOrchestrator {
 		this.config = config;
 		this.db = db;
 		this.peers = peers;
+		// if (this.config.tuiEnabled) { setupKeyboard(); } // moved to main thread
 	}
 
 	async handleRollForward(rollForwardCborBytes: Uint8Array, peerId: string, tip: number | bigint): Promise<void> {
@@ -103,7 +104,7 @@ export class ConsensusOrchestrator {
 
 			const blockHash = toHex(blockHeaderHash);
 
-            const applyBlockres = await applyBlock(this.db, multiEraBlock, BigInt(blockSlot), blockHeaderHash);
+            await applyBlock(this.db, multiEraBlock.block as MultiEraBlock["block"], BigInt(blockSlot), blockHeaderHash);
             logger.info(`Applied Block: ${toHex(blockHeaderHash)}`);	
             
 			const recordHeaders: HeaderInsertData = {
@@ -124,7 +125,7 @@ export class ConsensusOrchestrator {
 			this.batchBlockRecords.set(blockHash, recordBlocks);
 			this.batchHeaderRecords.set(blockHash, recordHeaders);
 
-			if (this.batchBlockRecords.size >= 50) {
+			if (this.batchBlockRecords.size >= 5) {
 				await this.db.insertBlockBatchVolatile(Array.from(this.batchBlockRecords.values()));
 				await this.db.insertHeaderBatchVolatile(Array.from(this.batchHeaderRecords.values()));
 				this.batchBlockRecords.clear();

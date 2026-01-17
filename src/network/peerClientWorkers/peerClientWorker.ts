@@ -82,6 +82,7 @@ parentPort!.on("message", async (msg: any) => {
 
 	if (msg.type === "rollForward") 
 	{
+		logger.debug(`RollForward received from peer ${msg.peerId}, forwarding to consensus`);
 		logger.info(`Processing rollForward message from peer ${msg.peerId}...`);
 		try {
 			await orchestrator.handleRollForward(msg.rollForwardCborBytes, msg.peerId, msg.tip);
@@ -92,6 +93,7 @@ parentPort!.on("message", async (msg: any) => {
 
 	if (msg.type === "rollBack") 
 	{
+		logger.debug(`RollBack received from peer ${msg.peerId}, point slot ${msg.point.blockHeader?.slotNumber}`);
 		await orchestrator.handleRollBack(msg.point);
 	};
 

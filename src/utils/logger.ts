@@ -125,7 +125,7 @@ export class Logger {
                     return arg.toString();
                 }
                 try {
-                    return JSON.parse(JSON.stringify(arg));
+                    return JSON.parse(JSON.stringify(arg, (k, v) => typeof v === 'bigint' ? v.toString() : v));
                 } catch {
                     return String(arg);
                 }

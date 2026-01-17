@@ -2,6 +2,7 @@ import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
 import { sql } from "bun";
 import { Buffer } from "node:buffer";
 import { toHex } from "@harmoniclabs/uint8array-utils";
+import { logger } from "../utils/logger";
 
 // Stable state represents the immutable portion of the blockchain
 export interface StableState {
@@ -151,6 +152,12 @@ export async function transitionToStable(
             updated_at = CURRENT_TIMESTAMP
         WHERE id = 1
     `;
+
+    logger.info("Advanced stable state", {
+        blocksCount: newBlockCount,
+        immutableTipSlot: newTip.slot.toString(),
+        immutableTipHash: toHex(newTip.hash.bytes),
+    });
 }
 
 // Check if a block exists in stable state
@@ -212,6 +219,8 @@ export async function getStableChain(): Promise<
 export async function garbageCollectVolatile(blocks: Hash32[]): Promise<void> {
     if (blocks.length === 0) return;
 
+    logger.debug("Garbage collecting volatile blocks", { count: blocks.length });
+
     const hashes = blocks.map((h) => h.toBuffer());
     await sql`DELETE FROM blocks WHERE hash IN ${sql(hashes)}`;
 }
@@ -237,6 +246,8 @@ export async function makeBlocksImmutable(
     blockHashes: Hash32[],
 ): Promise<void> {
     if (blockHashes.length === 0) return;
+
+    logger.info("Making blocks immutable", { count: blockHashes.length });
 
     // Get block data from volatile storage
     const hashBuffers = blockHashes.map((h) => h.toBuffer());
@@ -296,6 +307,11 @@ export async function appendBlock(
     }
 
     await transitionToStable([block]);
+
+    logger.info("Appended block to immutable", {
+        slot: block.slot.toString(),
+        hash: toHex(block.hash.bytes),
+    });
 }
 
 // Get a specific block component
@@ -374,7 +390,7 @@ export async function validateIntegrity(): Promise<boolean> {
             if (
                 currentBlock.data.prevHash !== toHex(prevBlock.hash.toBuffer())
             ) {
-                console.error(
+                logger.error(
                     `Chain validation failed at slot ${currentBlock.slot}: prev_hash mismatch`,
                 );
                 return false;
@@ -382,7 +398,7 @@ export async function validateIntegrity(): Promise<boolean> {
 
             // Check slot ordering
             if (currentBlock.slot <= prevBlock.slot) {
-                console.error(
+                logger.error(
                     `Chain validation failed: non-increasing slots at ${currentBlock.slot}`,
                 );
                 return false;
@@ -391,7 +407,7 @@ export async function validateIntegrity(): Promise<boolean> {
 
         return true;
     } catch (error) {
-        console.error("Integrity validation failed:", error);
+        logger.error("Integrity validation failed:", error);
         return false;
     }
 }
@@ -400,18 +416,18 @@ export async function validateIntegrity(): Promise<boolean> {
 export async function closeDB(): Promise<void> {
     // In a real implementation, this would close file handles, etc.
     // For SQLite, we don't need to do anything special as Bun handles connection pooling
-    console.log("Immutable database closed");
+    logger.info("Immutable database closed");
 }
 
 // Recovery mechanism - truncate to last valid block
 export async function recoverFromCorruption(): Promise<void> {
     const isValid = await validateIntegrity();
     if (isValid) {
-        console.log("Database integrity is valid");
+        logger.info("Database integrity is valid");
         return;
     }
 
-    console.log("Database corruption detected, attempting recovery...");
+    logger.error("Database corruption detected, attempting recovery...");
 
     // Find the last valid block by checking the chain
     const blocks = await getStableChain();
@@ -448,7 +464,7 @@ export async function recoverFromCorruption(): Promise<void> {
             WHERE id = 1
         `;
 
-        console.log(`Recovered database to slot ${lastValidBlock.slot}`);
+        logger.info(`Recovered database to slot ${lastValidBlock.slot}`);
     } else {
         // Complete corruption - reset to empty
         await sql`DELETE FROM immutable_blocks`;
@@ -460,7 +476,7 @@ export async function recoverFromCorruption(): Promise<void> {
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = 1
         `;
-        console.log("Database completely corrupted, reset to empty");
+        logger.info("Database completely corrupted, reset to empty");
     }
 }
 
@@ -495,7 +511,7 @@ export async function reconstructChunk(chunkIndex: number): Promise<void> {
 
     // In a real implementation, this would rebuild the chunk file
     // For now, this is a placeholder
-    console.log(`Reconstructing chunk ${chunkPath}`);
+    logger.info(`Reconstructing chunk ${chunkPath}`);
 
     // Validate after reconstruction
     const isValid = await validateChunk(chunkIndex);
@@ -527,7 +543,7 @@ export async function validateAllChunks(): Promise<boolean> {
 
     return validationResults.every((isValid, i) => {
         if (!isValid) {
-            console.error(`Chunk ${i} validation failed`);
+            logger.error(`Chunk ${i} validation failed`);
         }
         return isValid;
     });

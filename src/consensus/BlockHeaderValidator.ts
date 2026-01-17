@@ -22,7 +22,7 @@ async function getCachedShelleyGenesis(config: any): Promise<ShelleyGenesisConfi
         genesisCache = await getShelleyGenesisConfig(config);
         return genesisCache;
     } catch (error) {
-        console.error("Failed to load Shelley genesis config:", error);
+        logger.error("Failed to load Shelley genesis config:", error);
         return null;
     }
 }
@@ -205,7 +205,17 @@ export class ValidatePostBabbageHeader {
             maxKesEvo,
         );
 
-        logger.debug(`Header validation for era ${h.era} slot ${header.body.slot}: ${isKnownLeader ? '' : 'leader fail,'}${correctProof ? '' : 'vrf fail,'}${verifyLeaderStake ? '' : 'stake fail,'}${verifyOpCertValidity ? '' : 'opcert fail,'}${verifyKES ? '' : 'kes fail,'} ${verifyLeaderStake && correctProof && verifyOpCertValidity && verifyKES ? 'PASSED' : 'FAILED'}`);
+        const issuerHex = toHex(issuer.toCborBytes());
+        const passed = correctProof && verifyLeaderStake && verifyOpCertValidity && verifyKES;
+        logger.info(`Header validation ${passed ? 'PASSED' : 'FAILED'} era=${h.era} slot=${header.body.slot}`, {
+          issuerHex,
+          isKnownLeader,
+          correctProof,
+          verifyLeaderStake,
+          verifyOpCertValidity,
+          verifyKES,
+          passed
+        });
 
         // Temporarily allow non-genesis leaders for post-Babbage testing
         return (
@@ -418,7 +428,17 @@ export class ValidatePreBabbageHeader {
             maxKesEvo,
         );
 
-        logger.debug(`Header validation for era ${h.era} slot ${header.body.slot}: ${isKnownLeader ? '' : 'leader fail,'}${correctProof ? '' : 'vrf fail,'}${verifyLeaderStake ? '' : 'stake fail,'}${verifyOpCertValidity ? '' : 'opcert fail,'}${verifyKES ? '' : 'kes fail,'} ${isKnownLeader && correctProof && verifyLeaderStake && verifyOpCertValidity && verifyKES ? 'PASSED' : 'FAILED'}`);
+        const issuerHex = toHex(issuer.toCborBytes());
+        const passed = isKnownLeader && correctProof && verifyLeaderStake && verifyOpCertValidity && verifyKES;
+        logger.info(`Header validation ${passed ? 'PASSED' : 'FAILED'} era=${h.era} slot=${header.body.slot}`, {
+          issuerHex,
+          isKnownLeader,
+          correctProof,
+          verifyLeaderStake,
+          verifyOpCertValidity,
+          verifyKES,
+          passed
+        });
 
         return (
             isKnownLeader &&

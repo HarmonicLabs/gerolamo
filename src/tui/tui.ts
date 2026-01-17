@@ -1,4 +1,5 @@
 import { stdout } from 'process';
+import { stdin, stdout as stdOut } from 'process'; // rename to avoid conflict
 import { toHex } from '@harmoniclabs/uint8array-utils';
 import { logger } from "../utils/logger";
 import * as path from "path";
@@ -23,6 +24,7 @@ const colors = {
 	dim: '\x1b[2m',
 	reset: '\x1b[0m',
 	bold: '\x1b[1m',
+	green: '\x1b[92m',
 };
 
 const glow = colors.bold;
@@ -32,6 +34,7 @@ const logColors: Record<string, string> = {
 	INFO: colors.lightGray,
 	WARN: colors.hlRedDeep,
 	ERROR: colors.hlRedBright,
+	MEMPOOL: colors.green,
 };
 
 function visibleLength(str: string): number {
@@ -55,6 +58,18 @@ const LAB_HEADER = [
 	`${colors.hlRed}  ║      ${colors.hlRedBright}${glow}HARMONIC LABS${colors.reset} ${colors.hlRedDeep}${glow}–${colors.reset} ${colors.hlRedBright}${glow}GEROLAMO NODE${colors.reset}           ║  ${colors.reset}`,
 	`${colors.hlRedBright}${glow}  ╚══════════════════════════════════════════════╝  ${colors.reset}`,
 ];
+
+export function setupKeyboard() {
+	stdin.setRawMode(true);
+	stdin.resume();
+	stdin.setEncoding('utf8');
+	stdin.on('data', (key: string) => {
+		if (key === 'q' || key === 'Q' || key === '\u0003') {
+			stdOut.write('\x1b[?25h'); // restore cursor
+			process.exit(0);
+		}
+	});
+}
 
 export async function prettyBlockValidationLog(
 	era: number,
@@ -155,33 +170,73 @@ export async function prettyBlockValidationLog(
 }
 
 const LOG_LEVELS = ["DEBUG", "INFO", "WARN", "ERROR"] as const;
+const LOG_TYPES = ["debug", "info", "warn", "error"] as const;
 
 async function getRecentLogs(numLines: number = 20): Promise<Array<{ timestamp: string; level: string; message: string; }>> {
 	const allLogs: Array<{ timestamp: string; level: string; message: string; ts: number }> = [];
 	for (const level of LOG_LEVELS) {
 		try {
 			const logPath = logger.getLogPath(level);
-			const content = await Bun.file(logPath).text();
-			const lines = content.split("\n").filter(Boolean).slice(-numLines);
-			for (const line of lines) {
-				const entry = JSON.parse(line);
-				let message = "";
-				if (Array.isArray(entry.args)) {
-					message = entry.args.map((arg: any) => {
-						if (typeof arg === "string") return arg;
-						if (typeof arg === "object") return JSON.stringify(arg).slice(0, 50);
-						return String(arg);
-					}).join(" ");
-				} else {
-					message = String(entry.args);
+			const stream = Bun.file(logPath).stream();
+			const decoder = new TextDecoder();
+			let buffer = '';
+			const fileLogs: Array<{ timestamp: string; level: string; message: string; ts: number }> = [];
+			for await (const chunk of stream) {
+				buffer += decoder.decode(chunk, { stream: true });
+				const lines = buffer.split('\n');
+				buffer = lines.pop() || ''; // last incomplete line
+				for (const line of lines) {
+					if (!line.trim()) continue;
+					try {
+						const entry = JSON.parse(line);
+						let message = "";
+						if (Array.isArray(entry.args)) {
+							message = entry.args.map((arg: any) => {
+								if (typeof arg === "string") return arg;
+								if (typeof arg === "object") return JSON.stringify(arg).slice(0, 50);
+								return String(arg);
+							}).join(" ");
+						} else {
+							message = String(entry.args);
+						}
+						const logObj = {
+							timestamp: entry.timestamp.slice(11, 19),
+							level: entry.level,
+							message: message.slice(0, 60) + (message.length > 60 ? "..." : ""),
+							ts: new Date(entry.timestamp).getTime()
+						};
+						fileLogs.push(logObj);
+						if (fileLogs.length > numLines) fileLogs.shift();
+					} catch (e) {
+						// ignore invalid lines
+					}
 				}
-				allLogs.push({
-					timestamp: entry.timestamp.slice(11, 19),
-					level: entry.level,
-					message: message.slice(0, 60) + (message.length > 60 ? "..." : ""),
-					ts: new Date(entry.timestamp).getTime()
-				});
 			}
+			// process remaining buffer if complete
+			if (buffer.trim()) {
+				try {
+					const entry = JSON.parse(buffer);
+					let message = "";
+					if (Array.isArray(entry.args)) {
+						message = entry.args.map((arg: any) => {
+							if (typeof arg === "string") return arg;
+							if (typeof arg === "object") return JSON.stringify(arg).slice(0, 50);
+							return String(arg);
+						}).join(" ");
+					} else {
+						message = String(entry.args);
+					}
+					const logObj = {
+						timestamp: entry.timestamp.slice(11, 19),
+						level: entry.level,
+						message: message.slice(0, 60) + (message.length > 60 ? "..." : ""),
+						ts: new Date(entry.timestamp).getTime()
+					};
+					fileLogs.push(logObj);
+					if (fileLogs.length > numLines) fileLogs.shift();
+				} catch (e) {}
+			}
+			allLogs.push(...fileLogs);
 		} catch (e) {
 			// ignore missing files
 		}

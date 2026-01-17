@@ -41,16 +41,16 @@ export async function findIntersection(
     candidateBlockCount: number,
 ): Promise<{ intersectionBlock: number; rollbackDistance: number }> {
     // Query current chain blocks from database
-    const currentBlocks = await sql`
-        SELECT hash, slot FROM blocks ORDER BY slot ASC
-    `.values() as [Uint8Array, number][];
+    const currentSlots = await sql`
+        SELECT slot FROM blocks ORDER BY slot ASC
+    `.values() as number[];
 
-    if (currentBlocks.length === 0) {
+    if (currentSlots.length === 0) {
         // No current chain, intersection at genesis
         return { intersectionBlock: 0, rollbackDistance: 0 };
     }
 
-    const currentBlockCount = currentBlocks.length;
+    const currentBlockCount = currentSlots.length;
     const candidateSlot = Number(candidateTip.header.body.slot);
 
     // For proper intersection finding, we would trace back through block hashes
@@ -61,8 +61,8 @@ export async function findIntersection(
     let intersectionSlot = 0;
 
     // Find the latest block in current chain with slot <= candidate slot
-    for (let i = currentBlocks.length - 1; i >= 0; i--) {
-        const [hash, slot] = currentBlocks[i];
+    for (let i = currentSlots.length - 1; i >= 0; i--) {
+        const slot = currentSlots[i] as number;
         if (slot <= candidateSlot) {
             intersectionIndex = i;
             intersectionSlot = slot;
@@ -71,6 +71,13 @@ export async function findIntersection(
     }
 
     const rollbackDistance = currentBlockCount - 1 - intersectionIndex;
+
+    logger.debug("Chain intersection calculated", {
+        candidateSlot,
+        intersectionIndex,
+        rollbackDistance,
+        currentBlockCount
+    });
 
     return {
         intersectionBlock: intersectionIndex,
@@ -132,23 +139,37 @@ export async function selectBestChain(
     if (candidates.length === 0) return { candidate: null, comparison: null };
 
     // Get current chain tip
-    const currentBlocks = await sql`
-        SELECT hash, slot FROM blocks ORDER BY slot ASC
-    `.values() as [Uint8Array, number][];
+    const currentSlots = await sql`
+        SELECT slot FROM blocks ORDER BY slot ASC
+    `.values() as number[];
 
-    const currentBlockCount = currentBlocks.length;
-    const currentTipSlot = currentBlocks.length > 0 ? currentBlocks[currentBlocks.length - 1][1] : 0;
+    const currentBlockCount = currentSlots.length;
+    const currentTipSlot = currentSlots.length > 0 ? currentSlots[currentSlots.length - 1] as number : 0;
 
     const currentTip = {
         blockNumber: currentBlockCount,
         slotNumber: BigInt(currentTipSlot)
     };
 
+    logger.info("Starting chain selection", {
+        numCandidates: candidates.length,
+        currentTip: {
+            blockNumber: currentTip.blockNumber,
+            slotNumber: currentTip.slotNumber.toString()
+        }
+    });
+
     let bestCandidate: ChainCandidate | null = null;
     let bestComparison: ChainComparison | null = null;
 
     for (const candidate of candidates) {
         const comparison = await compareChainsPraos(currentTip, candidate, securityParamK);
+
+        logger.debug(`Candidate evaluation: preferred=${comparison.preferred}`, {
+            candidateSlot: candidate.slotNumber.toString(),
+            candidateBlockNumber: candidate.blockNumber,
+            rollbackDistance: comparison.rollbackDistance
+        });
 
         if (comparison.preferred === 'candidate') {
             bestCandidate = candidate;

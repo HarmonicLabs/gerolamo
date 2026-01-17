@@ -1,6 +1,7 @@
 import { Hash32, PoolKeyHash } from "@harmoniclabs/cardano-ledger-ts";
 import { sql } from "bun";
 import { toHex } from "@harmoniclabs/uint8array-utils";
+import { logger } from "../utils/logger";
 
 // Point interface for anchoring
 export interface Point {
@@ -47,6 +48,14 @@ export async function getVolatileState(
         }`.values() as [number][];
     const recentBlocks = blockRows[0][0];
 
+    logger.debug("Queried volatile state", {
+        anchorSlot: point.slot.toString(),
+        anchorHash: toHex(point.hash.bytes),
+        utxoCount,
+        totalFees: totalFees.toString(),
+        recentBlocks,
+    });
+
     return {
         utxoCount,
         totalFees,
@@ -59,6 +68,11 @@ export async function updateVolatileState(
     anchor: [Point, PoolKeyHash],
     updates: Partial<VolatileState>,
 ): Promise<void> {
+    logger.info("Updating volatile state", {
+        anchorSlot: anchor[0].slot.toString(),
+        updates,
+    });
+
     // Update fees/treasury
     if (updates.totalFees !== undefined) {
         await sql`UPDATE chain_account_state SET treasury = ${updates.totalFees} WHERE id = 1`;
@@ -94,6 +108,10 @@ export interface VolatileState {
 
 // Rollback a block from volatile state (for chain reorganization)
 export async function rollbackBlock(blockHash: Hash32): Promise<void> {
+    logger.warn("Rolling back volatile block", {
+        hash: toHex(blockHash.bytes),
+    });
+
     // Find the block to rollback
     const blockRows =
         await sql`SELECT * FROM blocks WHERE hash = ${blockHash.toBuffer()}`
@@ -132,6 +150,11 @@ export async function addBlockToVolatile(
         INSERT OR REPLACE INTO blocks (hash, data, slot)
         VALUES (${blockHash.toBuffer()}, ${JSON.stringify(blockData)}, ${slot})
     `;
+
+    logger.debug("Added block to volatile", {
+        slot: slot.toString(),
+        hash: toHex(blockHash.bytes),
+    });
 }
 
 // Create a store update from an anchor

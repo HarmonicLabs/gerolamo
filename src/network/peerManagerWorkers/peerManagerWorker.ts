@@ -93,12 +93,12 @@ function setupPeerClientListener() {
 	peerClientWorker.on("message", async (msg: IMsg) => {
 		try {
 			if (msg.type === "headerValidated"){
-
+				logger.debug(`Header validated for peer ${msg.peerId}`);
 			};
 		
 			if (msg.type === "blockFetched")
 			{
-
+				logger.debug(`Block fetched for peer ${msg.peerId}`);
 			};
 			if (msg.type === "rollForward")
 			{
@@ -156,6 +156,7 @@ async function addPeer(host: string, port: number | bigint, category: string) {
 				newPeerIds.push(peerId);
 				break;
 			};
+			logger.debug(`Peer ${peerId} added to ${category} category`);
 			resolve();
 		});
 	});

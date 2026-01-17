@@ -43,6 +43,11 @@ export class BlockBodyValidator {
         const actualBlock = this.getEraBlock(block);
         if (actualBlock === null) return null; // Unsupported era
 
+        logger.info("Starting block body validation", {
+            era: block.era,
+            slot: actualBlock.header.body.slot.toString()
+        });
+
         const genesis = await getCachedShelleyGenesis(this.config);
         if (!genesis) return false;
 
@@ -106,7 +111,10 @@ export class BlockBodyValidator {
             return false;
         }
 
-        logger.debug(`Block body validation passed all checks for slot ${actualBlock.header.body.slot}`);
+        logger.info("Block body validation passed all checks", {
+            era: block.era,
+            slot: actualBlock.header.body.slot.toString()
+        });
         return true;
     }
 
@@ -163,7 +171,7 @@ export class BlockBodyValidator {
 
                 const row = utxoMap.get(utxoRef);
                 if (!row) {
-                   // logger.warn(`UTxO not found: ${utxoRef}`);
+                    logger.warn(`UTxO not found: ${utxoRef}`);
                     return false;
                 }
 

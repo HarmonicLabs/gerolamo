@@ -8,7 +8,8 @@ import { importFromBlockfrost } from "./state/blockfrost/index";
 import { calculatePreProdCardanoEpoch } from "./utils/epochFromSlotCalculations";
 import { Database } from "bun:sqlite";
 import type { Worker } from "worker_threads";
-
+import { setupKeyboard } from "./tui/tui";
+setupKeyboard();
 export const getConfigPath = (network: string): string => path.join(getBasePath(), 'config', network, 'config.json');
 
 const network = process.env.NETWORK ?? "preprod";
@@ -28,7 +29,9 @@ async function loadConfig(filePath: string): Promise<GerolamoConfig> {
 
 const config = await loadConfig(configFilePath);
 logger.info("Configuration loaded successfully.");
-
+if (config.tuiEnabled) {	
+	logger.info("TUI keyboard handler enabled (press 'q' to quit).");
+}
 logger.info(`Database path: ${config.dbPath}`);
 logger.setLogConfig(config.logs);
 logger.info("Logger configured with log level and outputs.");
@@ -39,7 +42,8 @@ await db.ensureInitialized();
 logger.info("Database initialized and ready.");
 
 // Run snapshot population if enabled
-if (config.snapshot.enable) {
+if (config.snapshot.enable) 
+{
    await runSnapShotPopulation();
 }
 
@@ -51,7 +55,6 @@ logger.info("Starting peer block server...");
 const peerBlockServerMod = await import("./network/peerServer/peerBlockServer.ts");
 await peerBlockServerMod.startPeerBlockServer(config, managerWorker);
 logger.info("Peer block server started. Node is now running.");
-
 async function runSnapShotPopulation() {
     logger.info(`Snapshot population enabled (source: ${config.snapshot.source})`);
     const maxSlot = await db.getMaxSlot();

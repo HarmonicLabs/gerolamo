@@ -1,0 +1,15 @@
+
+
+When a node gets a block with all the TXs.
+
+The block has: 
+    an array of all the transaction_bodies,
+    an array of all the transaction_witness_sets for the transaction_bodies,
+
+    Then it verifys that all the transaction_bodies are signed by the transaction_witness_sets
+
+    since only the body gets signed, which ever body doesn't have a proper witness set signature it adds the tx index to the invalid_transactions array?
+
+
+
+ 

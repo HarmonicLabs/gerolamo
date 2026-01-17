@@ -98,12 +98,16 @@ export class DB {
 	};
 
 	async getMaxSlot(): Promise<bigint> {
+		logger.debug("Querying max slot from blocks");
 		const stmt = this.db.prepare('SELECT MAX(slot) as max_slot FROM blocks');
 		const row = stmt.get() as { max_slot: number | null } | undefined;
-		return BigInt(row?.max_slot ?? 0);
+		const maxSlot = BigInt(row?.max_slot ?? 0);
+		logger.debug("Max slot queried:", maxSlot.toString());
+		return maxSlot;
 	};
 
 	async getValidHeadersBefore(cutoffSlot: bigint): Promise<any[]> {
+		logger.debug(`Querying valid headers before slot ${cutoffSlot}`);
 		const stmt = this.db.prepare(`
 			SELECT * FROM volatile_headers
 			WHERE slot < ? AND is_valid = TRUE
@@ -114,6 +118,7 @@ export class DB {
 	};
 
 	async getValidBlocksBefore(cutoffSlot: bigint): Promise<any[]> {
+		logger.debug(`Querying valid blocks before slot ${cutoffSlot}`);
 		const stmt = this.db.prepare(`
 		SELECT * FROM blocks
 		WHERE slot < ? AND is_valid = TRUE
@@ -367,13 +372,16 @@ export class DB {
 
 	async getUtxosByRefs(utxoRefs: string[]): Promise<Array<{ utxo_ref: string; amount: any }>> {
 		if (utxoRefs.length === 0) return [];
+		logger.debug(`Querying ${utxoRefs.length} UTxOs by refs`);
 		const placeholders = utxoRefs.map(() => '?').join(',');
 		const stmt = this.db.prepare(
 			`SELECT utxo_ref, json_extract(tx_out, '$.amount') as amount 
 			FROM utxo 
 			WHERE utxo_ref IN (${placeholders})`
 		);
-		return stmt.all(...utxoRefs) as Array<{ utxo_ref: string; amount: any }>;
+		const rows = stmt.all(...utxoRefs) as Array<{ utxo_ref: string; amount: any }>;
+		logger.debug(`Found ${rows.length} UTxOs`);
+		return rows;
 	}
 
 	async getUtxoByRef(utxoRef: string): Promise<{ utxo_ref: string; tx_out: string } | null> {
@@ -382,11 +390,13 @@ export class DB {
 	}
 
 	async getAllStake(): Promise<Array<{ stake_credentials: Uint8Array; amount: number }>> {
+		logger.debug("Querying all stake");
 		const stmt = this.db.prepare(`SELECT stake_credentials, amount FROM stake`);
 		return stmt.all() as Array<{ stake_credentials: Uint8Array; amount: number }>;
 	}
 
 	async getAllDelegations(): Promise<Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>> {
+		logger.debug("Querying all delegations");
 		const stmt = this.db.prepare(`SELECT stake_credentials, pool_key_hash FROM delegations`);
 		return stmt.all() as Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>;
 	}
@@ -395,7 +405,14 @@ export class DB {
 		txBody: any,
 		blockHash: Uint8Array,
 	): Promise<void> {
-		const txId = toHex(blake2b_256(txBody.toCborBytes()));
+		txBody.toCborBytes()
+		const txId = toHex(txBody.toCborBytes());
+
+		if (!txBody.inputs || !Array.isArray(txBody.inputs)) 
+		{
+			logger.warn(`Skipping tx ${txId} due to invalid inputs:`, txBody.inputs);
+			return;
+		}
 
 		const inputRefs = txBody.inputs.map((input: any) =>
 			`${input.utxoRef.id.toString()}:${input.utxoRef.index}`
@@ -420,22 +437,28 @@ export class DB {
 			}
 		}
 
+		if (!txBody.outputs || !Array.isArray(txBody.outputs)) {
+			logger.warn(`Skipping tx ${txId} due to invalid outputs:`, txBody.outputs);
+			return;
+		}
+
 		const outputData: [string, string][] = txBody.outputs.map((output: any, i: number) => {
 			const utxoRef = `${txId}:${i}`;
 
 			const assetsObj: Record<string, Record<string, string>> = {};
-			(output.value.map as any[]).forEach((ma: any) => {
+			const multiAssets = Array.isArray(output.value?.map) ? output.value.map : [];
+			multiAssets.forEach((ma: any) => {
 				const policyStr = ma.policy.toString();
 				const assetObj: Record<string, string> = {};
-				(ma.assets as any[]).forEach((asset: any) => {
+				(Array.isArray(ma.assets) ? ma.assets : []).forEach((asset: any) => {
 					assetObj[toHex(asset.name)] = asset.quantity.toString();
 				});
 				assetsObj[policyStr] = assetObj;
 			});
 
 			const txOutJson = JSON.stringify({
-				address: output.address.toString(),
-				amount: output.value.lovelaces.toString(),
+				address: output.address?.toString() || "",
+				amount: output.value?.lovelaces?.toString() || "0",
 				assets: assetsObj,
 			});
 			return [utxoRef, txOutJson];
@@ -455,11 +478,11 @@ export class DB {
 			utxoStmt.run(ref, json);
 		}
 
-		if (txBody.certs) {
+		if (txBody.certs && Array.isArray(txBody.certs)) {
 			await this.applyCertificates(txBody.certs, blockHash);
 		}
 
-		if (txBody.withdrawals) {
+		if (txBody.withdrawals && Array.isArray(txBody.withdrawals)) {
 			await this.applyWithdrawals(txBody.withdrawals, blockHash);
 		}
 

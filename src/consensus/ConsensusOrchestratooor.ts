@@ -6,7 +6,7 @@ import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import type { BlockFetchNoBlocks, BlockFetchBlock } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { prettyBlockValidationLog } from "../tui/tui";
 import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
-import { toHex } from "@harmoniclabs/uint8array-utils";
+import { toHex, fromHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import type { GerolamoConfig } from "../network/peerManagerWorkers/peerManagerWorker";
 import type { PeerClient } from "../network/peerClientWorkers/PeerClient";
@@ -40,15 +40,24 @@ export class ConsensusOrchestrator {
 	private batchBlockRecords: Map<string, BlockInsertData> = new Map();
 	private batchHeaderRecords: Map<string, HeaderInsertData> = new Map();
 	private volatileDbGcCounter = 0;
+	private lastActivity: number = Date.now();
+	private stalledCallback?: () => void;
 
-	constructor(config: GerolamoConfig, db: DB, peers: PeerAccessor) {
+	constructor(config: GerolamoConfig, db: DB, peers: PeerAccessor, onStalled?: () => void) {
 		this.config = config;
 		this.db = db;
 		this.peers = peers;
-		// if (this.config.tuiEnabled) { setupKeyboard(); } // moved to main thread
+		this.stalledCallback = onStalled;
+		// setInterval(() => {
+		// 	if (Date.now() - this.lastActivity > 300000) { // 5 minutes
+		// 		logger.warn("Sync stalled, no rollForward for 5 minutes");
+		// 		if (this.stalledCallback) this.stalledCallback();
+		// 	}
+		// }, 60000); // check every minute
 	}
 
 	async handleRollForward(rollForwardCborBytes: Uint8Array, peerId: string, tip: number | bigint): Promise<void> {
+		this.lastActivity = Date.now();
 		logger.debug(`Processing rollForward message from peer ${peerId}...`);
 		try {
 			const peer = this.peers.getPeer(peerId);
@@ -64,7 +73,12 @@ export class ConsensusOrchestrator {
 				return;
 			}
 
-			const isValid = await validateHeader(parsedHeader.multiEraHeader, parsedHeader.epochNonce.nonce, this.config);
+			if(!(parsedHeader.currentEpochNonce)){
+				logger.warn(`Missing epoch nonce for header validation for peer ${peerId} at slot ${parsedHeader.slot}, hash ${toHex(parsedHeader.blockHeaderHash)}`);
+				return;
+			};
+
+			const isValid = await validateHeader(parsedHeader.multiEraHeader, fromHex(parsedHeader.currentEpochNonce), this.config);
 			if (!isValid) {
 				logger.warn(`Header validation failed for peer ${peerId}: slot ${parsedHeader.slot}, hash ${toHex(parsedHeader.blockHeaderHash)}`);
 				return;
@@ -125,7 +139,7 @@ export class ConsensusOrchestrator {
 			this.batchBlockRecords.set(blockHash, recordBlocks);
 			this.batchHeaderRecords.set(blockHash, recordHeaders);
 
-			if (this.batchBlockRecords.size >= 5) {
+			if (this.batchBlockRecords.size >= 1) {
 				await this.db.insertBlockBatchVolatile(Array.from(this.batchBlockRecords.values()));
 				await this.db.insertHeaderBatchVolatile(Array.from(this.batchHeaderRecords.values()));
 				this.batchBlockRecords.clear();

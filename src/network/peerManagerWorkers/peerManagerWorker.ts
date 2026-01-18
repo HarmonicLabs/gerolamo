@@ -7,6 +7,7 @@ import type { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "../peerClientWorkers/PeerClient";
 import { GlobalSharedMempool } from "../SharedMempool";
+import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 
 
 export interface GerolamoConfig {
@@ -61,6 +62,7 @@ let coldPeerIds: string[] = [];
 let bootstrapPeerIds: string[] = [];
 let newPeerIds: string[] = [];
 const peerAddedResolvers = new Map<string, (peerId: string) => void>();
+let monitorInterval: NodeJS.Timeout;
 
 async function initPeerClientWorker() {
 	peerClientWorker = new Worker("./src/network/peerClientWorkers/peerClientWorker.ts");
@@ -87,6 +89,8 @@ export interface IMsg {
 		};
 	};
 	rollForwardCborBytes: Uint8Array;
+	peerFailed: string;
+	newPeers: PeerAddress[];
 };
 
 function setupPeerClientListener() {
@@ -113,6 +117,45 @@ function setupPeerClientListener() {
 			if (msg.type === "rollBack")
 			{
 				logger.debug(`Roll back: ${msg.peerId}, point ${msg.point.blockHeader?.slotNumber}`);
+			};
+
+			if (msg.type === "peerFailed")
+			{
+				const category = allPeerIds.get(msg.peerFailed);
+				if (category) {
+					allPeerIds.delete(msg.peerFailed);
+					switch (category) {
+						case "hot":
+						hotPeerIds = hotPeerIds.filter(id => id !== msg.peerFailed);
+						break;
+						case "warm":
+						warmPeerIds = warmPeerIds.filter(id => id !== msg.peerFailed);
+						break;
+						case "cold":
+						coldPeerIds = coldPeerIds.filter(id => id !== msg.peerFailed);
+						break;
+						case "bootstrap":
+						bootstrapPeerIds = bootstrapPeerIds.filter(id => id !== msg.peerFailed);
+						break;
+						case "new":
+						newPeerIds = newPeerIds.filter(id => id !== msg.peerFailed);
+						break;
+					};
+					logger.warn(`Peer ${msg.peerFailed} failed and removed from ${category}`);
+				}
+			};
+
+			// if (msg.type === "stalledSync")
+			// {
+			// 	logger.warn("Sync stalled detected, replenishing peers");
+			// 	replenishPeers();
+			// };
+
+			if (msg.type === "newPeers")
+			{
+				for (const p of msg.newPeers) {
+					addPeer(p.address.toString(), p.portNumber, "hot");
+				}
 			};
 
 			if (msg.type === "peerAdded")
@@ -162,6 +205,30 @@ async function addPeer(host: string, port: number | bigint, category: string) {
 	});
 };
 
+async function replenishPeers() {
+	if (topology.bootstrapPeers) {
+		for (const ap of topology.bootstrapPeers) {
+			await addPeer(ap.address, ap.port, "hot");
+		};
+	};
+
+	if (topology.localRoots) {
+		for (const root of topology.localRoots) {
+			for (const ap of root.accessPoints) {
+				await addPeer(ap.address, ap.port, "hot");
+			};
+		};
+	};
+
+	peerClientWorker.postMessage({ type: "startSync", peerIds: hotPeerIds });
+
+	// Try to discover more peers
+	if (hotPeerIds.length > 0) {
+		const somePeerId = hotPeerIds[0];
+		peerClientWorker.postMessage({ type: "getPeers", peerId: somePeerId });
+	}
+};
+
 parentPort!.on("message", async (msg: any) => {
 	try {
 		if (msg.type === "init") {
@@ -197,6 +264,13 @@ parentPort!.on("message", async (msg: any) => {
 			logger.debug("All handshakes completed, sending startSync for hot peers");
 			peerClientWorker.postMessage({ type: "startSync", peerIds: hotPeerIds });
 			parentPort!.postMessage({ type: "started" });
+
+			monitorInterval = setInterval(async () => {
+				if (hotPeerIds.length === 0) {
+					logger.warn("No hot peers left, replenishing from topology");
+					await replenishPeers();
+				}
+			}, 30000);
 		};
 
 		if (msg.type === "submitTx") {
@@ -205,6 +279,7 @@ parentPort!.on("message", async (msg: any) => {
 		};		
 
 		if (msg.type === "shutdown") {
+			clearInterval(monitorInterval);
 			peerClientWorker.postMessage({ type: "shutdown" });
 			peerClientWorker.on("message", (msg) => {
 				if (msg.type === "shutdownComplete") {

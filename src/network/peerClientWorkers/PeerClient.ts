@@ -12,6 +12,7 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 import { GlobalSharedMempool } from "../SharedMempool";
 import { SharedMempool } from "@harmoniclabs/shared-cardano-mempool-ts";
 import { TxBody, Tx } from "@harmoniclabs/cardano-ledger-ts";
+import { GerolamoTxSubmitServer } from "../TxSubmitServer";
 
 export interface IPeerClient {
     host: string;
@@ -28,6 +29,8 @@ export interface IPeerClient {
     shelleyGenesisConfig: ShelleyGenesisConfig;
     db: DB;
     sharedMempool: SharedMempool;
+    txSubmitServer: GerolamoTxSubmitServer;
+    onTerminate?: (peerId: string) => void;
 }
 
 export class PeerClient implements IPeerClient {
@@ -46,19 +49,23 @@ export class PeerClient implements IPeerClient {
     private isRangeSyncComplete: boolean = false;
     shelleyGenesisConfig: ShelleyGenesisConfig;
     db: DB;
-    readonly txSubmitClient: TxSubmitClient;
+    readonly txSubmitClient!: TxSubmitClient;
+    readonly txSubmitServer!: GerolamoTxSubmitServer;
     readonly sharedMempool: SharedMempool;
+    readonly onTerminate?: (peerId: string) => void;
 
     constructor(
         host: string,
         port: number | bigint,
         config: GerolamoConfig,
+        onTerminate?: (peerId: string) => void
     ) {
         this.host = host;
         this.port = port;
         this.config = config;
         const unixTimestamp = Math.floor(Date.now() / 1000);
         this.peerId = `${host}:${port}:${unixTimestamp}`; // Set after host/port
+        this.onTerminate = onTerminate;
         this.shelleyGenesisConfig = {} as ShelleyGenesisConfig;
         this.db = new DB(this.config.dbPath);
 
@@ -70,16 +77,14 @@ export class PeerClient implements IPeerClient {
             protocolType: "node-to-node",
         });
 
-        
-
-        //* Load up the mini protocls into the pear and mplexer *//
+        //* Load up the mini protocols /w mplexer *//
         this.chainSyncClient    =  new ChainSyncClient( this.mplexer );
         this.blockFetchClient   = new BlockFetchClient( this.mplexer);
         this.keepAliveClient    =  new KeepAliveClient( this.mplexer );
         this.peerSharingClient  = new PeerSharingClient( this.mplexer );
-        this.sharedMempool     = GlobalSharedMempool.getInstance();
-        this.txSubmitClient     = new TxSubmitClient( this.mplexer, this.sharedMempool );
-
+        this.sharedMempool      = GlobalSharedMempool.getInstance();
+        this.txSubmitClient      = new TxSubmitClient(this.mplexer, this.sharedMempool);
+        this.txSubmitServer     = new GerolamoTxSubmitServer(this.mplexer);
         this.cookieCounter = 0;
         this.peerSlotNumber = null;
         this.keepAliveInterval = null;
@@ -127,6 +132,13 @@ export class PeerClient implements IPeerClient {
             logger.error(`KeepAliveClient error for peer ${this.peerId}:`, err);
         });
 
+        this.txSubmitClient.on("requestTxs", (requestTxs) => {
+            // logger.mempool(`TxSubmitClient requestTxs for peer ${this.peerId}:`, requestTxs);
+        });
+        this.txSubmitClient.on("requestTxIds", (requestTxIds) => {
+            // logger.mempool(`TxSubmitClient requestTxIds for peer ${this.peerId}:`, requestTxIds);
+        });
+
         process.on("beforeExit", () => {
             this.terminate();
         });
@@ -134,6 +146,7 @@ export class PeerClient implements IPeerClient {
 
     terminate() {
         logger.info(`Terminating connections for peer ${this.peerId}...`);
+        if (this.onTerminate) this.onTerminate(this.peerId);
         this.chainSyncClient.removeAllListeners("rollForward");
         this.chainSyncClient.removeAllListeners("rollBackwards");
         logger.debug(`Removed all ChainSyncClient listeners for peer ${this.peerId}` );
@@ -241,10 +254,7 @@ export class PeerClient implements IPeerClient {
                     rollForwardCborBytes: rollForwardCborBytes,
                     tip: tip
             });
-            
-                
-                await this.chainSyncClient.requestNext();
-                
+            await this.chainSyncClient.requestNext();    
         });
 
         this.chainSyncClient.on( "rollBackwards", async (rollBack: ChainSyncRollBackwards) => {
@@ -321,18 +331,19 @@ export class PeerClient implements IPeerClient {
             `Received peers from peer ${this.peerId}:`,
             peerResponse.peerAddresses.length,
         );
-        if (
-            !(
-                peerResponse instanceof PeerSharingResponse
-            )
-        ) throw new Error("Invalid PeerSharingResponse");
+        if (!(peerResponse instanceof PeerSharingResponse)) throw new Error("Invalid PeerSharingResponse");
 
         return peerResponse.peerAddresses;
     };
 
     async submitToSharedMempool(txCbor: Uint8Array): Promise<any> {
-        // txCbor = fromHex("84a700d9010281825820e297c765cd2cec4d62924b82bed85a5a031d5d565328d082a6e6012ee0480cb101018282583900d82e5937b38a75b67a38d727ac7ba5f1c4eed19df5e651afe017ba36a6219834e01485810ee3dd60c39823b10e63f4bfadbc6fa0120db2791a01ba814082583900d82e5937b38a75b67a38d727ac7ba5f1c4eed19df5e651afe017ba36a6219834e01485810ee3dd60c39823b10e63f4bfadbc6fa0120db2791b000000015574d52b021a0002b3dd031a06bad50f05a1581de0a6219834e01485810ee3dd60c39823b10e63f4bfadbc6fa0120db2791a138f492f0758202b4caff5d9445e32dc7c3d039db3b872d346d5ea9019796013d50f234ba8d6690801a100d9010282825820bf38993dbe4544e73d1acbe8c0cf60b5c559e422e0934ee8ff7e2b4d98f80fbe584014a0475f50d7ce67e2e4cf64ce26365361795d2331e14985f083827078186020d2461915468fa1df6ed67c17d72517e10a03888d55e560bcc39012662034360e825820124dc25cf49dd19052bc1bda9e40b4bd2c4ffb94110938eee2fd467aa124407e5840c585e1d084a9efdbcbe57d72671f95e8b3d196d1a165805f926de805a762d53feb406f3f8aaa53b3c19534b49c8ce554e4ce6d86574584990c78158fb5d4e90bf5a11902a2a1636d736781684765726f6c616d6f");
+        txCbor = fromHex("84a600d9010281825820e297c765cd2cec4d62924b82bed85a5a031d5d565328d082a6e6012ee0480cb101018282583900d82e5937b38a75b67a38d727ac7ba5f1c4eed19df5e651afe017ba36a6219834e01485810ee3dd60c39823b10e63f4bfadbc6fa0120db2791a0098968082583900d82e5937b38a75b67a38d727ac7ba5f1c4eed19df5e651afe017ba36a6219834e01485810ee3dd60c39823b10e63f4bfadbc6fa0120db2791b000000015696c907021a0002aac1031a06bc425905a1581de0a6219834e01485810ee3dd60c39823b10e63f4bfadbc6fa0120db2791a138f492f0801a100d9010282825820bf38993dbe4544e73d1acbe8c0cf60b5c559e422e0934ee8ff7e2b4d98f80fbe5840776d98092222a4848c7b136a43f3514816f7d535186d06e2d11dba43336aaa1db39e18ca2d86e3e56d243e417715295d089e22bade4548504f1cabdfc7b12d09825820124dc25cf49dd19052bc1bda9e40b4bd2c4ffb94110938eee2fd467aa124407e584003a39235e932e0db907378fd6cd5af60a18cfff2cf3535a6be6af28e10441671838fd2f651d9e130031ecde54eb7f735616a36501d0b2488ee75dd67700dea0bf5f6");
+        logger.mempool("Validating TX before submission to shared mempool...", { txCbor: Array.from(txCbor).slice(0, 16) });
         const tx = Tx.fromCbor(txCbor);
+        if(tx.body instanceof TxBody === false) {
+            throw new Error("Invalid TX: body is not TxBody");
+        };
+        logger.mempool("TX validated, submitting to shared mempool...", { txId: toHex(tx.body.hash.toBuffer()) });
         try {
             const result = await this.txSubmitClient.mempool.append(
                 tx.body.hash.toBuffer(),
@@ -343,16 +354,16 @@ export class PeerClient implements IPeerClient {
         } catch (e) {
             logger.mempool(`Failed to submit tx to peer ${this.peerId}`, e);
             throw e;
-        }
+        };
     };
     
     startKeepAlive(interval: number = 60000) {
         this.keepAliveInterval = setInterval(() => {
             this.cookieCounter = (this.cookieCounter + 1) % 65536;
-            // logger.debug(
-            //     `Sending keepAliveRequest cookie for peer ${this.peerId}:`,
-            //     this.cookieCounter,
-            // );
+            logger.debug(
+                 `Sending keepAliveRequest cookie for peer ${this.peerId}:`,
+                 this.cookieCounter,
+            );
             this.keepAliveClient.request(this.cookieCounter);
         }, interval);
     }

@@ -1,10 +1,7 @@
 import { fetch } from "bun";
 import { logger } from "./logger";
 
-
-
-
-export async function blockFrostFetchEra(epoch: number): Promise<any> {
+export async function blockFrostFetchEra(epoch: number): Promise<string> {
     const BLOCKFROST_API_URL_PREPROD = `https://blockfrost-preprod.onchainapps.io/epochs/${epoch}/parameters`;
     const BLOCKFROST_API_URL_MAINNET = `https://cardano-mainnet.blockfrost.io/api/v0/epochs/${epoch}/parameters`;
 
@@ -27,5 +24,6 @@ export async function blockFrostFetchEra(epoch: number): Promise<any> {
             `Failed to fetch epoch parameters: ${response.status} ${response.statusText}`,
         );
     }
-    return await response.json();
+    const data: any = await response.json();
+    return data.nonce;
 };

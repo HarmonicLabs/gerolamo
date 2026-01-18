@@ -8,6 +8,10 @@ import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "../utils/ep
 import { blockFrostFetchEra } from "../utils/blockFrostFetchEra";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
+let currentEpochNonce: string | null = null;
+let epochNonceBF: string | null = null;
+let currentEpoch: number | BigInt | null = null;
+
 export async function headerParser(rollForward: Uint8Array) {
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
     const data = ChainSyncRollForward.fromCbor(toHex(rollForward));
@@ -93,7 +97,16 @@ export async function headerParser(rollForward: Uint8Array) {
     const headerEpoch = calculatePreProdCardanoEpoch(
         Number(multiEraHeader.header.body.slot),
     );
-    const epochNonce = await blockFrostFetchEra(headerEpoch as number);
+    if( currentEpochNonce === null && currentEpoch === null ) 
+    {
+        currentEpochNonce = await blockFrostFetchEra(headerEpoch as number);
+        currentEpoch = headerEpoch;
+    };
+    if (Number(currentEpoch) < Number(headerEpoch)) {
+        currentEpoch = headerEpoch
+        currentEpochNonce = await blockFrostFetchEra(headerEpoch as number);
+    };
+
     const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
     const slot = multiEraHeader.header.body.slot;
 
@@ -108,10 +121,12 @@ export async function headerParser(rollForward: Uint8Array) {
         blockHeaderHash,
         era: blcokHeaderBodyEra,
         multiEraHeader,
-        epochNonce,
+        currentEpochNonce,
     });
-}
+};
 
+
+/** Multi Era Block Parser */
 export async function blockParser(
     newBlock: BlockFetchNoBlocks | BlockFetchBlock,
 )

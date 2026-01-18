@@ -35,7 +35,9 @@ parentPort!.on("message", async (msg: any) => {
 	{
 		const { host, port, category, addId } = msg;
 		try {
-			const peer = new PeerClient(host, port, config);
+			const peer = new PeerClient(host, port, config, (peerId) => {
+				parentPort!.postMessage({ type: "peerFailed", peerId });
+			});
 			await peer.handShakePeer();
 			peer.startKeepAlive();
 			allPeers.set(peer.peerId, peer);
@@ -174,5 +176,15 @@ parentPort!.on("message", async (msg: any) => {
 			}
 		}
 		logger.mempool(`Tx submit complete: ${results.filter(r => r.success).length}/${results.length} hot peers`);
-	}
+	};
+
+	if (msg.type === "getPeers") 
+	{
+		const peer = allPeers.get(msg.peerId);
+		if (peer) {
+			peer.askForPeers().then(peers => {
+				parentPort!.postMessage({ type: "newPeers", peers });
+			}).catch(err => logger.error(`Failed to get peers from ${msg.peerId}`, err));
+		}
+	};
 });

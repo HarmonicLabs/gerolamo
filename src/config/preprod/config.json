@@ -27,7 +27,7 @@
         "logLevel": "DEBUG"
     },
     "snapshot": {
-        "enable": true,
+        "enable": false,
         "source": "blockfrost",
         "fromEpoch": 4
     },

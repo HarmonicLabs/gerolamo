@@ -437,10 +437,11 @@ export class DB {
 			}
 		}
 
-		if (!txBody.outputs || !Array.isArray(txBody.outputs)) {
+		if (!txBody.outputs || !Array.isArray(txBody.outputs)) 
+		{
 			logger.warn(`Skipping tx ${txId} due to invalid outputs:`, txBody.outputs);
 			return;
-		}
+		};
 
 		const outputData: [string, string][] = txBody.outputs.map((output: any, i: number) => {
 			const utxoRef = `${txId}:${i}`;

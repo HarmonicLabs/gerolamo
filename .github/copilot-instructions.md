@@ -30,7 +30,7 @@ Gerolamo Network is a TypeScript Cardano node/relay using Bun. **SQLite3 fully i
 ## Project-Specific Conventions
 - **Peer Categories**: Add/move peers via worker messages; hot peers sync actively (see `addPeer` in worker). Preserve worker message types.
 - **Era Handling**: Multi-era support via `@harmoniclabs/cardano-ledger-ts`.
-- **Dependencies**: Use `@harmoniclabs/*` for Cardano primitives; Bun for runtime (no Node.js specifics). Transitioning storage from LMDB to SQLite3; preserve LMDB schemas during edits if needed.
+- **Dependencies**: Use `@harmoniclabs/*` for Cardano primitives; Bun for runtime (no Node.js specifics). SQLite3 for storage.
 
 ## Integration Points
 - **External APIs**: Fetches epoch params from Blockfrost (`blockFrostFetchEra.ts`).
@@ -61,4 +61,4 @@ Especially if it's about a structure of any cardano CBOR or CDDL.
 
 Most answers about Cardano structure can be found in Cardano ledger ts Eras folder under CDDL files.
 
-Refer to `README.md` for basic setup. When editing, preserve worker message types and any remaining LMDB schemas during transition to SQLite3.
+Refer to `README.md` for basic setup. When editing, preserve worker message types.

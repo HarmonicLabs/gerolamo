@@ -62,12 +62,57 @@ curl http://localhost:3030/block/9158475  # HTTP port 3030, raw CBOR
 6. **Multi-Era**: Full Byron/Shelley validation.
 7. **Mainnet Sync**.
 
-## Libs/Resources
-- Ouroboros Mini-Protocols: [GitHub](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts)
-- Cardano Ledger TS: [GitHub](https://github.com/HarmonicLabs/cardano-ledger-ts)
-- Specs: [Network](https://ouroboros-network.cardano.intersectmbo.org/), [Ledger](https://intersectmbo.github.io/formal-ledger-specifications/)
-- Cardano Node: [GitHub](https://github.com/IntersectMBO/cardano-node)
+## Developer Workflows
 
-Follow [TS Best Practices](https://github.com/HarmonicLabs/ts-best-practices). Preserve worker msgs/LMDB schemas (SQLite transition).
+### Setup
+- `bun install` to install dependencies (Bun runtime, no Node.js).
+- Set `NETWORK=preprod` or `mainnet` env var to switch networks.
+- Config loaded from `src/config/{network}/`.
 
-**Pick Up**: Fix parse → consensus worker → NES snapshots → immutable GC → txs.
+### Run
+- `bun src/start.ts` (default preprod; loads config, starts peer server/API/manager/TUI).
+- Starts P2P peer server (port 3000), block API (3030), manager workers.
+- **TUI**: Keyboard handler, press 'q' to quit.
+- Debug: `bun --inspect src/start.ts`.
+
+### Sync
+- Config: `syncFromTip`/`syncFromPointSlot` (e.g., 3542390), `syncFromPointBlockHash`.
+- `populateSnapshotsFromBlockfrost` option.
+- Hot peers actively sync (via peerManagerWorker "hot").
+- Bootstrap from `topology.json`.
+
+### Debug & Monitoring
+- Tail logs: `tail -f logs/preprod/*.jsonl | jq -r '.level, .args[] | @text'` or `tail -f logs/preprod/info.jsonl | jq`.
+- Block API: `curl http://localhost:3030/block/&lt;slot&gt;` or `/block/&lt;hash&gt;` (raw hex CBOR).
+- DB inspect: `sqlite3 store/db/preprod/Gerolamo.db "SELECT * FROM immutable_chunks;"`.
+- TUI: Pretty logs for block validation (era/slot/tip/GC counters).
+- Worker flow: PeerClient → manager relay → fetch/parse/store (temp; consensus pending).
+
+### Logging
+- `src/utils/logger.ts`: Levels DEBUG/INFO/WARN/ERROR/NONE/MEMPOOL; methods `logger.info(...)`.
+- Console: Colored timestamps/prefixes.
+- Files: Per-level JSONL `./logs/preprod/{debug,info,warn,error,mempool}.jsonl`.
+- Format: `{"timestamp":"ISO","level":"INFO","args":[...JSON-safe...]}` (BigInt→str, Error→obj).
+- Config: `GerolamoConfig.logs`; TUI disables console if enabled.
+
+### Storage
+- SQLite WAL: `store/db/preprod/Gerolamo.db` (or `config.dbPath`).
+- Tables: `volatile_blocks/headers` (raw CBOR, slot PK, GC invalid/old), `immutable_*` (GC'd chunks), `ledger_snapshots` (NES BLOBs), `transactions` (unified txs).
+- Schema: `src/db/Gerolamo_schema.sql`; `DB.ts` handles init/read/write/GC singleton.
+- GC: Volatile → immutable purge (counters in TUI/logs).
+
+### Configuration
+- Single `config.json` per network (`src/config/{preprod|mainnet}/`).
+- Key: `dbPath`/`logs`/`sync*`/`host: "0.0.0.0"`/`port`/`genesis*`/`conwayGenesisHash`.
+- Logs/snapshot/mempool toggles.
+- `p2p: "enabled"`.
+- Genesis/topology auto-loaded.
+
+### Development Notes
+- Key files: `start.ts` (entry), `peerManagerWorker.ts` (orchestration), `PeerClient.ts` (mini-protocols), `DB.ts` (storage), consensus pending (`src/consensus/*.ts`).
+- Worker messages: Preserve types (e.g., `rollForward`).
+- Multi-era: `@harmoniclabs/cardano-ledger-ts`.
+- Libs: Ouroboros mini-protocols TS, Blockfrost fetches.
+- TODOs: Consensus validation/NES/Praos, immutable population, tx extraction.
+- `src/config/pointsOfInterest.md`: Inspect points.
+- TS best practices (HarmonicLabs).

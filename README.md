@@ -142,6 +142,11 @@ NETWORK=mainnet  # Switch network
 - No build (Bun native TS).
 - `bun --inspect src/start.ts` debug.
 
+### TUI Usage
+- Interactive terminal UI (enabled by default).
+- Displays sync progress, GC counters, tip slot/era.
+- Press **q** to quit gracefully.
+
 ## 📊 Logging Architecture
 
 **src/utils/logger.ts** provides structured logging:

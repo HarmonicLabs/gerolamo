@@ -28,6 +28,30 @@ interface ImmutableChunk {
 	slot_range_end: bigint;
 };
 
+interface BlockQueryRow {
+	slot: number | bigint;
+	block_hash: string;
+	prev_hash?: string;
+	header_data: Uint8Array;
+	block_data: Uint8Array;
+	rollforward_header_cbor?: Uint8Array;
+	block_fetch_RawCbor: Uint8Array;
+	is_valid?: boolean;
+	inserted_at?: string;
+	chunk_id?: number;
+}
+
+interface VolatileHeaderRow {
+	slot: bigint;
+	header_hash: string;
+	rollforward_header_cbor: Uint8Array;
+	is_valid: boolean;
+}
+
+interface TxRow {
+	[key: string]: unknown;
+}
+
 export class DB {
 	private _db: Database | undefined;
 	constructor(private readonly dbPath: string) 
@@ -57,7 +81,7 @@ export class DB {
 		logger.info("DB initialized with WAL mode for concurrency");
 	};
 
-	getBlockByHash(hash: string): any {
+	getBlockByHash(hash: string): BlockQueryRow | undefined {
 		const stmt = this.db.prepare(`
 			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
 			FROM blocks WHERE hash = ?
@@ -65,10 +89,10 @@ export class DB {
 			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
 			FROM immutable_blocks WHERE block_hash = ?
 		`);
-		return stmt.get(hash, hash);
+		return stmt.get(hash, hash) as BlockQueryRow | undefined;
 	};
 
-	getBlockBySlot(slot: bigint): any {
+	getBlockBySlot(slot: bigint): BlockQueryRow | undefined {
 		const stmt = this.db.prepare(`
 			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
 			FROM blocks WHERE slot = ?
@@ -76,15 +100,15 @@ export class DB {
 			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
 			FROM immutable_blocks WHERE slot = ?
 		`);
-		return stmt.get(slot, slot);
+		return stmt.get(slot, slot) as BlockQueryRow | undefined;
 	};
 
-	getTransactionByTxId(txid: string): any {
+	getTransactionByTxId(txid: string): TxRow | undefined {
 		const stmt = this.db.prepare('SELECT * FROM transactions WHERE txid = ?');
-		return stmt.get(txid);
+		return stmt.get(txid) as TxRow | undefined;
 	};
 
-	getBlocksInEpoch(epoch: number): any[] {
+	getBlocksInEpoch(epoch: number): BlockQueryRow[] {
 		const stmt = this.db.prepare(`
 			SELECT * FROM volatile_blocks vb
 			INNER JOIN transactions t ON vb.block_hash = t.block_hash
@@ -94,7 +118,12 @@ export class DB {
 			INNER JOIN transactions t ON ib.block_hash = t.block_hash
 			WHERE t.epoch = ?
 		`);
-		return stmt.all(epoch, epoch);
+		return stmt.all(epoch, epoch) as BlockQueryRow[];
+	};
+
+	getLedgerSnapshot(snapshotNo: number): Record<string, unknown> | undefined {
+		const stmt = this.db.prepare('SELECT * FROM ledger_snapshots WHERE snapshot_no = ?');
+		return stmt.get(snapshotNo) as Record<string, unknown> | undefined;
 	};
 
 	async getMaxSlot(): Promise<bigint> {
@@ -106,25 +135,25 @@ export class DB {
 		return maxSlot;
 	};
 
-	async getValidHeadersBefore(cutoffSlot: bigint): Promise<any[]> {
+	async getValidHeadersBefore(cutoffSlot: bigint): Promise<VolatileHeaderRow[]> {
 		logger.debug(`Querying valid headers before slot ${cutoffSlot}`);
 		const stmt = this.db.prepare(`
 			SELECT * FROM volatile_headers
 			WHERE slot < ? AND is_valid = TRUE
 			ORDER BY slot ASC
 		`);
-		const rows = stmt.all(cutoffSlot);
+		const rows = stmt.all(cutoffSlot) as VolatileHeaderRow[];
 		return rows;
 	};
 
-	async getValidBlocksBefore(cutoffSlot: bigint): Promise<any[]> {
+	async getValidBlocksBefore(cutoffSlot: bigint): Promise<BlockQueryRow[]> {
 		logger.debug(`Querying valid blocks before slot ${cutoffSlot}`);
 		const stmt = this.db.prepare(`
 		SELECT * FROM blocks
 		WHERE slot < ? AND is_valid = TRUE
 		ORDER BY slot ASC
 		`);
-		const rows = stmt.all(cutoffSlot);
+		const rows = stmt.all(cutoffSlot) as BlockQueryRow[];
 		return rows;
 	};
 
@@ -134,12 +163,7 @@ export class DB {
 		return row;
 	};
 
-	getLedgerSnapshot(snapshotNo: number): any {
-		const stmt = this.db.prepare('SELECT * FROM ledger_snapshots WHERE snapshot_no = ?');
-		return stmt.get(snapshotNo);
-	};
-
-	async insertHeaderBatchVolatile(records: Array<HeaderInsertData>): Promise<void> {
+	insertHeaderBatchVolatile(records: Array<HeaderInsertData>): Promise<void> {
 		if (records.length === 0) return;
 
 		// Pre-check for dups in batch (debug only; Map prevents)
@@ -262,7 +286,7 @@ export class DB {
 		}
 	};
 
-	insertImmutableBlocks(blocks: any[], chunk_id: number): void {
+	insertImmutableBlocks(blocks: BlockQueryRow[], chunk_id: number): void {
 		const stmt = this.db.prepare(`
 			INSERT INTO immutable_blocks (slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor, rollforward_header_cbor, chunk_id)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -270,7 +294,16 @@ export class DB {
 		`);
 		try {
 			for (const block of blocks) {
-				stmt.run(block.slot, block.hash, block.prev_hash, block.header_data, block.block_data, block.block_fetch_RawCbor, block.rollforward_header_cbor, chunk_id);
+				stmt.run(
+					block.slot, 
+					block.block_hash, 
+					block.prev_hash ?? '', 
+					block.header_data, 
+					block.block_data, 
+					block.block_fetch_RawCbor, 
+					block.rollforward_header_cbor ?? new Uint8Array(0), 
+					chunk_id
+				);
 			};
 		} catch (err) {
 			this.logDbError("insert immutable_blocks", err);
@@ -305,7 +338,7 @@ export class DB {
 		}
 	};
 
-	async createChunk(oldBlocks: any[]): Promise<ImmutableChunk> {
+	async createChunk(oldBlocks: BlockQueryRow[]): Promise<ImmutableChunk> {
 		if (oldBlocks.length === 0) throw new Error('No blocks to chunk');
 
 		// Assume oldBlocks sorted by slot ASC
@@ -318,10 +351,10 @@ export class DB {
 
 		return {
 			chunk_no,
-			tip_hash: lastBlock.hash,
-			tip_slot_no: lastBlock.slot,
-			slot_range_start: firstBlock.slot,
-			slot_range_end: lastBlock.slot
+			tip_hash: lastBlock.block_hash,
+			tip_slot_no: BigInt(lastBlock.slot),
+			slot_range_start: BigInt(firstBlock.slot),
+			slot_range_end: BigInt(lastBlock.slot)
 		};
 	};
 
@@ -331,14 +364,14 @@ export class DB {
 
 	async compact(): Promise<void> {
 		const cutoff = (await this.getMaxSlot()) - 2160n;
-		const oldBlocks = await this.getValidBlocksBefore(cutoff);
-		const oldHeaders = await this.getValidHeadersBefore(cutoff);
+		const oldBlocks = await this.getValidBlocksBefore(cutoff) as BlockQueryRow[];
+		const oldHeaders = await this.getValidHeadersBefore(cutoff) as VolatileHeaderRow[];
 
 		if (oldBlocks.length === 0) return;
 
-		const headerMap = new Map(oldHeaders.map((h: any) => [h.header_hash, h.rollforward_header_cbor]));
+		const headerMap = new Map(oldHeaders.map((h) => [h.header_hash, h.rollforward_header_cbor]));
 		for (const block of oldBlocks) {
-			block.rollforward_header_cbor = headerMap.get(block.hash) ?? new Uint8Array(0);
+			block.rollforward_header_cbor = headerMap.get(block.block_hash) ?? new Uint8Array(0);
 		}
 
 		const chunk = await this.createChunk(oldBlocks);
@@ -356,13 +389,13 @@ export class DB {
 			throw err;
 		}
 		try {
-			this.deleteVolatileBlocks(oldBlocks.map((b: any) => b.hash));
+			this.deleteVolatileBlocks(oldBlocks.map((b) => b.block_hash));
 		} catch (err) {
 			this.logDbError("delete volatile_blocks", err);
 			throw err;
 		}
 		try {
-			this.deleteVolatileHeaders(oldHeaders.map((h: any) => h.header_hash));
+			this.deleteVolatileHeaders(oldHeaders.map((h) => h.header_hash));
 		} catch (err) {
 			this.logDbError("delete volatile_headers", err);
 			throw err;
@@ -370,7 +403,7 @@ export class DB {
 		logger.info(`GC'd ${oldBlocks.length} blocks + ${oldHeaders.length} headers (w/ RawCbor + rollforward_header_cbor) to chunk ${chunk.chunk_no}`);
 	};
 
-	async getUtxosByRefs(utxoRefs: string[]): Promise<Array<{ utxo_ref: string; amount: any }>> {
+	async getUtxosByRefs(utxoRefs: string[]): Promise<Array<{ utxo_ref: string; amount: unknown }>> {
 		if (utxoRefs.length === 0) return [];
 		logger.debug(`Querying ${utxoRefs.length} UTxOs by refs`);
 		const placeholders = utxoRefs.map(() => '?').join(',');
@@ -379,7 +412,7 @@ export class DB {
 			FROM utxo 
 			WHERE utxo_ref IN (${placeholders})`
 		);
-		const rows = stmt.all(...utxoRefs) as Array<{ utxo_ref: string; amount: any }>;
+		const rows = stmt.all(...utxoRefs) as Array<{ utxo_ref: string; amount: unknown }>;
 		logger.debug(`Found ${rows.length} UTxOs`);
 		return rows;
 	}
@@ -402,21 +435,23 @@ export class DB {
 	}
 
 	async applyTransaction(
-		txBody: any,
+		txBody: unknown,
 		blockHash: Uint8Array,
 	): Promise<void> {
-		txBody.toCborBytes()
-		const txId = toHex(txBody.toCborBytes());
+		const txBytes = (txBody as { toCborBytes(): Uint8Array }).toCborBytes();
+		const txId = toHex(txBytes);
 
-		if (!txBody.inputs || !Array.isArray(txBody.inputs)) 
+		if (!(txBody as any).inputs || !Array.isArray((txBody as any).inputs)) 
 		{
-			logger.warn(`Skipping tx ${txId} due to invalid inputs:`, txBody.inputs);
+			logger.warn(`Skipping tx ${txId} due to invalid inputs:`, (txBody as any).inputs);
 			return;
 		}
 
-		const inputRefs = txBody.inputs.map((input: any) =>
-			`${input.utxoRef.id.toString()}:${input.utxoRef.index}`
-		);
+		const inputRefs = (txBody as { inputs?: unknown[] }).inputs?.map((input: unknown): string =>
+			`${(input as { utxoRef: { id: { toString(): string }, index: number } }).utxoRef.id.toString()}:${
+				(input as { utxoRef: { id: { toString(): string }, index: number } }).utxoRef.index
+			}`
+		) || [];
 
 		if (inputRefs.length > 0) {
 			const placeholders = inputRefs.map(() => '?').join(',');
@@ -437,33 +472,33 @@ export class DB {
 			}
 		}
 
-		if (!txBody.outputs || !Array.isArray(txBody.outputs)) 
+		if (!(txBody as any).outputs || !Array.isArray((txBody as any).outputs)) 
 		{
-			logger.warn(`Skipping tx ${txId} due to invalid outputs:`, txBody.outputs);
+			logger.warn(`Skipping tx ${txId} due to invalid outputs:`, (txBody as any).outputs);
 			return;
 		};
 
-		const outputData: [string, string][] = txBody.outputs.map((output: any, i: number) => {
+		const outputData: [string, string][] = (txBody as { outputs?: unknown[] }).outputs?.map((output: unknown, i: number) => {
 			const utxoRef = `${txId}:${i}`;
 
 			const assetsObj: Record<string, Record<string, string>> = {};
-			const multiAssets = Array.isArray(output.value?.map) ? output.value.map : [];
-			multiAssets.forEach((ma: any) => {
-				const policyStr = ma.policy.toString();
+			const multiAssets = Array.isArray((output as any).value?.map) ? (output as any).value.map : [];
+			multiAssets.forEach((ma: unknown) => {
+				const policyStr = (ma as { policy: { toString(): string } }).policy.toString();
 				const assetObj: Record<string, string> = {};
-				(Array.isArray(ma.assets) ? ma.assets : []).forEach((asset: any) => {
-					assetObj[toHex(asset.name)] = asset.quantity.toString();
+				(Array.isArray((ma as any).assets) ? (ma as any).assets : []).forEach((asset: unknown) => {
+					assetObj[toHex((asset as { name: Uint8Array }).name)] = (asset as { quantity: bigint }).quantity.toString();
 				});
 				assetsObj[policyStr] = assetObj;
 			});
 
 			const txOutJson = JSON.stringify({
-				address: output.address?.toString() || "",
-				amount: output.value?.lovelaces?.toString() || "0",
+				address: (output as any).address?.toString() || "",
+				amount: (output as any).value?.lovelaces?.toString() || "0",
 				assets: assetsObj,
 			});
 			return [utxoRef, txOutJson];
-		});
+		}) || [];
 
 		const createStmt = this.db.prepare(
 			'INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (?, "create", ?)'
@@ -479,48 +514,46 @@ export class DB {
 			utxoStmt.run(ref, json);
 		}
 
-		if (txBody.certs && Array.isArray(txBody.certs)) {
-			await this.applyCertificates(txBody.certs, blockHash);
+		if ((txBody as { certs?: unknown[] }).certs && Array.isArray((txBody as any).certs)) {
+			await this.applyCertificates((txBody as any).certs, blockHash);
 		}
-
-		if (txBody.withdrawals && Array.isArray(txBody.withdrawals)) {
-			await this.applyWithdrawals(txBody.withdrawals, blockHash);
+		if ((txBody as { withdrawals?: unknown }).withdrawals && Array.isArray((txBody as any).withdrawals)) {
+			await this.applyWithdrawals((txBody as any).withdrawals, blockHash);
 		}
-
-		if (txBody.fee) {
+		if ((txBody as { fee?: { toString(): string } }).fee) {
 			const feeDeltaStmt = this.db.prepare(
 				'INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (?, "fee", ?)'
 			);
-			feeDeltaStmt.run(blockHash, JSON.stringify({ amount: txBody.fee.toString() }));
+			feeDeltaStmt.run(blockHash, JSON.stringify({ amount: (txBody as any).fee.toString() }));
 
 			const treasuryStmt = this.db.prepare(
 				'UPDATE chain_account_state SET treasury = treasury + ? WHERE id = 1'
 			);
-			treasuryStmt.run(txBody.fee);
+			treasuryStmt.run((txBody as any).fee);
 		}
 
 		// TODO: Handle minting, burning, collateral, etc.
 	}
 
 	async applyCertificates(
-		certs: any[],
+		certs: unknown[],
 		blockHash: Uint8Array,
 	): Promise<void> {
 		const certDeltaStmt = this.db.prepare(
 			'INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (?, "cert", ?)'
 		);
 
-		for (const cert of certs) {
-			const certAny = cert as any;
-			const stakeCred = certAny.stakeCredential?.hash?.toBuffer() ||
-				certAny.stakeCredential?.toBuffer();
+		for (const cert of certs as Iterable<unknown>) {
+			const certAny = cert as Record<string, unknown>;
+			const stakeCred = (certAny.stakeCredential as { hash?: { toBuffer(): Uint8Array }, toBuffer?: () => Uint8Array })?.hash?.toBuffer() ||
+				(certAny.stakeCredential as { toBuffer(): Uint8Array })?.toBuffer();
 
 			certDeltaStmt.run(blockHash, JSON.stringify({
-				type: cert.certType,
+				type: certAny.certType,
 				stakeCred: stakeCred ? toHex(stakeCred) : null,
-				poolId: certAny.poolKeyHash?.toString() ||
-					certAny.poolParams?.operator?.toString() ||
-					certAny.poolHash?.toString(),
+				poolId: (certAny.poolKeyHash as { toString(): string })?.toString() ||
+					(certAny.poolParams as { operator: { toString(): string } })?.operator?.toString() ||
+					(certAny.poolHash as { toString(): string })?.toString(),
 			}));
 		}
 
@@ -533,11 +566,11 @@ export class DB {
 			'INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash) VALUES (?, ?)'
 		);
 
-		await Promise.all(certs.map(async (cert) => {
-			const certAny = cert as any;
-			const stakeCred = certAny.stakeCredential?.hash?.toBuffer() ||
-				certAny.stakeCredential?.toBuffer();
-			switch (cert.certType) {
+		await Promise.all((certs as unknown[]).map(async (cert: unknown) => {
+			const certAny = cert as Record<string, unknown>;
+			const stakeCred = (certAny.stakeCredential as { hash?: { toBuffer(): Uint8Array }, toBuffer?: () => Uint8Array })?.hash?.toBuffer() ||
+				(certAny.stakeCredential as { toBuffer(): Uint8Array })?.toBuffer();
+			switch ((certAny.certType as number)) {
 				case 0: // CertificateType.StakeRegistration
 					if (stakeCred) {
 						stakeRegStmt.run(stakeCred);
@@ -583,15 +616,13 @@ export class DB {
 	}
 
 	async applyWithdrawals(
-		withdrawals: any,
+		withdrawals: unknown,
 		blockHash: Uint8Array,
 	): Promise<void> {
-		if (withdrawals.map.length === 0) return;
-
-		const withdrawalData = withdrawals.map.map(({ rewardAccount, amount }: any) => ({
-			stakeCred: rewardAccount.toBuffer(),
-			amount,
-		}));
+		const withdrawalData = ((withdrawals as { map?: unknown[] }).map || []).map(({ rewardAccount, amount }: Record<string, unknown>) => ({
+			stakeCred: (rewardAccount as { toBuffer(): Uint8Array }).toBuffer(),
+			amount: amount as bigint,
+		})) || [];
 		const rewardUpdateStmt = this.db.prepare(
 			'UPDATE rewards SET amount = amount - ? WHERE stake_credentials = ?'
 		);

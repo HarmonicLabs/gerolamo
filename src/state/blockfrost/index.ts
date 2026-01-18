@@ -1,6 +1,6 @@
 // Blockfrost-related state management functions
 // This module provides main import functions for ledger state from Blockfrost API
-
+import { DB } from "../../db/DB";
 import { Database } from "bun:sqlite";
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
 import { Buffer } from "node:buffer";

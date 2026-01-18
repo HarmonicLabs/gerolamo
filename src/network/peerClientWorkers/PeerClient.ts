@@ -223,7 +223,7 @@ export class PeerClient implements IPeerClient {
             });
         } else {
             logger.info(`Syncing to tip for peer ${this.peerId}...`);
-            startPoint = peerTipPoint;
+            startPoint = dbTipPoint || peerTipPoint;
         };
 
         if (!this.config.syncFromTip && !this.config.syncFromPoint) {

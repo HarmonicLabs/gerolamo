@@ -1,4 +1,5 @@
 import path from 'path';
+import { Database } from 'bun:sqlite';
 import { startPeerManager } from "./network/peerManagerWorkers/startPeerManager";
 import { DB } from "./db/DB";
 import type { GerolamoConfig } from "./network/peerManagerWorkers/peerManagerWorker";
@@ -50,7 +51,7 @@ const managerWorker: Worker = await startPeerManager(config);
 logger.info("Peer manager started.");
 
 logger.info("Starting peer block server...");
-const peerBlockServerMod = await import("./network/peerServer/peerBlockServer.ts");
+const peerBlockServerMod = await import("./network/peerServer/peerBlockServer");
 await peerBlockServerMod.startPeerBlockServer(config, managerWorker);
 logger.info("Peer block server started. Node is now running.");
 async function runSnapShotPopulation() {
@@ -67,7 +68,7 @@ async function runSnapShotPopulation() {
     const fromEpoch = (config.snapshot as any).fromEpoch || 1;
     logger.info(`Populating snapshots from epoch ${fromEpoch} to ${targetEpoch}`);
     for (let epoch = fromEpoch; epoch <= targetEpoch; epoch++) {
-        await import("./state/blockfrost/populateEpochState.ts").then(m => m.populateEpochState(
+        await import("./state/blockfrost/populateEpochState").then(m => m.populateEpochState(
             db.db, epoch, { 
             customBackend: "https://blockfrost-preprod.onchainapps.io/", projectId: undefined 
         }));

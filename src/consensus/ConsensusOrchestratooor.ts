@@ -33,6 +33,12 @@ interface BlockInsertData {
 	block_fetch_RawCbor: Uint8Array;
 }
 
+interface RollbackPoint {
+	blockHeader?: {
+		slotNumber: bigint;
+	};
+}
+
 export class ConsensusOrchestrator {
 	readonly config: GerolamoConfig;
 	readonly db!: DB;
@@ -56,7 +62,7 @@ export class ConsensusOrchestrator {
 		// }, 60000); // check every minute
 	}
 
-	async handleRollForward(rollForwardCborBytes: Uint8Array, peerId: string, tip: number | bigint): Promise<void> {
+	async handleRollForward(rollForwardCborBytes: Uint8Array, peerId: string, tip: bigint): Promise<void> {
 		this.lastActivity = Date.now();
 		logger.debug(`Processing rollForward message from peer ${peerId}...`);
 		try {
@@ -152,13 +158,13 @@ export class ConsensusOrchestrator {
 				await this.db.compact();
 			};
 
-			this.config.tuiEnabled && prettyBlockValidationLog(era, Number(blockEpoch), blockHeaderHash, blockSlot, tip, this.volatileDbGcCounter, this.batchBlockRecords.size);
-		} catch (error) {
+			this.config.tuiEnabled && prettyBlockValidationLog(era, Number(blockEpoch), blockHeaderHash, blockSlot, Number(tip), this.volatileDbGcCounter, this.batchBlockRecords.size);
+		} catch (error: unknown) {
 			logger.error(`Error processing rollForward for peer ${peerId}:`, error);
 		};
 	};
 
-	handleRollBack(point: any): void {
+	handleRollBack(point: RollbackPoint): void {
 		// TODO: Implement rollback logic
 		logger.debug(`Rollback stub for point slot ${point.blockHeader?.slotNumber}`);
 	};

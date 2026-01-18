@@ -126,7 +126,7 @@ export async function prettyBlockValidationLog(
 		frameTop,
 		...LAB_HEADER.map(line => center(line, INNER_WIDTH - 0)),
 		center(''),
-		center(`${colors.hlRedDeep}${glow}PREPROD`),
+		center(`${colors.hlRedDeep}${glow}Network: ${process.env.NETWORK?.toUpperCase() || 'PREPROD'}${colors.reset}`),
 		center(`${colors.hlRedDeep}${glow}ERA ${era}${colors.reset}`),
 		center(`${colors.lightGray}EPOCH ${blockEpoch.toString().padStart(3,'0')}   SLOT ${formatNum(slotNum).padStart(11)} / ${formatNum(tipNum).padStart(11)}${colors.reset}`),
 		center(`${colors.hlRed}PROGRESS [${bar}] ${percent}%${speed}${colors.reset}`),

@@ -37,7 +37,7 @@ export interface LoggerConfig {
 
 const defaultLoggerConfig: LoggerConfig = {
     logLevel: LogLevel.INFO,
-    logDirectory: "./logs",
+    logDirectory: "./src/logs/preprod/",
     logToFile: true,
     logToConsole: true,
 };
@@ -47,22 +47,36 @@ export class Logger {
     private _colors: boolean = true;
 
     constructor(config?: Partial<LoggerConfig>) {
-        this.config = {
-            ...defaultLoggerConfig,
-            ...config,
-        };
+        let initConfig = { ...defaultLoggerConfig };
+        if (config) {
+            const processed = { ...config };
+            if (typeof processed.logLevel === 'string') {
+                processed.logLevel = logLevelFromString(processed.logLevel);
+            }
+            initConfig = { ...initConfig, ...processed };
+        }
+        this.config = initConfig;
         this.updatePaths();
     }
 
     private updatePaths() {
-        const dir = this.config.logDirectory || "./logs";
-        try {
-            fs.mkdirSync(dir, { recursive: true });
-        } catch {}
+        const dir = this.config.logDirectory || "./src/logs/preprod/";
+        fs.mkdirSync(dir, { recursive: true });
+        const levels = ['debug', 'info', 'warn', 'error', 'mempool'];
+        for (const level of levels) {
+            const logFilePath = path.join(dir, `${level}.jsonl`);
+            if (!fs.existsSync(logFilePath)) {
+                fs.writeFileSync(logFilePath, '');
+            }
+        }
     }
 
     public setLogConfig(config: Partial<LoggerConfig>) {
-        Object.assign(this.config, config);
+        const processedConfig = { ...config };
+        if (typeof processedConfig.logLevel === 'string') {
+            processedConfig.logLevel = logLevelFromString(processedConfig.logLevel);
+        }
+        Object.assign(this.config, processedConfig);
         this.updatePaths();
     }
 
@@ -86,13 +100,16 @@ export class Logger {
     canError(): boolean {
         return this.logLevel <= LogLevel.ERROR;
     }
+    canMempool(): boolean {
+        return this.canInfo();
+    }
 
     setLogLevel(level: LogLevel) {
         this.config.logLevel = level;
     }
 
     private appendLog(level: string, stuff: any[]) {
-        const logFilePath = path.join(this.config.logDirectory || "./logs", `${level.toLowerCase()}.jsonl`);
+        const logFilePath = path.join(this.config.logDirectory || "./src/logs/preprod/", `${level.toLowerCase()}.jsonl`);
         const entry = {
             timestamp: new Date().toISOString(),
             level,
@@ -108,7 +125,7 @@ export class Logger {
                     return arg.toString();
                 }
                 try {
-                    return JSON.parse(JSON.stringify(arg));
+                    return JSON.parse(JSON.stringify(arg, (k, v) => typeof v === 'bigint' ? v.toString() : v));
                 } catch {
                     return String(arg);
                 }
@@ -179,6 +196,24 @@ export class Logger {
         if (this.config.logToFile) {
             this.appendLog(LEVEL, stuff);
         }
+    }
+    mempool(...stuff: any[]) {
+        if (!this.canMempool()) return;
+        const LEVEL = "MEMPOOL";
+
+        if (this.config.logToConsole) {
+            let prefix = `[${LEVEL} ][${new Date().toUTCString()}]:`;
+            if (this._colors) prefix = color.green(prefix);
+            console.log(prefix, ...stuff);
+        }
+
+        if (this.config.logToFile) {
+            this.appendLog(LEVEL, stuff);
+        }
+    }
+
+    public getLogPath(level: LogLevelString): string {
+        return path.join(this.config.logDirectory || "./logs", `${level.toLowerCase()}.jsonl`);
     }
 }
 

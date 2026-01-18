@@ -14,11 +14,13 @@ coverage
 logs
 _.log
 report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
+
+# Db
 store
 
 # dotenv environment variable files
 .env
-.env.development.local
+.env.development.local   
 .env.test.local
 .env.production.local
 .env.local

@@ -9,18 +9,31 @@
     "conwayGenesisHash": "0eb6adaec3fcb1fe286c1b4ae0da2a117eafc3add51e17577d36dd39eddfc3db",
     "p2p": "enabled",
     "topologyFile": "./src/config/preprod/topology.json",
-    "syncFromTip": false,
-    "syncFromPoint": true,
+    "syncFromTip": true,
+    "syncFromPoint": false,
     "syncFromPointSlot": 3542390,
     "syncFromPointBlockHash": "f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f",
     "host": "0.0.0.0",
     "port": 3030,
+    "unixSocket": false,
     "network": "preprod",
     "networkMagic": 1,
     "dbPath": "./src/store/db/preprod/Gerolamo.db",
+    "tuiEnabled": true,
     "logs":{
         "logToFile": true,
-        "logToConsole": true,
-        "logDirectory": "./src/logs/preprod/"
+        "logToConsole": false,
+        "logDirectory": "./src/logs/preprod/",
+        "logLevel": "DEBUG"
+    },
+    "snapshot": {
+        "enable": false,
+        "source": "blockfrost",
+        "fromEpoch": 4
+    },
+    "mempool": {
+        "enabled": true,
+        "maxSize": 262144,
+        "txExpirySeconds": 3600
     }
 }

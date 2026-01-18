@@ -1,4 +1,3 @@
-import { MultiEraHeader } from "@harmoniclabs/cardano-ledger-ts";
 import { sql } from "bun";
 import { logger } from "../utils/logger";
 /**
@@ -6,7 +5,7 @@ import { logger } from "../utils/logger";
  */
 export interface ChainCandidate {
     /** The tip header of the chain */
-    tip: MultiEraHeader;
+    // tip: MultiEraHeader;  // Not needed for slot-simplified selection
     /** Chain length (number of blocks from genesis) */
     blockCount: number;
     /** Block number of the tip */
@@ -37,8 +36,7 @@ export type ChainSelectionMode = 'praos';
  * Uses block hash chains to find the actual common ancestor
  */
 export async function findIntersection(
-    candidateTip: MultiEraHeader,
-    candidateBlockCount: number,
+    candidate: ChainCandidate,
 ): Promise<{ intersectionBlock: number; rollbackDistance: number }> {
     // Query current chain blocks from database
     const currentSlots = await sql`
@@ -51,7 +49,7 @@ export async function findIntersection(
     }
 
     const currentBlockCount = currentSlots.length;
-    const candidateSlot = Number(candidateTip.header.body.slot);
+    const candidateSlot = Number(candidate.slotNumber);
 
     // For proper intersection finding, we would trace back through block hashes
     // to find the common ancestor. This is a simplified implementation that
@@ -79,6 +77,8 @@ export async function findIntersection(
         currentBlockCount
     });
 
+    logger.rollback(`findIntersection: candidate slot ${candidateSlot}, intersection at block ${intersectionIndex} (rollback distance ${rollbackDistance})`);
+
     return {
         intersectionBlock: intersectionIndex,
         rollbackDistance
@@ -97,8 +97,7 @@ export async function compareChainsPraos(
     securityParamK: number = 2160,
 ): Promise<ChainComparison> {
     const { intersectionBlock, rollbackDistance } = await findIntersection(
-        candidate.tip,
-        candidate.blockCount
+        candidate
     );
 
     // Check if intersection is within k blocks of current tip
@@ -159,6 +158,8 @@ export async function selectBestChain(
         }
     });
 
+    logger.rollback(`selectBestChain start: ${candidates.length} candidates, current tip blocks=${currentTip.blockNumber} slot=${currentTip.slotNumber}`);
+
     let bestCandidate: ChainCandidate | null = null;
     let bestComparison: ChainComparison | null = null;
 
@@ -171,6 +172,8 @@ export async function selectBestChain(
             rollbackDistance: comparison.rollbackDistance
         });
 
+        logger.rollback(`Candidate ${candidate.slotNumber}: preferred=${comparison.preferred}, rollbackDistance=${comparison.rollbackDistance}`);
+
         if (comparison.preferred === 'candidate') {
             bestCandidate = candidate;
             bestComparison = comparison;
@@ -178,6 +181,9 @@ export async function selectBestChain(
     }
 
     logger.info(`Chain selection complete: ${bestCandidate ? `candidate slot ${bestCandidate.slotNumber} (rollback ${bestComparison!.rollbackDistance})` : 'current chain preferred'}`);
+
+    logger.rollback(`selectBestChain complete: ${bestCandidate ? `prefer candidate slot ${bestCandidate.slotNumber.toString()} (rollback ${bestComparison!.rollbackDistance})` : 'current preferred'}`);
+
     return { candidate: bestCandidate, comparison: bestComparison };
 }
 

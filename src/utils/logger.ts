@@ -62,7 +62,7 @@ export class Logger {
     private updatePaths() {
         const dir = this.config.logDirectory || "./src/logs/preprod/";
         fs.mkdirSync(dir, { recursive: true });
-        const levels = ['debug', 'info', 'warn', 'error', 'mempool'];
+        const levels = ['debug', 'info', 'warn', 'error', 'mempool', 'rollback'];
         for (const level of levels) {
             const logFilePath = path.join(dir, `${level}.jsonl`);
             if (!fs.existsSync(logFilePath)) {
@@ -101,6 +101,9 @@ export class Logger {
         return this.logLevel <= LogLevel.ERROR;
     }
     canMempool(): boolean {
+        return this.canInfo();
+    }
+    canRollback(): boolean {
         return this.canInfo();
     }
 
@@ -204,6 +207,20 @@ export class Logger {
         if (this.config.logToConsole) {
             let prefix = `[${LEVEL} ][${new Date().toUTCString()}]:`;
             if (this._colors) prefix = color.green(prefix);
+            console.log(prefix, ...stuff);
+        }
+
+        if (this.config.logToFile) {
+            this.appendLog(LEVEL, stuff);
+        }
+    }
+    rollback(...stuff: any[]) {
+        if (!this.canRollback()) return;
+        const LEVEL = "ROLLBACK";
+
+        if (this.config.logToConsole) {
+            let prefix = `[${LEVEL} ][${new Date().toUTCString()}]:`;
+            if (this._colors) prefix = color.magenta(prefix);
             console.log(prefix, ...stuff);
         }
 

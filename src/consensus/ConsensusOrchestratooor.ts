@@ -12,6 +12,7 @@ import type { GerolamoConfig } from "../network/peerManagerWorkers/peerManagerWo
 import type { PeerClient } from "../network/peerClientWorkers/PeerClient";
 import { DB } from "../db/DB";
 import { applyBlock } from "./BlockApplication";
+import { evaluateChains, type ChainCandidate } from "./chainSelection";
 
 export interface PeerAccessor {
 	getPeer(peerId: string): PeerClient | null;
@@ -60,6 +61,12 @@ export class ConsensusOrchestrator {
 		// 		if (this.stalledCallback) this.stalledCallback();
 		// 	}
 		// }, 60000); // check every minute
+	}
+
+	private async getCurrentTip(): Promise<{ blockNumber: number; slotNumber: bigint }> {
+		const maxSlot = await this.db.getMaxSlot();
+		const blockCount = maxSlot > 0n ? Number(maxSlot) : 0; // Approximate, since slots may have gaps
+		return { blockNumber: blockCount, slotNumber: maxSlot };
 	}
 
 	async handleRollForward(rollForwardCborBytes: Uint8Array, peerId: string, tip: bigint): Promise<void> {
@@ -164,8 +171,25 @@ export class ConsensusOrchestrator {
 		};
 	};
 
-	handleRollBack(point: RollbackPoint): void {
-		// TODO: Implement rollback logic
-		logger.debug(`Rollback stub for point slot ${point.blockHeader?.slotNumber}`);
+	async handleRollBack(point: RollbackPoint, candidate: ChainCandidate): Promise<{ rolledBack: boolean; fromSlot?: bigint; toSlot?: bigint; counts?: { blocksDeleted: number; headersDeleted: number; deltasDeleted: number } }> {
+		try {
+			const currentTip = await this.getCurrentTip();
+			const comparison = await evaluateChains([candidate], 'praos', 2160);
+
+			logger.rollback("handleRollBack: Evaluating chains with Praos");
+
+			if (comparison.comparison.preferred === 'candidate') {
+				const rollbackSlot = point.blockHeader!.slotNumber;
+				const counts = await this.db.rollbackChainTo(rollbackSlot);
+				logger.rollback(`Praos-approved rollback to slot ${rollbackSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`);
+				return { rolledBack: true, fromSlot: currentTip.slotNumber, toSlot: rollbackSlot, counts };
+			} else {
+				logger.rollback(`Rollback rejected by Praos: current preferred over candidate at slot ${candidate.slotNumber}`);
+				return { rolledBack: false };
+			}
+		} catch (error) {
+			logger.error('Error in handleRollBack:', error);
+			return { rolledBack: false };
+		}
 	};
 };

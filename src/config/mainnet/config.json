@@ -23,7 +23,7 @@
     "logs":{
         "logToFile": true,
         "logToConsole": false,
-        "logDirectory": "./src/logs/mainnet/",
+        "logDirectory": "./src/store/logs/mainnet/",
         "logLevel": "DEBUG",
         "bufferedLevels": ["debug", "info"],
         "batchSize": 50,

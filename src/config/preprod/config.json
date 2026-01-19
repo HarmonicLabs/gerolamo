@@ -21,9 +21,9 @@
     "dbPath": "./src/store/db/preprod/Gerolamo.db",
     "tuiEnabled": true,
     "logs":{
-        "logToFile": true,
+        "logToFile": false,
         "logToConsole": false,
-        "logDirectory": "./src/logs/preprod/",
+        "logDirectory": "./src/store/logs/preprod/",
         "logLevel": "DEBUG"
     },
     "snapshot": {

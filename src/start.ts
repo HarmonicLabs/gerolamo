@@ -10,6 +10,7 @@ import type { Worker } from "worker_threads";
 import { setupKeyboard } from "./tui/tui";
 setupKeyboard();
 export const getConfigPath = (network: string): string => path.join(getBasePath(), 'config', network, 'config.json');
+let configPath = "";
 
 const BLOCKFROST_API_URL_PREPROD = `https://blockfrost-preprod.onchainapps.io/`;
 const BLOCKFROST_API_URL_MAINNET = `https://blockfrost-mainnet.onchainapps.io/`;
@@ -17,8 +18,8 @@ const BLOCKFROST_API_URL_MAINNET = `https://blockfrost-mainnet.onchainapps.io/`;
 const network = process.env.NETWORK ?? "preprod";
 logger.info(`Gerolamo Network Node starting on ${network} network...`);
 
-const configFilePath = getConfigPath(network);
-logger.info(`Loading config from ${configFilePath}`);
+configPath = process.env.GEROLAMO_CONFIG?? getConfigPath(network);
+logger.info(`Loading config from ${configPath}`);
 
 async function loadConfig(filePath: string): Promise<GerolamoConfig> {
     const configFile = Bun.file(filePath);
@@ -29,7 +30,7 @@ async function loadConfig(filePath: string): Promise<GerolamoConfig> {
     return configData as GerolamoConfig;
 }
 
-const config = await loadConfig(configFilePath);
+const config = await loadConfig(configPath);
 logger.info("Configuration loaded successfully.");
 if (config.tuiEnabled) {	
 	logger.info("TUI keyboard handler enabled (press 'q' to quit).");

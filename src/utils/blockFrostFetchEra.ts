@@ -3,7 +3,7 @@ import { logger } from "./logger";
 
 export async function blockFrostFetchEra(epoch: number): Promise<string> {
     const BLOCKFROST_API_URL_PREPROD = `https://blockfrost-preprod.onchainapps.io/epochs/${epoch}/parameters`;
-    const BLOCKFROST_API_URL_MAINNET = `https://cardano-mainnet.blockfrost.io/api/v0/epochs/${epoch}/parameters`;
+    const BLOCKFROST_API_URL_MAINNET = `https://blockfrost-mainnet.onchainapps.io/epochs/${epoch}/parameters`;
 
     const url = process.env.NETWORK === "mainnet"
         ? BLOCKFROST_API_URL_MAINNET

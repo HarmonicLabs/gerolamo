@@ -11,6 +11,9 @@ import { setupKeyboard } from "./tui/tui";
 setupKeyboard();
 export const getConfigPath = (network: string): string => path.join(getBasePath(), 'config', network, 'config.json');
 
+const BLOCKFROST_API_URL_PREPROD = `https://blockfrost-preprod.onchainapps.io/`;
+const BLOCKFROST_API_URL_MAINNET = `https://blockfrost-mainnet.onchainapps.io/`;
+
 const network = process.env.NETWORK ?? "preprod";
 logger.info(`Gerolamo Network Node starting on ${network} network...`);
 
@@ -33,7 +36,12 @@ if (config.tuiEnabled) {
 }
 logger.info(`Database path: ${config.dbPath}`);
 logger.setLogConfig(config.logs);
-logger.info("Logger configured with log level and outputs.");
+if (config.tuiEnabled) {
+	logger.setLogConfig({ logToConsole: false });
+	logger.info("TUI enabled - console logging disabled to prevent interference.");
+}
+
+//logger.info("Logger configured with log level and outputs.");
 
 const db = new DB(config.dbPath);
 logger.info("Initializing database...");
@@ -54,6 +62,7 @@ logger.info("Starting peer block server...");
 const peerBlockServerMod = await import("./network/peerServer/peerBlockServer");
 await peerBlockServerMod.startPeerBlockServer(config, managerWorker);
 logger.info("Peer block server started. Node is now running.");
+
 async function runSnapShotPopulation() {
     logger.info(`Snapshot population enabled (source: ${config.snapshot.source})`);
     const maxSlot = await db.getMaxSlot();
@@ -70,7 +79,7 @@ async function runSnapShotPopulation() {
     for (let epoch = fromEpoch; epoch <= targetEpoch; epoch++) {
         await import("./state/blockfrost/populateEpochState").then(m => m.populateEpochState(
             db.db, epoch, { 
-            customBackend: "https://blockfrost-preprod.onchainapps.io/", projectId: undefined 
+            customBackend: network === "mainnet" ? BLOCKFROST_API_URL_MAINNET : BLOCKFROST_API_URL_PREPROD, projectId: undefined 
         }));
     }
     logger.info(`NES snapshot population complete up to epoch ${targetEpoch}`);    

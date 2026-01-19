@@ -9,16 +9,19 @@ let isFirstRender = true;
 let lastSlot = 0n;
 let lastTime = 0;
 
-const DASHBOARD_HEIGHT = 28;  // Increased for log pane
+const DASHBOARD_HEIGHT = 35;  // Adjusted for fewer logs
 const INNER_WIDTH = 80;
 const PROGRESS_WIDTH = 48;
 
 const colors = {
-	hlRed: '\x1b[91m',              // Bright ANSI red – main accent
-	hlRedDeep: '\x1b[38;5;160m',    // Deeper crimson for headers
-	hlRedBright: '\x1b[38;5;196m',  // Intense for alerts/purge
-	// Remove non-red colors to keep theme pure
-	gray: '\x1b[90m',               // Dim background for progress
+	// HarmonicRed theme base
+	harmonicRed: '\x1b[91m',           // HarmonicRed bright accent (was hlRed)
+	hlRedDeep: '\x1b[38;5;160m',       // Deeper for headers
+	hlRedBright: '\x1b[38;5;196m',     // Intense alerts
+	// Cardano Dark Blue additions
+	cardanoBlue: '\x1b[38;5;20m',      // #0033AD approx
+	cardanoBlueGlow: '\x1b[38;5;21m\x1b[1m',
+	gray: '\x1b[90m',
 	lightGray: '\x1b[37m',
 	white: '\x1b[97m',
 	dim: '\x1b[2m',
@@ -31,10 +34,11 @@ const glow = colors.bold;
 
 const logColors: Record<string, string> = {
 	DEBUG: colors.gray,
-	INFO: colors.lightGray,
+	INFO: colors.cardanoBlue,
 	WARN: colors.hlRedDeep,
 	ERROR: colors.hlRedBright,
 	MEMPOOL: colors.green,
+	ROLLBACK: colors.cardanoBlue,
 };
 
 function visibleLength(str: string): number {
@@ -42,11 +46,11 @@ return str.replace(/\x1b\[[0-9;]*m/g, '').length;
 }
 
 function center(text: string, width = INNER_WIDTH): string {
-const visLen = visibleLength(text);
-if (visLen > width) return text.slice(0, width - 3) + '...';
-const padTotal = width - visLen;
-const left = Math.floor(padTotal / 2);
-return `${colors.hlRed}│${colors.reset}${' '.repeat(left)}${text}${' '.repeat(padTotal - left)}${colors.hlRed}│${colors.reset}`;
+	const visLen = visibleLength(text);
+	if (visLen > width) return text.slice(0, width - 3) + '...';
+	const padTotal = width - visLen;
+	const left = Math.floor(padTotal / 2);
+	return `${colors.harmonicRed}│${colors.reset}${' '.repeat(left)}${text}${' '.repeat(padTotal - left)}${colors.harmonicRed}│${colors.reset}`;
 }
 
 function formatNum(n: number): string {
@@ -55,7 +59,7 @@ return n.toLocaleString('en-US');
 
 const LAB_HEADER = [
 	`${colors.hlRedDeep}${glow}  ╔══════════════════════════════════════════════╗  ${colors.reset}`,
-	`${colors.hlRed}  ║      ${colors.hlRedBright}${glow}HARMONIC LABS${colors.reset} ${colors.hlRedDeep}${glow}–${colors.reset} ${colors.hlRedBright}${glow}GEROLAMO NODE${colors.reset}           ║  ${colors.reset}`,
+	`${colors.harmonicRed}  ║      ${colors.hlRedBright}${glow}HARMONIC LABS${colors.reset} ${colors.hlRedDeep}${glow}–${colors.reset} ${colors.hlRedBright}${glow}GEROLAMO NODE${colors.reset}           ║  ${colors.reset}`,
 	`${colors.hlRedBright}${glow}  ╚══════════════════════════════════════════════╝  ${colors.reset}`,
 ];
 
@@ -119,24 +123,24 @@ export async function prettyBlockValidationLog(
 	lastSlot = BigInt(blockSlot);
 	lastTime = now;
 
-	const frameTop = `${colors.hlRed}╔${'═'.repeat(INNER_WIDTH)}╗${colors.reset}`;
-	const frameBot = `${colors.hlRed}╚${'═'.repeat(INNER_WIDTH)}╝${colors.reset}`;
+	const frameTop = `${colors.harmonicRed}╔${'═'.repeat(INNER_WIDTH)}╗${colors.reset}`;
+	const frameBot = `${colors.harmonicRed}╚${'═'.repeat(INNER_WIDTH)}╝${colors.reset}`;
 
 	const lines = [
 		frameTop,
 		...LAB_HEADER.map(line => center(line, INNER_WIDTH - 0)),
 		center(''),
-		center(`${colors.hlRedDeep}${glow}Network: ${process.env.NETWORK?.toUpperCase() || 'PREPROD'}${colors.reset}`),
-		center(`${colors.hlRedDeep}${glow}ERA ${era}${colors.reset}`),
+		center(`${colors.cardanoBlueGlow}Network: ${process.env.NETWORK?.toUpperCase() || 'PREPROD'}${colors.reset}`),
+		center(`${colors.cardanoBlue}ERA ${era}${colors.reset}`),
 		center(`${colors.lightGray}EPOCH ${blockEpoch.toString().padStart(3,'0')}   SLOT ${formatNum(slotNum).padStart(11)} / ${formatNum(tipNum).padStart(11)}${colors.reset}`),
-		center(`${colors.hlRed}PROGRESS [${bar}] ${percent}%${speed}${colors.reset}`),
-		center(`${colors.gray}HASH ${hashShort}${colors.reset}`),
+		center(`${colors.harmonicRed}PROGRESS [${bar}] ${percent}%${speed}${colors.reset}`),
+		center(`${colors.cardanoBlue}HASH ${hashShort}${colors.reset}`),
 		center(`${colors.white}GC CYCLES: ${volatileDbGcCounter.toString().padStart(5)}   BATCH: ${(batchInsertCounter ?? '---').toString().padStart(3)}${colors.reset}`),
 		center(`${colors.dim}UPTIME ${runtime}   ${new Date(now).toLocaleString('en-US', { hour12: true })}${colors.reset}`),
 
 		// Insert log pane
 		center(`${colors.hlRedDeep}${glow}RECENT LOGS${colors.reset}`),
-		...(await getRecentLogs(20)).map((log) => {
+		...(await getRecentLogs(6, 'INFO')).map((log) => {
 			const color = logColors[log.level as keyof typeof logColors] || colors.reset;
 			return center(`${color}[${log.timestamp}] ${log.level.padEnd(5)} ${log.message}${colors.reset}`);
 		}),
@@ -146,7 +150,7 @@ export async function prettyBlockValidationLog(
 		: center(''),
 
 		(batchInsertCounter ?? 0) >= 48
-		? center(`${colors.hlRed}${glow}»»» BATCH INSERT SEQUENCE ACTIVE «««${colors.reset}`)
+		? center(`${colors.harmonicRed}${glow}»»» BATCH INSERT SEQUENCE ACTIVE «««${colors.reset}`)
 		: center(''),
 
 		center(''),
@@ -172,75 +176,6 @@ export async function prettyBlockValidationLog(
 const LOG_LEVELS = ["DEBUG", "INFO", "WARN", "ERROR"] as const;
 const LOG_TYPES = ["debug", "info", "warn", "error"] as const;
 
-async function getRecentLogs(numLines: number = 20): Promise<Array<{ timestamp: string; level: string; message: string; }>> {
-	const allLogs: Array<{ timestamp: string; level: string; message: string; ts: number }> = [];
-	for (const level of LOG_LEVELS) {
-		try {
-			const logPath = logger.getLogPath(level);
-			const stream = Bun.file(logPath).stream();
-			const decoder = new TextDecoder();
-			let buffer = '';
-			const fileLogs: Array<{ timestamp: string; level: string; message: string; ts: number }> = [];
-			for await (const chunk of stream) {
-				buffer += decoder.decode(chunk, { stream: true });
-				const lines = buffer.split('\n');
-				buffer = lines.pop() || ''; // last incomplete line
-				for (const line of lines) {
-					if (!line.trim()) continue;
-					try {
-						const entry = JSON.parse(line);
-						let message = "";
-						if (Array.isArray(entry.args)) {
-							message = entry.args.map((arg: any) => {
-								if (typeof arg === "string") return arg;
-								if (typeof arg === "object") return JSON.stringify(arg).slice(0, 50);
-								return String(arg);
-							}).join(" ");
-						} else {
-							message = String(entry.args);
-						}
-						const logObj = {
-							timestamp: entry.timestamp.slice(11, 19),
-							level: entry.level,
-							message: message.slice(0, 60) + (message.length > 60 ? "..." : ""),
-							ts: new Date(entry.timestamp).getTime()
-						};
-						fileLogs.push(logObj);
-						if (fileLogs.length > numLines) fileLogs.shift();
-					} catch (e) {
-						// ignore invalid lines
-					}
-				}
-			}
-			// process remaining buffer if complete
-			if (buffer.trim()) {
-				try {
-					const entry = JSON.parse(buffer);
-					let message = "";
-					if (Array.isArray(entry.args)) {
-						message = entry.args.map((arg: any) => {
-							if (typeof arg === "string") return arg;
-							if (typeof arg === "object") return JSON.stringify(arg).slice(0, 50);
-							return String(arg);
-						}).join(" ");
-					} else {
-						message = String(entry.args);
-					}
-					const logObj = {
-						timestamp: entry.timestamp.slice(11, 19),
-						level: entry.level,
-						message: message.slice(0, 60) + (message.length > 60 ? "..." : ""),
-						ts: new Date(entry.timestamp).getTime()
-					};
-					fileLogs.push(logObj);
-					if (fileLogs.length > numLines) fileLogs.shift();
-				} catch (e) {}
-			}
-			allLogs.push(...fileLogs);
-		} catch (e) {
-			// ignore missing files
-		}
-	}
-	allLogs.sort((a, b) => b.ts - a.ts);
-	return allLogs.slice(0, 5).map(({ timestamp, level, message }) => ({ timestamp, level, message }));
+async function getRecentLogs(numLines: number = 20, minLevel: string = 'INFO'): Promise<Array<{ timestamp: string; level: string; message: string; }>> {
+  return logger.getRecentLogs(numLines, minLevel);
 }

@@ -24,12 +24,15 @@
         "logToFile": true,
         "logToConsole": false,
         "logDirectory": "./src/logs/mainnet/",
-        "logLevel": "DEBUG"
+        "logLevel": "DEBUG",
+        "bufferedLevels": ["debug", "info"],
+        "batchSize": 50,
+        "flushDelayMs": 1000
     },
     "snapshot": {
         "enable": false,
         "source": "blockfrost",
-        "fromEpoch": 4
+        "fromEpoch": 208
     },
     "mempool": {
         "enabled": true,

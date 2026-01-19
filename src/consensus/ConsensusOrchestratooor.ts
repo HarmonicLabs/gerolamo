@@ -6,6 +6,7 @@ import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import type { BlockFetchNoBlocks, BlockFetchBlock } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { prettyBlockValidationLog } from "../tui/tui";
 import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
+import { blockFrostFetchEra } from "../utils/blockFrostFetchEra";
 import { toHex, fromHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import type { GerolamoConfig } from "../network/peerManagerWorkers/peerManagerWorker";
@@ -50,6 +51,8 @@ export class ConsensusOrchestrator {
 	private lastActivity: number = Date.now();
 	private stalledCallback?: () => void;
 
+	private epochNonceCache: Map<number, string> = new Map();
+
 	constructor(config: GerolamoConfig, db: DB, peers: PeerAccessor, onStalled?: () => void) {
 		this.config = config;
 		this.db = db;
@@ -69,6 +72,22 @@ export class ConsensusOrchestrator {
 		return { blockNumber: blockCount, slotNumber: maxSlot };
 	}
 
+	private async getEpochNonce(epoch: number): Promise<string | null> {
+		if (this.epochNonceCache.has(epoch)) {
+			logger.debug(`Cache hit for epoch nonce ${epoch}`);
+			return this.epochNonceCache.get(epoch)!;
+		}
+		try {
+			const nonce = await blockFrostFetchEra(epoch);
+			this.epochNonceCache.set(epoch, nonce);
+			logger.debug(`Fetched and cached epoch ${epoch} nonce from Blockfrost`);
+			return nonce;
+		} catch (error: unknown) {
+			logger.error(`Failed to fetch epoch ${epoch} nonce:`, error);
+			return null;
+		}
+	}
+
 	async handleRollForward(rollForwardCborBytes: Uint8Array, peerId: string, tip: bigint): Promise<void> {
 		this.lastActivity = Date.now();
 		logger.debug(`Processing rollForward message from peer ${peerId}...`);
@@ -86,14 +105,15 @@ export class ConsensusOrchestrator {
 				return;
 			}
 
-			if(!(parsedHeader.currentEpochNonce)){
-				logger.warn(`Missing epoch nonce for header validation for peer ${peerId} at slot ${parsedHeader.slot}, hash ${toHex(parsedHeader.blockHeaderHash)}`);
+			const nonce = await this.getEpochNonce(parsedHeader.epoch as number);
+			if (!nonce) {
+				logger.warn(`Missing epoch nonce for header validation for peer ${peerId} at slot ${parsedHeader.slot.toString()}, hash ${toHex(parsedHeader.blockHeaderHash)}`);
 				return;
 			};
 
-			const isValid = await validateHeader(parsedHeader.multiEraHeader, fromHex(parsedHeader.currentEpochNonce), this.config);
+			const isValid = await validateHeader(parsedHeader.multiEraHeader, fromHex(nonce), this.config);
 			if (!isValid) {
-				logger.warn(`Header validation failed for peer ${peerId}: slot ${parsedHeader.slot}, hash ${toHex(parsedHeader.blockHeaderHash)}`);
+				logger.warn(`Header validation failed for peer ${peerId}: slot ${parsedHeader.slot.toString()}, hash ${toHex(parsedHeader.blockHeaderHash)}`);
 				return;
 			}
 
@@ -174,11 +194,13 @@ export class ConsensusOrchestrator {
 	async handleRollBack(point: RollbackPoint, candidate: ChainCandidate): Promise<{ rolledBack: boolean; fromSlot?: bigint; toSlot?: bigint; counts?: { blocksDeleted: number; headersDeleted: number; deltasDeleted: number } }> {
 		try {
 			const currentTip = await this.getCurrentTip();
-			const comparison = await evaluateChains([candidate], 'praos', 2160);
-
-			logger.rollback("handleRollBack: Evaluating chains with Praos");
-
-			if (comparison.comparison.preferred === 'candidate') {
+			logger.rollback(`handleRollBack: current tip slot=${currentTip.slotNumber.toString()} (~${currentTip.blockNumber} blocks), point slot=${point.blockHeader!.slotNumber.toString()}, candidate slot=${candidate.slotNumber.toString()} block#${candidate.blockNumber}`);
+			
+			const evalResult = await evaluateChains([candidate], 'praos', 2160);
+			const comparison = evalResult.comparison;
+			logger.rollback(`Praos eval: preferred='${comparison.preferred}', intersectionBlock=${comparison.intersectionBlock}, rollbackDistance=${comparison.rollbackDistance}`);
+			
+			if (comparison.preferred === 'candidate') {
 				const rollbackSlot = point.blockHeader!.slotNumber;
 				const counts = await this.db.rollbackChainTo(rollbackSlot);
 				logger.rollback(`Praos-approved rollback to slot ${rollbackSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`);

@@ -619,12 +619,26 @@ export class DB {
 
 		logger.rollback(`Pre-rollback to slot ${slot}: blocksDeleted=${counts.blocksDeleted}, headersDeleted=${counts.headersDeleted}, deltasDeleted=${counts.deltasDeleted}`);
 
+		const beforeTip = await this.getMaxSlot();
+		const deletedBlocksStmt = this.db.prepare("SELECT slot, hash FROM blocks WHERE slot > ? ORDER BY slot DESC LIMIT 50");
+		const deletedBlocks = deletedBlocksStmt.all(slot) as Array<{slot: number; hash: string}>;
+		logger.rollback(`Rollback to slot ${slot}; beforeTip slot ${beforeTip.toString()}; deleting ${counts.blocksDeleted} blocks (top 50: [${deletedBlocks.map(b => `${b.slot}:${b.hash.slice(0,8)}`).join(', ') || 'none'}])`);
+		
 		const tx = this.db.transaction(() => {
-			this.db.prepare('DELETE FROM blocks WHERE slot > ?').run(slot);
-			this.db.prepare('DELETE FROM volatile_headers WHERE slot > ?').run(slot);
-			this.db.prepare('DELETE FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ?)').run(slot);
+			// Fixed order: deltas first (needs blocks), then headers, then blocks
+			this.db.prepare("DELETE FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ?)").run(slot);
+			this.db.prepare("DELETE FROM volatile_headers WHERE slot > ?").run(slot);
+			this.db.prepare("DELETE FROM blocks WHERE slot > ?").run(slot);
 		});
 		tx();
+
+		const afterTip = await this.getMaxSlot();
+		const postBlocks = this.db.prepare("SELECT COUNT(*) FROM blocks WHERE slot > ?").get(slot)?.['COUNT(*)'] ?? 0;
+		const postHeaders = this.db.prepare("SELECT COUNT(*) FROM volatile_headers WHERE slot > ?").get(slot)?.['COUNT(*)'] ?? 0;
+		logger.rollback(`Post-rollback verify to slot ${slot}: remaining blocks=${postBlocks}(exp:0), headers=${postHeaders}(0); afterTip: ${afterTip.toString()}`);
+		if (postBlocks > 0 || postHeaders > 0) {
+			logger.error(`Rollback to ${slot} incomplete: blocks=${postBlocks}, headers=${postHeaders}`);
+		}
 
 		return counts;
 	}

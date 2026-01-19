@@ -5,12 +5,7 @@ import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, M
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "../utils/logger";
 import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
-import { blockFrostFetchEra } from "../utils/blockFrostFetchEra";
 import { toHex } from "@harmoniclabs/uint8array-utils";
-
-let currentEpochNonce: string | null = null;
-let epochNonceBF: string | null = null;
-let currentEpoch: number | BigInt | null = null;
 
 export async function headerParser(rollForward: Uint8Array) {
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
@@ -62,11 +57,11 @@ export async function headerParser(rollForward: Uint8Array) {
         logger.error("Missing Era in MultiEra header");
         throw new Error("Missing Era in MultiEra header");
     }
-    const blcokHeaderBodyEra = lazyHeader.array[0][0] + 1;
-    // logger.debug("Multiplexer Era: ", toHex(lazyHeader.array[1]), " Header Era: ", blcokHeaderBodyEra);
+    const blockHeaderBodyEra = lazyHeader.array[0][0] + 1;
+    // logger.debug("Multiplexer Era: ", toHex(lazyHeader.array[1]), " Header Era: ", blockHeaderBodyEra);
     // Parse the header based on era
     let parsedHeader;
-    switch (blcokHeaderBodyEra) {
+    switch (blockHeaderBodyEra) {
         case 2:
             parsedHeader = ShelleyHeader.fromCbor(blockHeaderParsed.data.bytes);
             break;
@@ -90,28 +85,19 @@ export async function headerParser(rollForward: Uint8Array) {
     }
 
     const multiEraHeader = new MultiEraHeader({
-        era: blcokHeaderBodyEra,
+        era: blockHeaderBodyEra,
         header: parsedHeader,
     });
 
     const headerEpoch = calculatePreProdCardanoEpoch(
         Number(multiEraHeader.header.body.slot),
     );
-    if( currentEpochNonce === null && currentEpoch === null ) 
-    {
-        currentEpochNonce = await blockFrostFetchEra(headerEpoch as number);
-        currentEpoch = headerEpoch;
-    };
-    if (Number(currentEpoch) < Number(headerEpoch)) {
-        currentEpoch = headerEpoch
-        currentEpochNonce = await blockFrostFetchEra(headerEpoch as number);
-    };
 
     const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
     const slot = multiEraHeader.header.body.slot;
 
     logger.info("Parsed header successfully", {
-        era: blcokHeaderBodyEra,
+        era: blockHeaderBodyEra,
         slot: slot.toString(),
         hash: toHex(blockHeaderHash)
     });
@@ -119,9 +105,9 @@ export async function headerParser(rollForward: Uint8Array) {
     return ({   
         slot,
         blockHeaderHash,
-        era: blcokHeaderBodyEra,
+        era: blockHeaderBodyEra,
         multiEraHeader,
-        currentEpochNonce,
+        epoch: Number(headerEpoch),
     });
 };
 

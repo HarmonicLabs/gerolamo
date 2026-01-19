@@ -1,5 +1,7 @@
 import { sql } from "bun";
 import { logger } from "../utils/logger";
+
+const chainLogger = logger.child("chainSelection");
 /**
  * Represents a candidate chain for selection
  */
@@ -45,6 +47,8 @@ export async function findIntersection(
 
     if (currentSlots.length === 0) {
         // No current chain, intersection at genesis
+        chainLogger.info("No current chain blocks in DB; intersection at genesis");
+
         return { intersectionBlock: 0, rollbackDistance: 0 };
     }
 
@@ -70,14 +74,14 @@ export async function findIntersection(
 
     const rollbackDistance = currentBlockCount - 1 - intersectionIndex;
 
-    logger.debug("Chain intersection calculated", {
+    chainLogger.debug("Chain intersection calculated", {
         candidateSlot,
         intersectionIndex,
         rollbackDistance,
         currentBlockCount
     });
 
-    logger.rollback(`findIntersection: candidate slot ${candidateSlot}, intersection at block ${intersectionIndex} (rollback distance ${rollbackDistance})`);
+    chainLogger.rollback(`findIntersection: candidate slot ${candidateSlot}, intersection at block ${intersectionIndex} (rollback distance ${rollbackDistance})`);
 
     return {
         intersectionBlock: intersectionIndex,
@@ -103,6 +107,12 @@ export async function compareChainsPraos(
     // Check if intersection is within k blocks of current tip
     if (rollbackDistance > securityParamK) {
         // Intersection too far back - cannot switch chains
+        chainLogger.debug("Candidate rejected: rollback distance exceeds k", {
+            rollbackDistance,
+            securityParamK,
+            intersectionBlock
+        });
+
         return {
             preferred: 'current',
             intersectionBlock,
@@ -150,7 +160,7 @@ export async function selectBestChain(
         slotNumber: BigInt(currentTipSlot)
     };
 
-    logger.info("Starting chain selection", {
+    chainLogger.info("Starting chain selection", {
         numCandidates: candidates.length,
         currentTip: {
             blockNumber: currentTip.blockNumber,
@@ -158,7 +168,13 @@ export async function selectBestChain(
         }
     });
 
-    logger.rollback(`selectBestChain start: ${candidates.length} candidates, current tip blocks=${currentTip.blockNumber} slot=${currentTip.slotNumber}`);
+    chainLogger.rollback(`selectBestChain start: ${candidates.length} candidates, current tip blocks=${currentTip.blockNumber} slot=${currentTip.slotNumber}`);
+
+    chainLogger.debug("Current chain tip determined from DB", {
+        blockNumber: currentTip.blockNumber,
+        slotNumber: currentTip.slotNumber.toString(),
+        dbBlockCount: currentSlots.length
+    });
 
     let bestCandidate: ChainCandidate | null = null;
     let bestComparison: ChainComparison | null = null;
@@ -166,13 +182,13 @@ export async function selectBestChain(
     for (const candidate of candidates) {
         const comparison = await compareChainsPraos(currentTip, candidate, securityParamK);
 
-        logger.debug(`Candidate evaluation: preferred=${comparison.preferred}`, {
+        chainLogger.debug(`Candidate evaluation: preferred=${comparison.preferred}`, {
             candidateSlot: candidate.slotNumber.toString(),
             candidateBlockNumber: candidate.blockNumber,
             rollbackDistance: comparison.rollbackDistance
         });
 
-        logger.rollback(`Candidate ${candidate.slotNumber}: preferred=${comparison.preferred}, rollbackDistance=${comparison.rollbackDistance}`);
+        chainLogger.rollback(`Candidate ${candidate.slotNumber}: preferred=${comparison.preferred}, rollbackDistance=${comparison.rollbackDistance}`);
 
         if (comparison.preferred === 'candidate') {
             bestCandidate = candidate;
@@ -180,9 +196,9 @@ export async function selectBestChain(
         }
     }
 
-    logger.info(`Chain selection complete: ${bestCandidate ? `candidate slot ${bestCandidate.slotNumber} (rollback ${bestComparison!.rollbackDistance})` : 'current chain preferred'}`);
+    chainLogger.info(`Chain selection complete: ${bestCandidate ? `candidate slot ${bestCandidate.slotNumber} (rollback ${bestComparison!.rollbackDistance})` : 'current chain preferred'}`);
 
-    logger.rollback(`selectBestChain complete: ${bestCandidate ? `prefer candidate slot ${bestCandidate.slotNumber.toString()} (rollback ${bestComparison!.rollbackDistance})` : 'current preferred'}`);
+    chainLogger.rollback(`selectBestChain complete: ${bestCandidate ? `prefer candidate slot ${bestCandidate.slotNumber.toString()} (rollback ${bestComparison!.rollbackDistance})` : 'current preferred'}`);
 
     return { candidate: bestCandidate, comparison: bestComparison };
 }
@@ -199,6 +215,12 @@ export async function evaluateChains(
     const result = await selectBestChain(peerChains, mode, securityParamK);
 
     if (!result.candidate || !result.comparison) {
+        chainLogger.warn("evaluateChains: no suitable candidate found", {
+            numCandidates: peerChains.length,
+            mode,
+            securityParamK
+        });
+
         throw new Error('No suitable chain candidate found for switching');
     }
 

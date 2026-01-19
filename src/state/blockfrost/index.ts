@@ -26,6 +26,7 @@ import { populatePulsingRewUpdate } from "./pulsing_rew_update";
 import { populateStashedAvvmAddresses } from "./stashed_avvm_addresses";
 import { populateNewEpochState } from "./new_epoch_state";
 import { fetchBlockData } from "./block_data";
+import { GerolamoConfig } from "../../network/peerManagerWorkers/peerManagerWorker";
 
 // Main import function for ledger state from Blockfrost
 export async function importFromBlockfrost(
@@ -36,6 +37,7 @@ export async function importFromBlockfrost(
         customBackend?: string;
         fromSlot?: number;
         count?: number;
+        config?: GerolamoConfig;
     },
 ) {
     const apiConfig: any = {
@@ -47,8 +49,10 @@ export async function importFromBlockfrost(
         apiConfig.projectId = options.projectId;
     } else {
         // Use custom backend (default)
-        apiConfig.customBackend = options?.customBackend ||
-            "https://blockfrost-preprod.onchainapps.io/";
+        apiConfig.customBackend = options?.customBackend || options?.config?.blockfrostUrl;
+        if (!apiConfig.customBackend) {
+            throw new Error("Blockfrost customBackend or config.blockfrostUrl required (no projectId provided)");
+        }
     }
 
     const api = new BlockFrostAPI(apiConfig);

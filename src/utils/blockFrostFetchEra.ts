@@ -1,14 +1,18 @@
 import { fetch } from "bun";
 import { logger } from "./logger";
+import { GerolamoConfig } from "../network/peerManagerWorkers/peerManagerWorker";
 
-export async function blockFrostFetchEra(epoch: number): Promise<string> {
-    const BLOCKFROST_API_URL_PREPROD = `https://blockfrost-preprod.onchainapps.io/epochs/${epoch}/parameters`;
-    const BLOCKFROST_API_URL_MAINNET = `https://blockfrost-mainnet.onchainapps.io/epochs/${epoch}/parameters`;
-
-    let url = process.env.NETWORK === "mainnet"
-        ? BLOCKFROST_API_URL_MAINNET
-        : BLOCKFROST_API_URL_PREPROD;
+export async function blockFrostFetchEra(configOrBaseUrl: GerolamoConfig | string, epoch: number): Promise<string> {
+    const baseUrl = typeof configOrBaseUrl === "string" 
+        ? configOrBaseUrl 
+        : configOrBaseUrl.blockfrostUrl ?? (
+            configOrBaseUrl.network === "mainnet" 
+                ? "https://blockfrost-mainnet.onchainapps.io" 
+                : "https://blockfrost-preprod.onchainapps.io"
+        );
         
+    const url = `${baseUrl}/epochs/${epoch}/parameters`;
+    
     logger.debug(`Fetching epoch parameters for epoch ${epoch} from BlockFrost API at ${url}`);
     
     const response = await fetch(url, {

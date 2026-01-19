@@ -29,8 +29,8 @@ export function Main() {
         )
         .option(
             "--custom-backend <url>",
-            "Custom Blockfrost backend URL",
-            "https://blockfrost-preprod.onchainapps.io/",
+            "Custom Blockfrost backend URL"
+            // no default hard-coded URL; use config.blockfrostUrl or explicit arg
         )
         .option(
             "--import-chain",

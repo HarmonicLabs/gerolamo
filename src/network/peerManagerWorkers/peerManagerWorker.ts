@@ -36,6 +36,7 @@ export interface GerolamoConfig {
 		readonly source: string;
 	};
 	readonly tuiEnabled?: boolean;
+	readonly blockfrostUrl?: string;
 	allPeers: Map<string, PeerClient>;
 };
 

@@ -78,7 +78,7 @@ export class ConsensusOrchestrator {
 			return this.epochNonceCache.get(epoch)!;
 		}
 		try {
-			const nonce = await blockFrostFetchEra(epoch);
+			const nonce = await blockFrostFetchEra(this.config, epoch);
 			this.epochNonceCache.set(epoch, nonce);
 			logger.debug(`Fetched and cached epoch ${epoch} nonce from Blockfrost`);
 			return nonce;

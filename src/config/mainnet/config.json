@@ -18,6 +18,7 @@
     "unixSocket": false,
     "network": "mainnet",
     "networkMagic": 764824073,
+    "blockfrostUrl": "https://blockfrost-mainnet.onchainapps.io/",
     "dbPath": "./src/store/db/mainnet/Gerolamo.db",
     "tuiEnabled": true,
     "logs":{

@@ -18,6 +18,7 @@
     "unixSocket": false,
     "network": "preprod",
     "networkMagic": 1,
+    "blockfrostUrl": "https://blockfrost-preprod.onchainapps.io/",
     "dbPath": "./src/store/db/preprod/Gerolamo.db",
     "tuiEnabled": true,
     "logs":{

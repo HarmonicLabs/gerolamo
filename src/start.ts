@@ -12,9 +12,6 @@ setupKeyboard();
 export const getConfigPath = (network: string): string => path.join(getBasePath(), 'config', network, 'config.json');
 let configPath = "";
 
-const BLOCKFROST_API_URL_PREPROD = `https://blockfrost-preprod.onchainapps.io/`;
-const BLOCKFROST_API_URL_MAINNET = `https://blockfrost-mainnet.onchainapps.io/`;
-
 const network = process.env.NETWORK ?? "preprod";
 logger.info(`Gerolamo Network Node starting on ${network} network...`);
 
@@ -80,7 +77,7 @@ async function runSnapShotPopulation() {
     for (let epoch = fromEpoch; epoch <= targetEpoch; epoch++) {
         await import("./state/blockfrost/populateEpochState").then(m => m.populateEpochState(
             db.db, epoch, { 
-            customBackend: network === "mainnet" ? BLOCKFROST_API_URL_MAINNET : BLOCKFROST_API_URL_PREPROD, projectId: undefined 
+            customBackend: config.blockfrostUrl!, projectId: undefined 
         }));
     }
     logger.info(`NES snapshot population complete up to epoch ${targetEpoch}`);    

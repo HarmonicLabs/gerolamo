@@ -20,6 +20,7 @@ import { populateEpochState as populateEpochStateNES } from "./epoch_state";
 import { populatePulsingRewUpdate } from "./pulsing_rew_update";
 import { populateStashedAvvmAddresses } from "./stashed_avvm_addresses";
 import { populateNewEpochState } from "./new_epoch_state";
+import { GerolamoConfig } from "../../network/peerManagerWorkers/peerManagerWorker";
 
 export async function populateEpochState(
     db: Database,
@@ -27,6 +28,7 @@ export async function populateEpochState(
     options: {
         projectId?: string;
         customBackend?: string;
+        config?: GerolamoConfig;
     } = {}
 ) {
     const apiConfig: any = { rateLimiter: false };
@@ -34,7 +36,10 @@ export async function populateEpochState(
     if (options.projectId) {
         apiConfig.projectId = options.projectId;
     } else {
-        apiConfig.customBackend = options.customBackend || "https://blockfrost-preprod.onchainapps.io/";
+        apiConfig.customBackend = options.customBackend || options.config?.blockfrostUrl;
+        if (!apiConfig.customBackend) {
+            throw new Error("Blockfrost customBackend or config.blockfrostUrl required (no projectId provided)");
+        }
     }
 
     const api = new BlockFrostAPI(apiConfig);

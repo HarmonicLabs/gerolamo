@@ -178,11 +178,6 @@ multitail logs/preprod/*.jsonl
 - HTTP Block API (`/block/{slot|hash}` → raw CBOR)
 - Structured JSONL logging
 
-### Pending (Consensus)
-- `./src/consensus/chainSelection.ts`
-- `./src/consensus/StableState.ts`
-- `./src/consensus/AnchoredVolatileState.ts`
-- `./src/consensus/BlockApplication.ts`
 
 ## 📚 Resources
 - [Cardano Ouroboros](https://ouroboros-network.cardano.intersectmbo.org/)

@@ -17,6 +17,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 
 # Db
 store
+tx
 
 # dotenv environment variable files
 .env

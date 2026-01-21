@@ -22,15 +22,18 @@
     "dbPath": "./src/store/db/preprod/Gerolamo.db",
     "tuiEnabled": true,
     "logs":{
-        "logToFile": false,
+        "logToFile": true,
         "logToConsole": false,
         "logDirectory": "./src/store/logs/preprod/",
-        "logLevel": "DEBUG"
+        "logLevel": "DEBUG",
+        "bufferedLevels": ["debug", "info", "rollback"],
+        "batchSize": 50,
+        "flushDelayMs": 1000
     },
     "snapshot": {
         "enable": true,
         "source": "blockfrost",
-        "fromEpoch": 0
+        "fromEpoch": 11
     },
     "mempool": {
         "enabled": true,

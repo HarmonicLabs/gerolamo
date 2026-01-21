@@ -128,7 +128,7 @@ export class ConsensusOrchestrator {
 
 			const isBlockValid = await validateBlock(multiEraBlock!, this.config, this.db);
 			if (!isBlockValid) {
-				logger.warn(`Block body validation failed for peer ${peerId} at slot ${parsedHeader.slot}, hash ${toHex(parsedHeader.blockHeaderHash)}`);
+				logger.warn(`Block body validation failed for peer ${peerId} at slot ${parsedHeader.slot}, hash ${toHex(parsedHeader.blockHeaderHash)} (bypassing validation; applying anyway for sync tolerance)`);
 				// continue even if invalid (temporary)
 			};
             if(isBlockValid) {
@@ -191,23 +191,30 @@ export class ConsensusOrchestrator {
 		};
 	};
 
-	async handleRollBack(point: RollbackPoint, candidate: ChainCandidate): Promise<{ rolledBack: boolean; fromSlot?: bigint; toSlot?: bigint; counts?: { blocksDeleted: number; headersDeleted: number; deltasDeleted: number } }> {
+	async handleRollBack(point: RollbackPoint, candidate?: ChainCandidate): Promise<{ rolledBack: boolean; fromSlot?: bigint; toSlot?: bigint; counts?: { blocksDeleted: number; headersDeleted: number; deltasDeleted: number } }> {
 		try {
 			const currentTip = await this.getCurrentTip();
-			logger.rollback(`handleRollBack: current tip slot=${currentTip.slotNumber.toString()} (~${currentTip.blockNumber} blocks), point slot=${point.blockHeader!.slotNumber.toString()}, candidate slot=${candidate.slotNumber.toString()} block#${candidate.blockNumber}`);
+			const pointSlot = point.blockHeader!.slotNumber;
+			logger.rollback(`handleRollBack: current tip slot=${currentTip.slotNumber.toString()} (~${currentTip.blockNumber} blocks), point slot=${pointSlot.toString()}${candidate ? `, candidate slot=${candidate.slotNumber.toString()} block#${candidate.blockNumber}` : ''}`);
 			
-			const evalResult = await evaluateChains([candidate], 'praos', 2160);
-			const comparison = evalResult.comparison;
-			logger.rollback(`Praos eval: preferred='${comparison.preferred}', intersectionBlock=${comparison.intersectionBlock}, rollbackDistance=${comparison.rollbackDistance}`);
-			
-			if (comparison.preferred === 'candidate') {
-				const rollbackSlot = point.blockHeader!.slotNumber;
-				const counts = await this.db.rollbackChainTo(rollbackSlot);
-				logger.rollback(`Praos-approved rollback to slot ${rollbackSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`);
-				return { rolledBack: true, fromSlot: currentTip.slotNumber, toSlot: rollbackSlot, counts };
+			if (candidate) {
+				const evalResult = await evaluateChains([candidate], 'praos', 2160);
+				const comparison = evalResult.comparison;
+				logger.rollback(`Praos eval: preferred='${comparison.preferred}', intersectionBlock=${comparison.intersectionBlock}, rollbackDistance=${comparison.rollbackDistance}`);
+				
+				if (comparison.preferred === 'candidate') {
+					const rollbackSlot = point.blockHeader!.slotNumber;
+					const counts = await this.db.rollbackChainTo(rollbackSlot);
+					logger.rollback(`Praos-approved rollback to slot ${rollbackSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`);
+					return { rolledBack: true, fromSlot: currentTip.slotNumber, toSlot: rollbackSlot, counts };
+				} else {
+					logger.rollback(`Rollback rejected by Praos: current preferred over candidate at slot ${candidate.slotNumber}`);
+					return { rolledBack: false };
+				}
 			} else {
-				logger.rollback(`Rollback rejected by Praos: current preferred over candidate at slot ${candidate.slotNumber}`);
-				return { rolledBack: false };
+				const counts = await this.db.rollbackChainTo(pointSlot);
+				logger.rollback(`Unconditional tip rollback to slot ${pointSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`);
+				return { rolledBack: true, fromSlot: currentTip.slotNumber, toSlot: pointSlot, counts };
 			}
 		} catch (error) {
 			logger.error('Error in handleRollBack:', error);

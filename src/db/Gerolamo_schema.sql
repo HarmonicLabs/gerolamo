@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS likelihoods (
 CREATE TABLE IF NOT EXISTS utxo (
     utxo_ref BLOB,
     tx_out JSONB,
+    tx_hash TEXT,
     PRIMARY KEY (utxo_ref)
 );
 
@@ -226,6 +227,9 @@ CREATE INDEX IF NOT EXISTS idx_volatile_prev_hash ON blocks (prev_hash);
 CREATE INDEX IF NOT EXISTS idx_immutable_slot ON immutable_blocks (slot);
 CREATE INDEX IF NOT EXISTS idx_immutable_hash ON immutable_blocks (block_hash);
 CREATE INDEX IF NOT EXISTS idx_immutable_chunk ON immutable_blocks (chunk_id);
+
+-- Index for utxo table
+CREATE INDEX IF NOT EXISTS idx_utxo_tx_hash ON utxo(tx_hash);
 
 -- Trigger GC (delete invalid old blocks; customize k=2160)
 CREATE TRIGGER IF NOT EXISTS gc_volatile AFTER INSERT ON blocks

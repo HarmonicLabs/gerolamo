@@ -70,8 +70,8 @@ export async function populateUTxOs(
     }
 
     const stmt = db.prepare(`
-        INSERT OR IGNORE INTO utxo (utxo_ref, tx_out)
-        VALUES (?, ?)
+        INSERT OR IGNORE INTO utxo (utxo_ref, tx_out, tx_hash)
+        VALUES (?, ?, ?)
     `);
     for (const utxo of utxos) {
         const utxoRef = `${utxo.tx_hash}:${utxo.output_index}`;
@@ -79,6 +79,6 @@ export async function populateUTxOs(
             address: utxo.address,
             amount: utxo.amount.find((a) => a.unit === "lovelace")?.quantity || "0",
         });
-        stmt.run(utxoRef, txOut);
+        stmt.run(utxoRef, txOut, utxo.tx_hash);
     }
 }

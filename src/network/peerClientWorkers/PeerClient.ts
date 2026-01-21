@@ -258,10 +258,10 @@ export class PeerClient implements IPeerClient {
         });
 
         this.chainSyncClient.on( "rollBackwards", async (rollBack: ChainSyncRollBackwards) => {
-                // if (!rollBack.point.blockHeader) return;
+                if (!rollBack.point.blockHeader) return;
                 const tip = rollBack.tip.point;
                 logger.debug(
-                    `Rolled back tip for peer ${this.peerId}`,
+                    `rollBack tip for peer ${this.peerId}`,
                     tip.blockHeader?.slotNumber,
                 );
                 if (parentPort) {

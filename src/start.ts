@@ -3,7 +3,6 @@ import { Database } from 'bun:sqlite';
 import { startPeerManager } from "./network/peerManagerWorkers/startPeerManager";
 import { DB } from "./db/DB";
 import type { GerolamoConfig } from "./network/peerManagerWorkers/peerManagerWorker";
-import { logger } from "./utils/logger";
 import { getBasePath } from './utils/paths.js';
 import { calculatePreProdCardanoEpoch } from "./utils/epochFromSlotCalculations";
 import type { Worker } from "worker_threads";
@@ -13,10 +12,10 @@ export const getConfigPath = (network: string): string => path.join(getBasePath(
 let configPath = "";
 
 const network = process.env.NETWORK ?? "preprod";
-logger.info(`Gerolamo Network Node starting on ${network} network...`);
+console.log(`Gerolamo Network Node starting on ${network} network...`);
 
-configPath = process.env.GEROLAMO_CONFIG?? getConfigPath(network);
-logger.info(`Loading config from ${configPath}`);
+configPath = process.env.GEROLAMO_CONFIG ?? getConfigPath(network);
+console.log(`Loading config from ${configPath}`);
 
 async function loadConfig(filePath: string): Promise<GerolamoConfig> {
     const configFile = Bun.file(filePath);
@@ -28,18 +27,17 @@ async function loadConfig(filePath: string): Promise<GerolamoConfig> {
 }
 
 const config = await loadConfig(configPath);
+const { logger } = await import("./utils/logger");
+logger.setLogConfig(config.logs);
 logger.info("Configuration loaded successfully.");
 if (config.tuiEnabled) {	
 	logger.info("TUI keyboard handler enabled (press 'q' to quit).");
 }
 logger.info(`Database path: ${config.dbPath}`);
-logger.setLogConfig(config.logs);
 if (config.tuiEnabled) {
 	logger.setLogConfig({ logToConsole: false });
 	logger.info("TUI enabled - console logging disabled to prevent interference.");
 }
-
-//logger.info("Logger configured with log level and outputs.");
 
 const db = new DB(config.dbPath);
 logger.info("Initializing database...");
@@ -62,25 +60,25 @@ await peerBlockServerMod.startPeerBlockServer(config, managerWorker);
 logger.info("Peer block server started. Node is now running.");
 
 async function runSnapShotPopulation() {
-    logger.info(`Snapshot population enabled (source: ${config.snapshot.source})`);
+    console.log(`Snapshot population enabled (source: ${config.snapshot.source})`);
     const maxSlot = await db.getMaxSlot();
-    logger.info(`Current DB max slot: ${maxSlot}`);
+    console.log(`Current DB max slot: ${maxSlot}`);
     const syncPointSlot = BigInt(config.syncFromPointSlot);
-    logger.info(`Sync point slot: ${syncPointSlot}`);
+    console.log(`Sync point slot: ${syncPointSlot}`);
     if (maxSlot >= syncPointSlot) {
-        logger.info("Database already contains data up to or beyond the sync point slot. Skipping snapshot population.");
+        console.log("Database already contains data up to or beyond the sync point slot. Skipping snapshot population.");
         return;
     };
     const targetEpoch = calculatePreProdCardanoEpoch(config.syncFromPointSlot);
     const fromEpoch = (config.snapshot as any).fromEpoch || 1;
-    logger.info(`Populating snapshots from epoch ${fromEpoch} to ${targetEpoch}`);
+    console.log(`Populating snapshots from epoch ${fromEpoch} to ${targetEpoch}`);
     for (let epoch = fromEpoch; epoch <= targetEpoch; epoch++) {
         await import("./state/blockfrost/populateEpochState").then(m => m.populateEpochState(
             db.db, epoch, { 
             customBackend: config.blockfrostUrl!, projectId: undefined 
         }));
     }
-    logger.info(`NES snapshot population complete up to epoch ${targetEpoch}`);    
+    console.log(`NES snapshot population complete up to epoch ${targetEpoch}`);    
     return;
 
 };

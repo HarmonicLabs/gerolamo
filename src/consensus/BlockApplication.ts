@@ -14,7 +14,7 @@ export async function applyBlock(
         logger.debug("applyBlock: no transactions to apply");
         return;
     }
-    logger.info("applyBlock:", block);
+    // logger.info("applyBlock:", block);
     // Apply all transactions concurrently
     await Promise.all(
         block.transactionBodies.map((txBody) =>

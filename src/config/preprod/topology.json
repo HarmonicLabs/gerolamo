@@ -17,10 +17,6 @@
         {
             "address": "preprod-node.play.dev.cardano.org",
             "port": 3001
-        },
-        {
-            "address": "localhost",
-            "port": 6423
         }
     ],
     "publicRoots": [

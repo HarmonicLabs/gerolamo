@@ -117,7 +117,7 @@ function setupPeerClientListener() {
 			};
 			if (msg.type === "rollBack")
 			{
-				logger.debug(`Roll back: ${msg.peerId}, point ${msg.point.blockHeader?.slotNumber}`);
+				logger.rollback(`Roll back: ${msg.peerId}, point ${msg.point.blockHeader?.slotNumber}`);
 			};
 
 			if (msg.type === "peerFailed")

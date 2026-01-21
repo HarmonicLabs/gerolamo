@@ -41,7 +41,7 @@ export interface LoggerConfig {
 
 const defaultLoggerConfig: LoggerConfig = {
     logLevel: LogLevel.INFO,
-    logDirectory: "./src/logs/preprod/",
+    logDirectory: undefined,
     logToFile: true,
     logToConsole: true,
     bufferedLevels: ["debug", "info"],
@@ -77,7 +77,8 @@ export class Logger {
     }
 
     private updatePaths() {
-        const dir = this.config.logDirectory || "./src/logs/preprod/";
+        const network = process.env.NETWORK ?? 'preprod';
+        const dir = this.config.logDirectory || `./src/store/logs/${network}/`;
         fs.mkdirSync(dir, { recursive: true });
         const levels = ['debug', 'info', 'warn', 'error', 'mempool', 'rollback'];
         for (const level of levels) {
@@ -145,7 +146,9 @@ export class Logger {
     private async flushQueue(level: string): Promise<void> {
         const queue = this.getQueue(level);
         if (queue.length === 0) return;
-        const logFilePath = path.join(this.config.logDirectory || "./src/logs/preprod/", `${level.toLowerCase()}.jsonl`);
+        const network = process.env.NETWORK ?? 'preprod';
+        const logDir = this.config.logDirectory || `./src/store/logs/${network}/`;
+        const logFilePath = path.join(logDir, `${level.toLowerCase()}.jsonl`);
         try {
             await fsPromises.appendFile(logFilePath, queue.join(''));
             queue.length = 0;
@@ -188,7 +191,9 @@ export class Logger {
 }
 
     private appendLog(level: string, stuff: any[]) {
-        const logFilePath = path.join(this.config.logDirectory || "./src/logs/preprod/", `${level.toLowerCase()}.jsonl`);
+        const network = process.env.NETWORK ?? 'preprod';
+        const logDir = this.config.logDirectory || `./src/store/logs/${network}/`;
+        const logFilePath = path.join(logDir, `${level.toLowerCase()}.jsonl`);
         const entry = {
             timestamp: new Date().toISOString(),
             level,
@@ -339,7 +344,9 @@ export class Logger {
 	}
 
     public getLogPath(level: LogLevelString): string {
-        return path.join(this.config.logDirectory || "./logs", `${level.toLowerCase()}.jsonl`);
+        const network = process.env.NETWORK ?? 'preprod';
+        const logDir = this.config.logDirectory || `./src/store/logs/${network}/`;
+        return path.join(logDir, `${level.toLowerCase()}.jsonl`);
     }
 }
 

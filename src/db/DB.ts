@@ -2,7 +2,7 @@ import { Database } from 'bun:sqlite';
 import fs from 'fs';
 import { logger } from '../utils/logger';
 import { getBasePath } from '../utils/paths';
-import { blake2b_256 } from "@harmoniclabs/crypto";
+import { ShelleyBlock, AllegraTxBody, MaryTxBody, AlonzoTxBody, BabbageTxBody, ConwayTxBody } from '@harmoniclabs/cardano-ledger-ts';
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
 interface HeaderInsertData {
@@ -27,6 +27,8 @@ interface ImmutableChunk {
 	slot_range_start: bigint;
 	slot_range_end: bigint;
 };
+
+type TxBody = AllegraTxBody | MaryTxBody | AlonzoTxBody | BabbageTxBody | ConwayTxBody;
 
 export class DB {
 	private _db: Database | undefined;
@@ -54,6 +56,7 @@ export class DB {
 			logger.error("Failed to initialize database schema:", err);
 			throw err;
 		}
+
 		logger.info("DB initialized with WAL mode for concurrency");
 	};
 
@@ -389,6 +392,11 @@ export class DB {
 		return stmt.get(utxoRef) as { utxo_ref: string; tx_out: string } | null;
 	}
 
+	async getUtxosByTxHash(txHash: string): Promise<Array<{ utxo_ref: string; tx_out: string }>> {
+		const stmt = this.db.prepare(`SELECT utxo_ref, tx_out FROM utxo WHERE tx_hash = ? ORDER BY CAST(substr(utxo_ref, 66) AS INTEGER)`);
+		return stmt.all(txHash) as Array<{ utxo_ref: string; tx_out: string }>;
+	}
+
 	async getAllStake(): Promise<Array<{ stake_credentials: Uint8Array; amount: number }>> {
 		logger.debug("Querying all stake");
 		const stmt = this.db.prepare(`SELECT stake_credentials, amount FROM stake`);
@@ -402,12 +410,11 @@ export class DB {
 	}
 
 	async applyTransaction(
-		txBody: any,
+		txBody: TxBody,
 		blockHash: Uint8Array,
 	): Promise<void> {
-		txBody.toCborBytes()
-		const txId = toHex(txBody.toCborBytes());
-
+		const txId = txBody.hash.toString();  // Canonical blake2b_256(txBody CBOR) hex from ledger-ts
+		logger.info("Applying transaction:", txId);
 		if (!txBody.inputs || !Array.isArray(txBody.inputs)) 
 		{
 			logger.warn(`Skipping tx ${txId} due to invalid inputs:`, txBody.inputs);
@@ -443,9 +450,10 @@ export class DB {
 			return;
 		};
 
-		const outputData: [string, string][] = txBody.outputs.map((output: any, i: number) => {
+		// Force tuple typing in map return
+		const outputData: [string, string, string][] = txBody.outputs.map((output: any, i: number) => {
 			const utxoRef = `${txId}:${i}`;
-
+			logger.debug(`Preparing output UTxO ${utxoRef}`);
 			const assetsObj: Record<string, Record<string, string>> = {};
 			const multiAssets = Array.isArray(output.value?.map) ? output.value.map : [];
 			multiAssets.forEach((ma: any) => {
@@ -462,7 +470,7 @@ export class DB {
 				amount: output.value?.lovelaces?.toString() || "0",
 				assets: assetsObj,
 			});
-			return [utxoRef, txOutJson];
+			return [utxoRef, txOutJson, txId] as [string, string, string];
 		});
 
 		const createStmt = this.db.prepare(
@@ -473,10 +481,10 @@ export class DB {
 		}
 
 		const utxoStmt = this.db.prepare(
-			'INSERT OR REPLACE INTO utxo (utxo_ref, tx_out) VALUES (?, ?)'
+			'INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (?, ?, ?)'
 		);
-		for (const [ref, json] of outputData) {
-			utxoStmt.run(ref, json);
+		for (const [ref, json, txhash] of outputData) {
+			utxoStmt.run(ref, json, txhash);
 		}
 
 		if (txBody.certs && Array.isArray(txBody.certs)) {

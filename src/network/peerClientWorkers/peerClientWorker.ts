@@ -95,7 +95,7 @@ parentPort!.on("message", async (msg: any) => {
 
 	if (msg.type === "rollBack") 
 	{
-		logger.debug(`RollBack received from peer ${msg.peerId}, point slot ${msg.point.blockHeader?.slotNumber}`);
+		logger.rollback(`RollBack received from peer ${msg.peerId}, point slot ${msg.point.blockHeader?.slotNumber}`);
 		await orchestrator.handleRollBack(msg.point);
 	};
 

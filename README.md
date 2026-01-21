@@ -24,7 +24,7 @@ Gerolamo is a lightweight, modular **Cardano node/relay** implementation in **Ty
 
 **No consensus validation** (yet)—focuses on networking/storage. Inspired by Cardano node specs.
 
-## 🚀 Quick Start (Noob-Friendly)
+## 🚀 Quick Start
 
 ### Prerequisites
 - **Bun** v1.0+ (fast JS/TS runtime): [bun.sh](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`).

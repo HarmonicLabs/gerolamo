@@ -5,151 +5,96 @@ import {
     PeerAddressIPv4,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
-import { PeerClient } from "./PeerClient";
+import {
+    PeerClient,
+    HeaderValidatedCallback,
+    BlockFetchedCallback,
+    RollbackCallback,
+} from "./PeerClient";
 import { logger } from "../utils/logger";
-import { parseTopology } from "./topology/parseTopology";
-import { Topology, TopologyRoot } from "./topology/topology";
+import {
+    adaptLegacyTopology,
+    isLegacyTopology,
+    isTopology,
+    Topology,
+    TopologyRoot,
+} from "./topology";
 import { uint32ToIpv4 } from "./utils/uint32ToIpv4";
-import { closeDB } from "./lmdbWorkers/lmdb";
-import { ShelleyGenesisConfig } from "../config/ShelleyGenesisTypes";
-import { RawNewEpochState } from "../rawNES";
+import topologyJson from "../config/topology.json" with { type: "json" };
+
+import { ChainManager } from "./ChainManager";
+import { ChainCandidate, ChainSelectionMode } from "../consensus/chainSelection";
+import { putHeader } from "./sql";
+import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
 
 //This class is not being used anymore in flavor of workers however
 //still need to move the interfaces from here.
 
-export interface GerolamoConfig {
-    readonly network: NetworkT;
-    readonly networkMagic: number;
-    readonly topologyFile: string;
-    readonly syncFromTip: boolean;
-    readonly syncFromGenesis: boolean;
-    readonly genesisBlockHash: string;
-    readonly syncFromPoint: boolean;
-    readonly syncFromPointSlot: bigint;
-    readonly syncFromPointBlockHash: string;
-    readonly logLevel: string;
-    readonly shelleyGenesisFile: string;
-    readonly enableMinibf?: boolean;
-    allPeers: Map<string, PeerClient>;
-}
-
-export interface IPeerManager {
+export class PeerManager {
     allPeers: Map<string, PeerClient>;
     hotPeers: PeerClient[];
     warmPeers: PeerClient[];
     coldPeers: PeerClient[];
     newPeers: PeerClient[];
     bootstrapPeers: PeerClient[];
-    config: GerolamoConfig;
+    networkMagic: number;
     topology: Topology;
-    shelleyGenesisConfig: ShelleyGenesisConfig;
-}
+    chainManager: ChainManager;
 
-export class PeerManager implements IPeerManager {
-    allPeers = new Map<string, PeerClient>();
-    hotPeers: PeerClient[] = [];
-    warmPeers: PeerClient[] = [];
-    coldPeers: PeerClient[] = [];
-    newPeers: PeerClient[] = [];
-    bootstrapPeers: PeerClient[] = [];
-    config: GerolamoConfig;
-    topology: Topology;
-    shelleyGenesisConfig: ShelleyGenesisConfig;
-    lState: RawNewEpochState;
-
-    constructor() {}
-
-    async init(config: GerolamoConfig) {
-        this.config = config;
-        // logger.debug("Reading config file: ", this.config);
-        this.topology = await parseTopology(this.config.topologyFile);
-        // logger.debug("Parsed topology:", this.topology);
-        const shelleyGenesisFile = Bun.file(this.config.shelleyGenesisFile);
-        this.shelleyGenesisConfig = await shelleyGenesisFile.json();
-        this.lState = RawNewEpochState.init();
-
-        // Assign bootstrap peers
-        if (this.topology.bootstrapPeers) {
-            await Promise.all(
-                this.topology.bootstrapPeers.map(async (ap: any) => {
-                    const peer = new PeerClient(
-                        ap.address,
-                        ap.port,
-                        this.config,
-                    );
-                    await peer.handShakePeer();
-                    peer.startKeepAlive();
-                    this.addPeer(peer, "bootstrap");
-                    this.addPeer(peer, "hot");
-                }),
-            );
-        }
-
-        // Assign local roots as hot peers
-        if (this.topology.localRoots) {
-            await Promise.all(
-                this.topology.localRoots.flatMap((root: TopologyRoot) =>
-                    root.accessPoints.map(async (ap: any) => {
-                        const peer = new PeerClient(
-                            ap.address,
-                            ap.port,
-                            this.config,
-                        );
-                        await peer.handShakePeer();
-                        peer.startKeepAlive();
-                        this.addPeer(peer, "hot");
-                    })
-                ),
-            );
-        }
-
-        // Assign public roots as warm peers (commented out in original)
-        // if (this.topology.publicRoots)
-        // {
-        //     this.topology.publicRoots.flatMap((root: TopologyRoot) =>
-        //         root.accessPoints.map((ap: any) => {
-        //             // const peer = new PeerClient(ap.address, ap.port);
-        //             // this.addPeer(peer, "warm");
-        //
-        //         })
-        //     );
-        // }
-
-        await this.peerSyncCurrentTasks();
+    constructor() {
+        this.allPeers = new Map<string, PeerClient>();
+        this.hotPeers = [];
+        this.warmPeers = [];
+        this.coldPeers = [];
+        this.newPeers = [];
+        this.bootstrapPeers = [];
+        this.networkMagic = 0;
+        this.topology = {} as Topology; // Will be set in initPeerManager
+        this.chainManager = new ChainManager();
     }
 
-    public getAllPeers(): ReadonlyArray<PeerClient> {
+    /**
+     * Initializes the peer manager with network configuration
+     */
+    async init(networkMagic: number): Promise<void> {
+        this.networkMagic = networkMagic;
+
+        // Validate the imported topology JSON
+        let topology = topologyJson as any;
+
+        // Handle legacy topology format if needed
+        topology = isLegacyTopology(topology)
+            ? adaptLegacyTopology(topology)
+            : topology;
+
+        // Validate the topology structure
+        if (!isTopology(topology)) {
+            throw new Error("Invalid topology configuration");
+        }
+
+        this.topology = topology;
+        // logger.debug("Validated topology:", this.topology);
+    }
+
+
+
+    /**
+     * Gets all peer clients as a readonly array
+     */
+    getAllPeers(): ReadonlyArray<PeerClient> {
         return Array.from(this.allPeers.values());
     }
 
-    private addPeer(
-        peer: PeerClient,
-        category: "hot" | "warm" | "cold" | "bootstrap" | "new",
-    ) {
-        this.allPeers.set(peer.peerId, peer);
-        switch (category) {
-            case "hot":
-                this.hotPeers.push(peer);
-                break;
-            case "warm":
-                this.warmPeers.push(peer);
-                break;
-            case "cold":
-                this.coldPeers.push(peer);
-                break;
-            case "bootstrap":
-                this.bootstrapPeers.push(peer);
-                break;
-            case "new":
-                this.newPeers.push(peer);
-                break;
-        }
-    }
-
-    private removePeer(peerId: string) {
-        const peer = this.allPeers.get(peerId);
-        if (peer) {
+    /**
+     * Removes a peer from the manager and terminates its connection
+     */
+    removePeer(peerId: string): void {
+        const peerClient = this.allPeers.get(peerId);
+        if (peerClient) {
+            // Terminate the peer connection
+            peerClient.terminate();
             this.allPeers.delete(peerId);
+            // Remove from all categories
             this.hotPeers = this.hotPeers.filter((p) => p.peerId !== peerId);
             this.warmPeers = this.warmPeers.filter((p) => p.peerId !== peerId);
             this.coldPeers = this.coldPeers.filter((p) => p.peerId !== peerId);
@@ -157,73 +102,161 @@ export class PeerManager implements IPeerManager {
                 p.peerId !== peerId
             );
             this.newPeers = this.newPeers.filter((p) => p.peerId !== peerId);
-            peer.terminate();
         }
     }
 
-    private async peerSyncCurrentTasks() {
+    /**
+     * Starts chain sync tasks for all hot peers
+     */
+    async startPeerSync(): Promise<void> {
         // logger.debug("Starting peer sync tasks...");
         // logger.log("this allpeers", this.allPeers);
-        await Promise.all(this.hotPeers.map(async (peer) => {
+        await Promise.all(this.hotPeers.map(async (peerClient) => {
             try {
                 logger.log(
-                    `Connecting to hot peer ${peer.peerId} at ${peer.host}:${peer.port} for current sync`,
+                    `Connecting to hot peer ${peerClient.peerId} at ${peerClient.host}:${peerClient.port} for current sync`,
                 );
-                peer.startSyncLoop();
+                await peerClient.startSync();
                 // const peersAddresses = await peer.askForPeers();
                 // console.log("peersAddresses: ", peersAddresses);
                 // this.addNewSharedPeers(peersAddresses);
             } catch (error) {
                 logger.error(
-                    `Failed to initialize hot peer ${peer.peerId}:`,
+                    `Failed to initialize hot peer ${peerClient.peerId}:`,
                     error,
                 );
-                this.removePeer(peer.peerId);
+                this.removePeer(peerClient.peerId);
             }
         }));
     }
 
-    private addNewSharedPeers(peersAddresses: PeerAddress[]) {
-        logger.log("Adding new shared peers from network...");
-        peersAddresses.forEach((address) => {
-            if (address instanceof PeerAddressIPv4) {
-                const newPeer = new PeerClient(
-                    uint32ToIpv4(address.address),
-                    address.portNumber,
-                    this.config,
-                );
-                this.addPeer(newPeer, "new");
-                logger.log(
-                    `Added new peer ${newPeer.peerId} from network at ${
-                        uint32ToIpv4(address.address)
-                    }:${address.portNumber}`,
-                );
-            }
-        });
-    }
-    s;
-
-    async shutdown() {
-        logger.debug("Shutting down PeerManager");
-        for (const peer of this.allPeers.values()) {
-            peer.terminate();
-        };
+    /**
+     * Adds a new peer to the manager
+     */
+    async addPeer(
+        host: string,
+        port: number | bigint,
+        category: string,
+    ): Promise<string> {
         try {
-            await closeDB();
-            logger.debug("LMDB worker closed");
-        } catch (error) {
-            logger.error(`Error closing LMDB worker: ${error}`);
-        };
-    };
-};
+            // Create peer client
+            const peerClient = new PeerClient(host, port, this.networkMagic, {
+                onHeaderValidated: (data) => {
+                    // Store header data
+                    putHeader(data.slot, data.header).catch((error) => {
+                        logger.error(
+                            `Failed to store header for peer ${data.peerId}`,
+                            error,
+                        );
+                    });
 
-// Initialize the peer manager
-/*
-export async function start(config: Bun.BunFile) {
-    const peerManager = new PeerManager();
-    peerManager.init(config).catch((error) => {
-        logger.error("Error initializing PeerManager:", error);
-    });
+                    // Calculate block number from header
+                    // This is simplified - real implementation would track block numbers properly
+                    const blockNumber = Number(data.header.header.body.blockNumber) || 1;
+
+                    // Add chain candidate for chain selection
+                    this.chainManager.addChainCandidate(
+                        data.peerId,
+                        data.header,
+                        blockNumber, // Block count from genesis
+                        blockNumber, // Current block number
+                    ).catch((error) => {
+                        logger.error(
+                            `Failed to add chain candidate for peer ${data.peerId}`,
+                            error,
+                        );
+                    });
+
+                    logger.debug(
+                        `Header validated: ${data.peerId}, slot ${data.slot}, block ${blockNumber}`,
+                    );
+                },
+                onBlockFetched: (data) => {
+                    logger.debug(
+                        `Block fetched: ${data.peerId}, slot ${data.slot}`,
+                    );
+                },
+                onRollback: (data) => {
+                    logger.debug(
+                        `Roll back: ${data.peerId}, point ${data.point.blockHeader?.slotNumber}`,
+                    );
+                },
+            });
+
+            // Initialize network components
+            peerClient.initNetwork();
+
+            // Perform handshake
+            await peerClient.handshake();
+
+            // Start keep-alive
+            peerClient.startKeepAlive();
+
+            // Add to appropriate category
+            this.allPeers.set(peerClient.peerId, peerClient);
+            switch (category) {
+                case "hot":
+                    this.hotPeers.push(peerClient);
+                    break;
+                case "warm":
+                    this.warmPeers.push(peerClient);
+                    break;
+                case "cold":
+                    this.coldPeers.push(peerClient);
+                    break;
+                case "bootstrap":
+                    this.bootstrapPeers.push(peerClient);
+                    break;
+                case "new":
+                    this.newPeers.push(peerClient);
+                    break;
+            }
+            logger.debug(`Added peer ${peerClient.peerId} to ${category}`);
+            return peerClient.peerId;
+        } catch (error) {
+            logger.error(`Failed to add peer ${host}:${port}`, error);
+            throw error;
+        }
+    }
+
+    /**
+     * Evaluate chain candidates and switch to the best chain if needed
+     */
+    async evaluateAndSwitchChain(
+        mode: ChainSelectionMode = 'praos',
+        securityParamK: number = 2160,
+    ): Promise<void> {
+        try {
+            const shouldSwitch = await this.chainManager.shouldSwitchChain(mode, securityParamK);
+            if (shouldSwitch) {
+                logger.info("Switching to better chain...");
+                await this.chainManager.applyBestChain(mode, securityParamK);
+                logger.info("Successfully switched to best chain");
+            } else {
+                logger.debug("Current chain is still the best");
+            }
+        } catch (error) {
+            logger.error("Failed to evaluate and switch chain:", error);
+        }
+    }
+
+    /**
+     * Start periodic chain evaluation
+     */
+    startChainEvaluation(interval: number = 30000): void {
+        setInterval(async () => {
+            await this.evaluateAndSwitchChain();
+        }, interval);
+        logger.info(`Started chain evaluation every ${interval}ms`);
+    }
+
+    /**
+     * Shuts down the peer manager and terminates all peer connections
+     */
+    async shutdown(): Promise<void> {
+        logger.debug("Shutting down PeerManager");
+        for (const peerClient of this.allPeers.values()) {
+            peerClient.terminate();
+        }
+    }
 }
-start().catch((error) => console.error("Failed to start:", error));
-*/

@@ -1,14 +1,58 @@
-import { Worker } from "worker_threads";
-import { GerolamoConfig } from "./PeerManager";
+import { PeerManager } from "./PeerManager";
+import { logger } from "../utils/logger";
 
-export async function startPeerManager(config: GerolamoConfig) {
-	const worker = new Worker("./src/network/peerManagerWorker.ts", { workerData: config });
-	worker.postMessage({ type: "init" });
-	return new Promise((resolve) => {
-		worker.on("message", (msg) => {
-			if (msg.type === "started") {
-				resolve(worker);
-			}
-		});
-	});
-};
+export async function startPeerManager(
+    networkMagic: number,
+): Promise<PeerManager> {
+    const peerManager = new PeerManager();
+    await peerManager.init(networkMagic);
+
+    // Get topology from peerManager (already loaded and validated)
+    const topology = peerManager.topology;
+
+    // Add bootstrap peers concurrently
+    if (topology.bootstrapPeers) {
+        const bootstrapPromises = topology.bootstrapPeers.flatMap((ap) => [
+            peerManager.addPeer(ap.address, ap.port, "bootstrap")
+                .catch((error) => {
+                    logger.error(
+                        `Failed to add bootstrap peer ${ap.address}:${ap.port}`,
+                        error,
+                    );
+                }),
+            peerManager.addPeer(ap.address, ap.port, "hot")
+                .catch((error) => {
+                    logger.error(
+                        `Failed to add hot peer ${ap.address}:${ap.port}`,
+                        error,
+                    );
+                }),
+        ]);
+        await Promise.all(bootstrapPromises);
+    }
+
+    // Add local root peers concurrently
+    if (topology.localRoots) {
+        const localRootPromises = topology.localRoots.flatMap((root) =>
+            root.accessPoints.map((ap) =>
+                peerManager.addPeer(ap.address, ap.port, "hot")
+                    .catch((error) => {
+                        logger.error(
+                            `Failed to add local root peer ${ap.address}:${ap.port}`,
+                            error,
+                        );
+                    })
+            )
+        );
+        await Promise.all(localRootPromises);
+    }
+
+    // Start sync for hot peers
+    await peerManager.startPeerSync();
+
+    // Start periodic chain evaluation
+    peerManager.startChainEvaluation();
+
+    logger.debug("PeerManager started successfully");
+    return peerManager;
+}

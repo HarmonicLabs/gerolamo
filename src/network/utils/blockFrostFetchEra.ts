@@ -16,4 +16,4 @@ export async function blockFrostFetchEra(epoch: number): Promise<any> {
         );
     }
     return await response.json();
-};
+}

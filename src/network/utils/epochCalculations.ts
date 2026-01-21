@@ -28,5 +28,5 @@ export function calculatePreProdCardanoEpoch(
     } else {
         const shelleyRelativeSlot = slot - shelleyTransitionSlot;
         return byronEpochOffset + (shelleyRelativeSlot / shelleySlotsPerEpoch);
-    };
-};
+    }
+}

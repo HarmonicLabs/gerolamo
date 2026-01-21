@@ -1,7 +1,7 @@
 
 <p align="center">
     <p align="center">
-        <img width="200px" src="./assets/gerolamo-logo.svg" align="center"/>
+        <img width="200px" src="https://github.com/HarmonicLabs/gerolamo/blob/closeout-demo/assets/gerolamo-logo.svg" align="center"/>
         <h1 align="center">Gerolamo</h1>
     </p>
   <p align="center">Cardano typescript client implementation</p>

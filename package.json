@@ -1,5 +1,7 @@
 {
 		"name": "@harmoniclabs/gerolamo",
+		"version": "0.0.1-dev16",
+		"description": "A Cardano full node implementation in TypeScript",
 		"module": "index.ts",
 		"type": "module",
 		"private": true,

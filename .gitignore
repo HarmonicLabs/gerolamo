@@ -19,12 +19,17 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 store/
 tx
 snapshots/
+.vscode/
+.github/
+output/
+
 # dotenv environment variable files
 .env
 .env.development.local   
 .env.test.local
 .env.production.local
 .env.local
+
 
 # caches
 .eslintcache

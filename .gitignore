@@ -20,6 +20,8 @@ store/
 tx
 snapshots/
 output/
+.vscode/
+.github/
 
 # dotenv environment variable files
 .env

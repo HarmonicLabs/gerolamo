@@ -19,6 +19,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 store/
 tx
 snapshots/
+output/
+
 # dotenv environment variable files
 .env
 .env.development.local   

@@ -20,7 +20,7 @@ import { populateEpochState as populateEpochStateNES } from "./epoch_state";
 import { populatePulsingRewUpdate } from "./pulsing_rew_update";
 import { populateStashedAvvmAddresses } from "./stashed_avvm_addresses";
 import { populateNewEpochState } from "./new_epoch_state";
-import { GerolamoConfig } from "../../network/peerManagerWorkers/peerManagerWorker";
+import { GerolamoConfig } from "../../network/peerManager";
 
 export async function populateEpochState(
     db: Database,

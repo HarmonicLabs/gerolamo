@@ -1,18 +1,18 @@
 import { BlockFetchBlock, TxSubmitClient, BlockFetchClient, BlockFetchNoBlocks, ChainPoint, ChainSyncClient, ChainSyncIntersectFound, ChainSyncIntersectNotFound, ChainSyncRollBackwards, ChainSyncRollForward, HandshakeAcceptVersion, HandshakeClient, KeepAliveClient, KeepAliveResponse, Multiplexer, PeerSharingClient, PeerSharingResponse } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { connect } from "node:net";
-import { logger } from "../../utils/logger";
+import { logger } from "../utils/logger";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
-import type { GerolamoConfig } from "../peerManagerWorkers/peerManagerWorker";
-import type { ShelleyGenesisConfig } from "../../types/ShelleyGenesisTypes";
-import { parentPort } from "worker_threads";
+import type { GerolamoConfig } from "./peerManager";
+import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
+
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { DB } from "../../db/DB";
-import { getShelleyGenesisConfig } from "../../utils/paths";
+import { DB } from "../db/DB";
+import { getShelleyGenesisConfig } from "../utils/paths";
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import { GlobalSharedMempool } from "../SharedMempool";
+import { GlobalSharedMempool } from "./SharedMempool";
 import { SharedMempool } from "@harmoniclabs/shared-cardano-mempool-ts";
 import { TxBody, Tx } from "@harmoniclabs/cardano-ledger-ts";
-import { GerolamoTxSubmitServer } from "../TxSubmitServer";
+import { GerolamoTxSubmitServer } from "./TxSubmitServer";
 
 export interface IPeerClient {
     host: string;
@@ -31,6 +31,9 @@ export interface IPeerClient {
     sharedMempool: SharedMempool;
     txSubmitServer: GerolamoTxSubmitServer;
     onTerminate?: (peerId: string) => void;
+    onRollForward?: (peerId: string, rollForwardCborBytes: Uint8Array, tip: number | bigint) => void;
+    onRollBack?: (peerId: string, point: any) => void;
+    onNewPeers?: (peers: PeerAddress[]) => void;
 }
 
 export class PeerClient implements IPeerClient {
@@ -51,8 +54,11 @@ export class PeerClient implements IPeerClient {
     db: DB;
     readonly txSubmitClient!: TxSubmitClient;
     readonly txSubmitServer!: GerolamoTxSubmitServer;
+    onTerminate?: (peerId: string) => void;
+    onRollForward?: (peerId: string, rollForwardCborBytes: Uint8Array, tip: number | bigint) => void;
+    onRollBack?: (peerId: string, point: any) => void;
+    onNewPeers?: (peers: PeerAddress[]) => void;
     readonly sharedMempool: SharedMempool;
-    readonly onTerminate?: (peerId: string) => void;
 
     constructor(
         host: string,
@@ -248,12 +254,7 @@ export class PeerClient implements IPeerClient {
         this.chainSyncClient.on("rollForward", async (rollForward: ChainSyncRollForward) => {
             const tip = rollForward.tip.point.blockHeader?.slotNumber;
             const rollForwardCborBytes = rollForward.toCborBytes();
-            if (parentPort) parentPort.postMessage({
-                    type: "rollForward",
-                    peerId: this.peerId,
-                    rollForwardCborBytes: rollForwardCborBytes,
-                    tip: tip
-            });
+            this.onRollForward?.(this.peerId, rollForwardCborBytes, tip);
             await this.chainSyncClient.requestNext();    
         });
 
@@ -264,13 +265,7 @@ export class PeerClient implements IPeerClient {
                     `rollBack tip for peer ${this.peerId}`,
                     tip.blockHeader?.slotNumber,
                 );
-                if (parentPort) {
-                    parentPort.postMessage({
-                        type: "rollBack",
-                        peerId: this.peerId,
-                        point: rollBack.point,
-                    });
-                }
+                this.onRollBack?.(this.peerId, rollBack.point);
                 
                 await this.chainSyncClient.requestNext();
             },

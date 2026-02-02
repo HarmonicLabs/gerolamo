@@ -26,7 +26,7 @@ import { populatePulsingRewUpdate } from "./pulsing_rew_update";
 import { populateStashedAvvmAddresses } from "./stashed_avvm_addresses";
 import { populateNewEpochState } from "./new_epoch_state";
 import { fetchBlockData } from "./block_data";
-import { GerolamoConfig } from "../../network/peerManagerWorkers/peerManagerWorker";
+import { GerolamoConfig } from "../../network/peerManager";
 
 // Main import function for ledger state from Blockfrost
 export async function importFromBlockfrost(

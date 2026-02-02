@@ -1,6 +1,6 @@
 import path from 'path';
 import { fileURLToPath } from 'node:url';
-import type { GerolamoConfig } from '../network/peerManagerWorkers/peerManagerWorker';
+import type { GerolamoConfig } from '../network/peerManager';
 import { logger } from './logger';
 
 export const getBasePath = (): string => {

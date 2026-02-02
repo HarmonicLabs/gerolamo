@@ -1,6 +1,6 @@
 import { fetch } from "bun";
 import { logger } from "./logger";
-import { GerolamoConfig } from "../network/peerManagerWorkers/peerManagerWorker";
+import { GerolamoConfig } from "../network/peerManager";
 
 export async function blockFrostFetchEra(configOrBaseUrl: GerolamoConfig | string, epoch: number): Promise<string> {
     const baseUrl = typeof configOrBaseUrl === "string" 

@@ -2,10 +2,10 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 import { getBasePath } from '../../utils/paths';
 import { DB } from '../../db/DB';
 import { logger } from '../../utils/logger';
-import { Worker } from "worker_threads";
-import type { GerolamoConfig } from "../peerManagerWorkers/peerManagerWorker";
 
-export async function startPeerBlockServer(config: GerolamoConfig, managerWorker: Worker | null) {
+import type { GerolamoConfig } from "../peerManager";
+
+export async function startPeerBlockServer(config: GerolamoConfig, manager: any) {
     const BASE_PATH = getBasePath();
     const dbInstance = new DB(config.dbPath);
 
@@ -19,7 +19,7 @@ export async function startPeerBlockServer(config: GerolamoConfig, managerWorker
             const url = new URL(req.url);
             if (req.method === "POST" && url.pathname === "/txsubmit") 
             {
-                if (!managerWorker) 
+                if (!manager) 
                 {
                     return new Response("Peer manager not available", { status: 500 });
                 }
@@ -30,7 +30,7 @@ export async function startPeerBlockServer(config: GerolamoConfig, managerWorker
                         return new Response("Empty tx body", { status: 400 });
                     }
                     logger.info(`HTTP txsubmit: ${txCbor.length} bytes from ${req.headers.get("user-agent") || "unknown"}`);
-                    managerWorker.postMessage({ type: "submitTx", txCbor });
+                    manager.submitTx({ txCbor });
                     return new Response(JSON.stringify({ status: "relayed to hot peers" }), {
                         status: 202,
                         headers: { "Content-Type": "application/json" }

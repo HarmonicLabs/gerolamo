@@ -1,9 +1,17 @@
 import type { TxSubmitMessage } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { txSubmitMessageFromCborObj, TxSubmitRequestIds, TxSubmitRequestTxs, Multiplexer } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import {
+    Multiplexer,
+    txSubmitMessageFromCborObj,
+    TxSubmitRequestIds,
+    TxSubmitRequestTxs,
+} from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import type { CborObj } from "@harmoniclabs/cbor";
 import { Cbor } from "@harmoniclabs/cbor";
 import { MiniProtocol } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { TxSubmitReplyIds, TxSubmitReplyTxs } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import {
+    TxSubmitReplyIds,
+    TxSubmitReplyTxs,
+} from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "../utils/logger";
 import { GlobalSharedMempool } from "./SharedMempool";
 
@@ -14,7 +22,10 @@ export class GerolamoTxSubmitServer {
 
     constructor(mplexer: Multiplexer) {
         this.mplexer = mplexer;
-        this.mplexer.on(MiniProtocol.TxSubmission, (chunk) => this.handleChunk(chunk));
+        this.mplexer.on(
+            MiniProtocol.TxSubmission,
+            (chunk) => this.handleChunk(chunk),
+        );
     }
 
     private async handleChunk(chunk: Uint8Array) {
@@ -27,7 +38,7 @@ export class GerolamoTxSubmitServer {
         }
 
         let offset = -1;
-        let thing: { parsed: CborObj, offset: number };
+        let thing: { parsed: CborObj; offset: number };
 
         while (true) {
             try {
@@ -69,13 +80,18 @@ export class GerolamoTxSubmitServer {
         const ack = req.knownTxCount;
         const reqCount = req.requestedTxCount;
         const slice = all.slice(ack, ack + reqCount);
-        const sliceMapped = slice.map(hs => ({ txId: hs.hash as unknown as Uint8Array, txSize: hs.size }));
+        const sliceMapped = slice.map((hs) => ({
+            txId: hs.hash as unknown as Uint8Array,
+            txSize: hs.size,
+        }));
         const reply = new TxSubmitReplyIds({ response: sliceMapped });
         this.mplexer.send(reply.toCbor().toBuffer(), {
             hasAgency: false,
-            protocol: MiniProtocol.TxSubmission
+            protocol: MiniProtocol.TxSubmission,
         });
-        logger.mempool(`TxSubmitServer sent replyIds to peer: ack=${ack}, req=${reqCount}, sent=${slice.length}`);
+        logger.mempool(
+            `TxSubmitServer sent replyIds to peer: ack=${ack}, req=${reqCount}, sent=${slice.length}`,
+        );
     }
 
     private async handleRequestTxs(req: TxSubmitRequestTxs) {
@@ -88,8 +104,10 @@ export class GerolamoTxSubmitServer {
         const reply = new TxSubmitReplyTxs({ txs });
         this.mplexer.send(reply.toCbor().toBuffer(), {
             hasAgency: false,
-            protocol: MiniProtocol.TxSubmission
+            protocol: MiniProtocol.TxSubmission,
         });
-        logger.mempool(`TxSubmitServer sent replyTxs to peer: requested=${txHashes.length}, sent=${txs.length}`);
+        logger.mempool(
+            `TxSubmitServer sent replyTxs to peer: requested=${txHashes.length}, sent=${txs.length}`,
+        );
     }
 }

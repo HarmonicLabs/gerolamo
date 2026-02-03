@@ -8,7 +8,7 @@ export async function populatePoolDistribution(
 ) {
     db.run(
         `INSERT OR REPLACE INTO pool_distr (id, pools, total_active_stake) VALUES (?, ?, ?)`,
-        [1, JSON.stringify(pools), totalActiveStake]
+        [1, JSON.stringify(pools), totalActiveStake],
     );
 }
 

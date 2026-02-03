@@ -219,7 +219,9 @@ export async function getStableChain(): Promise<
 export async function garbageCollectVolatile(blocks: Hash32[]): Promise<void> {
     if (blocks.length === 0) return;
 
-    logger.debug("Garbage collecting volatile blocks", { count: blocks.length });
+    logger.debug("Garbage collecting volatile blocks", {
+        count: blocks.length,
+    });
 
     const hashes = blocks.map((h) => h.toBuffer());
     await sql`DELETE FROM blocks WHERE hash IN ${sql(hashes)}`;

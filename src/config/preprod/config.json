@@ -21,7 +21,7 @@
     "blockfrostUrl": "https://blockfrost-preprod.onchainapps.io/",
     "dbPath": "./src/store/db/preprod/Gerolamo.db",
     "tuiEnabled": true,
-    "logs":{
+    "logs": {
         "logToFile": true,
         "logToConsole": false,
         "logDirectory": "./src/store/logs/preprod/",

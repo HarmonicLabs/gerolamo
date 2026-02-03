@@ -77,7 +77,8 @@ export async function populateUTxOs(
         const utxoRef = `${utxo.tx_hash}:${utxo.output_index}`;
         const txOut = JSON.stringify({
             address: utxo.address,
-            amount: utxo.amount.find((a) => a.unit === "lovelace")?.quantity || "0",
+            amount: utxo.amount.find((a) => a.unit === "lovelace")?.quantity ||
+                "0",
         });
         stmt.run(utxoRef, txOut, utxo.tx_hash);
     }

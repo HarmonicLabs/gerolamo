@@ -57,14 +57,16 @@ export class Logger {
     private bufferedLevels: string[] = ["debug", "info"];
     private batchSize: number = 1000;
     private flushDelayMs: number = 500;
-    private recentLogs: Array<{timestamp: string; level: string; args: any[]}> = [];
+    private recentLogs: Array<
+        { timestamp: string; level: string; args: any[] }
+    > = [];
     private readonly MAX_RECENT_LOGS = 100;
 
     constructor(config?: Partial<LoggerConfig>) {
         let initConfig = { ...defaultLoggerConfig };
         if (config) {
             const processed = { ...config };
-            if (typeof processed.logLevel === 'string') {
+            if (typeof processed.logLevel === "string") {
                 processed.logLevel = logLevelFromString(processed.logLevel);
             }
             initConfig = { ...initConfig, ...processed };
@@ -77,22 +79,31 @@ export class Logger {
     }
 
     private updatePaths() {
-        const network = process.env.NETWORK ?? 'preprod';
+        const network = process.env.NETWORK ?? "preprod";
         const dir = this.config.logDirectory || `./src/store/logs/${network}/`;
         fs.mkdirSync(dir, { recursive: true });
-        const levels = ['debug', 'info', 'warn', 'error', 'mempool', 'rollback'];
+        const levels = [
+            "debug",
+            "info",
+            "warn",
+            "error",
+            "mempool",
+            "rollback",
+        ];
         for (const level of levels) {
             const logFilePath = path.join(dir, `${level}.jsonl`);
             if (!fs.existsSync(logFilePath)) {
-                fs.writeFileSync(logFilePath, '');
+                fs.writeFileSync(logFilePath, "");
             }
         }
     }
 
     public setLogConfig(config: Partial<LoggerConfig>) {
         const processedConfig = { ...config };
-        if (typeof processedConfig.logLevel === 'string') {
-            processedConfig.logLevel = logLevelFromString(processedConfig.logLevel);
+        if (typeof processedConfig.logLevel === "string") {
+            processedConfig.logLevel = logLevelFromString(
+                processedConfig.logLevel,
+            );
         }
         Object.assign(this.config, processedConfig);
         this.updatePaths();
@@ -146,11 +157,12 @@ export class Logger {
     private async flushQueue(level: string): Promise<void> {
         const queue = this.getQueue(level);
         if (queue.length === 0) return;
-        const network = process.env.NETWORK ?? 'preprod';
-        const logDir = this.config.logDirectory || `./src/store/logs/${network}/`;
+        const network = process.env.NETWORK ?? "preprod";
+        const logDir = this.config.logDirectory ||
+            `./src/store/logs/${network}/`;
         const logFilePath = path.join(logDir, `${level.toLowerCase()}.jsonl`);
         try {
-            await fsPromises.appendFile(logFilePath, queue.join(''));
+            await fsPromises.appendFile(logFilePath, queue.join(""));
             queue.length = 0;
         } catch (err) {
             console.error(`Log flush failed for ${level}:`, err);
@@ -163,36 +175,65 @@ export class Logger {
     }
 
     public async flushAll(): Promise<void> {
-        await Promise.all(Object.keys(this.queues).map((l) => this.flushQueue(l as string)));
+        await Promise.all(
+            Object.keys(this.queues).map((l) => this.flushQueue(l as string)),
+        );
     }
 
     private recordRecent(level: string, stuff: any[]) {
-        this.recentLogs.push({ timestamp: new Date().toISOString(), level, args: stuff });
-        if (this.recentLogs.length > this.MAX_RECENT_LOGS) this.recentLogs.shift();
+        this.recentLogs.push({
+            timestamp: new Date().toISOString(),
+            level,
+            args: stuff,
+        });
+        if (this.recentLogs.length > this.MAX_RECENT_LOGS) {
+            this.recentLogs.shift();
+        }
     }
 
-    public getRecentLogs(numLines: number = 20, minLevel: string = 'DEBUG'): Array<{ timestamp: string; level: string; message: string }> {
-	const priority: Record<string, number> = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3, MEMPOOL: 1, ROLLBACK: 1 };
-	const minPri = priority[minLevel] ?? 0;
-	const filteredRecent = this.recentLogs.filter(log => priority[log.level] ?? 0 >= minPri);
-	return filteredRecent.slice(-numLines).reverse().map(({ timestamp, level, args }) => ({
-		timestamp: new Date(timestamp).toLocaleTimeString('en-US', { hour12: false }),
-		level,
-		message: args.map((arg: any) => {
-			if (typeof arg === 'string') return arg;
-			try {
-				const jsonStr = JSON.stringify(arg, (k, v) => typeof v === 'bigint' ? v.toString() : v);
-				return jsonStr.slice(0, 120) + (jsonStr.length > 120 ? '...' : '');
-			} catch {
-				return String(arg).slice(0, 120) + '...';
-			}
-		}).join(' ')
-	}));
-}
+    public getRecentLogs(
+        numLines: number = 20,
+        minLevel: string = "DEBUG",
+    ): Array<{ timestamp: string; level: string; message: string }> {
+        const priority: Record<string, number> = {
+            DEBUG: 0,
+            INFO: 1,
+            WARN: 2,
+            ERROR: 3,
+            MEMPOOL: 1,
+            ROLLBACK: 1,
+        };
+        const minPri = priority[minLevel] ?? 0;
+        const filteredRecent = this.recentLogs.filter((log) =>
+            priority[log.level] ?? 0 >= minPri
+        );
+        return filteredRecent.slice(-numLines).reverse().map((
+            { timestamp, level, args },
+        ) => ({
+            timestamp: new Date(timestamp).toLocaleTimeString("en-US", {
+                hour12: false,
+            }),
+            level,
+            message: args.map((arg: any) => {
+                if (typeof arg === "string") return arg;
+                try {
+                    const jsonStr = JSON.stringify(
+                        arg,
+                        (k, v) => typeof v === "bigint" ? v.toString() : v,
+                    );
+                    return jsonStr.slice(0, 120) +
+                        (jsonStr.length > 120 ? "..." : "");
+                } catch {
+                    return String(arg).slice(0, 120) + "...";
+                }
+            }).join(" "),
+        }));
+    }
 
     private appendLog(level: string, stuff: any[]) {
-        const network = process.env.NETWORK ?? 'preprod';
-        const logDir = this.config.logDirectory || `./src/store/logs/${network}/`;
+        const network = process.env.NETWORK ?? "preprod";
+        const logDir = this.config.logDirectory ||
+            `./src/store/logs/${network}/`;
         const logFilePath = path.join(logDir, `${level.toLowerCase()}.jsonl`);
         const entry = {
             timestamp: new Date().toISOString(),
@@ -202,25 +243,30 @@ export class Logger {
                     return {
                         message: arg.message,
                         stack: arg.stack,
-                        name: arg.name
+                        name: arg.name,
                     };
                 }
                 if (typeof arg === "bigint") {
                     return arg.toString();
                 }
                 try {
-                    return JSON.parse(JSON.stringify(arg, (k, v) => typeof v === 'bigint' ? v.toString() : v));
+                    return JSON.parse(
+                        JSON.stringify(
+                            arg,
+                            (k, v) => typeof v === "bigint" ? v.toString() : v,
+                        ),
+                    );
                 } catch {
                     return String(arg);
                 }
-            })
+            }),
         };
-        const line = JSON.stringify(entry) + '\n';
+        const line = JSON.stringify(entry) + "\n";
         const lowerLevel = level.toLowerCase();
         if (!this.bufferedLevels.includes(lowerLevel)) {
-	fs.appendFileSync(logFilePath, line);
-	return;
-}
+            fs.appendFileSync(logFilePath, line);
+            return;
+        }
         const queue = this.getQueue(level);
         queue.push(line);
         if (queue.length >= this.batchSize) {
@@ -331,26 +377,47 @@ export class Logger {
     }
 
     child(category: string): any {
-		const self = this;
-		return {
-			debug(...stuff: any[]) { self.debug({ category }, ...stuff); },
-			info(...stuff: any[]) { self.info({ category }, ...stuff); },
-			warn(...stuff: any[]) { self.warn({ category }, ...stuff); },
-			error(...stuff: any[]) { self.error({ category }, ...stuff); },
-			mempool(...stuff: any[]) { self.mempool({ category }, ...stuff); },
-			rollback(...stuff: any[]) { self.rollback({ category }, ...stuff); },
-			child(subCategory: string): any { return self.child(`${category}/${subCategory}`); }
-		};
-	}
+        const self = this;
+        return {
+            debug(...stuff: any[]) {
+                self.debug({ category }, ...stuff);
+            },
+            info(...stuff: any[]) {
+                self.info({ category }, ...stuff);
+            },
+            warn(...stuff: any[]) {
+                self.warn({ category }, ...stuff);
+            },
+            error(...stuff: any[]) {
+                self.error({ category }, ...stuff);
+            },
+            mempool(...stuff: any[]) {
+                self.mempool({ category }, ...stuff);
+            },
+            rollback(...stuff: any[]) {
+                self.rollback({ category }, ...stuff);
+            },
+            child(subCategory: string): any {
+                return self.child(`${category}/${subCategory}`);
+            },
+        };
+    }
 
     public getLogPath(level: LogLevelString): string {
-        const network = process.env.NETWORK ?? 'preprod';
-        const logDir = this.config.logDirectory || `./src/store/logs/${network}/`;
+        const network = process.env.NETWORK ?? "preprod";
+        const logDir = this.config.logDirectory ||
+            `./src/store/logs/${network}/`;
         return path.join(logDir, `${level.toLowerCase()}.jsonl`);
     }
 }
 
 export const logger = new Logger({ logLevel: LogLevel.DEBUG });
-process.on('beforeExit', async () => await logger.flushAll());
-process.on('SIGINT', async () => { await logger.flushAll(); process.exit(0); });
-process.on('SIGTERM', async () => { await logger.flushAll(); process.exit(0); });
+process.on("beforeExit", async () => await logger.flushAll());
+process.on("SIGINT", async () => {
+    await logger.flushAll();
+    process.exit(0);
+});
+process.on("SIGTERM", async () => {
+    await logger.flushAll();
+    process.exit(0);
+});

@@ -1,6 +1,6 @@
 // Blockfrost-related state management functions
 // This module provides main import functions for ledger state from Blockfrost API
-import { DB } from "../../db/DB";
+import { DB } from "../../db";
 import { Database } from "bun:sqlite";
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
 import { Buffer } from "node:buffer";
@@ -30,7 +30,6 @@ import { GerolamoConfig } from "../../network/peerManager";
 
 // Main import function for ledger state from Blockfrost
 export async function importFromBlockfrost(
-    db: Database,
     blockHash: string,
     options?: {
         projectId?: string;
@@ -49,9 +48,12 @@ export async function importFromBlockfrost(
         apiConfig.projectId = options.projectId;
     } else {
         // Use custom backend (default)
-        apiConfig.customBackend = options?.customBackend || options?.config?.blockfrostUrl;
+        apiConfig.customBackend = options?.customBackend ||
+            options?.config?.blockfrostUrl;
         if (!apiConfig.customBackend) {
-            throw new Error("Blockfrost customBackend or config.blockfrostUrl required (no projectId provided)");
+            throw new Error(
+                "Blockfrost customBackend or config.blockfrostUrl required (no projectId provided)",
+            );
         }
     }
 
@@ -91,7 +93,11 @@ export async function importFromBlockfrost(
     const { defaultShelleyProtocolParameters } = await import(
         "@harmoniclabs/cardano-ledger-ts"
     );
-    await populateRewards(db, stakeDistribution, defaultShelleyProtocolParameters);
+    await populateRewards(
+        db,
+        stakeDistribution,
+        defaultShelleyProtocolParameters,
+    );
 
     // 8. Non-myopic data
     await populateNonMyopic(db);
@@ -123,7 +129,9 @@ export async function importFromBlockfrost(
     console.log(
         `🏊 Pool distribution: ✓ (${pools.length} pools, ${totalActiveStake} total stake)`,
     );
-    console.log(`🏗️  Blocks made: ✓ (${blocksMadePoolCount} pools produced blocks)`);
+    console.log(
+        `🏗️  Blocks made: ✓ (${blocksMadePoolCount} pools produced blocks)`,
+    );
     console.log(`💰 Stake distribution: ✓`);
     console.log(`🔗 Delegations: ✓`);
     console.log(`💸 Rewards: ✓`);

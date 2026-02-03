@@ -6,8 +6,8 @@ import {
 } from "./protocol_params";
 import {
     fetchStakeDistribution,
-    populateStakeDistribution,
     populateDelegations,
+    populateStakeDistribution,
 } from "./stake_distribution";
 import { fetchPools, populatePoolDistribution } from "./pool_distribution";
 import { populateBlocksMade } from "./blocks_made";
@@ -29,16 +29,19 @@ export async function populateEpochState(
         projectId?: string;
         customBackend?: string;
         config?: GerolamoConfig;
-    } = {}
+    } = {},
 ) {
     const apiConfig: any = { rateLimiter: false };
 
     if (options.projectId) {
         apiConfig.projectId = options.projectId;
     } else {
-        apiConfig.customBackend = options.customBackend || options.config?.blockfrostUrl;
+        apiConfig.customBackend = options.customBackend ||
+            options.config?.blockfrostUrl;
         if (!apiConfig.customBackend) {
-            throw new Error("Blockfrost customBackend or config.blockfrostUrl required (no projectId provided)");
+            throw new Error(
+                "Blockfrost customBackend or config.blockfrostUrl required (no projectId provided)",
+            );
         }
     }
 
@@ -57,7 +60,11 @@ export async function populateEpochState(
 
     // Pools
     const pools = await fetchPools(api);
-    await populatePoolDistribution(db, pools, stakeDistribution.reduce((sum, s) => sum + BigInt(s.amount || 0), 0n));
+    await populatePoolDistribution(
+        db,
+        pools,
+        stakeDistribution.reduce((sum, s) => sum + BigInt(s.amount || 0), 0n),
+    );
 
     // Blocks made
     await populateBlocksMade(db, api, epoch);

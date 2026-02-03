@@ -15,7 +15,7 @@ export function calculateCardanoEpoch(
         (Number(totalSlots) - byron_total_slots) / shelley_slots_per_epoch,
     );
     return byron_epochs + shelleyEpochs;
-};
+}
 export function calculatePreProdCardanoEpoch(
     absoluteSlot: number | bigint,
 ): number | bigint {
@@ -31,9 +31,12 @@ export function calculatePreProdCardanoEpoch(
         const shelleyRelativeSlot = slot - shelleyTransitionSlot;
         return byronEpochOffset + (shelleyRelativeSlot / shelleySlotsPerEpoch);
     }
-};
+}
 
-export function getFirstSlotOfEpoch(epoch: number | bigint, genesis: ShelleyGenesisConfig): bigint | number {
+export function getFirstSlotOfEpoch(
+    epoch: number | bigint,
+    genesis: ShelleyGenesisConfig,
+): bigint | number {
     const byronSlotsPerEpoch = 21600n;
     const shelleySlotsPerEpoch = BigInt(genesis.epochLength); // Use genesis for flexibility (e.g., 432000)
     const shelleyTransitionSlot = 86409n; // Shelley hard fork slot (preprod/mainnet)
@@ -47,6 +50,7 @@ export function getFirstSlotOfEpoch(epoch: number | bigint, genesis: ShelleyGene
     } else {
         // Shelley era (epochs 4+)
         const shelleyEpoch = Number(epochNum) - Number(byronEpochOffset);
-        return Number(shelleyTransitionSlot) + (Number(shelleyEpoch) * Number(shelleySlotsPerEpoch));
+        return Number(shelleyTransitionSlot) +
+            (Number(shelleyEpoch) * Number(shelleySlotsPerEpoch));
     }
-};
+}

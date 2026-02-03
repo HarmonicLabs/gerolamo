@@ -1,4 +1,3 @@
-
 <p align="center">
     <p align="center">
         <img width="200px" src="https://github.com/HarmonicLabs/gerolamo/blob/closeout-demo/assets/gerolamo-logo.svg" align="center"/>
@@ -6,7 +5,7 @@
     </p>
   <p align="center">Cardano typescript client implementation</p>
 
-  <p align="center">
+<p align="center">
     <img src="https://img.shields.io/github/commit-activity/m/HarmonicLabs/gerolamo?style=for-the-badge" />
     <a href="https://twitter.com/hlabs_tech">
       <img src="https://img.shields.io/twitter/follow/hlabs_tech?style=for-the-badge&logo=twitter" />
@@ -14,23 +13,31 @@
   </p>
 </p>
 
-Gerolamo is a lightweight, modular **Cardano node/relay** implementation in **TypeScript** using **Bun** runtime. It supports:
-- **P2P networking** (Ouroboros mini-protocols: Handshake, ChainSync, BlockFetch).
-- **Multi-era chain sync** (Byron → Shelley → Alonzo → Babbage → Conway) from genesis/tip/point.
+Gerolamo is a lightweight, modular **Cardano node/relay** implementation in
+**TypeScript** using **Bun** runtime. It supports:
+
+- **P2P networking** (Ouroboros mini-protocols: Handshake, ChainSync,
+  BlockFetch).
+- **Multi-era chain sync** (Byron → Shelley → Alonzo → Babbage → Conway) from
+  genesis/tip/point.
 - **Block/header parsing** (`@harmoniclabs/cardano-ledger-ts`).
 - **SQLite3 storage** (volatile → immutable chunks, WAL concurrency).
 - **Peer categorization** (hot/warm/cold/bootstrap/new).
 - **Block serving API** (HTTP `/block/{slot|hash}`).
 
-**No consensus validation** (yet)—focuses on networking/storage. Inspired by Cardano node specs.
+**No consensus validation** (yet)—focuses on networking/storage. Inspired by
+Cardano node specs.
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- **Bun** v1.0+ (fast JS/TS runtime): [bun.sh](https://bun.sh) (`curl -fsSL https://bun.sh/install | bash`).
+
+- **Bun** v1.0+ (fast JS/TS runtime): [bun.sh](https://bun.sh)
+  (`curl -fsSL https://bun.sh/install | bash`).
 - No Node.js/SQLite install needed (Bun bundles `bun:sqlite`).
 
 ### 1. Clone & Install
+
 ```bash
 git clone https://github.com/HarmonicLabs/gerolamo-network.git
 cd gerolamo-network
@@ -38,9 +45,11 @@ bun install  # Installs @harmoniclabs/* deps (5s)
 ```
 
 ### 2. Run (Preprod Default)
+
 ```bash
 bun src/start.ts
 ```
+
 - Syncs **preprod** chain (edit `NETWORK=mainnet` for mainnet).
 - Starts **peer server** (port 3000), **block API** (port 3030).
 - Logs: `./logs/preprod/*.jsonl` (debug/info/warn/error).
@@ -48,6 +57,7 @@ bun src/start.ts
 **Done!** Gerolamo handshakes peers, syncs chain, stores blocks.
 
 ### 3. Monitor
+
 ```bash
 # Tail logs
 tail -f logs/preprod/*.jsonl | jq -r '.level, .args[] | @text'
@@ -62,7 +72,8 @@ curl http://localhost:3030/block/f93e682d5b91a94d8660e748aef229c19cb285bfb9830db
 **Single file per network**. Set `NETWORK=preprod` / `mainnet`.
 
 ### Key Fields
-```json
+
+````json
 {
   "network": "preprod",  // or "mainnet\"
   "networkMagic": 1,       // Preprod=1, Mainnet=0
@@ -86,26 +97,17 @@ curl http://localhost:3030/block/f93e682d5b91a94d8660e748aef229c19cb285bfb9830db
 - **Genesis**: Pre-loaded Cardano JSONs (Byron/Shelley/Alonzo/Conway).
 
 ## 🏗️ Architecture & Data Flow
+````
+
+start.ts ──(config)──> initDB (SQLite schema/WAL) │ └─(await import)──>
+peerBlockServer (HTTP API port 3030) │ └─(config)──> startPeerManager
+──(workerData=config)──> peerManagerWorker │ ├─ parseTopology ──> addPeers
+(hot/bootstrap) │ └─ spawn ──> peerClientWorker ──(msg.config)──> config │ ├─
+new PeerClient (per peer) │ ├── handshake │ ├── chainSync (rollForward/RollBack)
+│ └── blockFetch │ └─ rollForward ──> parse header/block ──> batch insert
+volatile ──> GC (2160 slots)
 
 ```
-start.ts ──(config)──> initDB (SQLite schema/WAL)
-         │
-         └─(await import)──> peerBlockServer (HTTP API port 3030)
-         │
-         └─(config)──> startPeerManager ──(workerData=config)──> peerManagerWorker
-                                                           │
-                                                           ├─ parseTopology ──> addPeers (hot/bootstrap)
-                                                           │
-                                                           └─ spawn ──> peerClientWorker ──(msg.config)──> config
-                                                                                 │
-                                                                                 ├─ new PeerClient (per peer)
-                                                                                 │   ├── handshake
-                                                                                 │   ├── chainSync (rollForward/RollBack)
-                                                                                 │   └── blockFetch
-                                                                                 │
-                                                                                 └─ rollForward ──> parse header/block ──> batch insert volatile ──> GC (2160 slots)
-```
-
 ### Key Components
 1. **start.ts**: Entry. Loads config (`bun src/config/[network]/config.json`), inits DB/server/manager.
 2. **db/**: 
@@ -143,9 +145,10 @@ start.ts ──(config)──> initDB (SQLite schema/WAL)
 
 ### Env Vars
 ```
-NETWORK=mainnet  # Switch network
-```
 
+NETWORK=mainnet # Switch network
+
+````
 ### Customize
 - **Peers**: Edit `topology.json` → restart.
 - **Sync Point**: `config.json` → `syncFromPointSlot`/`BlockHash`.
@@ -172,12 +175,14 @@ NETWORK=mainnet  # Switch network
 - **JSONL Format**:
   ```json
   {"timestamp":"2026-01-15T12:00:00Z","level":"INFO","args":["msg",123n,"str"]}
-  ```
-  - Handles `BigInt`→string, `Error`→{name,message,stack}
+````
+
+- Handles `BigInt`→string, `Error`→{name,message,stack}
 - **Config**: `logLevel`, `logDirectory`, `logToFile=true`, `logToConsole=true`
 - **Usage**: `logger.info("Sync", peerId, slot);`
 
 **Monitor**:
+
 ```bash
 tail -f logs/preprod/info.jsonl | jq -r '.timestamp, .level, (.args[] | @text)'
 multitail logs/preprod/*.jsonl
@@ -186,17 +191,17 @@ multitail logs/preprod/*.jsonl
 ## 🚧 Roadmap
 
 ### Implemented
+
 - P2P peer management (hot/bootstrap peers)
 - Ouroboros mini-protocols: Handshake, ChainSync, BlockFetch
 - Multi-era header/block parsing & storage (SQLite3 WAL, volatile→immutable GC)
 - HTTP Block API (`/block/{slot|hash}` → raw CBOR)
 - Structured JSONL logging
 
-
 ## 📚 Resources
+
 - [Cardano Ouroboros](https://ouroboros-network.cardano.intersectmbo.org/)
 - [HarmonicLabs Libs](https://github.com/HarmonicLabs/ouroboros-miniprotocols-ts)
 - [Bun Docs](https://bun.sh/docs)
 
 **Issues?** Check `error.jsonl` / terminal. Happy syncing! 🚀
-

@@ -1,6 +1,36 @@
-import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, isIAllegraHeader, isIAlonzoHeader, isIBabbageHeader, isIConwayHeader, isIMaryHeader, isIShelleyHeader, type IVrfCert, type KesPubKey, type KesSignature, MaryHeader, MultiEraHeader, PoolKeyHash, PublicKey, ShelleyHeader, VrfCert } from "@harmoniclabs/cardano-ledger-ts";
-import { blake2b_256, verifyEd25519Signature_sync, VrfProof03 } from "@harmoniclabs/crypto";
-import { concatUint8Array, fromHex, toHex, uint8ArrayEq, writeBigUInt64BE } from "@harmoniclabs/uint8array-utils";
+import {
+    AllegraHeader,
+    AlonzoHeader,
+    BabbageHeader,
+    ConwayHeader,
+    isIAllegraHeader,
+    isIAlonzoHeader,
+    isIBabbageHeader,
+    isIConwayHeader,
+    isIMaryHeader,
+    isIShelleyHeader,
+    type IVrfCert,
+    type KesPubKey,
+    type KesSignature,
+    MaryHeader,
+    MultiEraHeader,
+    PoolKeyHash,
+    PublicKey,
+    ShelleyHeader,
+    VrfCert,
+} from "@harmoniclabs/cardano-ledger-ts";
+import {
+    blake2b_256,
+    verifyEd25519Signature_sync,
+    VrfProof03,
+} from "@harmoniclabs/crypto";
+import {
+    concatUint8Array,
+    fromHex,
+    toHex,
+    uint8ArrayEq,
+    writeBigUInt64BE,
+} from "@harmoniclabs/uint8array-utils";
 import { PoolOperationalCert } from "@harmoniclabs/cardano-ledger-ts";
 import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
@@ -16,7 +46,9 @@ const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
     "1157920892373161954235709850086879078532699846656405640394575840079131296399360000000000000000000000000000000000",
 );
 
-async function getCachedShelleyGenesis(config: any): Promise<ShelleyGenesisConfig | null> {
+async function getCachedShelleyGenesis(
+    config: any,
+): Promise<ShelleyGenesisConfig | null> {
     if (genesisCache) return genesisCache;
     try {
         genesisCache = await getShelleyGenesisConfig(config);
@@ -101,7 +133,9 @@ export class ValidatePostBabbageHeader {
     ): boolean {
         const proof = VrfProof03.fromBytes(cert.proof);
         const verify = proof.verify(leaderPubKey, input);
-        const computedOutput = era === "pre-babbage" ? blake2b_256(proof.toBytes()) : proof.toHash();
+        const computedOutput = era === "pre-babbage"
+            ? blake2b_256(proof.toBytes())
+            : proof.toHash();
         const out = uint8ArrayEq(computedOutput, output);
         // logger.debug("VRF input:", toHex(input));
         // logger.debug("VRF leaderPubKey:", toHex(leaderPubKey));
@@ -125,7 +159,9 @@ export class ValidatePostBabbageHeader {
         return result;
     }
 
-    private getEraHeader(h: MultiEraHeader): BabbageHeader | ConwayHeader | null {
+    private getEraHeader(
+        h: MultiEraHeader,
+    ): BabbageHeader | ConwayHeader | null {
         if (h.era < 6) return null;
         if (h.era === 6 && !isIBabbageHeader(h.header)) {
             throw new Error("Invalid Babbage header for era 6");
@@ -145,7 +181,10 @@ export class ValidatePostBabbageHeader {
         if (!genesis) return false;
 
         const header = this.getEraHeader(h);
-        if (!(header instanceof BabbageHeader || header instanceof ConwayHeader) || header === null) {
+        if (
+            !(header instanceof BabbageHeader ||
+                header instanceof ConwayHeader) || header === null
+        ) {
             return null;
         }
 
@@ -156,7 +195,10 @@ export class ValidatePostBabbageHeader {
         const issuer = new PoolKeyHash(header.body.issuerPubKey);
         const isKnownLeader = this.verifyKnownLeader(issuer, genesis);
 
-        const leaderVrfOut = concatUint8Array(Buffer.from("L"), header.body.getLeaderVrfOutput());
+        const leaderVrfOut = concatUint8Array(
+            Buffer.from("L"),
+            header.body.getLeaderVrfOutput(),
+        );
 
         const vrfInput = this.getVrfInput(header.body.slot, nonce);
         const correctProof = this.verifyVrfProof(
@@ -180,7 +222,9 @@ export class ValidatePostBabbageHeader {
         if (totalActiveStake === 0n) {
             stakeRatio = BigDecimal.from(0);
         } else {
-            stakeRatio = BigDecimal.from(individualStake).div(BigDecimal.from(totalActiveStake));
+            stakeRatio = BigDecimal.from(individualStake).div(
+                BigDecimal.from(totalActiveStake),
+            );
         }
 
         const verifyLeaderStake = this.verifyLeaderEligibility(
@@ -194,7 +238,9 @@ export class ValidatePostBabbageHeader {
             new PublicKey(header.body.issuerPubKey),
         );
 
-        const headerBodyBytes = Cbor.encode(header.toCborObj().array?.[0] ?? header.toCborObj()).toBuffer();
+        const headerBodyBytes = Cbor.encode(
+            header.toCborObj().array?.[0] ?? header.toCborObj(),
+        ).toBuffer();
 
         const verifyKES = this.verifyKESSignature(
             header.body.slot / slotsPerKESPeriod,
@@ -206,16 +252,22 @@ export class ValidatePostBabbageHeader {
         );
 
         const issuerHex = toHex(issuer.toCborBytes());
-        const passed = correctProof && verifyLeaderStake && verifyOpCertValidity && verifyKES;
-        logger.info(`Header validation ${passed ? 'PASSED' : 'FAILED'} era=${h.era} slot=${header.body.slot}`, {
-          issuerHex,
-          isKnownLeader,
-          correctProof,
-          verifyLeaderStake,
-          verifyOpCertValidity,
-          verifyKES,
-          passed
-        });
+        const passed = correctProof && verifyLeaderStake &&
+            verifyOpCertValidity && verifyKES;
+        logger.info(
+            `Header validation ${
+                passed ? "PASSED" : "FAILED"
+            } era=${h.era} slot=${header.body.slot}`,
+            {
+                issuerHex,
+                isKnownLeader,
+                correctProof,
+                verifyLeaderStake,
+                verifyOpCertValidity,
+                verifyKES,
+                passed,
+            },
+        );
 
         // Temporarily allow non-genesis leaders for post-Babbage testing
         return (
@@ -302,7 +354,9 @@ export class ValidatePreBabbageHeader {
     ): boolean {
         const proof = VrfProof03.fromBytes(cert.proof);
         const verify = proof.verify(leaderPubKey, input);
-        const computedOutput = era === "pre-babbage" ? blake2b_256(proof.toBytes()) : proof.toHash();
+        const computedOutput = era === "pre-babbage"
+            ? blake2b_256(proof.toBytes())
+            : proof.toHash();
         const out = uint8ArrayEq(computedOutput, output);
         // logger.debug("VRF input:", toHex(input));
         // logger.debug("VRF leaderPubKey:", toHex(leaderPubKey));
@@ -315,7 +369,11 @@ export class ValidatePreBabbageHeader {
         return out;
     }
 
-    private getVrfInput(slot: bigint, nonce: Uint8Array, domain?: Uint8Array): Uint8Array {
+    private getVrfInput(
+        slot: bigint,
+        nonce: Uint8Array,
+        domain?: Uint8Array,
+    ): Uint8Array {
         const base = concatUint8Array(this.biguintToU64BE(slot), nonce);
         if (domain) {
             return blake2b_256(concatUint8Array(base, domain));
@@ -329,7 +387,9 @@ export class ValidatePreBabbageHeader {
         return result;
     }
 
-    private getEraHeader(h: MultiEraHeader): AlonzoHeader | MaryHeader | AllegraHeader | ShelleyHeader | null {
+    private getEraHeader(
+        h: MultiEraHeader,
+    ): AlonzoHeader | MaryHeader | AllegraHeader | ShelleyHeader | null {
         if (h.era > 5) return null;
         if (h.era === 5 && !isIAlonzoHeader(h.header)) {
             throw new Error("Invalid Alonzo header for era 5");
@@ -344,7 +404,11 @@ export class ValidatePreBabbageHeader {
             throw new Error("Invalid Shelley header for era 2");
         }
         if (h.era === 1) return null;
-        return h.header as AlonzoHeader | MaryHeader | AllegraHeader | ShelleyHeader;
+        return h.header as
+            | AlonzoHeader
+            | MaryHeader
+            | AllegraHeader
+            | ShelleyHeader;
     }
 
     public async validate(
@@ -356,7 +420,10 @@ export class ValidatePreBabbageHeader {
         if (!genesis) return false;
 
         const header = this.getEraHeader(h);
-        if (header === null || header instanceof BabbageHeader || header instanceof ConwayHeader) {
+        if (
+            header === null || header instanceof BabbageHeader ||
+            header instanceof ConwayHeader
+        ) {
             return null;
         }
 
@@ -403,7 +470,9 @@ export class ValidatePreBabbageHeader {
         if (totalActiveStake === 0n) {
             stakeRatio = BigDecimal.from(0);
         } else {
-            stakeRatio = BigDecimal.from(individualStake).div(BigDecimal.from(totalActiveStake));
+            stakeRatio = BigDecimal.from(individualStake).div(
+                BigDecimal.from(totalActiveStake),
+            );
         }
 
         const verifyLeaderStake = this.verifyLeaderEligibility(
@@ -417,7 +486,9 @@ export class ValidatePreBabbageHeader {
             new PublicKey(header.body.issuerPubKey),
         );
 
-        const headerBodyBytes = Cbor.encode(header.toCborObj().array?.[0] ?? header.toCborObj()).toBuffer();
+        const headerBodyBytes = Cbor.encode(
+            header.toCborObj().array?.[0] ?? header.toCborObj(),
+        ).toBuffer();
 
         const verifyKES = this.verifyKESSignature(
             header.body.slot / slotsPerKESPeriod,
@@ -429,16 +500,22 @@ export class ValidatePreBabbageHeader {
         );
 
         const issuerHex = toHex(issuer.toCborBytes());
-        const passed = isKnownLeader && correctProof && verifyLeaderStake && verifyOpCertValidity && verifyKES;
-        logger.info(`Header validation ${passed ? 'PASSED' : 'FAILED'} era=${h.era} slot=${header.body.slot}`, {
-          issuerHex,
-          isKnownLeader,
-          correctProof,
-          verifyLeaderStake,
-          verifyOpCertValidity,
-          verifyKES,
-          passed
-        });
+        const passed = isKnownLeader && correctProof && verifyLeaderStake &&
+            verifyOpCertValidity && verifyKES;
+        logger.info(
+            `Header validation ${
+                passed ? "PASSED" : "FAILED"
+            } era=${h.era} slot=${header.body.slot}`,
+            {
+                issuerHex,
+                isKnownLeader,
+                correctProof,
+                verifyLeaderStake,
+                verifyOpCertValidity,
+                verifyKES,
+                passed,
+            },
+        );
 
         return (
             isKnownLeader &&
@@ -456,7 +533,9 @@ export async function validateHeader(
     nonce: Uint8Array,
     config: any,
 ): Promise<boolean> {
-    const validator = h.era >= 6 ? new ValidatePostBabbageHeader() : new ValidatePreBabbageHeader();
+    const validator = h.era >= 6
+        ? new ValidatePostBabbageHeader()
+        : new ValidatePreBabbageHeader();
     const result = await validator.validate(h, nonce, config);
     return result ?? false;
 }

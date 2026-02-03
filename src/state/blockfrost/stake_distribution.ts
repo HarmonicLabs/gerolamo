@@ -1,7 +1,10 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
 import { Database } from "bun:sqlite";
 
-export async function populateStakeDistribution(db: Database, stakeDistribution: any[]) {
+export async function populateStakeDistribution(
+    db: Database,
+    stakeDistribution: any[],
+) {
     if (stakeDistribution.length > 0) {
         const stmt = db.prepare(`
             INSERT OR REPLACE INTO stake (stake_credentials, amount)
@@ -13,7 +16,10 @@ export async function populateStakeDistribution(db: Database, stakeDistribution:
     }
 }
 
-export async function populateDelegations(db: Database, stakeDistribution: any[]) {
+export async function populateDelegations(
+    db: Database,
+    stakeDistribution: any[],
+) {
     if (stakeDistribution.length > 0) {
         const stmt = db.prepare(`
             INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash)

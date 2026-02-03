@@ -21,7 +21,7 @@
     "blockfrostUrl": "https://blockfrost-mainnet.onchainapps.io/",
     "dbPath": "./src/store/db/mainnet/Gerolamo.db",
     "tuiEnabled": true,
-    "logs":{
+    "logs": {
         "logToFile": true,
         "logToConsole": false,
         "logDirectory": "./src/store/logs/mainnet/",

@@ -1,9 +1,7 @@
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import { blake2b_256 } from "@harmoniclabs/crypto";
 import { Logger, LogLevel } from "../../utils/logger";
-import { mkdir } from "fs/promises";
-import path from "path";
-
+import { blockParser } from "../../consensus/blockHeaderParser";
+import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, MultiEraHeader, ShelleyHeader, MultiEraBlock, BabbageHeaderBody, ConwayHeaderBody } from "@harmoniclabs/cardano-ledger-ts";
 const logger = new Logger({ logLevel: LogLevel.INFO });
 
 interface RawChunkBlock {
@@ -91,8 +89,10 @@ export async function parseChunk(dirPath: string, chunkNo: number): Promise<RawC
 
 async function outputBlocks(blocks: RawChunkBlock[], outDir: string, chunkStr: string) {
 	for (const block of blocks) {
-		console.log("block: ", toHex(block.blockCbor));
-	};
+		// console.log("block: ", toHex(block.blockCbor));
+		const newMultiEraBlock = MultiEraBlock.fromCbor(block.blockCbor);
+		console.log("parsed block: ", newMultiEraBlock);
+	};	
 };
 
 if (import.meta.main) 

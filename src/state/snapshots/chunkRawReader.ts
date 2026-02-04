@@ -83,22 +83,15 @@ export async function parseChunk(dirPath: string, chunkNo: number): Promise<RawC
 
 	if (blocks.length > 0) 
 	{
-		logger.info(`Example block 0: hash ${toHex(blocks[0].blockHash)}, size ${blocks[0].blockCbor.length}, slot ${String(blocks[0].slotNo)}`);
+		logger.info(`Example block 0: hash ${toHex(blocks[0].blockHash)}, size ${blocks[0].blockCbor.length}, slot ${String(blocks[0].slotNo)}, cbor" ${toHex(blocks[0].blockCbor)}`);
 	};
 
 	return blocks;
 };
 
 async function outputBlocks(blocks: RawChunkBlock[], outDir: string, chunkStr: string) {
-	await mkdir(outDir, { recursive: true });
 	for (const block of blocks) {
-		console.log("block: ", block);
-		const slotStr = String(block.slotNo);
-		const hashHex = toHex(block.blockHash);
-		const fileName = `chunk${chunkStr}_slot${slotStr}_${hashHex}.cbor`;
-		const filePath = path.join(outDir, fileName);
-		await Bun.write(filePath, block.blockCbor);
-		logger.info(`Wrote ${fileName} (${block.blockCbor.length} bytes)`);
+		console.log("block: ", toHex(block.blockCbor));
 	};
 };
 

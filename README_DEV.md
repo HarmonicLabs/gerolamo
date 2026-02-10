@@ -62,6 +62,13 @@ curl http://localhost:3030/block/9158475  # HTTP port 3030, raw CBOR
 6. **Multi-Era**: Full Byron/Shelley validation.
 7. **Mainnet Sync**.
 
+## Alternative Databases
+
+- **LMDB** (`src/db/DB-lmdb.ts`, `Gerolamo_LMDB_Schema.ts`): High-perf KV for server/Bun. `bun add lmdb`. Use `new DB(dbPath)` from DB-lmdb.ts. Full port of SQLite API.
+- **IndexedDB** (`src/db/db-indexedb.ts`, `Gerolamo_Indexeddb_Schema.ts`): Native browser DB. Async, object stores/indexes. Use in web env.
+
+Schemas define stores/indexes matching SQL. Serializers handle BigInt/Uint8Array. Full methods stubbed/ported (extend as needed).
+
 ## Developer Workflows
 
 ### Setup

@@ -28,6 +28,7 @@
 		"@harmoniclabs/uint8array-utils": "^1.0.4",
 		"@harmoniclabs/uplc": "^1.4.1",
 		"commander": "^14.0.3",
+		"lmdb": "^3.5.1",
 		"picocolors": "^1.1.1",
 		"typescript-language-server": "^5.1.3",
 		"wasm-kes": "./wasm-kes-0.2.2.tgz"

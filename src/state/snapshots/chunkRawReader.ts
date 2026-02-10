@@ -89,9 +89,9 @@ export async function parseChunk(dirPath: string, chunkNo: number): Promise<RawC
 
 async function outputBlocks(blocks: RawChunkBlock[], outDir: string, chunkStr: string) {
 	for (const block of blocks) {
-		// console.log("block: ", toHex(block.blockCbor));
-		const newMultiEraBlock = MultiEraBlock.fromCbor(block.blockCbor);
-		console.log("parsed block: ", newMultiEraBlock);
+		console.log("block: ", toHex(block.blockCbor));
+		// const newMultiEraBlock = MultiEraBlock.fromCbor(block.blockCbor);
+		// console.log("parsed block: ", newMultiEraBlock);
 	};	
 };
 

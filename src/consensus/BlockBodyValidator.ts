@@ -1,14 +1,30 @@
-import { AllegraBlock, AlonzoBlock, BabbageBlock, CertificateType, ConwayBlock, defaultConwayProtocolParameters, isShelleyProtocolParameters, MaryBlock, MultiEraBlock, ShelleyBlock, TxBody, TxOut, Value } from "@harmoniclabs/cardano-ledger-ts";
-// import { sql } from "bun";
+import {
+    AllegraBlock,
+    AlonzoBlock,
+    BabbageBlock,
+    CertificateType,
+    ConwayBlock,
+    defaultConwayProtocolParameters,
+    isShelleyProtocolParameters,
+    MaryBlock,
+    MultiEraBlock,
+    ShelleyBlock,
+    TxBody,
+    TxOut,
+    Value,
+} from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
-import { DB } from "../db/DB";
+
+import { getUtxosByRefs, getAllStake, getAllDelegations } from "../db";
 
 let genesisCache: ShelleyGenesisConfig | null = null;
 
-async function getCachedShelleyGenesis(config: any): Promise<ShelleyGenesisConfig | null> {
+async function getCachedShelleyGenesis(
+    config: any,
+): Promise<ShelleyGenesisConfig | null> {
     if (genesisCache) return genesisCache;
     try {
         genesisCache = await getShelleyGenesisConfig(config);
@@ -28,9 +44,11 @@ type CardanoBlock =
     | ShelleyBlock;
 
 export class BlockBodyValidator {
-    constructor(private config: any, private db: DB) {}
+    constructor(private config: any) {}
 
-    private getEraBlock(block: MultiEraBlock): AlonzoBlock | BabbageBlock | ConwayBlock | null {
+    private getEraBlock(
+        block: MultiEraBlock,
+    ): AlonzoBlock | BabbageBlock | ConwayBlock | null {
         if (block.era < 5) return null; // Pre-Alonzo (no scripts/collateral)
         // Assume correct type based on era
         return block.block as AlonzoBlock | BabbageBlock | ConwayBlock;
@@ -45,7 +63,7 @@ export class BlockBodyValidator {
 
         logger.info("Starting block body validation", {
             era: block.era,
-            slot: actualBlock.header.body.slot.toString()
+            slot: actualBlock.header.body.slot.toString(),
         });
 
         const genesis = await getCachedShelleyGenesis(this.config);
@@ -53,13 +71,17 @@ export class BlockBodyValidator {
 
         const txCountValid = this.validateTransactionCountMatch(actualBlock);
         if (!txCountValid) {
-            logger.warn(`Block body validation failed: transaction count mismatch`);
+            logger.warn(
+                `Block body validation failed: transaction count mismatch`,
+            );
             return false;
         }
 
         const noInvalidTxs = this.validateNoInvalidTxs(actualBlock);
         if (!noInvalidTxs) {
-            logger.warn(`Block body validation failed: invalid transactions present`);
+            logger.warn(
+                `Block body validation failed: invalid transactions present`,
+            );
             return false;
         }
 
@@ -75,15 +97,24 @@ export class BlockBodyValidator {
             return false;
         }
 
-        const validityIntervalValid = this.validateValidityInterval(actualBlock);
+        const validityIntervalValid = this.validateValidityInterval(
+            actualBlock,
+        );
         if (!validityIntervalValid) {
-            logger.warn(`Block body validation failed: validity interval invalid`);
+            logger.warn(
+                `Block body validation failed: validity interval invalid`,
+            );
             return false;
         }
 
-        const multiAssetsValid = await this.validateMultiAssetsBalance(actualBlock, genesis);
+        const multiAssetsValid = await this.validateMultiAssetsBalance(
+            actualBlock,
+            genesis,
+        );
         if (!multiAssetsValid) {
-            logger.warn(`Block body validation failed: multi-assets balance invalid`);
+            logger.warn(
+                `Block body validation failed: multi-assets balance invalid`,
+            );
             return false;
         }
 
@@ -105,7 +136,10 @@ export class BlockBodyValidator {
             return false;
         }
 
-        const sizeLimitsValid = await this.validateSizeLimits(actualBlock, genesis);
+        const sizeLimitsValid = await this.validateSizeLimits(
+            actualBlock,
+            genesis,
+        );
         if (!sizeLimitsValid) {
             logger.warn(`Block body validation failed: size limits exceeded`);
             return false;
@@ -113,7 +147,7 @@ export class BlockBodyValidator {
 
         logger.info("Block body validation passed all checks", {
             era: block.era,
-            slot: actualBlock.header.body.slot.toString()
+            slot: actualBlock.header.body.slot.toString(),
         });
         return true;
     }
@@ -152,12 +186,14 @@ export class BlockBodyValidator {
         ).flat();
 
         // Query only the UTxOs that are inputs to this block with extracted amount
-        const utxoRows = await this.db.getUtxosByRefs(inputUtxoRefs);
+        const utxoRows = await getUtxosByRefs(inputUtxoRefs);
 
         // Create a lookup map for efficient access
         const utxoMap = new Map(
             utxoRows.map(
-                ({ utxo_ref, amount }) => [utxo_ref, { utxo_ref, amount: BigInt(amount) }],
+                (
+                    { utxo_ref, amount },
+                ) => [utxo_ref, { utxo_ref, amount: BigInt(amount) }],
             ),
         );
 
@@ -226,11 +262,14 @@ export class BlockBodyValidator {
         // Implementation
         return block.transactionBodies.map(
             (txBody) =>
-                (!("validityIntervalStart" in txBody) || txBody.validityIntervalStart === undefined ||
+                (!("validityIntervalStart" in txBody) ||
+                    txBody.validityIntervalStart === undefined ||
                     txBody.validityIntervalStart! <= block.header.body.slot) &&
                 (!("ttl" in txBody) || txBody.ttl === undefined ||
-                    ("validityIntervalStart" in txBody && txBody.validityIntervalStart !== undefined &&
-                        txBody.validityIntervalStart! + txBody.ttl! > block.header.body.slot)),
+                    ("validityIntervalStart" in txBody &&
+                        txBody.validityIntervalStart !== undefined &&
+                        txBody.validityIntervalStart! + txBody.ttl! >
+                            block.header.body.slot)),
         ).reduce((a, b) => a && b);
     }
 
@@ -253,12 +292,14 @@ export class BlockBodyValidator {
         ).flat();
 
         // Query only the UTxOs that are inputs to this block with extracted amount
-        const utxoRows = await this.db.getUtxosByRefs(inputUtxoRefs);
+        const utxoRows = await getUtxosByRefs(inputUtxoRefs);
 
         // Create a lookup map for efficient access
         const utxoMap = new Map(
             utxoRows.map(
-                ({ utxo_ref, amount }) => [utxo_ref, { utxo_ref, amount: BigInt(amount) }],
+                (
+                    { utxo_ref, amount },
+                ) => [utxo_ref, { utxo_ref, amount: BigInt(amount) }],
             ),
         );
 
@@ -301,7 +342,9 @@ export class BlockBodyValidator {
                             certDeposits,
                             Value.lovelaces(keyDeposit),
                         );
-                    } else if (cert.certType === CertificateType.PoolRegistration) { // Pool registration
+                    } else if (
+                        cert.certType === CertificateType.PoolRegistration
+                    ) { // Pool registration
                         certDeposits = Value.add(
                             certDeposits,
                             Value.lovelaces(poolDeposit),
@@ -378,12 +421,14 @@ export class BlockBodyValidator {
         }
 
         // Query only the collateral UTxOs with extracted amount
-        const utxoRows = await this.db.getUtxosByRefs(collateralUtxoRefs);
+        const utxoRows = await getUtxosByRefs(collateralUtxoRefs);
 
         // Create a lookup map for efficient access
         const utxoMap = new Map(
             utxoRows.map(
-                ({ utxo_ref, amount }) => [utxo_ref, { utxo_ref, amount: BigInt(amount) }],
+                (
+                    { utxo_ref, amount },
+                ) => [utxo_ref, { utxo_ref, amount: BigInt(amount) }],
             ),
         );
 
@@ -415,7 +460,8 @@ export class BlockBodyValidator {
             }
 
             // Check collateral covers required amount (fee * collateralPercent / 100)
-            const requiredCollateral = (txBody.fee * BigInt(collateralPercent)) /
+            const requiredCollateral =
+                (txBody.fee * BigInt(collateralPercent)) /
                 100n;
             if (collateralValue < requiredCollateral) {
                 logger.error(
@@ -437,16 +483,21 @@ export class BlockBodyValidator {
         block: CardanoBlock,
     ): Promise<boolean> {
         // Query current stake distribution and delegations
-        const stakeRows = await this.db.getAllStake();
-        const delegationRows = await this.db.getAllDelegations();
+        const stakeRows = await getAllStake();
+        const delegationRows = await getAllDelegations();
 
         // Create lookup maps with string keys for reliable comparison
-        const getKey = (cred: Uint8Array | string) => typeof cred === 'string' ? cred : toHex(cred);
+        const getKey = (cred: Uint8Array | string) =>
+            typeof cred === "string" ? cred : toHex(cred);
         const stakeMap = new Map(
-            stakeRows.map(({ stake_credentials, amount }) => [getKey(stake_credentials), amount]),
+            stakeRows.map((
+                { stake_credentials, amount },
+            ) => [getKey(stake_credentials), amount]),
         );
         const delegationMap = new Map(
-            delegationRows.map(({ stake_credentials, pool_key_hash }) => [getKey(stake_credentials), pool_key_hash]),
+            delegationRows.map((
+                { stake_credentials, pool_key_hash },
+            ) => [getKey(stake_credentials), pool_key_hash]),
         );
 
         for (const txBody of block.transactionBodies) {
@@ -505,7 +556,9 @@ export class BlockBodyValidator {
                         break;
 
                     default:
-                        logger.error(`Unknown certificate type: ${cert.certType}`);
+                        logger.error(
+                            `Unknown certificate type: ${cert.certType}`,
+                        );
                         return false;
                 }
             }
@@ -547,7 +600,10 @@ export class BlockBodyValidator {
                 txBody.redeemers && (txBody.redeemers as any[]).length > 0
             ) {
                 const txIndex = block.transactionBodies.indexOf(txBody as any);
-                if (txIndex >= 0 && txIndex < block.transactionWitnessSets.length) {
+                if (
+                    txIndex >= 0 &&
+                    txIndex < block.transactionWitnessSets.length
+                ) {
                     const witnessSet = block.transactionWitnessSets[txIndex];
                     if (
                         witnessSet &&
@@ -597,8 +653,7 @@ export class BlockBodyValidator {
 export async function validateBlock(
     block: MultiEraBlock,
     config: any,
-    db: DB,
 ): Promise<boolean> {
-    const validator = new BlockBodyValidator(config, db);
+    const validator = new BlockBodyValidator(config);
     return await validator.validate(block) ?? false;
 }

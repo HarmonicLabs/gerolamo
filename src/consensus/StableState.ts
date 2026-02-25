@@ -156,7 +156,7 @@ export async function transitionToStable(
     logger.info("Advanced stable state", {
         blocksCount: newBlockCount,
         immutableTipSlot: newTip.slot.toString(),
-        immutableTipHash: toHex(newTip.hash.bytes),
+        immutableTipHash: toHex(newTip.hash.toBuffer()),
     });
 }
 
@@ -219,7 +219,9 @@ export async function getStableChain(): Promise<
 export async function garbageCollectVolatile(blocks: Hash32[]): Promise<void> {
     if (blocks.length === 0) return;
 
-    logger.debug("Garbage collecting volatile blocks", { count: blocks.length });
+    logger.debug("Garbage collecting volatile blocks", {
+        count: blocks.length,
+    });
 
     const hashes = blocks.map((h) => h.toBuffer());
     await sql`DELETE FROM blocks WHERE hash IN ${sql(hashes)}`;
@@ -310,7 +312,7 @@ export async function appendBlock(
 
     logger.info("Appended block to immutable", {
         slot: block.slot.toString(),
-        hash: toHex(block.hash.bytes),
+        hash: toHex(block.hash.toBuffer()),
     });
 }
 

@@ -1,10 +1,33 @@
-import { Cbor, CborArray, CborBytes, CborTag, LazyCborArray } from "@harmoniclabs/cbor";
-import { BlockFetchBlock, BlockFetchNoBlocks } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import {
+    Cbor,
+    CborArray,
+    CborBytes,
+    CborTag,
+    LazyCborArray,
+} from "@harmoniclabs/cbor";
+import {
+    BlockFetchBlock,
+    BlockFetchNoBlocks,
+} from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { blake2b_256 } from "@harmoniclabs/crypto";
-import { AllegraHeader, AlonzoHeader, BabbageHeader, ConwayHeader, MaryHeader, MultiEraHeader, ShelleyHeader, MultiEraBlock, BabbageHeaderBody, ConwayHeaderBody } from "@harmoniclabs/cardano-ledger-ts";
+import {
+    AllegraHeader,
+    AlonzoHeader,
+    BabbageHeader,
+    BabbageHeaderBody,
+    ConwayHeader,
+    ConwayHeaderBody,
+    MaryHeader,
+    MultiEraBlock,
+    MultiEraHeader,
+    ShelleyHeader,
+} from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "../utils/logger";
-import { calculateCardanoEpoch, calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
+import {
+    calculateCardanoEpoch,
+    calculatePreProdCardanoEpoch,
+} from "../utils/epochFromSlotCalculations";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
 export async function headerParser(rollForward: Uint8Array) {
@@ -12,9 +35,11 @@ export async function headerParser(rollForward: Uint8Array) {
     const data = ChainSyncRollForward.fromCbor(toHex(rollForward));
     // logger.debug("Header Parser Data: ", data.data);
 
-    if (!(
-        data.data instanceof CborArray
-    )) {
+    if (
+        !(
+            data.data instanceof CborArray
+        )
+    ) {
         logger.error("Invalid CBOR for header: data not CborArray");
         throw new Error("invalid CBOR for header");
     }
@@ -23,27 +48,37 @@ export async function headerParser(rollForward: Uint8Array) {
     // logger.debug("blockHeaderData", toHex(blockHeaderData));
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
     // logger.debug("Lazy Header: ", lazyHeader);
-    if (!(
-        lazyHeader instanceof LazyCborArray
-    ) || !lazyHeader.array[1]) {
-        logger.error("Invalid CBOR for header: lazyHeader not LazyCborArray or missing array[1]");
+    if (
+        !(
+            lazyHeader instanceof LazyCborArray
+        ) || !lazyHeader.array[1]
+    ) {
+        logger.error(
+            "Invalid CBOR for header: lazyHeader not LazyCborArray or missing array[1]",
+        );
         throw new Error("invalid CBOR for header");
     }
 
     const blockHeaderParsed = Cbor.parse(lazyHeader.array[1]);
     // logger.debug("Block Header Parsed: ", blockHeaderParsed);
-    if (!(
-        blockHeaderParsed instanceof CborTag &&
-        blockHeaderParsed.data instanceof CborBytes
-    )) {
-        logger.error("Invalid CBOR for header body: not CborTag with CborBytes");
+    if (
+        !(
+            blockHeaderParsed instanceof CborTag &&
+            blockHeaderParsed.data instanceof CborBytes
+        )
+    ) {
+        logger.error(
+            "Invalid CBOR for header body: not CborTag with CborBytes",
+        );
         throw new Error("invalid CBOR for header body");
     }
 
     const blockHeaderBodyLazy = Cbor.parseLazy(blockHeaderParsed.data.bytes);
-    if (!(
-        blockHeaderBodyLazy instanceof LazyCborArray
-    )) {
+    if (
+        !(
+            blockHeaderBodyLazy instanceof LazyCborArray
+        )
+    ) {
         logger.error("Invalid CBOR for header body: not LazyCborArray");
         throw new Error("invalid CBOR for header body");
     }
@@ -51,9 +86,12 @@ export async function headerParser(rollForward: Uint8Array) {
     /*
      * We add +1 to era in multiplexer because it enums starts at 0 for the HFC.
      */
-    if (!(
-        lazyHeader.array[0] !== undefined && lazyHeader.array[0][0] !== undefined
-    )) {
+    if (
+        !(
+            lazyHeader.array[0] !== undefined &&
+            lazyHeader.array[0][0] !== undefined
+        )
+    ) {
         logger.error("Missing Era in MultiEra header");
         throw new Error("Missing Era in MultiEra header");
     }
@@ -99,49 +137,51 @@ export async function headerParser(rollForward: Uint8Array) {
     logger.info("Parsed header successfully", {
         era: blockHeaderBodyEra,
         slot: slot.toString(),
-        hash: toHex(blockHeaderHash)
+        hash: toHex(blockHeaderHash),
     });
 
-    return ({   
+    return ({
         slot,
         blockHeaderHash,
         era: blockHeaderBodyEra,
         multiEraHeader,
         epoch: Number(headerEpoch),
     });
-};
-
+}
 
 /** Multi Era Block Parser */
 export async function blockParser(
     newBlock: BlockFetchNoBlocks | BlockFetchBlock,
-)
-{
-    if (!(
-        newBlock instanceof BlockFetchBlock
-    )) return;
+) {
+    if (
+        !(
+            newBlock instanceof BlockFetchBlock
+        )
+    ) return;
 
     const lazyBlock = Cbor.parseLazy(newBlock.blockData);
-    if (!(
-        lazyBlock instanceof LazyCborArray
-    )) {
+    if (
+        !(
+            lazyBlock instanceof LazyCborArray
+        )
+    ) {
         logger.error("Invalid CBOR for block: not LazyCborArray");
         throw new Error("invalid CBOR for block");
     }
-    
+
     const newMultiEraBlock = MultiEraBlock.fromCbor(newBlock.blockData);
 
     logger.debug("Parsed block successfully", {
         era: newMultiEraBlock.era,
-        slot: newMultiEraBlock.block.header.body.slot.toString()
+        slot: newMultiEraBlock.block.header.body.slot.toString(),
     });
 
     return newMultiEraBlock;
-};
+}
 
 //** Calculating block_body_hash **//
 /**
-     
+
      * The block_body_hash is not a simple blake2b_256 hash of the entire serialized block body.
      * Instead, it is a Merkle root-like hash (often referred to as a "Merkle triple root" or quadruple root, depending on the era) of the key components of the block body.
      * This design allows for efficient verification of the block's contents (transactions, witnesses, metadata, etc.) without re-serializing the entire body,

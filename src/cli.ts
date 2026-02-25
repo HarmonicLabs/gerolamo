@@ -1,8 +1,15 @@
 import { program } from "commander";
 import { initNewEpochState } from "./state/ledger";
 import { importFromBlockfrost } from "./state";
-import { DB } from "./db/DB";
-import { Database } from "bun:sqlite";
+import { ensureInitialized } from "./db";
+
+import { start } from "./network";
+
+import { Logger, LogLevel } from "./utils/logger";
+import { parse, resolve } from "node:path";
+import { readdir } from "node:fs/promises";
+
+import { processChunk, loadLedgerStateFromAncilliary } from "./state";
 
 export async function getCbor(dbPath: string, snapshotRoot: string) {
     // TODO: Implement Mithril snapshot import
@@ -29,7 +36,7 @@ export function Main() {
         )
         .option(
             "--custom-backend <url>",
-            "Custom Blockfrost backend URL"
+            "Custom Blockfrost backend URL",
             // no default hard-coded URL; use config.blockfrostUrl or explicit arg
         )
         .option(
@@ -53,10 +60,9 @@ export function Main() {
                 count?: number;
             },
         ) => {
-            const db = new DB(options.dbPath);
-            await db.ensureInitialized();
+            await ensureInitialized();
             await initNewEpochState();
-            await importFromBlockfrost(db as unknown as Database, blockHash, options);
+            await importFromBlockfrost(blockHash, options);
         });
 
     program
@@ -64,10 +70,45 @@ export function Main() {
         .description(
             "Start the gerolamo node based on config.json settings",
         )
-        .action(async () => {
-            import ("./start").then(() => {
-                // Node started
-            });
+        .action(start);
+
+    program
+        .command("read-raw-chunks")
+        .description(
+            "Read and optionally output raw blocks from Cardano immutable chunk files",
+        )
+        .argument(
+            "<immutable_dir>",
+            "Directory containing the .primary, .secondary, .chunk files",
+        )
+        .action(
+            async (
+                immutableDir: string,
+            ) => {
+                await ensureInitialized();
+                const dir = resolve(immutableDir);
+
+                const logger = new Logger({ logLevel: LogLevel.INFO });
+                const maxChunkNo = Math.max(
+                    ...(await readdir(dir)).map((v) => parseInt(parse(v).name))
+                );
+
+                for (let chunkNo = 0; chunkNo <= maxChunkNo; chunkNo++) {
+                    await processChunk(dir, chunkNo, logger);
+                }
+            },
+        );
+
+    program
+        .command("load-ancillary")
+        .description("Load ledger state from ancillary LMDB database")
+        .argument(
+            "<ledger_path>",
+            "Path to the ledger directory (e.g., ./db/ledger)",
+        )
+        .action(async (ledgerPath: string) => {
+            await ensureInitialized();
+            await loadLedgerStateFromAncilliary(ledgerPath);
         });
 
     program.parse(process.argv);

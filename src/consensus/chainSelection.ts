@@ -21,7 +21,7 @@ export interface ChainCandidate {
  */
 export interface ChainComparison {
     /** Which chain is preferred */
-    preferred: 'current' | 'candidate';
+    preferred: "current" | "candidate";
     /** Intersection point between chains (block number) */
     intersectionBlock: number;
     /** Distance from current tip to intersection (in blocks) */
@@ -31,7 +31,7 @@ export interface ChainComparison {
 /**
  * Chain selection mode - only Praos supported
  */
-export type ChainSelectionMode = 'praos';
+export type ChainSelectionMode = "praos";
 
 /**
  * Calculate intersection point between current chain and candidate chain
@@ -47,7 +47,9 @@ export async function findIntersection(
 
     if (currentSlots.length === 0) {
         // No current chain, intersection at genesis
-        chainLogger.info("No current chain blocks in DB; intersection at genesis");
+        chainLogger.info(
+            "No current chain blocks in DB; intersection at genesis",
+        );
 
         return { intersectionBlock: 0, rollbackDistance: 0 };
     }
@@ -78,14 +80,16 @@ export async function findIntersection(
         candidateSlot,
         intersectionIndex,
         rollbackDistance,
-        currentBlockCount
+        currentBlockCount,
     });
 
-    chainLogger.rollback(`findIntersection: candidate slot ${candidateSlot}, intersection at block ${intersectionIndex} (rollback distance ${rollbackDistance})`);
+    chainLogger.rollback(
+        `findIntersection: candidate slot ${candidateSlot}, intersection at block ${intersectionIndex} (rollback distance ${rollbackDistance})`,
+    );
 
     return {
         intersectionBlock: intersectionIndex,
-        rollbackDistance
+        rollbackDistance,
     };
 }
 
@@ -101,7 +105,7 @@ export async function compareChainsPraos(
     securityParamK: number = 2160,
 ): Promise<ChainComparison> {
     const { intersectionBlock, rollbackDistance } = await findIntersection(
-        candidate
+        candidate,
     );
 
     // Check if intersection is within k blocks of current tip
@@ -110,11 +114,11 @@ export async function compareChainsPraos(
         chainLogger.debug("Candidate rejected: rollback distance exceeds k", {
             rollbackDistance,
             securityParamK,
-            intersectionBlock
+            intersectionBlock,
         });
 
         return {
-            preferred: 'current',
+            preferred: "current",
             intersectionBlock,
             rollbackDistance,
         };
@@ -123,7 +127,7 @@ export async function compareChainsPraos(
     // Check if candidate chain is longer
     if (candidate.blockNumber > currentTip.blockNumber) {
         return {
-            preferred: 'candidate',
+            preferred: "candidate",
             intersectionBlock,
             rollbackDistance,
         };
@@ -131,7 +135,7 @@ export async function compareChainsPraos(
 
     // Current chain is preferred (same length or longer with valid intersection)
     return {
-        preferred: 'current',
+        preferred: "current",
         intersectionBlock,
         rollbackDistance,
     };
@@ -142,9 +146,10 @@ export async function compareChainsPraos(
  */
 export async function selectBestChain(
     candidates: ChainCandidate[],
-    mode: ChainSelectionMode = 'praos',
     securityParamK: number = 2160,
-): Promise<{ candidate: ChainCandidate | null; comparison: ChainComparison | null }> {
+): Promise<
+    { candidate: ChainCandidate | null; comparison: ChainComparison | null }
+> {
     if (candidates.length === 0) return { candidate: null, comparison: null };
 
     // Get current chain tip
@@ -153,52 +158,81 @@ export async function selectBestChain(
     `.values() as number[];
 
     const currentBlockCount = currentSlots.length;
-    const currentTipSlot = currentSlots.length > 0 ? currentSlots[currentSlots.length - 1] as number : 0;
+    const currentTipSlot = currentSlots.length > 0
+        ? currentSlots[currentSlots.length - 1] as number
+        : 0;
 
     const currentTip = {
         blockNumber: currentBlockCount,
-        slotNumber: BigInt(currentTipSlot)
+        slotNumber: BigInt(currentTipSlot),
     };
 
     chainLogger.info("Starting chain selection", {
         numCandidates: candidates.length,
         currentTip: {
             blockNumber: currentTip.blockNumber,
-            slotNumber: currentTip.slotNumber.toString()
-        }
+            slotNumber: currentTip.slotNumber.toString(),
+        },
     });
 
-    chainLogger.rollback(`selectBestChain start: ${candidates.length} candidates, current tip blocks=${currentTip.blockNumber} slot=${currentTip.slotNumber}`);
+    chainLogger.rollback(
+        `selectBestChain start: ${candidates.length} candidates, current tip blocks=${currentTip.blockNumber} slot=${currentTip.slotNumber}`,
+    );
 
     chainLogger.debug("Current chain tip determined from DB", {
         blockNumber: currentTip.blockNumber,
         slotNumber: currentTip.slotNumber.toString(),
-        dbBlockCount: currentSlots.length
+        dbBlockCount: currentSlots.length,
     });
 
     let bestCandidate: ChainCandidate | null = null;
     let bestComparison: ChainComparison | null = null;
 
     for (const candidate of candidates) {
-        const comparison = await compareChainsPraos(currentTip, candidate, securityParamK);
+        const comparison = await compareChainsPraos(
+            currentTip,
+            candidate,
+            securityParamK,
+        );
 
-        chainLogger.debug(`Candidate evaluation: preferred=${comparison.preferred}`, {
-            candidateSlot: candidate.slotNumber.toString(),
-            candidateBlockNumber: candidate.blockNumber,
-            rollbackDistance: comparison.rollbackDistance
-        });
+        chainLogger.debug(
+            `Candidate evaluation: preferred=${comparison.preferred}`,
+            {
+                candidateSlot: candidate.slotNumber.toString(),
+                candidateBlockNumber: candidate.blockNumber,
+                rollbackDistance: comparison.rollbackDistance,
+            },
+        );
 
-        chainLogger.rollback(`Candidate ${candidate.slotNumber}: preferred=${comparison.preferred}, rollbackDistance=${comparison.rollbackDistance}`);
+        chainLogger.rollback(
+            `Candidate ${candidate.slotNumber}: preferred=${comparison.preferred}, rollbackDistance=${comparison.rollbackDistance}`,
+        );
 
-        if (comparison.preferred === 'candidate') {
+        if (comparison.preferred === "candidate") {
             bestCandidate = candidate;
             bestComparison = comparison;
         }
     }
 
-    chainLogger.info(`Chain selection complete: ${bestCandidate ? `candidate slot ${bestCandidate.slotNumber} (rollback ${bestComparison!.rollbackDistance})` : 'current chain preferred'}`);
+    chainLogger.info(
+        `Chain selection complete: ${
+            bestCandidate
+                ? `candidate slot ${bestCandidate.slotNumber} (rollback ${
+                    bestComparison!.rollbackDistance
+                })`
+                : "current chain preferred"
+        }`,
+    );
 
-    chainLogger.rollback(`selectBestChain complete: ${bestCandidate ? `prefer candidate slot ${bestCandidate.slotNumber.toString()} (rollback ${bestComparison!.rollbackDistance})` : 'current preferred'}`);
+    chainLogger.rollback(
+        `selectBestChain complete: ${
+            bestCandidate
+                ? `prefer candidate slot ${bestCandidate.slotNumber.toString()} (rollback ${
+                    bestComparison!.rollbackDistance
+                })`
+                : "current preferred"
+        }`,
+    );
 
     return { candidate: bestCandidate, comparison: bestComparison };
 }
@@ -209,23 +243,21 @@ export async function selectBestChain(
  */
 export async function evaluateChains(
     peerChains: ChainCandidate[],
-    mode: ChainSelectionMode = 'praos',
     securityParamK: number = 2160,
 ): Promise<{ chainCandidate: ChainCandidate; comparison: ChainComparison }> {
-    const result = await selectBestChain(peerChains, mode, securityParamK);
+    const result = await selectBestChain(peerChains, securityParamK);
 
     if (!result.candidate || !result.comparison) {
         chainLogger.warn("evaluateChains: no suitable candidate found", {
             numCandidates: peerChains.length,
-            mode,
-            securityParamK
+            securityParamK,
         });
 
-        throw new Error('No suitable chain candidate found for switching');
+        throw new Error("No suitable chain candidate found for switching");
     }
 
     return {
         chainCandidate: result.candidate,
-        comparison: result.comparison
+        comparison: result.comparison,
     };
 }

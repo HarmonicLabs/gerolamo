@@ -1,9 +1,6 @@
 // Blockfrost-related state management functions
 // This module provides main import functions for ledger state from Blockfrost API
-import { DB } from "../../db/DB";
-import { Database } from "bun:sqlite";
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { Buffer } from "node:buffer";
 import {
     fetchProtocolParameters,
     populateProtocolParams,
@@ -21,16 +18,15 @@ import { populateUTxOs } from "./utxos";
 import { populateNonMyopic } from "./non_myopic";
 import { populateLedgerState } from "./ledger_state";
 import { populateSnapshots } from "./snapshots";
-import { populateEpochState } from "./epoch_state";
+import { populateEpochStateTable } from "./epoch_state";
 import { populatePulsingRewUpdate } from "./pulsing_rew_update";
 import { populateStashedAvvmAddresses } from "./stashed_avvm_addresses";
 import { populateNewEpochState } from "./new_epoch_state";
 import { fetchBlockData } from "./block_data";
-import { GerolamoConfig } from "../../network/peerManagerWorkers/peerManagerWorker";
+import { GerolamoConfig } from "../../network/peerManager";
 
 // Main import function for ledger state from Blockfrost
 export async function importFromBlockfrost(
-    db: Database,
     blockHash: string,
     options?: {
         projectId?: string;
@@ -49,9 +45,12 @@ export async function importFromBlockfrost(
         apiConfig.projectId = options.projectId;
     } else {
         // Use custom backend (default)
-        apiConfig.customBackend = options?.customBackend || options?.config?.blockfrostUrl;
+        apiConfig.customBackend = options?.customBackend ||
+            options?.config?.blockfrostUrl;
         if (!apiConfig.customBackend) {
-            throw new Error("Blockfrost customBackend or config.blockfrostUrl required (no projectId provided)");
+            throw new Error(
+                "Blockfrost customBackend or config.blockfrostUrl required (no projectId provided)",
+            );
         }
     }
 
@@ -70,52 +69,55 @@ export async function importFromBlockfrost(
     // === POPULATE ALL NES COMPONENTS ===
 
     // 1. Protocol parameters
-    await populateProtocolParams(db, protocolParams);
+    await populateProtocolParams(protocolParams);
 
     // 2. Chain account state
-    await populateChainAccountState(db);
+    await populateChainAccountState();
 
     // 3. Pool distribution
-    await populatePoolDistribution(db, pools, totalActiveStake);
+    await populatePoolDistribution(pools, totalActiveStake);
 
     // 4. Blocks made data
-    const blocksMadePoolCount = await populateBlocksMade(db, api, currentEpoch);
+    const blocksMadePoolCount = await populateBlocksMade(api, currentEpoch);
 
     // 5. Stake distribution
-    await populateStakeDistribution(db, stakeDistribution);
+    await populateStakeDistribution(stakeDistribution);
 
     // 6. Delegations
-    await populateDelegations(db, stakeDistribution);
+    await populateDelegations(stakeDistribution);
 
     // 7. Rewards
     const { defaultShelleyProtocolParameters } = await import(
         "@harmoniclabs/cardano-ledger-ts"
     );
-    await populateRewards(db, stakeDistribution, defaultShelleyProtocolParameters);
+    await populateRewards(
+        stakeDistribution,
+        defaultShelleyProtocolParameters,
+    );
 
     // 8. Non-myopic data
-    await populateNonMyopic(db);
+    await populateNonMyopic();
 
     // 9. UTxO set
-    await populateUTxOs(db, api, stakeDistribution);
+    await populateUTxOs(api, stakeDistribution);
 
     // 10. Ledger state
-    await populateLedgerState(db);
+    await populateLedgerState();
 
     // 11. Snapshots
-    await populateSnapshots(db);
+    await populateSnapshots();
 
     // 12. Epoch state
-    await populateEpochState(db);
+    await populateEpochStateTable();
 
     // 13. Pulsing reward update
-    await populatePulsingRewUpdate(db);
+    await populatePulsingRewUpdate();
 
     // 14. Stashed AVVM addresses
-    await populateStashedAvvmAddresses(db);
+    await populateStashedAvvmAddresses();
 
     // 15. New epoch state
-    await populateNewEpochState(db, currentEpoch);
+    await populateNewEpochState(currentEpoch);
 
     console.log(`\n=== COMPLETE NES IMPORTED FOR EPOCH ${currentEpoch} ===`);
     console.log(`📦 Protocol parameters: ✓`);
@@ -123,7 +125,9 @@ export async function importFromBlockfrost(
     console.log(
         `🏊 Pool distribution: ✓ (${pools.length} pools, ${totalActiveStake} total stake)`,
     );
-    console.log(`🏗️  Blocks made: ✓ (${blocksMadePoolCount} pools produced blocks)`);
+    console.log(
+        `🏗️  Blocks made: ✓ (${blocksMadePoolCount} pools produced blocks)`,
+    );
     console.log(`💰 Stake distribution: ✓`);
     console.log(`🔗 Delegations: ✓`);
     console.log(`💸 Rewards: ✓`);
@@ -138,4 +142,29 @@ export async function importFromBlockfrost(
     console.log(`\n🎉 Blockfrost NES import completed successfully!\n`);
 }
 
-export { populateEpochState } from "./populateEpochState";
+// Blockfrost-related functionality (all populate functions and import)
+export {
+    fetchProtocolParameters,
+    populateProtocolParams,
+} from "./protocol_params";
+export {
+    fetchStakeDistribution,
+    populateDelegations,
+    populateStakeDistribution,
+} from "./stake_distribution";
+export {
+    fetchPools,
+    populatePoolDistribution,
+} from "./pool_distribution";
+export { populateBlocksMade } from "./blocks_made";
+export { populateChainAccountState } from "./chain_account_state";
+export { populateRewards } from "./rewards";
+export { populateUTxOs } from "./utxos";
+export { populateNonMyopic } from "./non_myopic";
+export { populateLedgerState } from "./ledger_state";
+export { populateSnapshots } from "./snapshots";
+export { populateEpochState, populateEpochStateTable } from "./epoch_state";
+export { populatePulsingRewUpdate } from "./pulsing_rew_update";
+export { populateStashedAvvmAddresses } from "./stashed_avvm_addresses";
+export { populateNewEpochState } from "./new_epoch_state";
+export { fetchAddresses, fetchBlockData } from "./block_data";

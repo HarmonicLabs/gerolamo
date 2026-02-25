@@ -1,15 +1,11 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { Database } from "bun:sqlite";
+import { sql } from "bun";
 
 export async function populatePoolDistribution(
-    db: Database,
     pools: any[],
     totalActiveStake: bigint,
 ) {
-    db.run(
-        `INSERT OR REPLACE INTO pool_distr (id, pools, total_active_stake) VALUES (?, ?, ?)`,
-        [1, JSON.stringify(pools), totalActiveStake]
-    );
+    await sql`INSERT OR REPLACE INTO pool_distr (id, pools, total_active_stake) VALUES (${1}, ${JSON.stringify(pools)}, ${totalActiveStake})`;
 }
 
 export async function fetchPools(api: BlockFrostAPI) {

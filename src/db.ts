@@ -7,6 +7,7 @@ import {
     ConwayTxBody,
     MaryTxBody,
     ShelleyBlock,
+    ShelleyTxBody,
 } from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
@@ -34,6 +35,7 @@ interface ImmutableChunk {
 }
 
 type TxBody =
+    | ShelleyTxBody
     | AllegraTxBody
     | MaryTxBody
     | AlonzoTxBody
@@ -380,23 +382,19 @@ export async function getBlocksInEpoch(epoch: number): Promise<any[]> {
 }
 
 export async function getMaxSlot(): Promise<bigint> {
-    logger.debug("Querying max slot from blocks");
     const result = await sql`SELECT MAX(slot) as max_slot FROM blocks`.values();
     const maxSlot = BigInt(result[0]?.max_slot ?? 0);
-    logger.debug("Max slot queried:", maxSlot.toString());
     return maxSlot;
 }
 
 export async function getValidHeadersBefore(
     cutoffSlot: bigint,
 ): Promise<any[]> {
-    logger.debug(`Querying valid headers before slot ${cutoffSlot}`);
     return await sql`SELECT * FROM volatile_headers WHERE slot < ${cutoffSlot} AND is_valid = TRUE ORDER BY slot ASC`
         .values();
 }
 
 export async function getValidBlocksBefore(cutoffSlot: bigint): Promise<any[]> {
-    logger.debug(`Querying valid blocks before slot ${cutoffSlot}`);
     return await sql`SELECT * FROM blocks WHERE slot < ${cutoffSlot} AND is_valid = TRUE ORDER BY slot ASC`
         .values();
 }
@@ -601,12 +599,7 @@ export async function getUtxosByRefs(
     utxoRefs: string[],
 ): Promise<Array<{ utxo_ref: string; amount: any }>> {
     if (utxoRefs.length === 0) return [];
-    logger.debug(`Querying ${utxoRefs.length} UTxOs by refs`);
-    const rows =
-        await sql`SELECT utxo_ref, json_extract(tx_out, '$.amount') as amount FROM utxo WHERE utxo_ref IN ${
-            sql(utxoRefs)
-        }`.values() as Array<{ utxo_ref: string; amount: any }>;
-    logger.debug(`Found ${rows.length} UTxOs`);
+    const rows = await sql`SELECT utxo_ref, json_extract(tx_out, '$.amount') as amount FROM utxo WHERE utxo_ref IN ${sql(utxoRefs)}`.values() as Array<{ utxo_ref: string; amount: any }>;
     return rows;
 }
 
@@ -629,7 +622,6 @@ export async function getUtxosByTxHash(
 export async function getAllStake(): Promise<
     Array<{ stake_credentials: Uint8Array; amount: number }>
 > {
-    logger.debug("Querying all stake");
     return await sql`SELECT stake_credentials, amount FROM stake`
         .values() as Array<{ stake_credentials: Uint8Array; amount: number }>;
 }
@@ -637,11 +629,8 @@ export async function getAllStake(): Promise<
 export async function getAllDelegations(): Promise<
     Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>
 > {
-    logger.debug("Querying all delegations");
     return await sql`SELECT stake_credentials, pool_key_hash FROM delegations`
-        .values() as Array<
-            { stake_credentials: Uint8Array; pool_key_hash: Uint8Array }
-        >;
+        .values() as Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>;
 }
 
 export async function applyTransaction(
@@ -649,7 +638,7 @@ export async function applyTransaction(
     blockHash: Uint8Array,
 ): Promise<void> {
     const txId = txBody.hash.toString(); // Canonical blake2b_256(txBody CBOR) hex from ledger-ts
-    logger.info("Applying transaction:", txId);
+
     if (!txBody.inputs || !Array.isArray(txBody.inputs)) {
         logger.warn(
             `Skipping tx ${txId} due to invalid inputs:`,
@@ -662,15 +651,21 @@ export async function applyTransaction(
         `${input.utxoRef.id.toString()}:${input.utxoRef.index}`
     );
 
+    logger.info(`Input refs: ${inputRefs.length} - ${inputRefs.slice(0, 3).join(', ')}`);
+
     if (inputRefs.length > 0) {
         const existingUtxos =
             await sql`SELECT tx_out FROM utxo WHERE utxo_ref IN ${
                 sql(inputRefs)
             }`.values() as [string][];
-        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
-            sql(existingUtxos.map(([tx_out]) => [blockHash, "spend", tx_out]))
-        }`;
-        await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
+        if (existingUtxos.length > 0) {
+            // Insert spend deltas individually (Uint8Array in bulk has issues)
+            for (const [tx_out] of existingUtxos) {
+                await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, "spend", ${tx_out})`;
+            }
+            // Delete spent UTxOs in bulk
+            await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
+        }
     }
 
     if (!txBody.outputs || !Array.isArray(txBody.outputs)) {
@@ -685,7 +680,6 @@ export async function applyTransaction(
     const outputData: [string, string, string][] = txBody.outputs.map(
         (output: any, i: number) => {
             const utxoRef = `${txId}:${i}`;
-            logger.debug(`Preparing output UTxO ${utxoRef}`);
             const assetsObj: Record<string, Record<string, string>> = {};
             const multiAssets = Array.isArray(output.value?.map)
                 ? output.value.map
@@ -710,12 +704,17 @@ export async function applyTransaction(
         },
     );
 
-    await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
-        sql(outputData.map(([_, json]) => [blockHash, "create", json]))
-    }`;
-    await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES ${
-        sql(outputData.map(([ref, json, txhash]) => [ref, json, txhash]))
-    }`;
+    if (outputData.length > 0) {
+        // Insert UTxO deltas in bulk
+        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
+            sql(outputData.map(([_, json]) => [blockHash, "create", json]))
+        }`;
+
+        // Insert UTxOs individually (bulk operations work for homogeneous string data, but individual is more reliable)
+        for (const [ref, json, txhash] of outputData) {
+            await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${ref}, ${json}, ${txhash})`;
+        }
+    }
 
     if (txBody.certs && Array.isArray(txBody.certs)) {
         await applyCertificates(txBody.certs, blockHash);
@@ -733,6 +732,9 @@ export async function applyTransaction(
     }
 
     // TODO: Handle minting, burning, collateral, etc.
+    if (txBody.certs) {
+        await applyCertificates(txBody.certs, blockHash);
+    }
 }
 
 export async function applyCertificates(

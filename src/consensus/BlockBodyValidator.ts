@@ -13,12 +13,12 @@ import {
     TxOut,
     Value,
 } from "@harmoniclabs/cardano-ledger-ts";
-// import { sql } from "bun";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
-import { getAllDelegations, getAllStake, getUtxosByRefs } from "../db";
+
+import { getUtxosByRefs, getAllStake, getAllDelegations } from "../db";
 
 let genesisCache: ShelleyGenesisConfig | null = null;
 
@@ -186,7 +186,7 @@ export class BlockBodyValidator {
         ).flat();
 
         // Query only the UTxOs that are inputs to this block with extracted amount
-        const utxoRows = await this.db.getUtxosByRefs(inputUtxoRefs);
+        const utxoRows = await getUtxosByRefs(inputUtxoRefs);
 
         // Create a lookup map for efficient access
         const utxoMap = new Map(
@@ -292,7 +292,7 @@ export class BlockBodyValidator {
         ).flat();
 
         // Query only the UTxOs that are inputs to this block with extracted amount
-        const utxoRows = await this.db.getUtxosByRefs(inputUtxoRefs);
+        const utxoRows = await getUtxosByRefs(inputUtxoRefs);
 
         // Create a lookup map for efficient access
         const utxoMap = new Map(
@@ -421,7 +421,7 @@ export class BlockBodyValidator {
         }
 
         // Query only the collateral UTxOs with extracted amount
-        const utxoRows = await this.db.getUtxosByRefs(collateralUtxoRefs);
+        const utxoRows = await getUtxosByRefs(collateralUtxoRefs);
 
         // Create a lookup map for efficient access
         const utxoMap = new Map(
@@ -483,8 +483,8 @@ export class BlockBodyValidator {
         block: CardanoBlock,
     ): Promise<boolean> {
         // Query current stake distribution and delegations
-        const stakeRows = await this.db.getAllStake();
-        const delegationRows = await this.db.getAllDelegations();
+        const stakeRows = await getAllStake();
+        const delegationRows = await getAllDelegations();
 
         // Create lookup maps with string keys for reliable comparison
         const getKey = (cred: Uint8Array | string) =>

@@ -61,19 +61,14 @@ export class ConsensusOrchestrator {
     private batchBlockRecords: Map<string, BlockInsertData> = new Map();
     private batchHeaderRecords: Map<string, HeaderInsertData> = new Map();
     private volatileDbGcCounter = 0;
-    private lastActivity: number = Date.now();
-    private stalledCallback?: () => void;
-
     private epochNonceCache: Map<number, string> = new Map();
 
     constructor(
         config: GerolamoConfig,
         peers: PeerAccessor,
-        onStalled?: () => void,
     ) {
         this.config = config;
         this.peers = peers;
-        this.stalledCallback = onStalled;
         // setInterval(() => {
         // 	if (Date.now() - this.lastActivity > 300000) { // 5 minutes
         // 		logger.warn("Sync stalled, no rollForward for 5 minutes");
@@ -113,7 +108,6 @@ export class ConsensusOrchestrator {
         peerId: string,
         tip: bigint,
     ): Promise<void> {
-        this.lastActivity = Date.now();
         logger.debug(`Processing rollForward message from peer ${peerId}...`);
         try {
             const peer = this.peers.getPeer(peerId);
@@ -193,7 +187,6 @@ export class ConsensusOrchestrator {
 
             const era = multiEraBlock.era;
             const blockHeader = multiEraBlock.block.header;
-            const blockData = multiEraBlock.block.toCborBytes();
             const blockSlot = Number(blockHeader.body.slot);
             const blockEpoch = calculatePreProdCardanoEpoch(Number(blockSlot));
             const blockHeaderHash = blake2b_256(blockHeader.toCborBytes());
@@ -212,7 +205,6 @@ export class ConsensusOrchestrator {
             const blockHash = toHex(blockHeaderHash);
 
             await applyBlock(
-                this.db,
                 multiEraBlock.block as MultiEraBlock["block"],
                 BigInt(blockSlot),
                 blockHeaderHash,
@@ -297,8 +289,6 @@ export class ConsensusOrchestrator {
             if (candidate) {
                 const evalResult = await evaluateChains(
                     [candidate],
-                    "praos",
-                    2160,
                 );
                 const comparison = evalResult.comparison;
                 logger.rollback(

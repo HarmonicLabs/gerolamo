@@ -146,7 +146,6 @@ export async function compareChainsPraos(
  */
 export async function selectBestChain(
     candidates: ChainCandidate[],
-    mode: ChainSelectionMode = "praos",
     securityParamK: number = 2160,
 ): Promise<
     { candidate: ChainCandidate | null; comparison: ChainComparison | null }
@@ -244,15 +243,13 @@ export async function selectBestChain(
  */
 export async function evaluateChains(
     peerChains: ChainCandidate[],
-    mode: ChainSelectionMode = "praos",
     securityParamK: number = 2160,
 ): Promise<{ chainCandidate: ChainCandidate; comparison: ChainComparison }> {
-    const result = await selectBestChain(peerChains, mode, securityParamK);
+    const result = await selectBestChain(peerChains, securityParamK);
 
     if (!result.candidate || !result.comparison) {
         chainLogger.warn("evaluateChains: no suitable candidate found", {
             numCandidates: peerChains.length,
-            mode,
             securityParamK,
         });
 

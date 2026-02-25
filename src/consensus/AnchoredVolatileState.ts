@@ -50,7 +50,7 @@ export async function getVolatileState(
 
     logger.debug("Queried volatile state", {
         anchorSlot: point.slot.toString(),
-        anchorHash: toHex(point.hash.bytes),
+        anchorHash: toHex(point.hash.toBuffer()),
         utxoCount,
         totalFees: totalFees.toString(),
         recentBlocks,
@@ -109,7 +109,7 @@ export interface VolatileState {
 // Rollback a block from volatile state (for chain reorganization)
 export async function rollbackBlock(blockHash: Hash32): Promise<void> {
     logger.warn("Rolling back volatile block", {
-        hash: toHex(blockHash.bytes),
+        hash: toHex(blockHash.toBuffer()),
     });
 
     // Find the block to rollback
@@ -153,7 +153,7 @@ export async function addBlockToVolatile(
 
     logger.debug("Added block to volatile", {
         slot: slot.toString(),
-        hash: toHex(blockHash.bytes),
+        hash: toHex(blockHash.toBuffer()),
     });
 }
 

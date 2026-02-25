@@ -1,8 +1,5 @@
-import { Database } from "bun:sqlite";
+import { sql } from "bun";
 
-export async function populateChainAccountState(db: Database) {
-    db.run(
-        `INSERT OR REPLACE INTO chain_account_state (id, treasury, reserves) VALUES (?, ?, ?)`,
-        [1, 0, 0],
-    );
+export async function populateChainAccountState() {
+    await sql`INSERT OR REPLACE INTO chain_account_state (id, treasury, reserves) VALUES (${1}, ${0}, ${0})`;
 }

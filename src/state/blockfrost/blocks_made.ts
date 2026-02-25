@@ -1,8 +1,7 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { Database } from "bun:sqlite";
+import { sql } from "bun";
 
 export async function populateBlocksMade(
-    db: Database,
     api: BlockFrostAPI,
     currentEpoch: number,
 ) {
@@ -30,13 +29,8 @@ export async function populateBlocksMade(
     console.log(`Aggregated block production for ${blocksByPool.size} pools`);
 
     if (blocksByPool.size > 0) {
-        const stmt = db.prepare(`
-            INSERT OR REPLACE INTO blocks_made (pool_key_hash, epoch, block_count, status)
-            VALUES (?, ?, ?, ?)
-        `);
-        for (const [poolId, count] of blocksByPool.entries()) {
-            stmt.run(poolId, currentEpoch, count, "CURR");
-        }
+        const data = Array.from(blocksByPool.entries()).map(([poolId, count]) => [poolId, currentEpoch, count, "CURR"]);
+        await sql`INSERT OR REPLACE INTO blocks_made (pool_key_hash, epoch, block_count, status) VALUES ${sql(data)}`;
         console.log(
             `Inserted ${blocksByPool.size} pool block production records`,
         );

@@ -1,8 +1,7 @@
 import { stdout } from "process";
 import { stdin, stdout as stdOut } from "process"; // rename to avoid conflict
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import { logger } from "../utils/logger";
-import * as path from "path";
+import { logger } from "./utils/logger";
 
 let startTime: number | null = null;
 let isFirstRender = true;

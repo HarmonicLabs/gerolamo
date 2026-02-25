@@ -1,36 +1,17 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { Database } from "bun:sqlite";
+import { sql } from "bun";
 
 export async function populateStakeDistribution(
-    db: Database,
     stakeDistribution: any[],
 ) {
-    if (stakeDistribution.length > 0) {
-        const stmt = db.prepare(`
-            INSERT OR REPLACE INTO stake (stake_credentials, amount)
-            VALUES (?, ?)
-        `);
-        for (const stake of stakeDistribution) {
-            stmt.run(stake.stake_address, stake.amount);
-        }
-    }
+    await sql`INSERT OR REPLACE INTO stake (stake_credentials, amount) VALUES ${sql(stakeDistribution.map(stake => [stake.stake_address, stake.amount]))}`;
 }
 
 export async function populateDelegations(
-    db: Database,
     stakeDistribution: any[],
 ) {
-    if (stakeDistribution.length > 0) {
-        const stmt = db.prepare(`
-            INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash)
-            VALUES (?, ?)
-        `);
-        for (const stake of stakeDistribution) {
-            if (stake.pool_id.trim() !== "") {
-                stmt.run(stake.stake_address, stake.pool_id);
-            }
-        }
-    }
+    const delegations = stakeDistribution.filter(stake => stake.pool_id.trim() !== "").map(stake => [stake.stake_address, stake.pool_id]);
+    await sql`INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash) VALUES ${sql(delegations)}`;
 }
 
 export async function fetchStakeDistribution(

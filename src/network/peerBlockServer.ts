@@ -1,16 +1,15 @@
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import { getBasePath } from "../../utils/paths";
-import { DB } from "../db";
-import { logger } from "../../utils/logger";
+import { getBasePath } from "../utils/paths";
+import { getUtxosByTxHash, getUtxoByRef, getBlockBySlot, getBlockByHash } from "../db";
+import { logger } from "../utils/logger";
 
-import type { GerolamoConfig } from "../peerManager";
+import type { GerolamoConfig } from "./peerManager";
 
 export async function startPeerBlockServer(
     config: GerolamoConfig,
     manager: any,
 ) {
     const BASE_PATH = getBasePath();
-    const dbInstance = new DB(config.dbPath);
 
     interface BlockRow {
         block_fetch_RawCbor?: Uint8Array;
@@ -70,7 +69,7 @@ export async function startPeerBlockServer(
                 if (parts.length === 1) {
                     // txhash only: all outputs
                     const txHash = parts[0];
-                    const utxos = await dbInstance.getUtxosByTxHash(txHash);
+                    const utxos = await getUtxosByTxHash(txHash);
                     if (utxos.length === 0) {
                         return new Response("No UTXOs found for tx hash", {
                             status: 404,
@@ -92,7 +91,7 @@ export async function startPeerBlockServer(
                             status: 400,
                         });
                     }
-                    const utxo = await dbInstance.getUtxoByRef(ref);
+                    const utxo = await getUtxoByRef(ref);
                     if (!utxo) {
                         return new Response("UTXO not found", { status: 404 });
                     }
@@ -114,13 +113,13 @@ export async function startPeerBlockServer(
                 );
             }
             const id = decodeURIComponent(url.pathname.slice(7));
-            let row: BlockRow | null;
+            let row: any;
 
             if (/^\d+n?$/.test(id)) {
                 const slot = BigInt(id.replace("n", ""));
-                row = dbInstance.getBlockBySlot(slot) ?? null;
+                row = getBlockBySlot(slot) ?? null;
             } else {
-                row = dbInstance.getBlockByHash(id) ?? null;
+                row = getBlockByHash(id) ?? null;
             }
 
             if (!row?.block_fetch_RawCbor) {

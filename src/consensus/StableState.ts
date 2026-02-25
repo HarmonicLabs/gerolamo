@@ -156,7 +156,7 @@ export async function transitionToStable(
     logger.info("Advanced stable state", {
         blocksCount: newBlockCount,
         immutableTipSlot: newTip.slot.toString(),
-        immutableTipHash: toHex(newTip.hash.bytes),
+        immutableTipHash: toHex(newTip.hash.toBuffer()),
     });
 }
 
@@ -312,7 +312,7 @@ export async function appendBlock(
 
     logger.info("Appended block to immutable", {
         slot: block.slot.toString(),
-        hash: toHex(block.hash.bytes),
+        hash: toHex(block.hash.toBuffer()),
     });
 }
 

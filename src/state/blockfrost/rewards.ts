@@ -1,8 +1,6 @@
-import { Database } from "bun:sqlite";
 import { sql } from "bun";
 
 export async function populateRewards(
-    db: Database,
     stakeDistribution: any[],
     protocolParams: any,
 ) {
@@ -64,16 +62,5 @@ export async function populateRewards(
             };
         });
 
-    console.log(`Calculated rewards for ${rewards.length} stake addresses`);
-
-    if (rewards.length > 0) {
-        const stmt = db.prepare(`
-            INSERT OR REPLACE INTO rewards (stake_credentials, amount)
-            VALUES (?, ?)
-        `);
-        for (const reward of rewards) {
-            stmt.run(reward.stake_credentials, reward.amount);
-        }
-        console.log(`Inserted ${rewards.length} reward entries`);
-    }
+    await sql`INSERT OR REPLACE INTO rewards (stake_credentials, amount) VALUES ${sql(rewards.map(reward => [reward.stake_credentials, reward.amount]))}`;
 }

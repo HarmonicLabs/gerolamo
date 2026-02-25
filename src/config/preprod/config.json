@@ -1,43 +1,27 @@
 {
-    "byronGenesisFile": "./src/config/preprod/byron-genesis.json",
-    "byronGenesisHash": "d4b8de7a11d929a323373cbab6c1a9bdc931beffff11db111cf9d57356ee1937",
-    "shelleyGenesisFile": "./src/config/preprod/shelley-genesis.json",
-    "shelleyGenesisHash": "162d29c4e1cf6b8a84f2d692e67a3ac6bc7851bc3e6e4afe64d15778bed8bd86",
-    "alonzoGenesisFile": "./src/config/preprod/alonzo-genesis.json",
-    "alonzoGenesisHash": "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
-    "conwayGenesisFile": "./src/config/preprod/conway-genesis.json",
-    "conwayGenesisHash": "0eb6adaec3fcb1fe286c1b4ae0da2a117eafc3add51e17577d36dd39eddfc3db",
-    "p2p": "enabled",
-    "topologyFile": "./src/config/preprod/topology.json",
-    "syncFromTip": true,
-    "syncFromPoint": false,
-    "syncFromPointSlot": 3542390,
-    "syncFromPointBlockHash": "f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f",
-    "host": "0.0.0.0",
-    "port": 3030,
-    "unixSocket": false,
-    "network": "preprod",
-    "networkMagic": 1,
-    "blockfrostUrl": "https://blockfrost-preprod.onchainapps.io/",
-    "dbPath": "./src/store/db/preprod/Gerolamo.db",
-    "tuiEnabled": true,
-    "logs": {
-        "logToFile": true,
-        "logToConsole": false,
-        "logDirectory": "./src/store/logs/preprod/",
-        "logLevel": "DEBUG",
-        "bufferedLevels": ["debug", "info", "rollback"],
-        "batchSize": 50,
-        "flushDelayMs": 1000
-    },
-    "snapshot": {
-        "enable": false,
-        "source": "blockfrost",
-        "fromEpoch": 11
-    },
-    "mempool": {
-        "enabled": true,
-        "maxSize": 262144,
-        "txExpirySeconds": 3600
-    }
+  "network": "testnet",
+  "networkMagic": 1,
+  "topologyFile": "./src/config/preprod/topology.json",
+  "syncFromTip": true,
+  "syncFromGenesis": false,
+  "genesisBlockHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "syncFromPoint": false,
+  "syncFromPointSlot": "0",
+  "syncFromPointBlockHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "logLevel": "info",
+  "shelleyGenesisFile": "./src/config/preprod/shelley-genesis.json",
+  "dbPath": "./ledger/gerolamo.db",
+  "port": 3001,
+  "unixSocket": false,
+  "logs": {
+    "logToFile": false,
+    "logToConsole": true,
+    "logDirectory": "./logs"
+  },
+  "snapshot": {
+    "enable": false,
+    "source": "blockfrost"
+  },
+  "tuiEnabled": false,
+  "blockfrostUrl": "https://cardano-preprod.blockfrost.io/api/v0"
 }

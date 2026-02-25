@@ -1,16 +1,14 @@
-import { logger } from "../../utils/logger";
+import { logger } from "../utils/logger";
 import {
     adaptLegacyTopology,
     isLegacyTopology,
     isTopology,
     type Topology,
 } from "./topology";
-import type { ShelleyGenesisConfig } from "../../types/ShelleyGenesisTypes";
+import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import type { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
-import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
-import { GlobalSharedMempool } from "../SharedMempool";
-import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { GlobalSharedMempool } from "./SharedMempool";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
@@ -42,40 +40,28 @@ export interface GerolamoConfig {
     allPeers: Map<string, PeerClient>;
 }
 
-// export interface IPeerManager {
-//     allPeers: Map<string, PeerClient>;
-//     hotPeers: PeerClient[];
-//     warmPeers: PeerClient[];
-//     coldPeers: PeerClient[];
-//     newPeers: PeerClient[];
-//     bootstrapPeers: PeerClient[];
-//     config: GerolamoConfig;
-//     topology: Topology;
-//     shelleyGenesisConfig: ShelleyGenesisConfig;
-// };
+let topology: Topology;
+let shelleyGenesisConfig: ShelleyGenesisConfig;
+let allPeers = new Map<string, PeerClient>();
+let hotPeers: PeerClient[] = [];
+let warmPeers: PeerClient[] = [];
+let coldPeers: PeerClient[] = [];
+let bootstrapPeers: PeerClient[] = [];
+let newPeers: PeerClient[] = [];
+let monitorInterval: NodeJS.Timeout;
 
 export async function initPeerManager(config: GerolamoConfig): Promise<void> {
-    let topology: Topology;
-    let shelleyGenesisConfig: ShelleyGenesisConfig;
-    let allPeers = new Map<string, PeerClient>();
-    let hotPeers: PeerClient[] = [];
-    let warmPeers: PeerClient[] = [];
-    let coldPeers: PeerClient[] = [];
-    let bootstrapPeers: PeerClient[] = [];
-    let newPeers: PeerClient[] = [];
-    let monitorInterval: NodeJS.Timeout;
-
     logger.setLogConfig(config.logs);
     if (config.tuiEnabled) {
         logger.setLogConfig({ logToConsole: false });
     }
-    // Inline parseTopology functionality
+    // Load topology using Bun.file (since dynamic imports don't work for JSON files)
     const topoFile = Bun.file(config.topologyFile);
     if (!(await topoFile.exists())) {
         throw new Error("missing topology file at " + config.topologyFile);
     }
 
-    let parsedTopology = JSON.parse(await topoFile.text());
+    let parsedTopology = await topoFile.json();
 
     parsedTopology = isLegacyTopology(parsedTopology)
         ? adaptLegacyTopology(parsedTopology)
@@ -86,7 +72,12 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
     }
 
     topology = parsedTopology;
+
+    // Load Shelley genesis using Bun.file
     const shelleyGenesisFile = Bun.file(config.shelleyGenesisFile);
+    if (!(await shelleyGenesisFile.exists())) {
+        throw new Error("missing Shelley genesis file at " + config.shelleyGenesisFile);
+    }
     shelleyGenesisConfig = await shelleyGenesisFile.json();
     GlobalSharedMempool.getInstance();
     logger.mempool("Global SharedMempool initialized in PeerManager");

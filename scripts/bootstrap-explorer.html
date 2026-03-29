@@ -5,556 +5,814 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Gerolamo — Mithril Bootstrap Explorer</title>
 <style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
   :root {
-    --bg: #0d1117;
-    --surface: #161b22;
-    --border: #30363d;
-    --text: #e6edf3;
-    --text-dim: #8b949e;
-    --harmonic-red: #e05252;
-    --cardano-blue: #3cc8c8;
-    --accent: #58a6ff;
-    --green: #3fb950;
-    --yellow: #d29922;
+    --bg: #06080c;
+    --bg-elevated: #0c1018;
+    --surface: #111820;
+    --surface-hover: #161e2a;
+    --surface-active: #1a2434;
+    --border: #1e2a38;
+    --border-subtle: #172030;
+    --text: #e4eaf0;
+    --text-secondary: #8899aa;
+    --text-muted: #4a5a6a;
+    --brand-red: #ff4d5e;
+    --brand-red-glow: rgba(255, 77, 94, 0.08);
+    --brand-cyan: #00dcc6;
+    --brand-cyan-glow: rgba(0, 220, 198, 0.08);
+    --brand-cyan-strong: rgba(0, 220, 198, 0.15);
+    --blue: #4d9eff;
+    --blue-glow: rgba(77, 158, 255, 0.08);
+    --green: #34d399;
+    --green-glow: rgba(52, 211, 153, 0.10);
+    --amber: #fbbf24;
+    --amber-glow: rgba(251, 191, 36, 0.08);
+    --danger: #f87171;
+    --radius: 10px;
+    --radius-sm: 6px;
+    --radius-xs: 4px;
+    --shadow: 0 1px 3px rgba(0,0,0,0.3), 0 4px 12px rgba(0,0,0,0.2);
+    --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+    --font-mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
   }
+
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; overflow: hidden; }
+
   body {
     background: var(--bg);
     color: var(--text);
-    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
+    font-family: var(--font-sans);
     font-size: 13px;
     line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
   }
-  header {
-    padding: 16px 24px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    align-items: center;
-    gap: 16px;
-  }
-  header h1 {
-    font-size: 16px;
-    font-weight: 600;
-    color: var(--harmonic-red);
-  }
-  header h1 span { color: var(--cardano-blue); }
-  header .subtitle { color: var(--text-dim); font-size: 12px; }
 
-  .controls {
-    padding: 16px 24px;
-    border-bottom: 1px solid var(--border);
-    display: flex;
-    gap: 12px;
-    align-items: center;
-    flex-wrap: wrap;
+  .app {
+    display: grid;
+    grid-template-rows: auto auto auto auto 1fr auto;
+    height: 100vh;
   }
-  .controls label { color: var(--text-dim); font-size: 12px; }
-  .controls input, .controls select {
+
+  /* ═══ Header ═══ */
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 24px;
+    height: 52px;
+    background: var(--bg-elevated);
+    border-bottom: 1px solid var(--border);
+  }
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+  .logo-mark {
+    width: 30px; height: 30px;
+    border-radius: 8px;
+    background: linear-gradient(135deg, var(--brand-red) 0%, #c03090 50%, var(--brand-cyan) 100%);
+    display: grid;
+    place-items: center;
+    font-family: var(--font-mono);
+    font-weight: 700;
+    font-size: 15px;
+    color: #fff;
+    letter-spacing: -0.5px;
+    box-shadow: 0 0 20px rgba(255, 77, 94, 0.15), 0 0 20px rgba(0, 220, 198, 0.15);
+  }
+  .header-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+  }
+  .header-title .dim { color: var(--text-muted); font-weight: 400; }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .tag {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    letter-spacing: 0.5px;
+    padding: 4px 10px;
+    border-radius: var(--radius-xs);
+    text-transform: uppercase;
+  }
+  .tag-cyan { background: var(--brand-cyan-glow); color: var(--brand-cyan); border: 1px solid rgba(0,220,198,0.12); }
+  .tag-red { background: var(--brand-red-glow); color: var(--brand-red); border: 1px solid rgba(255,77,94,0.12); }
+
+  /* ═══ Toolbar ═══ */
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 10px 24px;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+  .field {
+    display: flex;
+    align-items: center;
+    height: 34px;
     background: var(--surface);
     border: 1px solid var(--border);
-    color: var(--text);
-    padding: 6px 10px;
-    border-radius: 6px;
-    font-family: inherit;
-    font-size: 12px;
-    width: 100px;
+    border-radius: var(--radius-sm);
+    transition: border-color 0.15s, box-shadow 0.15s;
   }
-  .controls input:focus, .controls select:focus {
-    outline: none;
-    border-color: var(--accent);
+  .field:focus-within {
+    border-color: var(--brand-cyan);
+    box-shadow: 0 0 0 3px var(--brand-cyan-glow);
   }
-  button {
-    background: var(--accent);
-    color: #000;
+  .field-label {
+    padding: 0 10px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--text-muted);
+    white-space: nowrap;
+    user-select: none;
+    border-right: 1px solid var(--border);
+    height: 100%;
+    display: grid;
+    place-items: center;
+    background: var(--bg-elevated);
+    border-radius: var(--radius-sm) 0 0 var(--radius-sm);
+  }
+  .field input, .field select {
+    height: 100%;
     border: none;
-    padding: 6px 16px;
-    border-radius: 6px;
-    font-family: inherit;
+    outline: none;
+    background: transparent;
+    color: var(--text);
+    font-family: var(--font-mono);
+    font-size: 12px;
+    padding: 0 10px;
+  }
+  .field input { width: 72px; }
+  .field input.url { width: 190px; }
+  .field select { width: 140px; cursor: pointer; -webkit-appearance: none; }
+  .field select option { background: var(--surface); color: var(--text); }
+
+  .sep { width: 1px; height: 18px; background: var(--border); flex-shrink: 0; }
+
+  .btn {
+    height: 34px;
+    padding: 0 16px;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-family: var(--font-sans);
     font-size: 12px;
     font-weight: 600;
     cursor: pointer;
-    transition: opacity 0.15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    transition: all 0.1s;
+    white-space: nowrap;
+    letter-spacing: 0.2px;
   }
-  button:hover { opacity: 0.85; }
-  button:disabled { opacity: 0.4; cursor: not-allowed; }
-  button.stop { background: var(--harmonic-red); color: #fff; }
-  button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+  .btn:active { transform: scale(0.96); }
+  .btn:disabled { opacity: 0.3; cursor: default; pointer-events: none; }
+  .btn-stream {
+    background: var(--brand-cyan);
+    color: #06080c;
+    box-shadow: 0 0 16px rgba(0, 220, 198, 0.2);
+  }
+  .btn-stream:hover { background: #00ecd4; }
+  .btn-stop { background: var(--brand-red); color: #fff; box-shadow: 0 0 16px rgba(255,77,94,0.15); }
+  .btn-stop:hover { background: #ff6070; }
+  .btn-ghost {
+    background: var(--surface);
+    color: var(--text-secondary);
+    border: 1px solid var(--border);
+  }
+  .btn-ghost:hover { background: var(--surface-hover); color: var(--text); }
 
-  .stats-bar {
-    padding: 12px 24px;
+  /* ═══ Stats ═══ */
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(5, 1fr);
     border-bottom: 1px solid var(--border);
+  }
+  .stat {
+    padding: 12px 20px;
+    border-right: 1px solid var(--border-subtle);
     display: flex;
-    gap: 32px;
-    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
   }
-  .stat { display: flex; flex-direction: column; }
-  .stat .label { font-size: 11px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 0.5px; }
-  .stat .value { font-size: 18px; font-weight: 600; color: var(--cardano-blue); }
-  .stat .value.streaming { color: var(--green); }
-  .stat .value.error { color: var(--harmonic-red); }
+  .stat:last-child { border-right: none; }
+  .stat-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+  .stat-dot.cyan { background: var(--brand-cyan); box-shadow: 0 0 8px var(--brand-cyan); }
+  .stat-dot.green { background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .stat-dot.blue { background: var(--blue); box-shadow: 0 0 8px var(--blue); }
+  .stat-dot.amber { background: var(--amber); box-shadow: 0 0 8px var(--amber); }
+  .stat-dot.dim { background: var(--text-muted); }
+  .stat-text {}
+  .stat-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.8px;
+    color: var(--text-muted);
+  }
+  .stat-val {
+    font-family: var(--font-mono);
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--text);
+    margin-top: 1px;
+  }
+  .stat-val.live { color: var(--green); }
+  .stat-val.err { color: var(--danger); }
+  .stat-val.idle { color: var(--text-muted); }
 
-  .progress-bar-container {
-    padding: 0 24px;
-    padding-top: 8px;
-  }
+  /* ═══ Progress ═══ */
+
+  .progress { height: 2px; background: var(--border-subtle); }
   .progress-bar {
-    height: 3px;
-    background: var(--border);
-    border-radius: 2px;
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--brand-cyan), var(--blue));
+    transition: width 0.25s ease;
+    border-radius: 0 1px 1px 0;
+  }
+
+  /* ═══ Content ═══ */
+
+  .content {
+    display: grid;
+    grid-template-columns: 1fr 360px;
+    min-height: 0;
     overflow: hidden;
   }
-  .progress-bar .fill {
-    height: 100%;
-    background: linear-gradient(90deg, var(--cardano-blue), var(--accent));
-    transition: width 0.3s;
-    width: 0%;
-  }
 
-  .main-content {
-    display: grid;
-    grid-template-columns: 1fr 400px;
-    height: calc(100vh - 220px);
-  }
-  @media (max-width: 900px) {
-    .main-content { grid-template-columns: 1fr; }
-    .detail-panel { display: none; }
-  }
+  /* ─── Table ─── */
 
-  .table-container {
-    overflow: auto;
+  .tbl-wrap {
+    display: flex;
+    flex-direction: column;
     border-right: 1px solid var(--border);
+    min-height: 0;
   }
-  table {
-    width: 100%;
-    border-collapse: collapse;
+  .tbl-scroll {
+    flex: 1;
+    overflow-y: auto;
+    overflow-x: hidden;
   }
-  thead th {
-    position: sticky;
-    top: 0;
+  .tbl-scroll::-webkit-scrollbar { width: 6px; }
+  .tbl-scroll::-webkit-scrollbar-track { background: transparent; }
+  .tbl-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+  col.c-num { width: 54px; }
+  col.c-hash { }
+  col.c-idx { width: 52px; }
+  col.c-size { width: 72px; }
+
+  thead { position: sticky; top: 0; z-index: 2; }
+  th {
     background: var(--surface);
-    padding: 8px 12px;
-    text-align: left;
-    font-size: 11px;
-    color: var(--text-dim);
+    padding: 6px 14px;
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-muted);
     text-transform: uppercase;
-    letter-spacing: 0.5px;
+    letter-spacing: 0.7px;
+    text-align: left;
     border-bottom: 1px solid var(--border);
-    z-index: 1;
   }
-  tbody tr {
-    cursor: pointer;
-    transition: background 0.1s;
-  }
-  tbody tr:hover { background: rgba(88, 166, 255, 0.06); }
-  tbody tr.selected { background: rgba(88, 166, 255, 0.12); }
-  tbody td {
-    padding: 6px 12px;
-    border-bottom: 1px solid var(--border);
+  th.r { text-align: right; }
+
+  tbody tr { cursor: pointer; }
+  tbody tr:hover { background: var(--surface-hover); }
+  tbody tr.sel { background: var(--brand-cyan-glow); }
+
+  td {
+    padding: 4px 14px;
+    border-bottom: 1px solid var(--border-subtle);
     white-space: nowrap;
     overflow: hidden;
     text-overflow: ellipsis;
-    max-width: 300px;
-  }
-  .hash { color: var(--accent); }
-  .idx { color: var(--yellow); text-align: right; }
-  .size { color: var(--text-dim); text-align: right; }
-
-  .detail-panel {
-    padding: 16px;
-    overflow: auto;
-  }
-  .detail-panel h3 {
+    font-family: var(--font-mono);
     font-size: 12px;
-    color: var(--text-dim);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-    margin-bottom: 12px;
+    line-height: 1.7;
   }
-  .detail-field {
-    margin-bottom: 12px;
+  td.c-n { color: var(--text-muted); font-size: 11px; }
+  td.c-h { color: var(--blue); }
+  td.c-i { color: var(--amber); text-align: right; }
+  td.c-s { color: var(--text-muted); text-align: right; font-size: 11px; }
+  td.c-db { color: var(--text-secondary); }
+
+  .empty {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
+    padding: 60px 40px;
+    text-align: center;
   }
-  .detail-field .field-label {
-    font-size: 11px;
-    color: var(--text-dim);
+  .empty-ring {
+    width: 56px; height: 56px;
+    border-radius: 50%;
+    border: 2px solid var(--border);
+    display: grid;
+    place-items: center;
+    color: var(--text-muted);
+    font-size: 22px;
     margin-bottom: 4px;
   }
-  .detail-field .field-value {
+  .empty p { color: var(--text-muted); font-size: 13px; }
+  .empty .sub { color: var(--text-muted); font-size: 11px; opacity: 0.7; }
+
+  /* ─── Detail ─── */
+
+  .detail {
+    display: flex;
+    flex-direction: column;
+    background: var(--bg-elevated);
+    min-height: 0;
+    overflow: hidden;
+  }
+  .detail-top {
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-shrink: 0;
+  }
+  .detail-top h3 {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--text-muted);
+  }
+  .badge-idx {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--brand-cyan);
+    background: var(--brand-cyan-glow);
+    padding: 2px 8px;
+    border-radius: var(--radius-xs);
+    border: 1px solid rgba(0,220,198,0.1);
+  }
+  .detail-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 14px 18px;
+  }
+  .detail-body::-webkit-scrollbar { width: 6px; }
+  .detail-body::-webkit-scrollbar-track { background: transparent; }
+  .detail-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+  .d-field { margin-bottom: 16px; }
+  .d-label {
+    font-size: 10px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-muted);
+    margin-bottom: 6px;
+  }
+  .d-val {
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px 10px;
+    border-radius: var(--radius-sm);
+    padding: 10px 12px;
+    font-family: var(--font-mono);
     font-size: 12px;
+    line-height: 1.7;
     word-break: break-all;
     white-space: pre-wrap;
     max-height: 200px;
     overflow-y: auto;
     user-select: all;
   }
-  .detail-field .field-value.hash { color: var(--accent); }
+  .d-val::-webkit-scrollbar { width: 4px; }
+  .d-val::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .d-val.v-hash { color: var(--blue); }
+  .d-val.v-dim { font-size: 11px; color: var(--text-secondary); }
 
-  .log {
-    padding: 8px 24px;
-    border-top: 1px solid var(--border);
-    font-size: 11px;
-    color: var(--text-dim);
-    max-height: 60px;
-    overflow-y: auto;
+  .d-row { display: flex; gap: 10px; }
+  .d-row .d-field { flex: 1; min-width: 0; }
+
+  .cbor-chip {
+    display: inline-block;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: var(--radius-xs);
+    background: var(--blue-glow);
+    color: var(--blue);
+    border: 1px solid rgba(77,158,255,0.1);
+    margin-right: 6px;
+    vertical-align: middle;
   }
-  .log .entry { padding: 1px 0; }
-  .log .entry.error { color: var(--harmonic-red); }
-  .log .entry.ok { color: var(--green); }
 
-  .empty-state {
+  .detail-empty {
+    flex: 1;
     display: flex;
-    flex-direction: column;
     align-items: center;
     justify-content: center;
-    height: 100%;
-    color: var(--text-dim);
-    gap: 8px;
+    color: var(--text-muted);
+    font-size: 12px;
+    padding: 40px;
+    text-align: center;
   }
-  .empty-state .icon { font-size: 32px; opacity: 0.3; }
+
+  /* ═══ Log ═══ */
+
+  .log {
+    height: 72px;
+    flex-shrink: 0;
+    border-top: 1px solid var(--border);
+    background: var(--bg-elevated);
+    overflow-y: auto;
+    padding: 6px 20px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+  }
+  .log::-webkit-scrollbar { width: 4px; }
+  .log::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+  .log-line {
+    display: flex;
+    gap: 10px;
+    padding: 1px 0;
+  }
+  .log-line .t { color: var(--text-muted); flex-shrink: 0; font-size: 10px; }
+  .log-line .m { color: var(--text-secondary); }
+  .log-line.err .m { color: var(--danger); }
+  .log-line.ok .m { color: var(--green); }
+
+  /* ═══ Responsive ═══ */
+
+  @media (max-width: 960px) {
+    .content { grid-template-columns: 1fr; }
+    .detail { display: none; }
+    .stats { grid-template-columns: repeat(3, 1fr); }
+    .stat:nth-child(n+4) { display: none; }
+  }
 </style>
 </head>
 <body>
+<div class="app">
 
-<header>
-  <h1>Gerolamo <span>Bootstrap Explorer</span></h1>
-  <div class="subtitle">Mithril LMDB Snapshot — UTxO Stream Viewer</div>
-</header>
-
-<div class="controls">
-  <div>
-    <label>Server</label>
-    <input id="serverUrl" value="http://localhost:3040" style="width:200px">
-  </div>
-  <div>
-    <label>Endpoint</label>
-    <select id="endpoint">
-      <option value="/stream/utxo">/stream/utxo</option>
-      <option value="/stream/all">/stream/all</option>
-    </select>
-  </div>
-  <div>
-    <label>From</label>
-    <input id="fromIdx" type="number" value="0" min="0">
-  </div>
-  <div>
-    <label>Limit</label>
-    <input id="limitVal" type="number" value="500" min="1">
-  </div>
-  <button id="btnStream" onclick="startStream()">Stream</button>
-  <button id="btnStop" class="stop" onclick="stopStream()" disabled>Stop</button>
-  <button class="secondary" onclick="clearData()">Clear</button>
-  <button class="secondary" onclick="fetchInfo()">Info</button>
-</div>
-
-<div class="stats-bar">
-  <div class="stat">
-    <span class="label">Status</span>
-    <span class="value" id="statStatus">Idle</span>
-  </div>
-  <div class="stat">
-    <span class="label">Entries</span>
-    <span class="value" id="statEntries">0</span>
-  </div>
-  <div class="stat">
-    <span class="label">Bytes Received</span>
-    <span class="value" id="statBytes">0</span>
-  </div>
-  <div class="stat">
-    <span class="label">Rate</span>
-    <span class="value" id="statRate">—</span>
-  </div>
-  <div class="stat">
-    <span class="label">Elapsed</span>
-    <span class="value" id="statTime">—</span>
-  </div>
-</div>
-
-<div class="progress-bar-container">
-  <div class="progress-bar"><div class="fill" id="progressFill"></div></div>
-</div>
-
-<div class="main-content">
-  <div class="table-container" id="tableContainer">
-    <table>
-      <thead>
-        <tr>
-          <th style="width:50px">#</th>
-          <th>Tx Hash</th>
-          <th style="width:50px">Idx</th>
-          <th style="width:80px">Value Size</th>
-        </tr>
-      </thead>
-      <tbody id="tableBody"></tbody>
-    </table>
-    <div class="empty-state" id="emptyState">
-      <div class="icon">&#9651;</div>
-      <div>Click "Stream" to fetch UTxO entries</div>
+  <div class="header">
+    <div class="header-left">
+      <div class="logo-mark">G</div>
+      <div class="header-title">Gerolamo <span class="dim">/ Bootstrap Explorer</span></div>
+    </div>
+    <div class="header-right">
+      <div class="tag tag-cyan">Mithril LMDB</div>
+      <div class="tag tag-red">Cardano</div>
     </div>
   </div>
 
-  <div class="detail-panel" id="detailPanel">
-    <h3>Entry Detail</h3>
-    <div id="detailContent">
-      <div class="empty-state" style="height:200px">
-        <div>Select a row to inspect</div>
+  <div class="toolbar">
+    <div class="field">
+      <div class="field-label">Server</div>
+      <input id="serverUrl" class="url" value="http://localhost:3040" spellcheck="false">
+    </div>
+    <div class="field">
+      <div class="field-label">Endpoint</div>
+      <select id="endpoint">
+        <option value="/stream/utxo">/stream/utxo</option>
+        <option value="/stream/all">/stream/all</option>
+      </select>
+    </div>
+    <div class="field">
+      <div class="field-label">From</div>
+      <input id="fromIdx" type="number" value="0" min="0">
+    </div>
+    <div class="field">
+      <div class="field-label">Limit</div>
+      <input id="limitVal" type="number" value="10000" min="1" max="100000">
+    </div>
+    <div class="sep"></div>
+    <button class="btn btn-stream" id="btnStream" onclick="startStream()">Stream</button>
+    <button class="btn btn-stop" id="btnStop" onclick="stopStream()" disabled>Stop</button>
+    <button class="btn btn-ghost" onclick="clearData()">Clear</button>
+    <button class="btn btn-ghost" onclick="fetchInfo()">Info</button>
+  </div>
+
+  <div class="stats">
+    <div class="stat">
+      <div class="stat-dot dim" id="statusDot"></div>
+      <div class="stat-text">
+        <div class="stat-label">Status</div>
+        <div class="stat-val idle" id="statStatus">Idle</div>
+      </div>
+    </div>
+    <div class="stat">
+      <div class="stat-dot blue"></div>
+      <div class="stat-text">
+        <div class="stat-label">Entries</div>
+        <div class="stat-val" id="statEntries">0</div>
+      </div>
+    </div>
+    <div class="stat">
+      <div class="stat-dot cyan"></div>
+      <div class="stat-text">
+        <div class="stat-label">Received</div>
+        <div class="stat-val" id="statBytes">0 B</div>
+      </div>
+    </div>
+    <div class="stat">
+      <div class="stat-dot green"></div>
+      <div class="stat-text">
+        <div class="stat-label">Rate</div>
+        <div class="stat-val" id="statRate">&mdash;</div>
+      </div>
+    </div>
+    <div class="stat">
+      <div class="stat-dot amber"></div>
+      <div class="stat-text">
+        <div class="stat-label">Elapsed</div>
+        <div class="stat-val" id="statTime">&mdash;</div>
       </div>
     </div>
   </div>
+
+  <div class="progress"><div class="progress-bar" id="progressFill"></div></div>
+
+  <div class="content">
+    <div class="tbl-wrap">
+      <div class="tbl-scroll" id="tblScroll">
+        <table>
+          <colgroup>
+            <col class="c-num"><col class="c-hash"><col class="c-idx"><col class="c-size">
+          </colgroup>
+          <thead><tr><th>#</th><th>Transaction Hash</th><th class="r">Idx</th><th class="r">Size</th></tr></thead>
+          <tbody id="tBody"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="emptyState">
+        <div class="empty-ring">~</div>
+        <p>No entries loaded</p>
+        <div class="sub">Press Stream to fetch UTxO data from the Mithril snapshot</div>
+      </div>
+    </div>
+
+    <div class="detail">
+      <div class="detail-top">
+        <h3>Inspector</h3>
+        <span class="badge-idx" id="dBadge" style="display:none"></span>
+      </div>
+      <div class="detail-body" id="dBody">
+        <div class="detail-empty" id="dEmpty">Select a row to view details</div>
+        <div id="dContent" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="log" id="logPanel"></div>
 </div>
 
-<div class="log" id="logPanel"></div>
-
 <script>
-  const state = {
-    entries: [],
-    reader: null,
-    abortController: null,
-    startTime: null,
-    totalBytes: 0,
-    selected: null,
-    totalExpected: null,
-  };
+const S = { entries: [], abort: null, t0: null, bytes: 0, sel: null, total: null };
+const $ = id => document.getElementById(id);
 
-  const $ = id => document.getElementById(id);
+function log(m, c='') {
+  const p = $('logPanel');
+  const d = document.createElement('div');
+  d.className = 'log-line ' + c;
+  d.innerHTML = `<span class="t">${new Date().toLocaleTimeString('en-GB')}</span><span class="m">${esc(m)}</span>`;
+  p.appendChild(d);
+  p.scrollTop = p.scrollHeight;
+  if (p.children.length > 300) p.removeChild(p.firstChild);
+}
 
-  function log(msg, cls = '') {
-    const el = $('logPanel');
-    const d = document.createElement('div');
-    d.className = 'entry ' + cls;
-    d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
-    el.appendChild(d);
-    el.scrollTop = el.scrollHeight;
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function fmtB(b) {
+  if (b < 1024) return b + ' B';
+  if (b < 1048576) return (b/1024).toFixed(1) + ' KB';
+  return (b/1048576).toFixed(1) + ' MB';
+}
+
+function stats() {
+  $('statEntries').textContent = S.entries.length.toLocaleString();
+  $('statBytes').textContent = fmtB(S.bytes);
+  if (S.t0) {
+    const s = (Date.now() - S.t0) / 1000;
+    $('statTime').textContent = s < 60 ? s.toFixed(1)+'s' : (s/60).toFixed(1)+'m';
+    if (s > 0.1) $('statRate').textContent = Math.round(S.entries.length / s).toLocaleString() + '/s';
   }
+  if (S.total > 0) $('progressFill').style.width = Math.min(100, S.entries.length / S.total * 100) + '%';
+}
 
-  function formatBytes(b) {
-    if (b < 1024) return b + ' B';
-    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
-    return (b / 1048576).toFixed(1) + ' MB';
+function addRow(e, i) {
+  const tr = document.createElement('tr');
+  tr.dataset.i = i;
+  tr.onclick = () => sel(i);
+  if (e.txHash) {
+    tr.innerHTML =
+      `<td class="c-n">${i}</td>` +
+      `<td class="c-h" title="${e.txHash}">${e.txHash.slice(0,10)}...${e.txHash.slice(-6)}</td>` +
+      `<td class="c-i">${e.outputIndex}</td>` +
+      `<td class="c-s">${e.valueCbor ? (e.valueCbor.length/2)+'B' : ''}</td>`;
+  } else if (e.db) {
+    tr.innerHTML =
+      `<td class="c-n">${i}</td>` +
+      `<td class="c-db">[${esc(e.db)}] ${e.key.slice(0,24)}...</td>` +
+      `<td class="c-i">&mdash;</td>` +
+      `<td class="c-s">${e.value ? (e.value.length/2)+'B' : ''}</td>`;
   }
+  $('tBody').appendChild(tr);
+}
 
-  function updateStats() {
-    $('statEntries').textContent = state.entries.length.toLocaleString();
-    $('statBytes').textContent = formatBytes(state.totalBytes);
-    if (state.startTime) {
-      const elapsed = (Date.now() - state.startTime) / 1000;
-      $('statTime').textContent = elapsed.toFixed(1) + 's';
-      if (elapsed > 0) {
-        $('statRate').textContent = Math.round(state.entries.length / elapsed).toLocaleString() + '/s';
+function sel(i) {
+  const e = S.entries[i];
+  if (!e) return;
+  S.sel = i;
+  document.querySelectorAll('tbody tr.sel').forEach(r => r.classList.remove('sel'));
+  const row = document.querySelector(`tr[data-i="${i}"]`);
+  if (row) row.classList.add('sel');
+
+  $('dEmpty').style.display = 'none';
+  $('dContent').style.display = '';
+  $('dBadge').style.display = '';
+  $('dBadge').textContent = '#' + i;
+
+  let h = '';
+  if (e.txHash) {
+    const sz = e.valueCbor.length / 2;
+    const fb = e.valueCbor.slice(0, 2);
+    h = `
+      <div class="d-field">
+        <div class="d-label">Transaction Hash</div>
+        <div class="d-val v-hash">${e.txHash}</div>
+      </div>
+      <div class="d-row">
+        <div class="d-field">
+          <div class="d-label">Output Index</div>
+          <div class="d-val">${e.outputIndex}</div>
+        </div>
+        <div class="d-field">
+          <div class="d-label">Value Size</div>
+          <div class="d-val">${sz} bytes</div>
+        </div>
+      </div>
+      <div class="d-field">
+        <div class="d-label">CBOR Lead Byte</div>
+        <div class="d-val"><span class="cbor-chip">0x${fb}</span>${cborDesc(e.valueCbor)}</div>
+      </div>
+      <div class="d-field">
+        <div class="d-label">Raw Value (hex)</div>
+        <div class="d-val v-dim">${e.valueCbor}</div>
+      </div>`;
+  } else if (e.db) {
+    h = `
+      <div class="d-field">
+        <div class="d-label">Database</div>
+        <div class="d-val">${esc(e.db)}</div>
+      </div>
+      <div class="d-field">
+        <div class="d-label">Key (hex)</div>
+        <div class="d-val v-hash">${e.key}</div>
+      </div>
+      <div class="d-field">
+        <div class="d-label">Value (${e.value.length/2} bytes)</div>
+        <div class="d-val v-dim">${e.value}</div>
+      </div>`;
+  }
+  $('dContent').innerHTML = h;
+  $('dBody').scrollTop = 0;
+}
+
+function cborDesc(hex) {
+  const b = parseInt(hex.slice(0,2), 16);
+  if (b <= 0x17) return `Unsigned int (${b})`;
+  if (b >= 0x18 && b <= 0x1b) return 'Unsigned int';
+  if (b >= 0x20 && b <= 0x3b) return 'Negative int';
+  if (b >= 0x40 && b <= 0x5b) return 'Byte string';
+  if (b === 0x5f) return 'Byte string (indef)';
+  if (b >= 0x60 && b <= 0x7b) return 'Text string';
+  if (b >= 0x80 && b <= 0x97) return `Array (${b-0x80} items)`;
+  if (b >= 0x98 && b <= 0x9b) return 'Array';
+  if (b === 0x9f) return 'Array (indef)';
+  if (b >= 0xa0 && b <= 0xb7) return `Map (${b-0xa0} pairs)`;
+  if (b >= 0xb8 && b <= 0xbb) return 'Map';
+  if (b === 0xbf) return 'Map (indef)';
+  if (b >= 0xc0 && b <= 0xdb) return 'Tag';
+  if (b === 0xf4) return 'false';
+  if (b === 0xf5) return 'true';
+  if (b === 0xf6) return 'null';
+  if (b === 0xff) return 'Break';
+  return 'Raw';
+}
+
+function setStatus(txt, cls) {
+  $('statStatus').textContent = txt;
+  $('statStatus').className = 'stat-val ' + cls;
+  const dot = $('statusDot');
+  dot.className = 'stat-dot ' + (cls === 'live' ? 'green' : cls === 'err' ? 'dim' : 'dim');
+  if (cls === 'live') dot.className = 'stat-dot green';
+}
+
+async function fetchInfo() {
+  log('Fetching snapshot info...');
+  try {
+    const r = await fetch($('serverUrl').value + '/info');
+    const d = await r.json();
+    S.total = d.totalEntries;
+    log(`${d.totalEntries.toLocaleString()} entries across [${d.databases.join(', ')}]`, 'ok');
+  } catch(e) { log('Failed: ' + e.message, 'err'); }
+}
+
+async function startStream() {
+  const url = `${$('serverUrl').value}${$('endpoint').value}?from=${$('fromIdx').value}&limit=${$('limitVal').value}`;
+  log('Connecting ' + url);
+
+  $('btnStream').disabled = true;
+  $('btnStop').disabled = false;
+  $('emptyState').style.display = 'none';
+  setStatus('Streaming', 'live');
+  S.t0 = Date.now();
+  S.bytes = 0;
+  S.total = parseInt($('limitVal').value);
+
+  try {
+    S.abort = new AbortController();
+    const res = await fetch(url, { signal: S.abort.signal });
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const rdr = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await rdr.read();
+      if (done) break;
+      S.bytes += value.byteLength;
+      buf += dec.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const ln of lines) {
+        if (!ln.trim()) continue;
+        try {
+          const o = JSON.parse(ln);
+          if (o._progress) { log(`${o.db}: ${o.count.toLocaleString()}`); continue; }
+          if (o._done) { log(`Done: ${o.totalStreamed.toLocaleString()} entries`, 'ok'); continue; }
+          if (o._error) { log(o._error, 'err'); continue; }
+          const idx = S.entries.length;
+          S.entries.push(o);
+          addRow(o, idx);
+        } catch (e) { log('Parse: ' + e.message, 'err'); }
       }
+      stats();
     }
-    if (state.totalExpected && state.totalExpected > 0) {
-      const pct = Math.min(100, (state.entries.length / state.totalExpected) * 100);
-      $('progressFill').style.width = pct + '%';
-    }
+  } catch (e) {
+    if (e.name !== 'AbortError') { log(e.message, 'err'); setStatus('Error', 'err'); }
+  } finally {
+    $('btnStream').disabled = false;
+    $('btnStop').disabled = true;
+    if ($('statStatus').textContent === 'Streaming') setStatus('Complete', 'live');
+    stats();
   }
+}
 
-  function addRow(entry, index) {
-    const tbody = $('tableBody');
-    const tr = document.createElement('tr');
-    tr.dataset.index = index;
-    tr.onclick = () => selectRow(index);
+function stopStream() {
+  if (S.abort) { S.abort.abort(); S.abort = null; }
+  setStatus('Stopped', 'err');
+  log('Stopped');
+}
 
-    if (entry.txHash) {
-      tr.innerHTML = `
-        <td>${index}</td>
-        <td class="hash" title="${entry.txHash}">${entry.txHash.slice(0, 16)}...${entry.txHash.slice(-8)}</td>
-        <td class="idx">${entry.outputIndex}</td>
-        <td class="size">${entry.valueCbor ? (entry.valueCbor.length / 2) + 'B' : '—'}</td>
-      `;
-    } else if (entry.db) {
-      tr.innerHTML = `
-        <td>${index}</td>
-        <td title="${entry.key}">[${entry.db}] ${entry.key.slice(0, 24)}...</td>
-        <td class="idx">—</td>
-        <td class="size">${entry.value ? (entry.value.length / 2) + 'B' : '—'}</td>
-      `;
-    }
-    tbody.appendChild(tr);
-  }
-
-  function selectRow(index) {
-    const entry = state.entries[index];
-    if (!entry) return;
-    state.selected = index;
-
-    document.querySelectorAll('tbody tr.selected').forEach(r => r.classList.remove('selected'));
-    const row = document.querySelector(`tr[data-index="${index}"]`);
-    if (row) row.classList.add('selected');
-
-    let html = '';
-    if (entry.txHash) {
-      html += `
-        <div class="detail-field">
-          <div class="field-label">Transaction Hash</div>
-          <div class="field-value hash">${entry.txHash}</div>
-        </div>
-        <div class="detail-field">
-          <div class="field-label">Output Index</div>
-          <div class="field-value">${entry.outputIndex}</div>
-        </div>
-        <div class="detail-field">
-          <div class="field-label">Value CBOR (${entry.valueCbor.length / 2} bytes)</div>
-          <div class="field-value">${entry.valueCbor}</div>
-        </div>
-        <div class="detail-field">
-          <div class="field-label">First Byte</div>
-          <div class="field-value">${'0x' + entry.valueCbor.slice(0, 2)} — ${describeFirstByte(entry.valueCbor)}</div>
-        </div>
-      `;
-    } else if (entry.db) {
-      html += `
-        <div class="detail-field">
-          <div class="field-label">Database</div>
-          <div class="field-value">${entry.db}</div>
-        </div>
-        <div class="detail-field">
-          <div class="field-label">Key</div>
-          <div class="field-value hash">${entry.key}</div>
-        </div>
-        <div class="detail-field">
-          <div class="field-label">Value (${entry.value.length / 2} bytes)</div>
-          <div class="field-value">${entry.value}</div>
-        </div>
-      `;
-    }
-    $('detailContent').innerHTML = html;
-  }
-
-  function describeFirstByte(hex) {
-    const b = parseInt(hex.slice(0, 2), 16);
-    if (b <= 0x17) return `CBOR uint (${b})`;
-    if (b === 0x18) return 'CBOR uint (1-byte follows)';
-    if (b === 0x19) return 'CBOR uint (2-byte follows)';
-    if (b >= 0x20 && b <= 0x3b) return 'CBOR negative int';
-    if (b >= 0x40 && b <= 0x5b) return 'CBOR byte string';
-    if (b >= 0x60 && b <= 0x7b) return 'CBOR text string';
-    if (b >= 0x80 && b <= 0x9b) return 'CBOR array';
-    if (b >= 0xa0 && b <= 0xbb) return 'CBOR map';
-    if (b >= 0xc0 && b <= 0xdb) return 'CBOR tag';
-    if (b === 0xf6) return 'CBOR null';
-    return `Raw byte 0x${b.toString(16)}`;
-  }
-
-  async function fetchInfo() {
-    const base = $('serverUrl').value;
-    try {
-      const res = await fetch(base + '/info');
-      const info = await res.json();
-      state.totalExpected = info.totalEntries;
-      log(`Snapshot info: ${info.totalEntries.toLocaleString()} entries across [${info.databases.join(', ')}]`, 'ok');
-      log(`LMDB path: ${info.dbDir}`);
-    } catch (e) {
-      log('Failed to fetch /info: ' + e.message, 'error');
-    }
-  }
-
-  async function startStream() {
-    const base = $('serverUrl').value;
-    const endpoint = $('endpoint').value;
-    const from = $('fromIdx').value;
-    const limit = $('limitVal').value;
-
-    const url = `${base}${endpoint}?from=${from}&limit=${limit}`;
-    log(`Connecting to ${url}...`);
-
-    $('btnStream').disabled = true;
-    $('btnStop').disabled = false;
-    $('statStatus').textContent = 'Streaming';
-    $('statStatus').className = 'value streaming';
-    $('emptyState').style.display = 'none';
-    state.startTime = Date.now();
-    state.totalBytes = 0;
-    state.totalExpected = parseInt(limit);
-
-    try {
-      state.abortController = new AbortController();
-      const res = await fetch(url, { signal: state.abortController.signal });
-      const reader = res.body.getReader();
-      state.reader = reader;
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        state.totalBytes += value.byteLength;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop();
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const obj = JSON.parse(line);
-            if (obj._progress) {
-              log(`Progress: ${obj.db} — ${obj.count.toLocaleString()} entries`);
-              continue;
-            }
-            if (obj._done) {
-              log(`Done. Total streamed: ${obj.totalStreamed.toLocaleString()}`, 'ok');
-              continue;
-            }
-            if (obj._error) {
-              log(`Error: ${obj._error}`, 'error');
-              continue;
-            }
-            const idx = state.entries.length;
-            state.entries.push(obj);
-            addRow(obj, idx);
-          } catch (e) {
-            log('Parse error: ' + e.message, 'error');
-          }
-        }
-        updateStats();
-      }
-    } catch (e) {
-      if (e.name !== 'AbortError') {
-        log('Stream error: ' + e.message, 'error');
-        $('statStatus').textContent = 'Error';
-        $('statStatus').className = 'value error';
-      }
-    } finally {
-      $('btnStream').disabled = false;
-      $('btnStop').disabled = true;
-      if ($('statStatus').textContent === 'Streaming') {
-        $('statStatus').textContent = 'Complete';
-        $('statStatus').className = 'value streaming';
-      }
-      updateStats();
-    }
-  }
-
-  function stopStream() {
-    if (state.abortController) {
-      state.abortController.abort();
-      state.abortController = null;
-    }
-    $('statStatus').textContent = 'Stopped';
-    $('statStatus').className = 'value error';
-    log('Stream stopped by user');
-  }
-
-  function clearData() {
-    state.entries = [];
-    state.selected = null;
-    state.totalBytes = 0;
-    state.startTime = null;
-    $('tableBody').innerHTML = '';
-    $('detailContent').innerHTML = '<div class="empty-state" style="height:200px"><div>Select a row to inspect</div></div>';
-    $('emptyState').style.display = '';
-    $('statEntries').textContent = '0';
-    $('statBytes').textContent = '0';
-    $('statRate').textContent = '—';
-    $('statTime').textContent = '—';
-    $('statStatus').textContent = 'Idle';
-    $('statStatus').className = 'value';
-    $('progressFill').style.width = '0%';
-    log('Cleared');
-  }
+function clearData() {
+  S.entries = []; S.sel = null; S.bytes = 0; S.t0 = null;
+  $('tBody').innerHTML = '';
+  $('dContent').style.display = 'none';
+  $('dContent').innerHTML = '';
+  $('dEmpty').style.display = '';
+  $('dBadge').style.display = 'none';
+  $('emptyState').style.display = '';
+  $('statEntries').textContent = '0';
+  $('statBytes').textContent = '0 B';
+  $('statRate').textContent = '\u2014';
+  $('statTime').textContent = '\u2014';
+  $('progressFill').style.width = '0%';
+  setStatus('Idle', 'idle');
+  log('Cleared');
+}
 </script>
 </body>
 </html>

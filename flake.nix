@@ -49,6 +49,14 @@
               bun.enable = true;
             };
           };
+
+          scripts.gerolamo-explorer.exec = ''
+            exec bun run "''${DEVENV_ROOT}/scripts/gerolamo-explorer.ts" "$@"
+          '';
+
+          scripts.gerolamo-stream-server.exec = ''
+            exec bun run "''${DEVENV_ROOT}/scripts/mithril-stream-server.ts" "$@"
+          '';
         };
       };
     };

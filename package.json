@@ -6,7 +6,9 @@
     "type": "module",
     "private": true,
     "scripts": {
-        "start": "bun src/index.ts"
+        "start": "bun src/index.ts",
+        "explorer": "bun scripts/gerolamo-explorer.ts",
+        "stream-server": "bun scripts/mithril-stream-server.ts"
     },
     "devDependencies": {
         "@harmoniclabs/cddl-tools": "^0.0.4",

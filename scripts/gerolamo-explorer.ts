@@ -12,10 +12,15 @@
  *   --no-open        Don't auto-open browser
  *   --help           Show help
  */
-import { iterateLmdb, type LmdbEntry } from "./lmdb-ffi.ts";
 import { readFileSync, existsSync } from "fs";
 import { resolve, dirname } from "path";
 import { execSync } from "child_process";
+import {
+    createLmdbStream,
+    getSnapshotInfo,
+    CORS_HEADERS,
+    type StreamFilter,
+} from "./lmdb-stream.ts";
 
 // ── CLI Args ──
 
@@ -103,88 +108,9 @@ explorerHtml = explorerHtml.replace(
     `'/api/info'`
 );
 
-// ── Stream helpers ──
-
-function toHex(buf: Uint8Array): string {
-    return Buffer.from(buf).toString("hex");
-}
+// ── Cached snapshot info ──
 
 let cachedInfo: { databases: string[]; totalEntries: number } | null = null;
-
-function getSnapshotInfo(): { databases: string[]; totalEntries: number } {
-    if (cachedInfo) return cachedInfo;
-    let total = 0;
-    const dbs = new Set<string>();
-    iterateLmdb(DB_DIR, (entry) => { dbs.add(entry.dbName); total++; }, { onProgress: () => {} });
-    cachedInfo = { databases: [...dbs], totalEntries: total };
-    return cachedInfo;
-}
-
-function formatUtxoEntry(key: Uint8Array, value: Uint8Array): string {
-    const txHash = toHex(key.subarray(0, 32));
-    const outputIndex = key[32] | (key[33] << 8);
-    const valueCbor = toHex(value);
-    return JSON.stringify({ txHash, outputIndex, valueCbor });
-}
-
-function formatGenericEntry(dbName: string, key: Uint8Array, value: Uint8Array): string {
-    return JSON.stringify({ db: dbName, key: toHex(key), value: toHex(value) });
-}
-
-type StreamFilter = "utxo" | "all";
-
-function createLmdbStream(filter: StreamFilter, from = 0, limit = Infinity): ReadableStream<Uint8Array> {
-    const enc = new TextEncoder();
-    let cancelled = false;
-
-    return new ReadableStream<Uint8Array>({
-        start(ctrl) {
-            queueMicrotask(() => {
-                let utxoIdx = 0, streamed = 0;
-                try {
-                    iterateLmdb(DB_DIR, (entry) => {
-                        if (cancelled) throw new Error("CANCELLED");
-                        if (streamed >= limit) throw new Error("LIMIT");
-
-                        if (filter === "utxo") {
-                            if (entry.dbName !== "utxo" || entry.key.length !== 34) return;
-                            if (utxoIdx < from) { utxoIdx++; return; }
-                            utxoIdx++;
-                            ctrl.enqueue(enc.encode(formatUtxoEntry(entry.key, entry.value) + "\n"));
-                            streamed++;
-                        } else {
-                            if (entry.key.length === 34 && entry.dbName === "utxo") {
-                                ctrl.enqueue(enc.encode(formatUtxoEntry(entry.key, entry.value) + "\n"));
-                            } else {
-                                ctrl.enqueue(enc.encode(formatGenericEntry(entry.dbName, entry.key, entry.value) + "\n"));
-                            }
-                            streamed++;
-                        }
-                    }, {
-                        onProgress: (db, count) => {
-                            ctrl.enqueue(enc.encode(JSON.stringify({ _progress: true, db, count }) + "\n"));
-                        },
-                    });
-                } catch (e: any) {
-                    if (e.message !== "CANCELLED" && e.message !== "LIMIT") {
-                        ctrl.enqueue(enc.encode(JSON.stringify({ _error: e.message }) + "\n"));
-                    }
-                }
-                ctrl.enqueue(enc.encode(JSON.stringify({ _done: true, totalStreamed: streamed }) + "\n"));
-                ctrl.close();
-            });
-        },
-        cancel() { cancelled = true; },
-    });
-}
-
-// ── CORS ──
-
-const CORS = {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "GET, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type",
-};
 
 // ── Server ──
 
@@ -195,22 +121,24 @@ Bun.serve({
         const path = url.pathname;
 
         if (req.method === "OPTIONS") {
-            return new Response(null, { status: 204, headers: CORS });
+            return new Response(null, { status: 204, headers: CORS_HEADERS });
         }
 
         // ── Frontend ──
 
         if (path === "/" || path === "/index.html") {
             return new Response(explorerHtml, {
-                headers: { "Content-Type": "text/html; charset=utf-8", ...CORS },
+                headers: { "Content-Type": "text/html; charset=utf-8", ...CORS_HEADERS },
             });
         }
 
         // ── API: /api/info ──
 
         if (path === "/api/info") {
-            const info = getSnapshotInfo();
-            return Response.json({ dbDir: DB_DIR, ...info }, { headers: CORS });
+            if (!cachedInfo) {
+                cachedInfo = getSnapshotInfo(DB_DIR);
+            }
+            return Response.json({ dbDir: DB_DIR, ...cachedInfo }, { headers: CORS_HEADERS });
         }
 
         // ── API: /api/stream/utxo | /api/stream/all ──
@@ -221,8 +149,8 @@ Bun.serve({
             const limit = parseInt(url.searchParams.get("limit") || "0", 10) || Infinity;
             console.log(`  Stream ${filter} from=${from} limit=${limit === Infinity ? "all" : limit}`);
 
-            return new Response(createLmdbStream(filter, from, limit), {
-                headers: { ...CORS, "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache" },
+            return new Response(createLmdbStream(DB_DIR, filter, from, limit), {
+                headers: { ...CORS_HEADERS, "Content-Type": "application/x-ndjson", "Cache-Control": "no-cache" },
             });
         }
 

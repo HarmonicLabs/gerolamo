@@ -90,22 +90,10 @@ try {
     process.exit(1);
 }
 
-// Patch the default server URL in the HTML to point to /api
+// Patch server URL to be relative (same-origin when served by this CLI)
 explorerHtml = explorerHtml.replace(
     'value="http://localhost:3040"',
-    `value=""`
-);
-explorerHtml = explorerHtml.replace(
-    'value="/stream/utxo"',
-    'value="/api/stream/utxo"'
-);
-explorerHtml = explorerHtml.replace(
-    'value="/stream/all"',
-    'value="/api/stream/all"'
-);
-explorerHtml = explorerHtml.replace(
-    `$('serverUrl').value + '/info'`,
-    `'/api/info'`
+    'value=""',
 );
 
 // ── Cached snapshot info ──

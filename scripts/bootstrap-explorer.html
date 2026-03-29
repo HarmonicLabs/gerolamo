@@ -7,11 +7,6 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
-/* ═══════════════════════════════════════════════════════════
-   Gerolamo Bootstrap Explorer — Production Stylesheet
-   Dark theme, Cardano-inspired aesthetics
-   ═══════════════════════════════════════════════════════════ */
-
 :root {
   --bg: #070b12;
   --bg-raised: #0c1119;
@@ -28,18 +23,16 @@
   --red-dim: rgba(255,77,94,0.12);
   --cyan: #00dcc6;
   --cyan-dim: rgba(0,220,198,0.10);
-  --cyan-strong: rgba(0,220,198,0.18);
   --blue: #3b82f6;
   --blue-dim: rgba(59,130,246,0.10);
   --green: #22c55e;
   --green-dim: rgba(34,197,94,0.10);
   --amber: #f59e0b;
-  --amber-dim: rgba(245,158,11,0.10);
   --purple: #a78bfa;
   --r: 10px;
   --r-sm: 6px;
   --sans: 'Inter', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
-  --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', ui-monospace, monospace;
+  --mono: 'JetBrains Mono', 'Fira Code', ui-monospace, monospace;
 }
 
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
@@ -52,669 +45,238 @@ body {
   font-size: 13px;
   line-height: 1.55;
   -webkit-font-smoothing: antialiased;
-  -moz-osx-font-smoothing: grayscale;
 }
 
-/* ── App Shell ── */
+[v-cloak] { display: none; }
 
-.app {
-  height: 100vh;
-  display: grid;
-  grid-template-rows: 56px 1fr;
-  grid-template-columns: 1fr;
-}
+.app { height: 100vh; display: grid; grid-template-rows: 56px 1fr; }
 
 /* ── Header ── */
-
 header {
-  display: flex;
-  align-items: center;
-  gap: 0;
-  padding: 0 20px;
-  background: var(--bg-raised);
-  border-bottom: 1px solid var(--border-dim);
-  z-index: 10;
+  display: flex; align-items: center; padding: 0 20px;
+  background: var(--bg-raised); border-bottom: 1px solid var(--border-dim); z-index: 10;
 }
-
-.logo {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin-right: 32px;
-  user-select: none;
-}
-
+.logo { display: flex; align-items: center; gap: 10px; margin-right: 32px; user-select: none; }
 .logo-icon {
-  width: 28px;
-  height: 28px;
-  border-radius: 7px;
+  width: 28px; height: 28px; border-radius: 7px;
   background: linear-gradient(135deg, var(--red), #ff7a4d);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 700;
-  font-size: 14px;
-  color: #fff;
-  letter-spacing: -0.5px;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 14px; color: #fff;
 }
+.logo-text { font-size: 15px; font-weight: 600; letter-spacing: -0.3px; }
+.logo-sub { font-size: 11px; color: var(--text-3); margin-left: -2px; }
 
-.logo-text {
-  font-size: 15px;
-  font-weight: 600;
-  letter-spacing: -0.3px;
-  color: var(--text);
-}
-
-.logo-sub {
-  font-size: 11px;
-  font-weight: 400;
-  color: var(--text-3);
-  margin-left: -2px;
-}
-
-nav {
-  display: flex;
-  gap: 2px;
-  height: 100%;
-  align-items: stretch;
-}
-
+nav { display: flex; gap: 2px; height: 100%; align-items: stretch; }
 nav button {
-  font-family: var(--sans);
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--text-3);
-  background: none;
-  border: none;
-  padding: 0 16px;
-  cursor: pointer;
-  position: relative;
-  transition: color 0.15s;
-  white-space: nowrap;
+  font-family: var(--sans); font-size: 13px; font-weight: 500; color: var(--text-3);
+  background: none; border: none; padding: 0 16px; cursor: pointer;
+  position: relative; transition: color 0.15s; white-space: nowrap;
 }
-
 nav button:hover { color: var(--text-2); }
-
-nav button.active {
-  color: var(--text);
-}
-
+nav button.active { color: var(--text); }
 nav button.active::after {
-  content: '';
-  position: absolute;
-  bottom: 0;
-  left: 12px;
-  right: 12px;
-  height: 2px;
-  background: var(--cyan);
-  border-radius: 2px 2px 0 0;
+  content: ''; position: absolute; bottom: 0; left: 12px; right: 12px;
+  height: 2px; background: var(--cyan); border-radius: 2px 2px 0 0;
 }
 
-.header-spacer { flex: 1; }
+.spacer { flex: 1; }
 
-.conn-badge {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  font-weight: 500;
-  color: var(--text-3);
-  padding: 5px 10px;
-  background: var(--surface);
-  border: 1px solid var(--border-dim);
-  border-radius: 20px;
+.conn {
+  display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 500; color: var(--text-3);
+  padding: 5px 10px; background: var(--surface); border: 1px solid var(--border-dim); border-radius: 20px;
 }
-
-.conn-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-4);
-  transition: background 0.3s;
+.dot {
+  width: 6px; height: 6px; border-radius: 50%; background: var(--text-4); transition: all 0.3s;
 }
+.dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.dot.err { background: var(--red); box-shadow: 0 0 6px var(--red); }
+.dot.stream { background: var(--cyan); box-shadow: 0 0 6px var(--cyan); animation: pulse 1.5s infinite; }
+@keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
 
-.conn-dot.ok { background: var(--green); box-shadow: 0 0 6px var(--green); }
-.conn-dot.err { background: var(--red); }
-
-/* ── Panels ── */
-
-.panel {
-  display: none;
-  overflow-y: auto;
-  padding: 24px;
-}
-
+/* ── Panel ── */
+.panel { display: none; overflow-y: auto; padding: 24px; }
 .panel.active { display: block; }
-
-/* ── Cards ── */
-
-.cards {
-  display: grid;
-  gap: 16px;
-}
-
-.cards-4 { grid-template-columns: repeat(4, 1fr); }
-.cards-3 { grid-template-columns: repeat(3, 1fr); }
-.cards-2 { grid-template-columns: repeat(2, 1fr); }
-
-.card {
-  background: var(--surface);
-  border: 1px solid var(--border-dim);
-  border-radius: var(--r);
-  padding: 20px;
-}
-
-.card-label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--text-3);
-  margin-bottom: 8px;
-}
-
-.card-value {
-  font-size: 28px;
-  font-weight: 700;
-  font-family: var(--mono);
-  letter-spacing: -1px;
-  line-height: 1.1;
-  color: var(--text);
-}
-
-.card-value.sm { font-size: 20px; letter-spacing: -0.5px; }
-.card-value.xs { font-size: 16px; letter-spacing: 0; }
-.card-value.cyan { color: var(--cyan); }
-.card-value.blue { color: var(--blue); }
-.card-value.green { color: var(--green); }
-.card-value.amber { color: var(--amber); }
-.card-value.red { color: var(--red); }
-
-.card-sub {
-  font-size: 12px;
-  color: var(--text-3);
-  margin-top: 4px;
-}
-
-.card.full { grid-column: 1 / -1; }
-.card.span-2 { grid-column: span 2; }
-.card.span-3 { grid-column: span 3; }
-
-/* ── Section headers ── */
-
-.section-title {
-  font-size: 16px;
-  font-weight: 600;
-  margin-bottom: 16px;
-  color: var(--text);
-}
-
-.section-desc {
-  font-size: 12px;
-  color: var(--text-3);
-  margin-top: -12px;
-  margin-bottom: 16px;
-}
-
-.section-gap { margin-top: 28px; }
-
-/* ── Buttons ── */
-
-.btn {
-  font-family: var(--sans);
-  font-size: 12px;
-  font-weight: 600;
-  border: none;
-  border-radius: var(--r-sm);
-  padding: 8px 16px;
-  cursor: pointer;
-  transition: all 0.15s;
-  white-space: nowrap;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.btn:disabled { opacity: 0.35; cursor: not-allowed; }
-
-.btn-primary {
-  background: var(--cyan);
-  color: #070b12;
-}
-.btn-primary:hover:not(:disabled) { background: #00f0d6; }
-
-.btn-danger {
-  background: var(--red-dim);
-  color: var(--red);
-  border: 1px solid rgba(255,77,94,0.2);
-}
-.btn-danger:hover:not(:disabled) { background: rgba(255,77,94,0.18); }
-
-.btn-ghost {
-  background: var(--surface-2);
-  color: var(--text-2);
-  border: 1px solid var(--border-dim);
-}
-.btn-ghost:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
-
-.btn-sm { padding: 5px 10px; font-size: 11px; }
-
-.btn-row {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-/* ── Inputs ── */
-
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-.field-label {
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--text-3);
-}
-
-.field-row {
-  display: flex;
-  gap: 12px;
-  align-items: flex-end;
-}
-
-input[type="text"], input[type="number"], input[type="url"], .input {
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 8px 12px;
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border-dim);
-  border-radius: var(--r-sm);
-  outline: none;
-  transition: border 0.15s;
-}
-
-input:focus, .input:focus { border-color: var(--cyan); }
-
-.url-input {
-  width: 100%;
-  max-width: 480px;
-}
-
-/* ── Progress ── */
-
-.progress-track {
-  height: 4px;
-  background: var(--surface-2);
-  border-radius: 2px;
-  overflow: hidden;
-}
-
-.progress-fill {
-  height: 100%;
-  width: 0%;
-  background: linear-gradient(90deg, var(--cyan), var(--blue));
-  border-radius: 2px;
-  transition: width 0.3s ease-out;
-}
-
-/* ── Tables ── */
-
-.tbl-wrap {
-  background: var(--surface);
-  border: 1px solid var(--border-dim);
-  border-radius: var(--r);
-  overflow: hidden;
-}
-
-.tbl-scroll {
-  overflow-y: auto;
-  max-height: 420px;
-}
-
-.tbl-scroll::-webkit-scrollbar { width: 6px; }
-.tbl-scroll::-webkit-scrollbar-track { background: transparent; }
-.tbl-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
-table {
-  width: 100%;
-  border-collapse: collapse;
-  table-layout: fixed;
-}
-
-th {
-  position: sticky;
-  top: 0;
-  background: var(--surface-2);
-  font-size: 11px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-  color: var(--text-3);
-  padding: 10px 14px;
-  text-align: left;
-  border-bottom: 1px solid var(--border-dim);
-  z-index: 2;
-}
-
-th.r { text-align: right; }
-
-td {
-  font-family: var(--mono);
-  font-size: 12px;
-  padding: 8px 14px;
-  border-bottom: 1px solid var(--border-dim);
-  color: var(--text-2);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-tr:hover td { background: var(--surface-2); }
-tr.sel td { background: var(--cyan-dim); color: var(--text); }
-tr { cursor: pointer; }
-
-.col-num { width: 50px; }
-.col-hash { width: auto; }
-.col-idx { width: 60px; text-align: right; }
-.col-size { width: 80px; text-align: right; }
-td.r { text-align: right; }
-
-/* ── Split pane (table + inspector) ── */
-
-.split {
-  display: grid;
-  grid-template-columns: 1fr 360px;
-  gap: 16px;
-  min-height: 0;
-}
-
-/* ── Inspector ── */
-
-.inspector {
-  background: var(--surface);
-  border: 1px solid var(--border-dim);
-  border-radius: var(--r);
-  display: flex;
-  flex-direction: column;
-}
-
-.insp-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 14px 16px;
-  border-bottom: 1px solid var(--border-dim);
-}
-
-.insp-header h3 {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.badge {
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 500;
-  padding: 2px 8px;
-  border-radius: 10px;
-  background: var(--cyan-dim);
-  color: var(--cyan);
-}
-
-.insp-body {
-  flex: 1;
-  overflow-y: auto;
-  padding: 16px;
-}
-
-.insp-empty {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 100%;
-  color: var(--text-4);
-  font-size: 12px;
-}
-
-.detail-field { margin-bottom: 14px; }
-.detail-field:last-child { margin-bottom: 0; }
-
-.detail-label {
-  font-size: 10px;
-  font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--text-4);
-  margin-bottom: 3px;
-}
-
-.detail-value {
-  font-family: var(--mono);
-  font-size: 12px;
-  color: var(--text);
-  word-break: break-all;
-  line-height: 1.5;
-}
-
-.detail-value.dim { color: var(--text-3); }
-.detail-value.blue { color: var(--blue); }
-
-.detail-row {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 12px;
-}
-
-.cbor-chip {
-  display: inline-block;
-  font-family: var(--mono);
-  font-size: 11px;
-  font-weight: 500;
-  padding: 1px 6px;
-  border-radius: 4px;
-  background: var(--purple);
-  color: #fff;
-  margin-right: 6px;
-}
-
-/* ── Activity Log ── */
-
-.log-area {
-  background: var(--bg);
-  border: 1px solid var(--border-dim);
-  border-radius: var(--r);
-  padding: 12px;
-  max-height: 180px;
-  overflow-y: auto;
-  font-family: var(--mono);
-  font-size: 11px;
-  line-height: 1.7;
-}
-
-.log-area::-webkit-scrollbar { width: 5px; }
-.log-area::-webkit-scrollbar-track { background: transparent; }
-.log-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-
-.log-line {
-  display: flex;
-  gap: 8px;
-}
-
-.log-ts { color: var(--text-4); flex-shrink: 0; }
-.log-msg { color: var(--text-2); }
-.log-line.ok .log-msg { color: var(--green); }
-.log-line.err .log-msg { color: var(--red); }
-.log-line.info .log-msg { color: var(--blue); }
-
-/* ── Empty state ── */
-
-.empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  padding: 48px 20px;
-  color: var(--text-4);
-}
-
-.empty-icon {
-  width: 48px;
-  height: 48px;
-  border-radius: 50%;
-  border: 2px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-size: 20px;
-  margin-bottom: 12px;
-}
-
-.empty p { font-size: 13px; }
-
-/* ── Distribution bars ── */
-
-.dist-row {
-  display: grid;
-  grid-template-columns: 80px 1fr 60px;
-  gap: 10px;
-  align-items: center;
-  padding: 5px 0;
-}
-
-.dist-label {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-2);
-  text-align: right;
-}
-
-.dist-track {
-  height: 20px;
-  background: var(--surface-2);
-  border-radius: 4px;
-  overflow: hidden;
-}
-
-.dist-fill {
-  height: 100%;
-  background: linear-gradient(90deg, var(--cyan), var(--blue));
-  border-radius: 4px;
-  min-width: 2px;
-  transition: width 0.4s ease-out;
-}
-
-.dist-pct {
-  font-family: var(--mono);
-  font-size: 11px;
-  color: var(--text-3);
-  text-align: right;
-}
-
-/* ── Top TX table ── */
-
-.top-table {
-  width: 100%;
-  border-collapse: collapse;
-}
-
-.top-table th {
-  font-size: 10px;
-  padding: 6px 10px;
-  background: transparent;
-  border-bottom: 1px solid var(--border-dim);
-}
-
-.top-table td {
-  font-size: 12px;
-  padding: 6px 10px;
-  border-bottom: 1px solid var(--border-dim);
-}
-
-.top-table td.hash {
-  color: var(--blue);
-}
-
-/* ── Search bar ── */
-
-.search-bar {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  margin-bottom: 16px;
-}
-
-.search-input {
-  flex: 1;
-  max-width: 600px;
-  font-family: var(--mono);
-  font-size: 13px;
-  padding: 10px 14px;
-  background: var(--bg);
-  color: var(--text);
-  border: 1px solid var(--border);
-  border-radius: var(--r-sm);
-  outline: none;
-  transition: border 0.15s, box-shadow 0.15s;
-}
-
-.search-input:focus {
-  border-color: var(--cyan);
-  box-shadow: 0 0 0 3px var(--cyan-dim);
-}
-
-.search-input::placeholder { color: var(--text-4); }
-
-.page-info {
-  font-size: 11px;
-  color: var(--text-3);
-  font-family: var(--mono);
-  margin-left: 4px;
-}
-
-/* ── Responsive ── */
-
-@media (max-width: 900px) {
-  .cards-4 { grid-template-columns: repeat(2, 1fr); }
-  .split { grid-template-columns: 1fr; }
-  .cards-3 { grid-template-columns: 1fr; }
-}
-
-/* ── Scrollbar global ── */
-
 .panel::-webkit-scrollbar { width: 6px; }
 .panel::-webkit-scrollbar-track { background: transparent; }
 .panel::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 
-/* ── Skeleton loading ── */
+/* ── Cards ── */
+.cards { display: grid; gap: 16px; }
+.c4 { grid-template-columns: repeat(4, 1fr); }
+.c3 { grid-template-columns: repeat(3, 1fr); }
+.c2 { grid-template-columns: repeat(2, 1fr); }
+@media (max-width: 900px) { .c4,.c3 { grid-template-columns: repeat(2, 1fr); } }
 
-.skeleton {
-  background: linear-gradient(90deg, var(--surface-2) 25%, var(--surface-3) 50%, var(--surface-2) 75%);
-  background-size: 200% 100%;
-  animation: shimmer 1.5s infinite;
-  border-radius: var(--r-sm);
+.card {
+  background: var(--surface); border: 1px solid var(--border-dim); border-radius: var(--r);
+  padding: 20px; transition: border-color 0.2s;
+}
+.card:hover { border-color: var(--border); }
+.card.full { grid-column: 1 / -1; }
+
+.card-label {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px;
+  color: var(--text-3); margin-bottom: 8px;
+}
+.card-val {
+  font-size: 28px; font-weight: 700; font-family: var(--mono);
+  letter-spacing: -1px; line-height: 1.1;
+}
+.card-val.sm { font-size: 20px; letter-spacing: -0.5px; }
+.card-val.xs { font-size: 16px; letter-spacing: 0; }
+.v-cyan { color: var(--cyan); }
+.v-green { color: var(--green); }
+.v-red { color: var(--red); }
+.v-blue { color: var(--blue); }
+.card-sub { font-size: 12px; color: var(--text-3); margin-top: 4px; }
+
+.sec-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+.sec-desc { font-size: 12px; color: var(--text-3); margin-top: -12px; margin-bottom: 16px; }
+.sec-gap { margin-top: 28px; }
+
+/* ── Buttons ── */
+.btn {
+  font-family: var(--sans); font-size: 12px; font-weight: 600;
+  border: none; border-radius: var(--r-sm); padding: 8px 16px;
+  cursor: pointer; transition: all 0.15s; white-space: nowrap;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.btn:disabled { opacity: 0.35; cursor: not-allowed; }
+.btn-primary { background: var(--cyan); color: #070b12; }
+.btn-primary:hover:not(:disabled) { background: #00f0d6; }
+.btn-danger { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,77,94,0.2); }
+.btn-danger:hover:not(:disabled) { background: rgba(255,77,94,0.18); }
+.btn-ghost { background: var(--surface-2); color: var(--text-2); border: 1px solid var(--border-dim); }
+.btn-ghost:hover:not(:disabled) { background: var(--surface-3); color: var(--text); }
+.btn-sm { padding: 5px 10px; font-size: 11px; }
+.btn-row { display: flex; gap: 8px; align-items: center; }
+.sep { width: 1px; height: 20px; background: var(--border-dim); margin: 0 4px; }
+
+/* ── Inputs ── */
+.field { display: flex; flex-direction: column; gap: 4px; }
+.field-label { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px; color: var(--text-3); }
+input[type="text"], .search-input {
+  font-family: var(--mono); font-size: 12px; padding: 8px 12px;
+  background: var(--bg); color: var(--text); border: 1px solid var(--border-dim);
+  border-radius: var(--r-sm); outline: none; transition: border 0.15s, box-shadow 0.15s;
+}
+input:focus, .search-input:focus { border-color: var(--cyan); box-shadow: 0 0 0 3px var(--cyan-dim); }
+.search-input { font-size: 13px; padding: 10px 14px; flex: 1; max-width: 600px; }
+.search-input::placeholder { color: var(--text-4); }
+
+/* ── Progress ── */
+.progress-track { height: 4px; background: var(--surface-2); border-radius: 2px; overflow: hidden; }
+.progress-fill {
+  height: 100%; background: linear-gradient(90deg, var(--cyan), var(--blue));
+  border-radius: 2px; transition: width 0.3s ease-out;
 }
 
-@keyframes shimmer {
-  0% { background-position: 200% 0; }
-  100% { background-position: -200% 0; }
+/* ── Table ── */
+.tbl-wrap { background: var(--surface); border: 1px solid var(--border-dim); border-radius: var(--r); overflow: hidden; }
+.tbl-scroll { overflow-y: auto; max-height: 420px; }
+.tbl-scroll::-webkit-scrollbar { width: 6px; }
+.tbl-scroll::-webkit-scrollbar-track { background: transparent; }
+.tbl-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th {
+  position: sticky; top: 0; background: var(--surface-2);
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.4px;
+  color: var(--text-3); padding: 10px 14px; text-align: left;
+  border-bottom: 1px solid var(--border-dim); z-index: 2;
+}
+th.r { text-align: right; }
+td {
+  font-family: var(--mono); font-size: 12px; padding: 8px 14px;
+  border-bottom: 1px solid var(--border-dim); color: var(--text-2);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+tr { cursor: pointer; transition: background 0.1s; }
+tr:hover td { background: var(--surface-2); }
+tr.sel td { background: var(--cyan-dim); color: var(--text); }
+td.r { text-align: right; }
+.col-num { width: 50px; }
+.col-hash { width: auto; }
+.col-idx { width: 60px; }
+.col-size { width: 80px; }
+
+/* ── Split ── */
+.split { display: grid; grid-template-columns: 1fr 360px; gap: 16px; }
+@media (max-width: 900px) { .split { grid-template-columns: 1fr; } }
+
+/* ── Inspector ── */
+.inspector {
+  background: var(--surface); border: 1px solid var(--border-dim); border-radius: var(--r);
+  display: flex; flex-direction: column;
+}
+.insp-hdr {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 14px 16px; border-bottom: 1px solid var(--border-dim);
+}
+.insp-hdr h3 { font-size: 13px; font-weight: 600; }
+.badge {
+  font-family: var(--mono); font-size: 11px; font-weight: 500;
+  padding: 2px 8px; border-radius: 10px; background: var(--cyan-dim); color: var(--cyan);
+}
+.insp-body { flex: 1; overflow-y: auto; padding: 16px; }
+.insp-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--text-4); font-size: 12px; }
+
+.df { margin-bottom: 14px; }
+.df:last-child { margin-bottom: 0; }
+.dl { font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-4); margin-bottom: 3px; }
+.dv { font-family: var(--mono); font-size: 12px; color: var(--text); word-break: break-all; line-height: 1.5; }
+.dv.dim { color: var(--text-3); }
+.dv.blue { color: var(--blue); }
+.d-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.cbor-chip {
+  display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 500;
+  padding: 1px 6px; border-radius: 4px; background: var(--purple); color: #fff; margin-right: 6px;
 }
 
-/* ── Tooltip ── */
-
-.hint {
-  font-size: 11px;
-  color: var(--text-4);
-  font-style: italic;
+/* ── Log ── */
+.log-area {
+  background: var(--bg); border: 1px solid var(--border-dim); border-radius: var(--r);
+  padding: 12px; max-height: 180px; overflow-y: auto;
+  font-family: var(--mono); font-size: 11px; line-height: 1.7;
 }
+.log-area::-webkit-scrollbar { width: 5px; }
+.log-area::-webkit-scrollbar-track { background: transparent; }
+.log-area::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+.ll { display: flex; gap: 8px; }
+.ll .ts { color: var(--text-4); flex-shrink: 0; }
+.ll .msg { color: var(--text-2); }
+.ll.ok .msg { color: var(--green); }
+.ll.err .msg { color: var(--red); }
+
+/* ── Empty ── */
+.empty {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  padding: 48px 20px; color: var(--text-4);
+}
+.empty-icon {
+  width: 48px; height: 48px; border-radius: 50%; border: 2px solid var(--border);
+  display: flex; align-items: center; justify-content: center; font-size: 20px; margin-bottom: 12px;
+}
+
+/* ── Distribution ── */
+.dist-row { display: grid; grid-template-columns: 80px 1fr 60px; gap: 10px; align-items: center; padding: 5px 0; }
+.dist-label { font-family: var(--mono); font-size: 11px; color: var(--text-2); text-align: right; }
+.dist-track { height: 20px; background: var(--surface-2); border-radius: 4px; overflow: hidden; }
+.dist-fill { height: 100%; background: linear-gradient(90deg, var(--cyan), var(--blue)); border-radius: 4px; min-width: 2px; transition: width 0.4s; }
+.dist-pct { font-family: var(--mono); font-size: 11px; color: var(--text-3); text-align: right; }
+
+.top-tbl { width: 100%; border-collapse: collapse; }
+.top-tbl th { font-size: 10px; padding: 6px 10px; background: transparent; border-bottom: 1px solid var(--border-dim); }
+.top-tbl td { font-size: 12px; padding: 6px 10px; border-bottom: 1px solid var(--border-dim); }
+.top-tbl .hash { color: var(--blue); }
+
+.hint { font-size: 11px; color: var(--text-4); font-style: italic; }
+.page-info { font-size: 11px; color: var(--text-3); font-family: var(--mono); margin-left: 4px; }
 </style>
 </head>
 <body>
+
+<div id="app" v-cloak>
 <div class="app">
 
 <!-- ═══ Header ═══ -->
@@ -726,459 +288,346 @@ td.r { text-align: right; }
       <div class="logo-sub">Mithril Bootstrap Explorer</div>
     </div>
   </div>
-
   <nav>
-    <button class="active" data-tab="dashboard" onclick="switchTab(this)">Dashboard</button>
-    <button data-tab="bootstrap" onclick="switchTab(this)">Bootstrap</button>
-    <button data-tab="explorer" onclick="switchTab(this)">Explorer</button>
-    <button data-tab="analytics" onclick="switchTab(this)">Analytics</button>
+    <button v-for="t in tabs" :key="t.id" :class="{ active: tab === t.id }" @click="tab = t.id">{{ t.label }}</button>
   </nav>
-
-  <div class="header-spacer"></div>
-
-  <div class="conn-badge">
-    <span class="conn-dot" id="connDot"></span>
-    <span id="connLabel">Disconnected</span>
+  <div class="spacer"></div>
+  <div class="conn">
+    <span class="dot" :class="connClass"></span>
+    <span>{{ connLabel }}</span>
   </div>
 </header>
 
-<!-- ═══════════════════════════════════════════════════════════
-     DASHBOARD PANEL
-     ═══════════════════════════════════════════════════════════ -->
-<div class="panel active" id="panel-dashboard">
-
-  <div class="section-title">Snapshot Overview</div>
-  <div class="section-desc">Mithril LMDB snapshot metadata from the connected server</div>
-
-  <div class="cards cards-4">
+<!-- ═══ Dashboard ═══ -->
+<div class="panel" :class="{ active: tab === 'dashboard' }">
+  <div class="sec-title">Snapshot Overview</div>
+  <div class="sec-desc">Mithril LMDB snapshot connected via stream server</div>
+  <div class="cards c4">
     <div class="card">
       <div class="card-label">Total Entries</div>
-      <div class="card-value cyan" id="dTotal">&mdash;</div>
-      <div class="card-sub" id="dTotalSub">Fetching...</div>
+      <div class="card-val v-cyan">{{ snap.total !== null ? fmt(snap.total) : '—' }}</div>
+      <div class="card-sub">{{ snap.total !== null ? 'in Mithril snapshot' : 'Connecting...' }}</div>
     </div>
     <div class="card">
       <div class="card-label">Databases</div>
-      <div class="card-value sm" id="dDbs">&mdash;</div>
-      <div class="card-sub" id="dDbsSub">&mdash;</div>
+      <div class="card-val sm">{{ snap.dbs.length || '—' }}</div>
+      <div class="card-sub">{{ snap.dbs.join(', ') || '—' }}</div>
     </div>
     <div class="card">
-      <div class="card-label">IndexedDB Status</div>
-      <div class="card-value sm green" id="dIdb">&mdash;</div>
-      <div class="card-sub" id="dIdbSub">Checking...</div>
+      <div class="card-label">Local Storage</div>
+      <div class="card-val sm v-green">{{ fmt(idbCount) }}</div>
+      <div class="card-sub">{{ idbCount > 0 ? 'entries stored locally' : 'empty — bootstrap to populate' }}</div>
     </div>
     <div class="card">
       <div class="card-label">Bootstrap</div>
-      <div class="card-value sm" id="dBoot">Idle</div>
-      <div class="card-sub" id="dBootSub">&mdash;</div>
+      <div class="card-val sm" :class="bsStatusColor">{{ bs.status }}</div>
+      <div class="card-sub">{{ bsStatusHint }}</div>
     </div>
   </div>
-
-  <div class="section-gap"></div>
-  <div class="section-title">Quick Actions</div>
-
+  <div class="sec-gap"></div>
+  <div class="sec-title">Quick Actions</div>
   <div class="btn-row">
-    <button class="btn btn-primary" onclick="switchTab(document.querySelector('[data-tab=bootstrap]')); bsStart()">Start Bootstrap</button>
-    <button class="btn btn-ghost" onclick="switchTab(document.querySelector('[data-tab=explorer]'))">Open Explorer</button>
-    <button class="btn btn-ghost" onclick="switchTab(document.querySelector('[data-tab=analytics]')); computeStats()">Run Analytics</button>
-    <button class="btn btn-ghost btn-sm" onclick="refreshDashboard()">Refresh</button>
+    <button class="btn btn-primary" @click="tab='bootstrap'; bsStart()">Start Bootstrap</button>
+    <button class="btn btn-ghost" @click="tab='explorer'">Open Explorer</button>
+    <button class="btn btn-ghost" @click="tab='analytics'; runStats()">Run Analytics</button>
+    <button class="btn btn-ghost btn-sm" @click="refreshAll()">Refresh</button>
   </div>
-
-  <div class="section-gap"></div>
-  <div class="section-title">About</div>
+  <div class="sec-gap"></div>
+  <div class="sec-title">About</div>
   <div class="card" style="max-width:640px">
     <p style="color:var(--text-2);font-size:12px;line-height:1.7">
-      <strong style="color:var(--text)">Gerolamo</strong> is a lightweight, modular Cardano node/relay implementation in TypeScript.
-      This tool bootstraps UTxO state from Mithril LMDB snapshots into IndexedDB for browser-based node operation.
-      <br><br>
-      <strong style="color:var(--text)">Pipeline:</strong> LMDB snapshot → Bun FFI → NDJSON stream → Browser fetch → IndexedDB → Query &amp; Analytics
+      <strong style="color:var(--text)">Gerolamo</strong> is a lightweight, modular Cardano node/relay in TypeScript.
+      This tool bootstraps UTxO state from Mithril LMDB snapshots into browser storage for offline querying and analytics.
     </p>
   </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════
-     BOOTSTRAP PANEL
-     ═══════════════════════════════════════════════════════════ -->
-<div class="panel" id="panel-bootstrap">
-
-  <div class="section-title">Bootstrap UTxO State</div>
-  <div class="section-desc">Stream UTxO entries from the Mithril snapshot into browser IndexedDB storage</div>
-
-  <div class="field-row" style="margin-bottom:16px">
+<!-- ═══ Bootstrap ═══ -->
+<div class="panel" :class="{ active: tab === 'bootstrap' }">
+  <div class="sec-title">Bootstrap UTxO State</div>
+  <div class="sec-desc">Stream entries from the Mithril snapshot into local browser storage</div>
+  <div style="display:flex;gap:12px;align-items:flex-end;margin-bottom:16px">
     <div class="field" style="flex:1;max-width:480px">
       <div class="field-label">Server URL</div>
-      <input type="text" id="bsUrl" class="url-input" value="http://localhost:3040" spellcheck="false">
+      <input type="text" v-model="serverUrl" style="width:100%" spellcheck="false">
     </div>
   </div>
-
   <div class="btn-row" style="margin-bottom:20px">
-    <button class="btn btn-primary" id="btnStart" onclick="bsStart()">Fresh Start</button>
-    <button class="btn btn-ghost" id="btnResume" onclick="bsResume()">Resume</button>
-    <button class="btn btn-danger" id="btnStop" onclick="bsStop()" disabled>Stop</button>
-    <div style="width:1px;height:20px;background:var(--border-dim);margin:0 4px"></div>
-    <button class="btn btn-ghost btn-sm" onclick="bsCheck()">Check DB</button>
-    <button class="btn btn-ghost btn-sm" onclick="bsClear()">Clear DB</button>
+    <button class="btn btn-primary" :disabled="bs.running" @click="bsStart()">Fresh Start</button>
+    <button class="btn btn-ghost" :disabled="bs.running" @click="bsResume()">Resume</button>
+    <button class="btn btn-danger" :disabled="!bs.running" @click="bsStop()">Stop</button>
+    <div class="sep"></div>
+    <button class="btn btn-ghost btn-sm" @click="bsCheck()">Check</button>
+    <button class="btn btn-ghost btn-sm" @click="bsClear()">Clear</button>
   </div>
-
-  <div class="cards cards-4" style="margin-bottom:16px">
+  <div class="cards c4" style="margin-bottom:16px">
     <div class="card">
       <div class="card-label">Status</div>
-      <div class="card-value xs" id="bsStatus">Idle</div>
-      <div class="card-sub" id="bsStatusSub">&mdash;</div>
+      <div class="card-val xs" :class="bsStatusColor">{{ bs.status }}</div>
+      <div class="card-sub">{{ bsStatusHint }}</div>
     </div>
     <div class="card">
-      <div class="card-label">Stored in IndexedDB</div>
-      <div class="card-value" id="bsStored">0</div>
-      <div class="card-sub" id="bsStoredSub">&mdash;</div>
+      <div class="card-label">Stored Locally</div>
+      <div class="card-val">{{ fmt(bs.stored) }}</div>
+      <div class="card-sub">{{ snap.total ? `of ${fmt(snap.total)} total` : '—' }}</div>
     </div>
     <div class="card">
-      <div class="card-label">Rate</div>
-      <div class="card-value" id="bsRate">&mdash;</div>
-      <div class="card-sub" id="bsEta">&mdash;</div>
+      <div class="card-label">Speed</div>
+      <div class="card-val">{{ bs.rate > 0 ? fmt(bs.rate) + '/s' : '—' }}</div>
+      <div class="card-sub">{{ bs.eta !== null ? 'ETA ' + fmtTime(bs.eta) : '—' }}</div>
     </div>
     <div class="card">
-      <div class="card-label">Network</div>
-      <div class="card-value xs" id="bsRecv">0 B</div>
-      <div class="card-sub" id="bsElapsed">&mdash;</div>
+      <div class="card-label">Downloaded</div>
+      <div class="card-val xs">{{ fmtBytes(bs.bytes) }}</div>
+      <div class="card-sub">{{ bs.elapsed > 0 ? fmtTime(bs.elapsed) : '—' }}</div>
     </div>
   </div>
-
   <div class="progress-track" style="margin-bottom:20px">
-    <div class="progress-fill" id="bsProg"></div>
+    <div class="progress-fill" :style="{ width: bsProgress + '%' }"></div>
   </div>
-
-  <div class="section-title" style="font-size:13px">Activity Log</div>
-  <div class="log-area" id="bsLog"></div>
+  <div class="sec-title" style="font-size:13px">Activity</div>
+  <div class="log-area" ref="logArea">
+    <div v-for="(l, i) in logs" :key="i" class="ll" :class="l.cls">
+      <span class="ts">{{ l.ts }}</span>
+      <span class="msg">{{ l.msg }}</span>
+    </div>
+  </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════
-     EXPLORER PANEL
-     ═══════════════════════════════════════════════════════════ -->
-<div class="panel" id="panel-explorer">
-
-  <div class="section-title">UTxO Explorer</div>
-  <div class="section-desc">Search and browse the UTxO set stored in IndexedDB</div>
-
-  <div class="search-bar">
-    <input class="search-input" id="qSearch" placeholder="Search by tx hash, prefix, or txHash:outputIndex" spellcheck="false">
-    <button class="btn btn-primary" onclick="qSearchExec()">Search</button>
-    <button class="btn btn-ghost" onclick="qListAll()">List All</button>
-    <div style="width:1px;height:20px;background:var(--border-dim);margin:0 4px"></div>
-    <button class="btn btn-ghost btn-sm" id="qPrevBtn" onclick="qPrev()" disabled>Prev</button>
-    <button class="btn btn-ghost btn-sm" id="qNextBtn" onclick="qNext()" disabled>Next</button>
-    <span class="page-info" id="qPageInfo"></span>
+<!-- ═══ Explorer ═══ -->
+<div class="panel" :class="{ active: tab === 'explorer' }">
+  <div class="sec-title">UTxO Explorer</div>
+  <div class="sec-desc">Search and browse the UTxO set stored locally</div>
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:16px">
+    <input class="search-input" v-model="q.search" @keydown.enter="qSearch()" placeholder="Search by tx hash, prefix, or txHash:outputIndex" spellcheck="false">
+    <button class="btn btn-primary" @click="qSearch()">Search</button>
+    <button class="btn btn-ghost" @click="qList()">Browse All</button>
+    <div class="sep"></div>
+    <button class="btn btn-ghost btn-sm" :disabled="q.stack.length === 0" @click="qPrev()">Prev</button>
+    <button class="btn btn-ghost btn-sm" :disabled="!q.hasMore" @click="qNext()">Next</button>
+    <span class="page-info">{{ q.info }}</span>
   </div>
-
   <div class="split">
     <div>
-      <div class="tbl-wrap">
-        <div class="tbl-scroll" id="qTableScroll">
+      <div class="tbl-wrap" v-show="q.rows.length > 0">
+        <div class="tbl-scroll">
           <table>
-            <colgroup>
-              <col class="col-num">
-              <col class="col-hash">
-              <col class="col-idx">
-              <col class="col-size">
-            </colgroup>
-            <thead>
-              <tr>
-                <th>#</th>
-                <th>Transaction Hash</th>
-                <th class="r">Idx</th>
-                <th class="r">Size</th>
+            <colgroup><col class="col-num"><col class="col-hash"><col class="col-idx"><col class="col-size"></colgroup>
+            <thead><tr><th>#</th><th>Transaction Hash</th><th class="r">Idx</th><th class="r">Size</th></tr></thead>
+            <tbody>
+              <tr v-for="(r, i) in q.rows" :key="r.id" :class="{ sel: q.sel === i }" @click="qSel(i)">
+                <td>{{ i + 1 }}</td>
+                <td :title="r.txHash">{{ r.txHash.slice(0,12) }}…{{ r.txHash.slice(-8) }}</td>
+                <td class="r">{{ r.outputIndex }}</td>
+                <td class="r">{{ fmtBytes(r.size || 0) }}</td>
               </tr>
-            </thead>
-            <tbody id="qTbody"></tbody>
+            </tbody>
           </table>
         </div>
       </div>
-      <div class="empty" id="qEmpty">
+      <div class="empty" v-show="q.rows.length === 0">
         <div class="empty-icon">?</div>
-        <p>Bootstrap data first, then search the UTxO set</p>
+        <p>{{ q.emptyMsg }}</p>
       </div>
     </div>
-
-    <div class="inspector" id="qInspector">
-      <div class="insp-header">
+    <div class="inspector">
+      <div class="insp-hdr">
         <h3>Inspector</h3>
-        <span class="badge" id="qBadge" style="display:none"></span>
+        <span class="badge" v-show="q.sel !== null">#{{ (q.sel || 0) + 1 }}</span>
       </div>
       <div class="insp-body">
-        <div class="insp-empty" id="qInspEmpty">Select a row to inspect</div>
-        <div id="qInspContent" style="display:none"></div>
+        <div class="insp-empty" v-if="q.sel === null">Select a row to inspect</div>
+        <template v-else-if="q.rows[q.sel]">
+          <div class="df">
+            <div class="dl">Transaction Hash</div>
+            <div class="dv blue">{{ q.rows[q.sel].txHash }}</div>
+          </div>
+          <div class="d-row">
+            <div class="df">
+              <div class="dl">Output Index</div>
+              <div class="dv">{{ q.rows[q.sel].outputIndex }}</div>
+            </div>
+            <div class="df">
+              <div class="dl">Value Size</div>
+              <div class="dv">{{ fmtBytes(q.rows[q.sel].size || 0) }}</div>
+            </div>
+          </div>
+          <div class="df" v-if="q.rows[q.sel].valueCbor">
+            <div class="dl">CBOR Lead Byte</div>
+            <div class="dv">
+              <span class="cbor-chip">0x{{ q.rows[q.sel].valueCbor.slice(0,2) }}</span>
+              {{ cborDesc(q.rows[q.sel].valueCbor) }}
+            </div>
+          </div>
+          <div class="df" v-if="q.rows[q.sel].valueCbor">
+            <div class="dl">Raw Value (hex)</div>
+            <div class="dv dim" style="max-height:160px;overflow-y:auto;font-size:11px">{{ q.rows[q.sel].valueCbor }}</div>
+          </div>
+        </template>
       </div>
     </div>
   </div>
 </div>
 
-<!-- ═══════════════════════════════════════════════════════════
-     ANALYTICS PANEL
-     ═══════════════════════════════════════════════════════════ -->
-<div class="panel" id="panel-analytics">
-
-  <div class="section-title">UTxO Analytics</div>
-  <div class="section-desc">Compute statistics over the entire UTxO set in IndexedDB</div>
-
+<!-- ═══ Analytics ═══ -->
+<div class="panel" :class="{ active: tab === 'analytics' }">
+  <div class="sec-title">UTxO Analytics</div>
+  <div class="sec-desc">Compute statistics over the locally stored UTxO set</div>
   <div class="btn-row" style="margin-bottom:20px">
-    <button class="btn btn-primary" id="btnStats" onclick="computeStats()">Compute Statistics</button>
-    <span class="page-info" id="statsProgress"></span>
+    <button class="btn btn-primary" :disabled="st.computing" @click="runStats()">Compute Statistics</button>
+    <span class="page-info">{{ st.progress }}</span>
   </div>
-
-  <div class="cards cards-4" style="margin-bottom:20px">
+  <div class="cards c4" style="margin-bottom:20px">
     <div class="card">
       <div class="card-label">Total Entries</div>
-      <div class="card-value cyan" id="stTotal">0</div>
+      <div class="card-val v-cyan">{{ fmt(st.total) }}</div>
     </div>
     <div class="card">
       <div class="card-label">Total Size</div>
-      <div class="card-value" id="stSize">&mdash;</div>
-      <div class="card-sub" id="stAvg"></div>
+      <div class="card-val">{{ st.totalSize ? fmtBytes(st.totalSize) : '—' }}</div>
+      <div class="card-sub" v-if="st.avg">Average: {{ fmtBytes(st.avg) }} per entry</div>
     </div>
     <div class="card">
       <div class="card-label">Smallest UTxO</div>
-      <div class="card-value sm" id="stMin">&mdash;</div>
+      <div class="card-val sm">{{ st.min !== null ? fmtBytes(st.min) : '—' }}</div>
     </div>
     <div class="card">
       <div class="card-label">Largest UTxO</div>
-      <div class="card-value sm" id="stMax">&mdash;</div>
+      <div class="card-val sm">{{ st.max !== null ? fmtBytes(st.max) : '—' }}</div>
     </div>
   </div>
-
-  <div class="cards cards-2">
+  <div class="cards c2">
     <div class="card">
       <div class="card-label" style="margin-bottom:12px">Size Distribution</div>
-      <div id="stDist">
-        <div class="hint">Run analytics to see distribution</div>
-      </div>
+      <template v-if="st.dist.length">
+        <div v-for="b in st.dist" :key="b.label" class="dist-row">
+          <div class="dist-label">{{ b.label }}</div>
+          <div class="dist-track"><div class="dist-fill" :style="{ width: b.width + '%' }"></div></div>
+          <div class="dist-pct">{{ b.percentage.toFixed(1) }}%</div>
+        </div>
+      </template>
+      <div v-else class="hint">Run analytics to see distribution</div>
     </div>
     <div class="card">
       <div class="card-label" style="margin-bottom:12px">Top 10 Transactions (by output count)</div>
-      <div id="stTop">
-        <div class="hint">Run analytics to see top transactions</div>
-      </div>
+      <table v-if="st.topTx.length" class="top-tbl">
+        <thead><tr><th>Transaction Hash</th><th class="r">Outputs</th></tr></thead>
+        <tbody>
+          <tr v-for="tx in st.topTx" :key="tx.txHash">
+            <td class="hash">{{ tx.txHash.slice(0,16) }}…{{ tx.txHash.slice(-8) }}</td>
+            <td class="r">{{ tx.outputCount }}</td>
+          </tr>
+        </tbody>
+      </table>
+      <div v-else class="hint">Run analytics to see top transactions</div>
     </div>
   </div>
 </div>
 
-</div><!-- .app -->
+</div>
+</div>
 
-<script>
-/* ═══════════════════════════════════════════════════════════════
-   Gerolamo Bootstrap Explorer — Application Logic
-   ═══════════════════════════════════════════════════════════════ */
+<script type="module">
+import { createApp, ref, reactive, computed, watch, nextTick, onMounted } from 'https://esm.sh/vue@3.5.13/dist/vue.esm-browser.prod.js'
 
-const $ = id => document.getElementById(id);
-const esc = s => String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-const fmtB = b => b < 1024 ? b+' B' : b < 1048576 ? (b/1024).toFixed(1)+' KB' : (b/1048576).toFixed(2)+' MB';
-const fmtN = n => Number(n).toLocaleString();
-const fmtT = ms => { const s = ms/1000; return s < 60 ? s.toFixed(1)+'s' : s < 3600 ? (s/60).toFixed(1)+'m' : (s/3600).toFixed(1)+'h'; };
+// ── IndexedDB Layer ──
 
-// ─── Tab Navigation ───
-
-function switchTab(btn) {
-  if (typeof btn === 'string') btn = document.querySelector(`[data-tab="${btn}"]`);
-  document.querySelectorAll('nav button').forEach(b => b.classList.remove('active'));
-  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
-  btn.classList.add('active');
-  $('panel-' + btn.dataset.tab).classList.add('active');
-}
-
-// ─── CBOR Lead Byte Description ───
-
-function cborDesc(hex) {
-  if (!hex || hex.length < 2) return '';
-  const b = parseInt(hex.slice(0,2), 16);
-  if (b <= 0x17) return `Unsigned int (${b})`;
-  if (b >= 0x18 && b <= 0x1b) return 'Unsigned int';
-  if (b >= 0x20 && b <= 0x3b) return 'Negative int';
-  if (b >= 0x40 && b <= 0x5b) return 'Byte string';
-  if (b === 0x5f) return 'Byte string (indef)';
-  if (b >= 0x60 && b <= 0x7b) return 'Text string';
-  if (b >= 0x80 && b <= 0x97) return `Array (${b-0x80} items)`;
-  if (b >= 0x98 && b <= 0x9b) return 'Array';
-  if (b === 0x9f) return 'Array (indef)';
-  if (b >= 0xa0 && b <= 0xb7) return `Map (${b-0xa0} pairs)`;
-  if (b >= 0xb8 && b <= 0xbb) return 'Map';
-  if (b === 0xbf) return 'Map (indef)';
-  if (b >= 0xc0 && b <= 0xdb) return 'Tag';
-  if (b === 0xf4) return 'false';
-  if (b === 0xf5) return 'true';
-  if (b === 0xf6) return 'null';
-  if (b === 0xff) return 'Break';
-  return 'Unknown';
-}
-
-// ─── Inspector Rendering ───
-
-function showInspector(entry, contentEl, emptyEl, badgeEl, label) {
-  emptyEl.style.display = 'none';
-  contentEl.style.display = '';
-  if (badgeEl) { badgeEl.style.display = ''; badgeEl.textContent = label; }
-
-  const sz = entry.valueCbor ? entry.valueCbor.length / 2 : (entry.size || 0);
-  const fb = entry.valueCbor ? entry.valueCbor.slice(0,2) : '';
-
-  contentEl.innerHTML = `
-    <div class="detail-field">
-      <div class="detail-label">Transaction Hash</div>
-      <div class="detail-value blue">${entry.txHash}</div>
-    </div>
-    <div class="detail-row">
-      <div class="detail-field">
-        <div class="detail-label">Output Index</div>
-        <div class="detail-value">${entry.outputIndex}</div>
-      </div>
-      <div class="detail-field">
-        <div class="detail-label">Value Size</div>
-        <div class="detail-value">${fmtB(sz)}</div>
-      </div>
-    </div>
-    ${fb ? `<div class="detail-field">
-      <div class="detail-label">CBOR Lead Byte</div>
-      <div class="detail-value"><span class="cbor-chip">0x${fb}</span>${cborDesc(entry.valueCbor)}</div>
-    </div>` : ''}
-    <div class="detail-field">
-      <div class="detail-label">Raw Value (hex)</div>
-      <div class="detail-value dim" style="max-height:160px;overflow-y:auto;font-size:11px">${entry.valueCbor || '—'}</div>
-    </div>
-  `;
-}
-
-// ─── Logging helper ───
-
-function logTo(areaId, msg, cls) {
-  const area = $(areaId);
-  const div = document.createElement('div');
-  div.className = 'log-line ' + (cls || '');
-  div.innerHTML = `<span class="log-ts">${new Date().toLocaleTimeString('en-GB')}</span><span class="log-msg">${esc(msg)}</span>`;
-  area.appendChild(div);
-  area.scrollTop = area.scrollHeight;
-  if (area.children.length > 500) area.removeChild(area.firstChild);
-}
-
-// ═══════════════════════════════════════════════════════════
-// INDEXEDDB LAYER
-// ═══════════════════════════════════════════════════════════
-
-const IDB_NAME = 'gerolamo-utxo';
-const IDB_VER = 1;
-const UTXO_STORE = 'utxo';
-const META_STORE = 'meta';
-
-let _db = null;
+const IDB_NAME = 'gerolamo-utxo', IDB_VER = 1, UTXO_STORE = 'utxo', META_STORE = 'meta'
+let _db = null
 
 function idbOpen() {
-  if (_db) return Promise.resolve(_db);
+  if (_db) return Promise.resolve(_db)
   return new Promise((ok, fail) => {
-    const req = indexedDB.open(IDB_NAME, IDB_VER);
+    const req = indexedDB.open(IDB_NAME, IDB_VER)
     req.onupgradeneeded = () => {
-      const db = req.result;
+      const db = req.result
       if (!db.objectStoreNames.contains(UTXO_STORE)) {
-        const s = db.createObjectStore(UTXO_STORE, { keyPath: 'id' });
-        s.createIndex('txHash', 'txHash', { unique: false });
+        const s = db.createObjectStore(UTXO_STORE, { keyPath: 'id' })
+        s.createIndex('txHash', 'txHash', { unique: false })
       }
       if (!db.objectStoreNames.contains(META_STORE))
-        db.createObjectStore(META_STORE, { keyPath: 'key' });
-    };
-    req.onsuccess = () => { _db = req.result; ok(_db); };
-    req.onerror = () => fail(req.error);
-  });
+        db.createObjectStore(META_STORE, { keyPath: 'key' })
+    }
+    req.onsuccess = () => { _db = req.result; ok(_db) }
+    req.onerror = () => fail(req.error)
+  })
 }
 
 function idbCount(db) {
   return new Promise((ok, fail) => {
-    const tx = db.transaction(UTXO_STORE, 'readonly');
-    const r = tx.objectStore(UTXO_STORE).count();
-    r.onsuccess = () => ok(r.result);
-    r.onerror = () => fail(r.error);
-  });
+    const r = db.transaction(UTXO_STORE, 'readonly').objectStore(UTXO_STORE).count()
+    r.onsuccess = () => ok(r.result); r.onerror = () => fail(r.error)
+  })
 }
 
 function idbBatchPut(db, items) {
   return new Promise((ok, fail) => {
-    const tx = db.transaction(UTXO_STORE, 'readwrite');
-    const os = tx.objectStore(UTXO_STORE);
-    for (const item of items) os.put(item);
-    tx.oncomplete = () => ok();
-    tx.onerror = () => fail(tx.error);
-  });
+    const tx = db.transaction(UTXO_STORE, 'readwrite'), os = tx.objectStore(UTXO_STORE)
+    for (const item of items) os.put(item)
+    tx.oncomplete = () => ok(); tx.onerror = () => fail(tx.error)
+  })
 }
 
 function idbClearAll(db) {
   return new Promise((ok, fail) => {
-    const tx = db.transaction([UTXO_STORE, META_STORE], 'readwrite');
-    tx.objectStore(UTXO_STORE).clear();
-    tx.objectStore(META_STORE).clear();
-    tx.oncomplete = () => ok();
-    tx.onerror = () => fail(tx.error);
-  });
+    const tx = db.transaction([UTXO_STORE, META_STORE], 'readwrite')
+    tx.objectStore(UTXO_STORE).clear(); tx.objectStore(META_STORE).clear()
+    tx.oncomplete = () => ok(); tx.onerror = () => fail(tx.error)
+  })
 }
 
 function idbGetByTxHash(db, txHash) {
   return new Promise((ok, fail) => {
-    const tx = db.transaction(UTXO_STORE, 'readonly');
-    const r = tx.objectStore(UTXO_STORE).index('txHash').getAll(txHash);
-    r.onsuccess = () => ok(r.result);
-    r.onerror = () => fail(r.error);
-  });
+    const r = db.transaction(UTXO_STORE, 'readonly').objectStore(UTXO_STORE).index('txHash').getAll(txHash)
+    r.onsuccess = () => ok(r.result); r.onerror = () => fail(r.error)
+  })
 }
 
 function idbGetByRef(db, txHash, idx) {
   return new Promise((ok, fail) => {
-    const tx = db.transaction(UTXO_STORE, 'readonly');
-    const r = tx.objectStore(UTXO_STORE).get(`${txHash}:${idx}`);
-    r.onsuccess = () => ok(r.result || null);
-    r.onerror = () => fail(r.error);
-  });
+    const r = db.transaction(UTXO_STORE, 'readonly').objectStore(UTXO_STORE).get(`${txHash}:${idx}`)
+    r.onsuccess = () => ok(r.result || null); r.onerror = () => fail(r.error)
+  })
 }
 
-function idbSearchPrefix(db, prefix, limit) {
-  limit = limit || 100;
+function idbSearchPrefix(db, prefix, limit = 100) {
   return new Promise((ok, fail) => {
-    const tx = db.transaction(UTXO_STORE, 'readonly');
-    const range = IDBKeyRange.bound(prefix, prefix + '\uffff', false, true);
-    const r = tx.objectStore(UTXO_STORE).index('txHash').openCursor(range);
-    const res = [], seen = new Set();
+    const range = IDBKeyRange.bound(prefix, prefix + '\uffff', false, true)
+    const r = db.transaction(UTXO_STORE, 'readonly').objectStore(UTXO_STORE).index('txHash').openCursor(range)
+    const res = [], seen = new Set()
     r.onsuccess = () => {
-      const cur = r.result;
-      if (!cur || res.length >= limit) { ok(res); return; }
-      if (!seen.has(cur.value.id)) { seen.add(cur.value.id); res.push(cur.value); }
-      cur.continue();
-    };
-    r.onerror = () => fail(r.error);
-  });
+      const c = r.result
+      if (!c || res.length >= limit) { ok(res); return }
+      if (!seen.has(c.value.id)) { seen.add(c.value.id); res.push(c.value) }
+      c.continue()
+    }
+    r.onerror = () => fail(r.error)
+  })
 }
 
-function idbList(db, pageSize, startKey) {
-  pageSize = pageSize || 50;
+function idbList(db, pageSize = 50, startKey) {
   return new Promise((ok, fail) => {
-    const tx = db.transaction(UTXO_STORE, 'readonly');
-    const store = tx.objectStore(UTXO_STORE);
-    const range = startKey ? IDBKeyRange.lowerBound(startKey, true) : undefined;
-    const r = store.openCursor(range, 'next');
-    const entries = [];
+    const store = db.transaction(UTXO_STORE, 'readonly').objectStore(UTXO_STORE)
+    const range = startKey ? IDBKeyRange.lowerBound(startKey, true) : undefined
+    const r = store.openCursor(range, 'next')
+    const entries = []
     r.onsuccess = () => {
-      const cur = r.result;
-      if (!cur || entries.length >= pageSize) {
-        ok({ entries, hasMore: !!cur, nextCursor: cur ? cur.key : null });
-        return;
-      }
-      entries.push(cur.value);
-      cur.continue();
-    };
-    r.onerror = () => fail(r.error);
-  });
+      const c = r.result
+      if (!c || entries.length >= pageSize) { ok({ entries, hasMore: !!c, nextCursor: c ? c.key : null }); return }
+      entries.push(c.value); c.continue()
+    }
+    r.onerror = () => fail(r.error)
+  })
 }
 
 function idbComputeStats(db, onProgress) {
   return new Promise((ok, fail) => {
-    const tx = db.transaction(UTXO_STORE, 'readonly');
-    const store = tx.objectStore(UTXO_STORE);
-    const countReq = store.count();
-    let totalEntries = 0;
-    countReq.onsuccess = () => { totalEntries = countReq.result; };
-
-    const curReq = store.openCursor();
-    let totalSize = 0, minSize = Infinity, maxSize = 0, scanned = 0;
+    const store = db.transaction(UTXO_STORE, 'readonly').objectStore(UTXO_STORE)
+    const countReq = store.count()
+    let totalEntries = 0
+    countReq.onsuccess = () => { totalEntries = countReq.result }
+    const cur = store.openCursor()
+    let totalSize = 0, minSize = Infinity, maxSize = 0, scanned = 0
     const buckets = [
       { label: '0–50 B', min: 0, max: 50, count: 0 },
       { label: '50–100 B', min: 50, max: 100, count: 0 },
@@ -1187,498 +636,369 @@ function idbComputeStats(db, onProgress) {
       { label: '500 B–1 KB', min: 500, max: 1024, count: 0 },
       { label: '1–5 KB', min: 1024, max: 5120, count: 0 },
       { label: '5 KB+', min: 5120, max: Infinity, count: 0 },
-    ];
-    const txCounts = new Map();
-
-    curReq.onsuccess = () => {
-      const cur = curReq.result;
-      if (!cur) {
+    ]
+    const txCounts = new Map()
+    cur.onsuccess = () => {
+      const c = cur.result
+      if (!c) {
         ok({
-          totalEntries: scanned,
-          totalSizeBytes: totalSize,
+          totalEntries: scanned, totalSizeBytes: totalSize,
           avgSizeBytes: scanned > 0 ? Math.round(totalSize / scanned) : 0,
-          minSizeBytes: minSize === Infinity ? 0 : minSize,
-          maxSizeBytes: maxSize,
-          sizeDistribution: buckets.map(b => ({
-            ...b,
-            percentage: scanned > 0 ? (b.count / scanned) * 100 : 0,
-          })),
-          topTxHashes: [...txCounts.entries()]
-            .sort((a,b) => b[1] - a[1])
-            .slice(0, 10)
-            .map(([h,c]) => ({ txHash: h, outputCount: c })),
-        });
-        return;
+          minSizeBytes: minSize === Infinity ? 0 : minSize, maxSizeBytes: maxSize,
+          sizeDistribution: buckets.map(b => ({ ...b, percentage: scanned > 0 ? (b.count / scanned) * 100 : 0 })),
+          topTxHashes: [...txCounts.entries()].sort((a, b) => b[1] - a[1]).slice(0, 10).map(([h, c]) => ({ txHash: h, outputCount: c })),
+        })
+        return
       }
-
-      const e = cur.value, sz = e.size || 0;
-      totalSize += sz;
-      if (sz < minSize) minSize = sz;
-      if (sz > maxSize) maxSize = sz;
-      for (const b of buckets) { if (sz >= b.min && sz < b.max) { b.count++; break; } }
-      txCounts.set(e.txHash, (txCounts.get(e.txHash) || 0) + 1);
-      scanned++;
-      if (onProgress && scanned % 50000 === 0) onProgress(scanned, totalEntries);
-      cur.continue();
-    };
-    curReq.onerror = () => fail(curReq.error);
-  });
-}
-
-// ═══════════════════════════════════════════════════════════
-// DASHBOARD
-// ═══════════════════════════════════════════════════════════
-
-async function refreshDashboard() {
-  // Fetch server info
-  const serverUrl = $('bsUrl').value.replace(/\/+$/, '');
-  try {
-    const r = await fetch(serverUrl + '/api/info');
-    if (r.ok) {
-      const info = await r.json();
-      $('dTotal').textContent = fmtN(info.totalEntries);
-      $('dTotalSub').textContent = 'in Mithril snapshot';
-      $('dDbs').textContent = (info.databases || []).length;
-      $('dDbsSub').textContent = (info.databases || []).join(', ');
-      $('connDot').className = 'conn-dot ok';
-      $('connLabel').textContent = 'Connected';
+      const e = c.value, sz = e.size || 0
+      totalSize += sz
+      if (sz < minSize) minSize = sz
+      if (sz > maxSize) maxSize = sz
+      for (const b of buckets) { if (sz >= b.min && sz < b.max) { b.count++; break } }
+      txCounts.set(e.txHash, (txCounts.get(e.txHash) || 0) + 1)
+      scanned++
+      if (onProgress && scanned % 50000 === 0) onProgress(scanned, totalEntries)
+      c.continue()
     }
-  } catch {
-    $('connDot').className = 'conn-dot err';
-    $('connLabel').textContent = 'Disconnected';
-    $('dTotal').textContent = '—';
-    $('dTotalSub').textContent = 'Cannot reach server';
-  }
-
-  // Check IndexedDB
-  try {
-    const db = await idbOpen();
-    const count = await idbCount(db);
-    $('dIdb').textContent = fmtN(count);
-    $('dIdbSub').textContent = count > 0 ? 'entries stored' : 'empty — bootstrap to populate';
-  } catch {
-    $('dIdb').textContent = '—';
-    $('dIdbSub').textContent = 'IndexedDB unavailable';
-  }
+    cur.onerror = () => fail(cur.error)
+  })
 }
 
-// ═══════════════════════════════════════════════════════════
-// BOOTSTRAP
-// ═══════════════════════════════════════════════════════════
+// ── Vue App ──
 
-let bsAbort = null;
+createApp({
+  setup() {
+    const tab = ref('dashboard')
+    const tabs = [
+      { id: 'dashboard', label: 'Dashboard' },
+      { id: 'bootstrap', label: 'Bootstrap' },
+      { id: 'explorer', label: 'Explorer' },
+      { id: 'analytics', label: 'Analytics' },
+    ]
+    const serverUrl = ref('http://localhost:3040')
+    const snap = reactive({ total: null, dbs: [] })
+    const idbCountVal = ref(0)
+    const connStatus = ref('off') // off | ok | stream | err
 
-async function bsCheck() {
-  const db = await idbOpen();
-  const count = await idbCount(db);
-  $('bsStored').textContent = fmtN(count);
-  $('bsStoredSub').textContent = count > 0 ? 'entries in IndexedDB' : 'empty';
-  logTo('bsLog', `IndexedDB: ${fmtN(count)} entries`, 'info');
-}
+    const connClass = computed(() => ({ ok: connStatus.value === 'ok', stream: connStatus.value === 'stream', err: connStatus.value === 'err' }))
+    const connLabel = computed(() => ({ off: 'Disconnected', ok: 'Connected', stream: 'Streaming', err: 'Error' }[connStatus.value] || 'Disconnected'))
 
-async function bsClear() {
-  const db = await idbOpen();
-  await idbClearAll(db);
-  $('bsStored').textContent = '0';
-  $('bsStoredSub').textContent = 'cleared';
-  $('bsStatus').textContent = 'Idle';
-  $('bsStatusSub').textContent = '—';
-  $('bsProg').style.width = '0%';
-  logTo('bsLog', 'IndexedDB cleared', 'ok');
-  refreshDashboard();
-}
+    // ── Formatters ──
+    const fmt = n => Number(n || 0).toLocaleString()
+    const fmtBytes = b => { b = b || 0; return b < 1024 ? b + ' B' : b < 1048576 ? (b / 1024).toFixed(1) + ' KB' : (b / 1048576).toFixed(2) + ' MB' }
+    const fmtTime = ms => { if (!ms || ms <= 0) return '—'; const s = ms / 1000; return s < 60 ? s.toFixed(1) + 's' : s < 3600 ? (s / 60).toFixed(1) + 'm' : (s / 3600).toFixed(1) + 'h' }
 
-function bsStart() { bsRun(true); }
-function bsResume() { bsRun(false); }
-
-async function bsRun(fresh) {
-  const db = await idbOpen();
-  const serverUrl = $('bsUrl').value.replace(/\/+$/, '');
-  const batchSize = 1000;
-  const MAX_RETRIES = 10;
-  const RETRY_DELAY_MS = 2000;
-
-  if (fresh) await idbClearAll(db);
-
-  let totalExpected = null;
-  const t0 = Date.now();
-  let bytesReceived = 0;
-  let retries = 0;
-  let userAborted = false;
-
-  $('btnStart').disabled = true;
-  $('btnResume').disabled = true;
-  $('btnStop').disabled = false;
-
-  const initialCount = await idbCount(db);
-  $('bsStatus').textContent = 'Connecting';
-  $('bsStatusSub').textContent = fresh ? 'fresh start' : `resuming from ${fmtN(initialCount)}`;
-  logTo('bsLog', fresh ? 'Starting fresh bootstrap...' : `Resuming from ${fmtN(initialCount)}...`);
-
-  // Fetch total count
-  try {
-    const infoRes = await fetch(serverUrl + '/api/info');
-    if (infoRes.ok) {
-      const info = await infoRes.json();
-      totalExpected = info.totalEntries || null;
+    function cborDesc(hex) {
+      if (!hex || hex.length < 2) return ''
+      const b = parseInt(hex.slice(0, 2), 16)
+      if (b <= 0x17) return `Unsigned int (${b})`
+      if (b >= 0x18 && b <= 0x1b) return 'Unsigned int'
+      if (b >= 0x20 && b <= 0x3b) return 'Negative int'
+      if (b >= 0x40 && b <= 0x5b) return 'Byte string'
+      if (b === 0x5f) return 'Byte string (indef)'
+      if (b >= 0x60 && b <= 0x7b) return 'Text string'
+      if (b >= 0x80 && b <= 0x97) return `Array (${b - 0x80} items)`
+      if (b >= 0x98 && b <= 0x9b) return 'Array'
+      if (b === 0x9f) return 'Array (indef)'
+      if (b >= 0xa0 && b <= 0xb7) return `Map (${b - 0xa0} pairs)`
+      if (b >= 0xb8 && b <= 0xbb) return 'Map'
+      if (b === 0xbf) return 'Map (indef)'
+      if (b >= 0xc0 && b <= 0xdb) return 'Tag'
+      if (b === 0xf4) return 'false'
+      if (b === 0xf5) return 'true'
+      if (b === 0xf6) return 'null'
+      return 'Unknown'
     }
-  } catch {}
 
-  if (totalExpected) {
-    $('bsStoredSub').textContent = `of ${fmtN(totalExpected)} expected`;
-    logTo('bsLog', `Server: ${fmtN(totalExpected)} total entries`, 'info');
-  }
+    // ── Bootstrap ──
+    const bs = reactive({
+      status: 'Idle', running: false,
+      stored: 0, rate: 0, eta: null, bytes: 0, elapsed: 0,
+    })
+    const logs = reactive([])
+    const logArea = ref(null)
+    let bsAbort = null
 
-  bsAbort = new AbortController();
+    const bsStatusColor = computed(() => {
+      const s = bs.status.toLowerCase()
+      if (s === 'complete') return 'v-green'
+      if (s.includes('error') || s.includes('failed')) return 'v-red'
+      if (s.includes('stream') || s.includes('retry')) return 'v-cyan'
+      return ''
+    })
+    const bsStatusHint = computed(() => {
+      const s = bs.status.toLowerCase()
+      if (s === 'idle') return 'Ready to begin'
+      if (s === 'complete') return `${fmt(bs.stored)} entries stored`
+      if (s === 'paused') return 'Resume to continue'
+      return '—'
+    })
+    const bsProgress = computed(() => snap.total > 0 ? Math.min(100, (bs.stored / snap.total) * 100) : 0)
 
-  const updateUI = (received) => {
-    const elapsed = Date.now() - t0;
-    const newEntries = received - initialCount;
-    const rate = elapsed > 100 ? (newEntries / elapsed) * 1000 : 0;
-    const remaining = totalExpected ? totalExpected - received : null;
-    const eta = rate > 0 && remaining !== null ? remaining / rate : null;
+    function log(msg, cls = '') {
+      logs.push({ ts: new Date().toLocaleTimeString('en-GB'), msg, cls })
+      if (logs.length > 200) logs.splice(0, logs.length - 200)
+      nextTick(() => { if (logArea.value) logArea.value.scrollTop = logArea.value.scrollHeight })
+    }
 
-    $('bsStored').textContent = fmtN(received);
-    $('bsRate').textContent = rate > 0 ? fmtN(Math.round(rate)) + '/s' : '—';
-    $('bsEta').textContent = eta !== null ? 'ETA ' + fmtT(eta * 1000) : '—';
-    $('bsRecv').textContent = fmtB(bytesReceived);
-    $('bsElapsed').textContent = fmtT(elapsed);
-    if (totalExpected > 0) $('bsProg').style.width = Math.min(100, received / totalExpected * 100) + '%';
-  };
-
-  // Stream one segment starting from `fromIdx`. Returns true if stream completed, false if dropped.
-  async function streamSegment(fromIdx) {
-    const url = `${serverUrl}/api/stream/utxo?from=${fromIdx}`;
-    let received = fromIdx;
-    let batch = [];
-
-    const flushBatch = async () => {
-      if (batch.length === 0) return;
-      await idbBatchPut(db, batch);
-      batch = [];
-    };
-
-    const res = await fetch(url, { signal: bsAbort.signal });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    if (!res.body) throw new Error('No response body');
-
-    const rdr = res.body.getReader(), dec = new TextDecoder();
-    let buf = '';
-
-    while (true) {
-      const { done, value } = await rdr.read();
-      if (done) break;
-      bytesReceived += value.byteLength;
-      buf += dec.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-
-      for (const ln of lines) {
-        if (!ln.trim()) continue;
-        let obj;
-        try { obj = JSON.parse(ln); } catch { continue; }
-        if (obj._progress || obj._done || obj._error) {
-          if (obj._progress) logTo('bsLog', `Progress: ${obj.db} — ${fmtN(obj.count)} scanned`);
-          if (obj._done) logTo('bsLog', `Server done: ${fmtN(obj.totalStreamed)} streamed`, 'ok');
-          if (obj._error) logTo('bsLog', `Server error: ${obj._error}`, 'err');
-          continue;
+    async function refreshAll() {
+      const url = serverUrl.value.replace(/\/+$/, '')
+      try {
+        const r = await fetch(url + '/api/info')
+        if (r.ok) {
+          const info = await r.json()
+          snap.total = info.totalEntries || null
+          snap.dbs = info.databases || []
+          connStatus.value = 'ok'
         }
-        if (obj.txHash) {
-          batch.push({
-            id: `${obj.txHash}:${obj.outputIndex}`,
-            txHash: obj.txHash,
-            outputIndex: obj.outputIndex,
-            valueCbor: obj.valueCbor,
-            size: obj.valueCbor ? obj.valueCbor.length / 2 : 0,
-          });
-          received++;
-          if (batch.length >= batchSize) {
-            await flushBatch();
-            updateUI(received);
+      } catch { connStatus.value = 'err' }
+      try {
+        const db = await idbOpen()
+        idbCountVal.value = await idbCount(db)
+        bs.stored = idbCountVal.value
+      } catch {}
+    }
+
+    async function bsCheck() {
+      const db = await idbOpen()
+      const c = await idbCount(db)
+      idbCountVal.value = c
+      bs.stored = c
+      log(`${fmt(c)} entries stored locally`, 'ok')
+    }
+
+    async function bsClear() {
+      const db = await idbOpen()
+      await idbClearAll(db)
+      idbCountVal.value = 0
+      bs.stored = 0
+      bs.status = 'Idle'
+      log('Local storage cleared', 'ok')
+    }
+
+    function bsStart() { bsRun(true) }
+    function bsResume() { bsRun(false) }
+
+    async function bsRun(fresh) {
+      const db = await idbOpen()
+      const url = serverUrl.value.replace(/\/+$/, '')
+      const BATCH = 1000, MAX_RETRIES = 10, RETRY_DELAY = 2000
+
+      if (fresh) await idbClearAll(db)
+
+      const initialCount = await idbCount(db)
+      bs.running = true
+      bs.status = 'Connecting'
+      bs.stored = initialCount
+      bs.bytes = 0
+      bs.elapsed = 0
+      bs.rate = 0
+      bs.eta = null
+      log(fresh ? 'Starting fresh...' : `Resuming from ${fmt(initialCount)} entries`)
+
+      // Get total
+      try {
+        const r = await fetch(url + '/api/info')
+        if (r.ok) { const info = await r.json(); snap.total = info.totalEntries || null; snap.dbs = info.databases || [] }
+      } catch {}
+
+      if (snap.total) log(`${fmt(snap.total)} entries available on server`)
+
+      bsAbort = new AbortController()
+      const t0 = Date.now()
+      let retries = 0, userAborted = false
+
+      async function streamSegment(fromIdx) {
+        const res = await fetch(`${url}/api/stream/utxo?from=${fromIdx}`, { signal: bsAbort.signal })
+        if (!res.ok) throw new Error('HTTP ' + res.status)
+        if (!res.body) throw new Error('No response body')
+        const rdr = res.body.getReader(), dec = new TextDecoder()
+        let buf = '', received = fromIdx, batch = []
+
+        while (true) {
+          const { done, value } = await rdr.read()
+          if (done) break
+          bs.bytes += value.byteLength
+          buf += dec.decode(value, { stream: true })
+          const lines = buf.split('\n'); buf = lines.pop()
+          for (const ln of lines) {
+            if (!ln.trim()) continue
+            let obj; try { obj = JSON.parse(ln) } catch { continue }
+            if (obj._progress || obj._done || obj._error) continue
+            if (obj.txHash) {
+              batch.push({ id: `${obj.txHash}:${obj.outputIndex}`, txHash: obj.txHash, outputIndex: obj.outputIndex, valueCbor: obj.valueCbor, size: obj.valueCbor ? obj.valueCbor.length / 2 : 0 })
+              received++
+              if (batch.length >= BATCH) {
+                await idbBatchPut(db, batch); batch = []
+                bs.stored = received
+                const elapsed = Date.now() - t0
+                const newEntries = received - initialCount
+                bs.elapsed = elapsed
+                bs.rate = elapsed > 100 ? Math.round((newEntries / elapsed) * 1000) : 0
+                const remaining = snap.total ? snap.total - received : null
+                bs.eta = bs.rate > 0 && remaining !== null ? (remaining / bs.rate) * 1000 : null
+              }
+            }
           }
         }
+        if (batch.length) { await idbBatchPut(db, batch) }
+        bs.stored = received
+        return received
       }
-    }
-
-    await flushBatch();
-    updateUI(received);
-    return received;
-  }
-
-  // Main loop: stream with auto-retry on network errors
-  try {
-    let currentFrom = initialCount;
-
-    while (true) {
-      $('bsStatus').textContent = retries > 0 ? `Retry ${retries}/${MAX_RETRIES}` : 'Streaming';
-      $('connDot').className = 'conn-dot ok';
-      $('connLabel').textContent = 'Streaming';
 
       try {
-        const finalReceived = await streamSegment(currentFrom);
-        // Stream completed successfully
-        updateUI(finalReceived);
-        $('bsStatus').textContent = 'Complete';
-        $('bsStatus').className = 'card-value xs green';
-        $('bsStatusSub').textContent = `${fmtN(finalReceived)} entries stored`;
-        $('dBoot').textContent = 'Complete';
-        $('dBoot').className = 'card-value sm green';
-        logTo('bsLog', `Bootstrap complete: ${fmtN(finalReceived)} entries`, 'ok');
-        break;
-
-      } catch (e) {
-        if (e.name === 'AbortError') {
-          userAborted = true;
-          const count = await idbCount(db);
-          updateUI(count);
-          $('bsStatus').textContent = 'Paused';
-          $('bsStatusSub').textContent = `${fmtN(count)} stored — resume to continue`;
-          logTo('bsLog', `Paused at ${fmtN(count)} entries`);
-          break;
+        let currentFrom = initialCount
+        while (true) {
+          bs.status = retries > 0 ? `Reconnecting (${retries})` : 'Streaming'
+          connStatus.value = 'stream'
+          try {
+            const final = await streamSegment(currentFrom)
+            bs.status = 'Complete'
+            connStatus.value = 'ok'
+            log(`Bootstrap complete — ${fmt(final)} entries stored`, 'ok')
+            break
+          } catch (e) {
+            if (e.name === 'AbortError') {
+              userAborted = true
+              const c = await idbCount(db); bs.stored = c
+              bs.status = 'Paused'
+              log(`Paused at ${fmt(c)} entries`)
+              break
+            }
+            retries++
+            const c = await idbCount(db); currentFrom = c; bs.stored = c
+            if (retries > MAX_RETRIES) {
+              bs.status = 'Failed'
+              log(`Could not complete after ${MAX_RETRIES} attempts`, 'err')
+              break
+            }
+            log(`Connection interrupted — reconnecting (${retries}/${MAX_RETRIES})...`, 'err')
+            bs.status = `Reconnecting (${retries})`
+            connStatus.value = 'err'
+            await new Promise(r => setTimeout(r, RETRY_DELAY))
+            if (bsAbort?.signal.aborted) { userAborted = true; break }
+            bsAbort = new AbortController()
+          }
         }
-
-        // Network error — auto-retry
-        retries++;
-        const count = await idbCount(db);
-        currentFrom = count;
-
-        if (retries > MAX_RETRIES) {
-          $('bsStatus').textContent = 'Error';
-          $('bsStatus').className = 'card-value xs red';
-          $('bsStatusSub').textContent = `Failed after ${MAX_RETRIES} retries`;
-          logTo('bsLog', `Gave up after ${MAX_RETRIES} retries (${fmtN(count)} stored)`, 'err');
-          break;
-        }
-
-        logTo('bsLog', `Connection lost at ${fmtN(count)} entries — retrying in ${RETRY_DELAY_MS/1000}s (${retries}/${MAX_RETRIES})...`, 'err');
-        $('bsStatus').textContent = `Reconnecting (${retries})`;
-        $('connDot').className = 'conn-dot err';
-        $('connLabel').textContent = 'Reconnecting';
-
-        // Wait before retry
-        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
-
-        // Refresh the abort controller for the new fetch
-        if (bsAbort) {
-          const oldSignal = bsAbort.signal;
-          if (oldSignal.aborted) { userAborted = true; break; }
-        }
-        bsAbort = new AbortController();
+      } finally {
+        bs.running = false
+        bsAbort = null
+        idbCountVal.value = bs.stored
+        if (!userAborted) connStatus.value = 'ok'
       }
     }
-  } finally {
-    $('btnStart').disabled = false;
-    $('btnResume').disabled = false;
-    $('btnStop').disabled = true;
-    bsAbort = null;
-    if (!userAborted) {
-      $('connDot').className = 'conn-dot ok';
-      $('connLabel').textContent = 'Connected';
-    } else {
-      $('connDot').className = 'conn-dot';
-      $('connLabel').textContent = 'Paused';
+
+    function bsStop() { if (bsAbort) { bsAbort.abort(); bsAbort = null } }
+
+    // ── Explorer ──
+    const q = reactive({
+      search: '', rows: [], sel: null, hasMore: false,
+      cursor: null, stack: [], info: '', emptyMsg: 'Bootstrap data first, then search the UTxO set',
+    })
+
+    function qClear() { q.rows = []; q.sel = null; q.hasMore = false; q.cursor = null; q.info = '' }
+
+    async function qSearch() {
+      const db = await idbOpen()
+      const input = q.search.trim()
+      if (!input) return
+      qClear(); q.stack = []
+      if (input.includes(':')) {
+        const [hash, idx] = input.split(':')
+        const r = await idbGetByRef(db, hash, parseInt(idx))
+        if (r) { q.rows = [r]; q.info = '1 result' }
+        else { q.emptyMsg = 'No UTxO found for this reference'; q.info = '0 results' }
+        return
+      }
+      if (input.length === 64 && /^[0-9a-fA-F]+$/.test(input)) {
+        const r = await idbGetByTxHash(db, input)
+        q.rows = r; q.info = `${r.length} output${r.length !== 1 ? 's' : ''}`
+        if (!r.length) q.emptyMsg = 'No outputs found for this transaction'
+        return
+      }
+      const r = await idbSearchPrefix(db, input.toLowerCase(), 100)
+      q.rows = r; q.info = `${r.length} result${r.length !== 1 ? 's' : ''}`
+      if (!r.length) q.emptyMsg = 'No matches for this prefix'
     }
-    refreshDashboard();
+
+    async function qList() {
+      const db = await idbOpen()
+      qClear(); q.stack = []
+      const page = await idbList(db, 50)
+      q.rows = page.entries; q.hasMore = page.hasMore; q.cursor = page.nextCursor
+      const total = await idbCount(db)
+      q.info = page.entries.length > 0 ? `1–${page.entries.length} of ${fmt(total)}` : '0 entries'
+      if (!page.entries.length) q.emptyMsg = 'No data stored locally — bootstrap first'
+    }
+
+    async function qNext() {
+      if (!q.cursor) return
+      const db = await idbOpen()
+      q.stack.push(q.rows.length > 0 ? q.rows[0].id : null)
+      qClear()
+      const page = await idbList(db, 50, q.cursor)
+      q.rows = page.entries; q.hasMore = page.hasMore; q.cursor = page.nextCursor
+      const total = await idbCount(db)
+      const off = q.stack.length * 50
+      q.info = `${off + 1}–${off + page.entries.length} of ${fmt(total)}`
+    }
+
+    async function qPrev() {
+      if (!q.stack.length) return
+      const db = await idbOpen()
+      q.stack.pop()
+      const startKey = q.stack.length > 0 ? q.stack[q.stack.length - 1] : undefined
+      qClear()
+      const page = startKey ? await idbList(db, 50, startKey) : await idbList(db, 50)
+      q.rows = page.entries; q.hasMore = page.hasMore; q.cursor = page.nextCursor
+      const total = await idbCount(db)
+      const off = q.stack.length * 50
+      q.info = `${off + 1}–${off + page.entries.length} of ${fmt(total)}`
+    }
+
+    function qSel(i) { q.sel = i }
+
+    // ── Analytics ──
+    const st = reactive({
+      computing: false, progress: '', total: 0,
+      totalSize: null, avg: null, min: null, max: null,
+      dist: [], topTx: [],
+    })
+
+    async function runStats() {
+      const db = await idbOpen()
+      const c = await idbCount(db)
+      if (c === 0) { st.progress = 'No data — bootstrap first'; return }
+      st.computing = true
+      st.progress = `Analyzing ${fmt(c)} entries...`
+      const stats = await idbComputeStats(db, (scanned, total) => {
+        st.progress = `${fmt(scanned)} / ${fmt(total)} analyzed...`
+      })
+      st.computing = false
+      st.progress = `Done — ${fmt(stats.totalEntries)} entries`
+      st.total = stats.totalEntries
+      st.totalSize = stats.totalSizeBytes
+      st.avg = stats.avgSizeBytes
+      st.min = stats.minSizeBytes
+      st.max = stats.maxSizeBytes
+      const maxPct = Math.max(...stats.sizeDistribution.map(b => b.percentage), 1)
+      st.dist = stats.sizeDistribution.map(b => ({ ...b, width: (b.percentage / maxPct) * 100 }))
+      st.topTx = stats.topTxHashes
+    }
+
+    // ── Init ──
+    onMounted(() => refreshAll())
+
+    return {
+      tab, tabs, serverUrl, snap, idbCount: idbCountVal, connClass, connLabel,
+      bs, bsStatusColor, bsStatusHint, bsProgress, logs, logArea,
+      bsStart, bsResume, bsStop, bsCheck, bsClear, refreshAll,
+      q, qSearch, qList, qNext, qPrev, qSel,
+      st, runStats,
+      fmt, fmtBytes, fmtTime, cborDesc, log,
+    }
   }
-}
-
-function bsStop() {
-  if (bsAbort) { bsAbort.abort(); bsAbort = null; }
-}
-
-// ═══════════════════════════════════════════════════════════
-// EXPLORER
-// ═══════════════════════════════════════════════════════════
-
-let qResults = [];
-let qCursor = null;
-let qCursorStack = [];
-
-function qRenderRow(e, i) {
-  const tr = document.createElement('tr');
-  tr.dataset.i = i;
-  tr.onclick = () => qSel(i);
-  const sz = e.size || (e.valueCbor ? e.valueCbor.length / 2 : 0);
-  tr.innerHTML = `<td>${i+1}</td><td title="${e.txHash}">${e.txHash.slice(0,12)}…${e.txHash.slice(-8)}</td><td class="r">${e.outputIndex}</td><td class="r">${fmtB(sz)}</td>`;
-  $('qTbody').appendChild(tr);
-}
-
-function qSel(i) {
-  const e = qResults[i];
-  if (!e) return;
-  document.querySelectorAll('#qTbody tr.sel').forEach(r => r.classList.remove('sel'));
-  const row = document.querySelector(`#qTbody tr[data-i="${i}"]`);
-  if (row) row.classList.add('sel');
-  showInspector(e, $('qInspContent'), $('qInspEmpty'), $('qBadge'), `#${i+1}`);
-}
-
-function qClearResults() {
-  qResults = [];
-  $('qTbody').innerHTML = '';
-  $('qInspContent').style.display = 'none';
-  $('qInspContent').innerHTML = '';
-  $('qInspEmpty').style.display = '';
-  $('qBadge').style.display = 'none';
-}
-
-async function qSearchExec() {
-  const db = await idbOpen();
-  const input = $('qSearch').value.trim();
-  if (!input) return;
-
-  qClearResults();
-  $('qEmpty').style.display = 'none';
-  $('qTableScroll').parentElement.style.display = '';
-
-  // txHash:index format
-  if (input.includes(':')) {
-    const [hash, idx] = input.split(':');
-    const r = await idbGetByRef(db, hash, parseInt(idx));
-    if (r) { qResults = [r]; qRenderRow(r, 0); }
-    else { $('qEmpty').querySelector('p').textContent = 'No UTxO found for this reference'; $('qEmpty').style.display = ''; }
-    $('qPageInfo').textContent = r ? '1 result' : '0 results';
-    $('qPrevBtn').disabled = true;
-    $('qNextBtn').disabled = true;
-    return;
-  }
-
-  // Full 64-char txHash
-  if (input.length === 64 && /^[0-9a-fA-F]+$/.test(input)) {
-    const r = await idbGetByTxHash(db, input);
-    qResults = r;
-    r.forEach((e, i) => qRenderRow(e, i));
-    $('qPageInfo').textContent = `${r.length} output${r.length !== 1 ? 's' : ''}`;
-    if (r.length === 0) { $('qEmpty').querySelector('p').textContent = 'No outputs found for this transaction'; $('qEmpty').style.display = ''; }
-    $('qPrevBtn').disabled = true;
-    $('qNextBtn').disabled = true;
-    return;
-  }
-
-  // Prefix search
-  const r = await idbSearchPrefix(db, input.toLowerCase(), 100);
-  qResults = r;
-  r.forEach((e, i) => qRenderRow(e, i));
-  $('qPageInfo').textContent = `${r.length} result${r.length !== 1 ? 's' : ''} (prefix match)`;
-  if (r.length === 0) { $('qEmpty').querySelector('p').textContent = 'No matches for this prefix'; $('qEmpty').style.display = ''; }
-  $('qPrevBtn').disabled = true;
-  $('qNextBtn').disabled = true;
-}
-
-async function qListAll() {
-  const db = await idbOpen();
-  qClearResults();
-  $('qEmpty').style.display = 'none';
-  $('qTableScroll').parentElement.style.display = '';
-  qCursorStack = [];
-  qCursor = null;
-
-  const page = await idbList(db, 50);
-  qResults = page.entries;
-  page.entries.forEach((e, i) => qRenderRow(e, i));
-  qCursor = page.hasMore ? page.nextCursor : null;
-  $('qNextBtn').disabled = !page.hasMore;
-  $('qPrevBtn').disabled = true;
-  const total = await idbCount(db);
-  $('qPageInfo').textContent = page.entries.length > 0 ? `1–${page.entries.length} of ${fmtN(total)}` : '0 entries';
-  if (page.entries.length === 0) {
-    $('qEmpty').querySelector('p').textContent = 'IndexedDB is empty — bootstrap first';
-    $('qEmpty').style.display = '';
-  }
-}
-
-async function qNext() {
-  if (!qCursor) return;
-  const db = await idbOpen();
-  qCursorStack.push(qResults.length > 0 ? qResults[0].id : null);
-  qClearResults();
-  const page = await idbList(db, 50, qCursor);
-  qResults = page.entries;
-  page.entries.forEach((e, i) => qRenderRow(e, i));
-  qCursor = page.hasMore ? page.nextCursor : null;
-  $('qNextBtn').disabled = !page.hasMore;
-  $('qPrevBtn').disabled = qCursorStack.length === 0;
-  const total = await idbCount(db);
-  const offset = qCursorStack.length * 50;
-  $('qPageInfo').textContent = `${offset+1}–${offset+page.entries.length} of ${fmtN(total)}`;
-}
-
-async function qPrev() {
-  if (qCursorStack.length === 0) return;
-  const db = await idbOpen();
-  qCursorStack.pop();
-  const startKey = qCursorStack.length > 0 ? qCursorStack[qCursorStack.length - 1] : undefined;
-  qClearResults();
-  const page = startKey ? await idbList(db, 50, startKey) : await idbList(db, 50);
-  qResults = page.entries;
-  page.entries.forEach((e, i) => qRenderRow(e, i));
-  qCursor = page.hasMore ? page.nextCursor : null;
-  $('qNextBtn').disabled = !page.hasMore;
-  $('qPrevBtn').disabled = qCursorStack.length === 0;
-  const total = await idbCount(db);
-  const offset = qCursorStack.length * 50;
-  $('qPageInfo').textContent = `${offset+1}–${offset+page.entries.length} of ${fmtN(total)}`;
-}
-
-// Enter to search
-$('qSearch').addEventListener('keydown', e => { if (e.key === 'Enter') qSearchExec(); });
-
-// ═══════════════════════════════════════════════════════════
-// ANALYTICS
-// ═══════════════════════════════════════════════════════════
-
-async function computeStats() {
-  const db = await idbOpen();
-  const count = await idbCount(db);
-  if (count === 0) {
-    $('statsProgress').textContent = 'No data — bootstrap first';
-    return;
-  }
-
-  $('btnStats').disabled = true;
-  $('statsProgress').textContent = `Scanning ${fmtN(count)} entries...`;
-
-  const stats = await idbComputeStats(db, (scanned, total) => {
-    $('statsProgress').textContent = `${fmtN(scanned)} / ${fmtN(total)} scanned...`;
-  });
-
-  $('btnStats').disabled = false;
-  $('statsProgress').textContent = `Done — ${fmtN(stats.totalEntries)} entries analyzed`;
-
-  $('stTotal').textContent = fmtN(stats.totalEntries);
-  $('stSize').textContent = fmtB(stats.totalSizeBytes);
-  $('stAvg').textContent = `Average: ${fmtB(stats.avgSizeBytes)} per entry`;
-  $('stMin').textContent = fmtB(stats.minSizeBytes);
-  $('stMax').textContent = fmtB(stats.maxSizeBytes);
-
-  // Distribution bars
-  const maxPct = Math.max(...stats.sizeDistribution.map(b => b.percentage), 1);
-  $('stDist').innerHTML = stats.sizeDistribution.map(b => {
-    const w = (b.percentage / maxPct) * 100;
-    return `<div class="dist-row">
-      <div class="dist-label">${b.label}</div>
-      <div class="dist-track"><div class="dist-fill" style="width:${w}%"></div></div>
-      <div class="dist-pct">${b.percentage.toFixed(1)}%</div>
-    </div>`;
-  }).join('');
-
-  // Top tx hashes
-  if (stats.topTxHashes.length > 0) {
-    $('stTop').innerHTML = `<table class="top-table">
-      <thead><tr><th>Transaction Hash</th><th class="r">Outputs</th></tr></thead>
-      <tbody>${stats.topTxHashes.map(tx =>
-        `<tr><td class="hash">${tx.txHash.slice(0,16)}…${tx.txHash.slice(-8)}</td><td class="r">${tx.outputCount}</td></tr>`
-      ).join('')}</tbody>
-    </table>`;
-  } else {
-    $('stTop').innerHTML = '<div class="hint">No data</div>';
-  }
-}
-
-// ═══════════════════════════════════════════════════════════
-// INIT
-// ═══════════════════════════════════════════════════════════
-
-refreshDashboard();
+}).mount('#app')
 </script>
 </body>
 </html>

@@ -20,6 +20,7 @@ store/
 tx/
 /snapshots/
 output/
+scripts/output/
 .vscode
 .github
 

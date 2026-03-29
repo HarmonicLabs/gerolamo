@@ -1295,18 +1295,25 @@ async function bsRun(fresh) {
   const db = await idbOpen();
   const serverUrl = $('bsUrl').value.replace(/\/+$/, '');
   const batchSize = 1000;
+  const MAX_RETRIES = 10;
+  const RETRY_DELAY_MS = 2000;
 
   if (fresh) await idbClearAll(db);
 
-  const storedCount = await idbCount(db);
   let totalExpected = null;
+  const t0 = Date.now();
+  let bytesReceived = 0;
+  let retries = 0;
+  let userAborted = false;
 
   $('btnStart').disabled = true;
   $('btnResume').disabled = true;
   $('btnStop').disabled = false;
+
+  const initialCount = await idbCount(db);
   $('bsStatus').textContent = 'Connecting';
-  $('bsStatusSub').textContent = fresh ? 'fresh start' : `resuming from ${fmtN(storedCount)}`;
-  logTo('bsLog', fresh ? 'Starting fresh bootstrap...' : `Resuming from ${fmtN(storedCount)}...`);
+  $('bsStatusSub').textContent = fresh ? 'fresh start' : `resuming from ${fmtN(initialCount)}`;
+  logTo('bsLog', fresh ? 'Starting fresh bootstrap...' : `Resuming from ${fmtN(initialCount)}...`);
 
   // Fetch total count
   try {
@@ -1322,18 +1329,11 @@ async function bsRun(fresh) {
     logTo('bsLog', `Server: ${fmtN(totalExpected)} total entries`, 'info');
   }
 
-  const streamUrl = `${serverUrl}/api/stream/utxo?from=${storedCount}`;
-  const t0 = Date.now();
-  let bytesReceived = 0, received = storedCount, batch = [];
-
   bsAbort = new AbortController();
-  $('bsStatus').textContent = 'Streaming';
-  $('connDot').className = 'conn-dot ok';
-  $('connLabel').textContent = 'Streaming';
 
-  const updateUI = () => {
+  const updateUI = (received) => {
     const elapsed = Date.now() - t0;
-    const newEntries = received - storedCount;
+    const newEntries = received - initialCount;
     const rate = elapsed > 100 ? (newEntries / elapsed) * 1000 : 0;
     const remaining = totalExpected ? totalExpected - received : null;
     const eta = rate > 0 && remaining !== null ? remaining / rate : null;
@@ -1346,14 +1346,19 @@ async function bsRun(fresh) {
     if (totalExpected > 0) $('bsProg').style.width = Math.min(100, received / totalExpected * 100) + '%';
   };
 
-  const flushBatch = async () => {
-    if (batch.length === 0) return;
-    await idbBatchPut(db, batch);
-    batch = [];
-  };
+  // Stream one segment starting from `fromIdx`. Returns true if stream completed, false if dropped.
+  async function streamSegment(fromIdx) {
+    const url = `${serverUrl}/api/stream/utxo?from=${fromIdx}`;
+    let received = fromIdx;
+    let batch = [];
 
-  try {
-    const res = await fetch(streamUrl, { signal: bsAbort.signal });
+    const flushBatch = async () => {
+      if (batch.length === 0) return;
+      await idbBatchPut(db, batch);
+      batch = [];
+    };
+
+    const res = await fetch(url, { signal: bsAbort.signal });
     if (!res.ok) throw new Error('HTTP ' + res.status);
     if (!res.body) throw new Error('No response body');
 
@@ -1389,40 +1394,90 @@ async function bsRun(fresh) {
           received++;
           if (batch.length >= batchSize) {
             await flushBatch();
-            updateUI();
+            updateUI(received);
           }
         }
       }
     }
 
     await flushBatch();
-    updateUI();
-    $('bsStatus').textContent = 'Complete';
-    $('bsStatus').className = 'card-value xs green';
-    $('bsStatusSub').textContent = `${fmtN(received)} entries stored`;
-    $('dBoot').textContent = 'Complete';
-    $('dBoot').className = 'card-value sm green';
-    logTo('bsLog', `Bootstrap complete: ${fmtN(received)} entries`, 'ok');
-  } catch (e) {
-    if (e.name === 'AbortError') {
-      await flushBatch();
-      updateUI();
-      $('bsStatus').textContent = 'Paused';
-      $('bsStatusSub').textContent = `${fmtN(received)} stored — resume to continue`;
-      logTo('bsLog', `Paused at ${fmtN(received)} entries`);
-    } else {
-      $('bsStatus').textContent = 'Error';
-      $('bsStatus').className = 'card-value xs red';
-      $('bsStatusSub').textContent = e.message;
-      logTo('bsLog', 'Error: ' + e.message, 'err');
+    updateUI(received);
+    return received;
+  }
+
+  // Main loop: stream with auto-retry on network errors
+  try {
+    let currentFrom = initialCount;
+
+    while (true) {
+      $('bsStatus').textContent = retries > 0 ? `Retry ${retries}/${MAX_RETRIES}` : 'Streaming';
+      $('connDot').className = 'conn-dot ok';
+      $('connLabel').textContent = 'Streaming';
+
+      try {
+        const finalReceived = await streamSegment(currentFrom);
+        // Stream completed successfully
+        updateUI(finalReceived);
+        $('bsStatus').textContent = 'Complete';
+        $('bsStatus').className = 'card-value xs green';
+        $('bsStatusSub').textContent = `${fmtN(finalReceived)} entries stored`;
+        $('dBoot').textContent = 'Complete';
+        $('dBoot').className = 'card-value sm green';
+        logTo('bsLog', `Bootstrap complete: ${fmtN(finalReceived)} entries`, 'ok');
+        break;
+
+      } catch (e) {
+        if (e.name === 'AbortError') {
+          userAborted = true;
+          const count = await idbCount(db);
+          updateUI(count);
+          $('bsStatus').textContent = 'Paused';
+          $('bsStatusSub').textContent = `${fmtN(count)} stored — resume to continue`;
+          logTo('bsLog', `Paused at ${fmtN(count)} entries`);
+          break;
+        }
+
+        // Network error — auto-retry
+        retries++;
+        const count = await idbCount(db);
+        currentFrom = count;
+
+        if (retries > MAX_RETRIES) {
+          $('bsStatus').textContent = 'Error';
+          $('bsStatus').className = 'card-value xs red';
+          $('bsStatusSub').textContent = `Failed after ${MAX_RETRIES} retries`;
+          logTo('bsLog', `Gave up after ${MAX_RETRIES} retries (${fmtN(count)} stored)`, 'err');
+          break;
+        }
+
+        logTo('bsLog', `Connection lost at ${fmtN(count)} entries — retrying in ${RETRY_DELAY_MS/1000}s (${retries}/${MAX_RETRIES})...`, 'err');
+        $('bsStatus').textContent = `Reconnecting (${retries})`;
+        $('connDot').className = 'conn-dot err';
+        $('connLabel').textContent = 'Reconnecting';
+
+        // Wait before retry
+        await new Promise(r => setTimeout(r, RETRY_DELAY_MS));
+
+        // Refresh the abort controller for the new fetch
+        if (bsAbort) {
+          const oldSignal = bsAbort.signal;
+          if (oldSignal.aborted) { userAborted = true; break; }
+        }
+        bsAbort = new AbortController();
+      }
     }
   } finally {
     $('btnStart').disabled = false;
     $('btnResume').disabled = false;
     $('btnStop').disabled = true;
     bsAbort = null;
-    $('connDot').className = 'conn-dot ok';
-    $('connLabel').textContent = 'Connected';
+    if (!userAborted) {
+      $('connDot').className = 'conn-dot ok';
+      $('connLabel').textContent = 'Connected';
+    } else {
+      $('connDot').className = 'conn-dot';
+      $('connLabel').textContent = 'Paused';
+    }
     refreshDashboard();
   }
 }

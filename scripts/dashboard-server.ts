@@ -35,10 +35,14 @@ const NODE_URL = args["node-url"]!;
 const STATIC_DIR = args["static-dir"] ? resolve(args["static-dir"]) : "";
 
 let db: Database | null = null;
-function getDb(): Database {
+let dbMissing = false;
+function getDb(): Database | null {
+  if (dbMissing) return null;
   if (!db) {
     if (!existsSync(DB_PATH)) {
-      throw new Error(`Database not found at ${DB_PATH}`);
+      dbMissing = true;
+      console.warn(`Database not found at ${DB_PATH} — API will return empty data until node starts`);
+      return null;
     }
     db = new Database(DB_PATH, { readonly: true });
     db.exec("PRAGMA journal_mode = WAL");
@@ -83,8 +87,16 @@ async function pollAndBroadcast() {
 }
 setInterval(pollAndBroadcast, 2000);
 
+const EMPTY_STATUS = {
+  tip: { slot: 0, hash: "", epoch: 0, era: 0 },
+  sync: { progress: 0, speed: 0, startedAt: new Date().toISOString() },
+  uptime: 0, network: process.env.NETWORK ?? "preprod",
+  volatileBlocks: 0, immutableBlocks: 0, utxoCount: 0, mempoolSize: 0, gcCycles: 0,
+};
+
 function buildStatus() {
   const d = getDb();
+  if (!d) return { ...EMPTY_STATUS, uptime: Date.now() - startTime };
   const tipRow = d.query("SELECT MAX(slot) as slot FROM blocks").get() as any;
   const tipSlot = tipRow?.slot ?? 0;
 
@@ -122,6 +134,7 @@ function buildStatus() {
 
 function queryRecentBlocks(limit: number) {
   const d = getDb();
+  if (!d) return [];
   const rows = d.query(`
     SELECT slot, hash, prev_hash, inserted_at
     FROM blocks
@@ -185,7 +198,7 @@ function queryLogs(level: string, limit: number) {
 
 function queryUtxos(q: string) {
   const d = getDb();
-  if (!q) return [];
+  if (!d || !q) return [];
 
   // utxo ref format: hash:idx
   if (/^[0-9a-f]{64}:\d+$/i.test(q)) {
@@ -221,6 +234,7 @@ function parseUtxoRow(row: any) {
 
 function queryRecentDeltas(limit: number) {
   const d = getDb();
+  if (!d) return [];
   const rows = d.query(`
     SELECT id, block_hash, action, utxo, created_at
     FROM utxo_deltas
@@ -239,6 +253,7 @@ function queryRecentDeltas(limit: number) {
 
 function queryChainState() {
   const d = getDb();
+  if (!d) return { treasury: 0, reserves: 0, poolCount: 0, stakeCount: 0, delegationCount: 0 };
   let treasury = 0, reserves = 0;
   try {
     const cas = d.query("SELECT treasury, reserves FROM chain_account_state WHERE id = 1").get() as any;

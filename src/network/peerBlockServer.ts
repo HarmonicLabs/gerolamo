@@ -117,9 +117,9 @@ export async function startPeerBlockServer(
 
             if (/^\d+n?$/.test(id)) {
                 const slot = BigInt(id.replace("n", ""));
-                row = getBlockBySlot(slot) ?? null;
+                row = (await getBlockBySlot(slot)) ?? null;
             } else {
-                row = getBlockByHash(id) ?? null;
+                row = (await getBlockByHash(id)) ?? null;
             }
 
             if (!row?.block_fetch_RawCbor) {

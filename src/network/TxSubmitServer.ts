@@ -60,8 +60,8 @@ export class GerolamoTxSubmitServer {
             }
         }
 
-        let msg: TxSubmitMessage;
-        while (msg = this.queue.pop()!) {
+        let msg: TxSubmitMessage | undefined;
+        while ((msg = this.queue.pop())) {
             await this.handleMessage(msg);
         }
     }

@@ -8,7 +8,10 @@
     "scripts": {
         "start": "bun src/index.ts",
         "explorer": "bun scripts/gerolamo-explorer.ts",
-        "stream-server": "bun scripts/mithril-stream-server.ts"
+        "stream-server": "bun scripts/mithril-stream-server.ts",
+        "dashboard": "bun scripts/dashboard-server.ts",
+        "dashboard:dev": "cd dashboard && bun x vite",
+        "dashboard:build": "cd dashboard && bun x vite build"
     },
     "devDependencies": {
         "@harmoniclabs/cddl-tools": "^0.0.4",

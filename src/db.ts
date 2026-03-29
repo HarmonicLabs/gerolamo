@@ -363,24 +363,6 @@ export async function getBlockBySlot(slot: bigint): Promise<any> {
     return result[0] || null;
 }
 
-export async function getTransactionByTxId(txid: string): Promise<any> {
-    const result = await sql`SELECT * FROM transactions WHERE txid = ${txid}`
-        .values();
-    return result[0] || null;
-}
-
-export async function getBlocksInEpoch(epoch: number): Promise<any[]> {
-    return await sql`
-			SELECT * FROM volatile_blocks vb
-			INNER JOIN transactions t ON vb.block_hash = t.block_hash
-			WHERE t.epoch = ${epoch}
-			UNION
-			SELECT * FROM immutable_blocks ib
-			INNER JOIN transactions t ON ib.block_hash = t.block_hash
-			WHERE t.epoch = ${epoch}
-		`.values();
-}
-
 export async function getMaxSlot(): Promise<bigint> {
     const result = await sql`SELECT MAX(slot) as max_slot FROM blocks`.values();
     const maxSlot = BigInt(result[0]?.max_slot ?? 0);
@@ -651,7 +633,7 @@ export async function applyTransaction(
         `${input.utxoRef.id.toString()}:${input.utxoRef.index}`
     );
 
-    logger.info(`Input refs: ${inputRefs.length} - ${inputRefs.slice(0, 3).join(', ')}`);
+    logger.debug(`Input refs: ${inputRefs.length} - ${inputRefs.slice(0, 3).join(', ')}`);
 
     if (inputRefs.length > 0) {
         const existingUtxos =
@@ -659,10 +641,10 @@ export async function applyTransaction(
                 sql(inputRefs)
             }`.values() as [string][];
         if (existingUtxos.length > 0) {
-            // Insert spend deltas individually (Uint8Array in bulk has issues)
-            for (const [tx_out] of existingUtxos) {
-                await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, "spend", ${tx_out})`;
-            }
+            // Batch insert spend deltas
+            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
+                sql(existingUtxos.map(([tx_out]) => [blockHash, "spend", tx_out]))
+            }`;
             // Delete spent UTxOs in bulk
             await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
         }
@@ -705,15 +687,13 @@ export async function applyTransaction(
     );
 
     if (outputData.length > 0) {
-        // Insert UTxO deltas in bulk
+        // Batch insert UTxO deltas and UTxOs together
         await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
             sql(outputData.map(([_, json]) => [blockHash, "create", json]))
         }`;
-
-        // Insert UTxOs individually (bulk operations work for homogeneous string data, but individual is more reliable)
-        for (const [ref, json, txhash] of outputData) {
-            await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${ref}, ${json}, ${txhash})`;
-        }
+        await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES ${
+            sql(outputData)
+        }`;
     }
 
     if (txBody.certs && Array.isArray(txBody.certs)) {
@@ -729,11 +709,6 @@ export async function applyTransaction(
             JSON.stringify({ amount: txBody.fee.toString() })
         })`;
         await sql`UPDATE chain_account_state SET treasury = treasury + ${txBody.fee} WHERE id = 1`;
-    }
-
-    // TODO: Handle minting, burning, collateral, etc.
-    if (txBody.certs) {
-        await applyCertificates(txBody.certs, blockHash);
     }
 }
 

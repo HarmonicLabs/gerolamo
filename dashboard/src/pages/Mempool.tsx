@@ -14,14 +14,8 @@ import { Badge } from "@/components/ui/badge";
 import { Stat } from "@/components/ui/stat";
 import { fetchMempool, fetchStatus, useSSE, type MempoolTx, type NodeStatus } from "@/lib/api";
 
-// ---------------------------------------------------------------------------
-// Mock data loader — swap for real API once available
-// ---------------------------------------------------------------------------
-import mockMempool from "@/mocks/fixtures/mempool.json";
-
 function loadMempool(): Promise<MempoolTx[]> {
-  // Try the real API first; fall back to mock fixtures
-  return fetchMempool().catch(() => mockMempool as unknown as MempoolTx[]);
+  return fetchMempool().catch(() => [] as MempoolTx[]);
 }
 
 // ---------------------------------------------------------------------------

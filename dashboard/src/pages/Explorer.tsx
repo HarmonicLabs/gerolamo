@@ -13,75 +13,6 @@ const ACTION_VARIANT = {
   withdrawal: "purple" as const,
 };
 
-// ---------------------------------------------------------------------------
-// Mock UTxO entries for demo mode
-// ---------------------------------------------------------------------------
-
-const MOCK_UTXOS: UtxoEntry[] = [
-  {
-    ref: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2:0",
-    txHash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
-    outputIndex: 0,
-    address: "addr_test1qz2fxv2umyhttkxyxp8x0dlpdt3k6cwng5pxj3jhsydzer3jcu5d8ps7zex2k2xt3uqxgjqnnj83ws8lhrn648jjxtwq2ytjqp",
-    amount: "5000000",
-    assets: {},
-  },
-  {
-    ref: "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3:1",
-    txHash: "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
-    outputIndex: 1,
-    address: "addr_test1qpq42zurawfczgafnfmjuqptv8d0dlhmm60g4g3r0sx0evfvaulnzk7dwkfmgf5cdkghjuqpf07kdrh6ansg2rquc0wsaqv5gc",
-    amount: "150000000",
-    assets: {
-      "aabb001122334455667788990011223344556677889900aabbccddeeff": {
-        "474552": "1000000",
-      },
-    },
-  },
-  {
-    ref: "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4:0",
-    txHash: "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
-    outputIndex: 0,
-    address: "addr_test1qz8fg2e9yn0ga6sav0760cxmx0antql96mfuhqgzcc5swugvaulnzk7dwkfmgf5cdkghjuqpf07kdrh6ansg2rquc0wsaqeq2h",
-    amount: "250000000",
-    assets: {},
-  },
-  {
-    ref: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5:2",
-    txHash: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
-    outputIndex: 2,
-    address: "addr_test1qruhwxcf0zj9cey0pfjksh67qavdr2gazkyldnqtt2nsn4fvaulnzk7dwkfmgf5cdkghjuqpf07kdrh6ansg2rquc0wsaqxmv7",
-    amount: "75000000",
-    assets: {
-      "ddee334455667788990011223344556677889900aabbccddeeff001122": {
-        "4e465431": "1",
-        "4e465432": "1",
-      },
-    },
-  },
-  {
-    ref: "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6:0",
-    txHash: "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6",
-    outputIndex: 0,
-    address: "addr_test1wrv40rn87n5pqglm9v68rkraqhfxz3svewm0aw4fuys3w0q4l8ahp",
-    amount: "50000000",
-    assets: {},
-  },
-];
-
-const MOCK_DELTAS: DeltaEntry[] = [
-  { id: 1, blockHash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2", action: "create", utxo: "a1b2c3d4...f0a1b2:0 -> 5 ADA", createdAt: new Date(Date.now() - 20_000).toISOString() },
-  { id: 2, blockHash: "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2", action: "spend", utxo: "f6a7b8c9...e5f6a7:1 -> 3.2 ADA", createdAt: new Date(Date.now() - 20_000).toISOString() },
-  { id: 3, blockHash: "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3", action: "create", utxo: "b2c3d4e5...a1b2c3:1 -> 150 ADA + GER", createdAt: new Date(Date.now() - 40_000).toISOString() },
-  { id: 4, blockHash: "b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3", action: "fee", utxo: "fee: 0.437 ADA", createdAt: new Date(Date.now() - 40_000).toISOString() },
-  { id: 5, blockHash: "c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4", action: "create", utxo: "c3d4e5f6...b2c3d4:0 -> 250 ADA", createdAt: new Date(Date.now() - 60_000).toISOString() },
-  { id: 6, blockHash: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5", action: "spend", utxo: "0a1b2c3d...f00102:0 -> 100 ADA", createdAt: new Date(Date.now() - 80_000).toISOString() },
-  { id: 7, blockHash: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5", action: "create", utxo: "d4e5f6a7...c3d4e5:2 -> 75 ADA + NFTs", createdAt: new Date(Date.now() - 80_000).toISOString() },
-  { id: 8, blockHash: "d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5", action: "cert", utxo: "stake registration", createdAt: new Date(Date.now() - 80_000).toISOString() },
-  { id: 9, blockHash: "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6", action: "withdrawal", utxo: "rewards: 12.5 ADA", createdAt: new Date(Date.now() - 100_000).toISOString() },
-  { id: 10, blockHash: "e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6", action: "create", utxo: "e5f6a7b8...d4e5f6:0 -> 50 ADA", createdAt: new Date(Date.now() - 100_000).toISOString() },
-];
-
 const Explorer: Component = () => {
   const [query, setQuery] = createSignal("");
   const [searchTerm, setSearchTerm] = createSignal("");
@@ -90,21 +21,8 @@ const Explorer: Component = () => {
   const [selected, setSelected] = createSignal<UtxoEntry | null>(null);
   setInterval(refetch, 5000);
 
-  // Demo mode: show mock UTxOs when no search has been performed
-  const isDeltasDemo = createMemo(() => (deltas() ?? []).length === 0);
-
-  const effectiveDeltas = createMemo(() => {
-    const d = deltas() ?? [];
-    return d.length > 0 ? d : MOCK_DELTAS;
-  });
-
-  // Show mock UTxOs when search is empty (pre-populated)
-  const displayUtxos = createMemo(() => {
-    if (!searchTerm()) return MOCK_UTXOS;
-    return utxos() ?? [];
-  });
-
-  const isUtxoDemo = createMemo(() => !searchTerm());
+  const displayUtxos = createMemo(() => utxos() ?? []);
+  const effectiveDeltas = createMemo(() => deltas() ?? []);
 
   function search() { setSearchTerm(query().trim()); }
 
@@ -140,14 +58,6 @@ const Explorer: Component = () => {
         </button>
       </div>
 
-      <Show when={isDeltasDemo()}>
-        <div class="flex items-center gap-2 rounded-[var(--radius-sm)] border border-accent/15 bg-accent/[0.04] px-4 py-2">
-          <div class="h-1.5 w-1.5 rounded-full bg-accent/50 pulse-live" />
-          <span class="text-[12px] text-text-secondary">
-            Demo data — connect a live node for real UTxO queries
-          </span>
-        </div>
-      </Show>
       <div class="grid grid-cols-1 gap-5 lg:grid-cols-3">
         {/* Results */}
         <div class="lg:col-span-2">
@@ -156,9 +66,6 @@ const Explorer: Component = () => {
               <div class="flex items-center gap-3">
                 <CardTitle>UTxO Results</CardTitle>
                 <Badge variant="muted">{displayUtxos().length}</Badge>
-                <Show when={isUtxoDemo()}>
-                  <Badge variant="purple">demo</Badge>
-                </Show>
               </div>
             </CardHeader>
             <div class="flex-1 overflow-y-auto">
@@ -203,6 +110,11 @@ const Explorer: Component = () => {
               </table>
               <Show when={!utxos.loading && searchTerm() && (utxos()?.length ?? 0) === 0}>
                 <div class="px-4 py-16 text-center text-[13px] text-text-secondary">No UTxOs found</div>
+              </Show>
+              <Show when={!searchTerm()}>
+                <div class="flex flex-col items-center gap-3 px-4 py-16">
+                  <span class="text-[13px] text-text-secondary">Search for a tx hash, utxo ref, or address prefix</span>
+                </div>
               </Show>
             </div>
           </Card>
@@ -286,9 +198,6 @@ const Explorer: Component = () => {
           <div class="flex items-center gap-3">
             <CardTitle>Recent UTxO Deltas</CardTitle>
             <Badge variant="muted">{effectiveDeltas().length}</Badge>
-            <Show when={isDeltasDemo()}>
-              <Badge variant="purple">demo</Badge>
-            </Show>
           </div>
         </CardHeader>
         <div class="flex-1 overflow-y-auto">
@@ -316,6 +225,12 @@ const Explorer: Component = () => {
               </TransitionGroup>
             </tbody>
           </table>
+          <Show when={effectiveDeltas().length === 0}>
+            <div class="flex flex-col items-center gap-3 px-4 py-16">
+              <span class="text-[13px] text-text-secondary">No UTxO deltas yet</span>
+              <span class="text-[11px] text-text-muted">Deltas will appear as the node processes blocks.</span>
+            </div>
+          </Show>
         </div>
       </Card>
     </Motion.div>

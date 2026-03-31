@@ -113,7 +113,7 @@ const Explorer: Component = () => {
       initial={{ opacity: 0, y: 8 }}
       animate={{ opacity: 1, y: 0 }}
       transition={{ duration: 0.3 }}
-      class="flex flex-col gap-5"
+      class="flex h-full flex-col gap-5"
     >
       {/* Search bar */}
       <div class="flex gap-3" role="search" aria-label="UTxO search">
@@ -161,13 +161,13 @@ const Explorer: Component = () => {
                 </Show>
               </div>
             </CardHeader>
-            <div class="max-h-[500px] overflow-y-auto">
-              <table class="wallet-table w-full" aria-label="UTxO search results">
+            <div class="flex-1 overflow-y-auto">
+              <table class="wallet-table w-full table-fixed" aria-label="UTxO search results">
                 <thead class="sticky top-0 z-10">
                   <tr>
-                    <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-text-muted">Tx Hash</th>
-                    <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-text-muted">Idx</th>
-                    <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-5 py-3 text-right text-[11px] font-semibold uppercase tracking-wider text-text-muted">Amount</th>
+                    <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-6 py-4 text-left text-sm font-semibold uppercase tracking-wider text-text-muted w-[60%]">Tx Hash</th>
+                    <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-6 py-4 text-left text-sm font-semibold uppercase tracking-wider text-text-muted w-[10%]">Idx</th>
+                    <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-6 py-4 text-right text-sm font-semibold uppercase tracking-wider text-text-muted w-[30%]">Amount</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -190,9 +190,9 @@ const Explorer: Component = () => {
                             }
                           }}
                         >
-                          <td class="px-5 py-3 font-mono text-[12px] text-text-dim">{utxo.txHash.slice(0, 20)}...</td>
-                          <td class="px-5 py-3 font-mono tabular-nums text-[13px] text-text">{utxo.outputIndex}</td>
-                          <td class="px-5 py-3 text-right font-mono tabular-nums text-[13px] text-accent">
+                          <td class="px-6 py-4 font-mono text-sm text-text-dim truncate">{utxo.txHash.slice(0, 20)}...</td>
+                          <td class="px-6 py-4 font-mono tabular-nums text-sm text-text">{utxo.outputIndex}</td>
+                          <td class="px-6 py-4 text-right font-mono tabular-nums text-sm text-accent">
                             {(parseInt(utxo.amount) / 1_000_000).toLocaleString()} ADA
                           </td>
                         </tr>
@@ -291,14 +291,14 @@ const Explorer: Component = () => {
             </Show>
           </div>
         </CardHeader>
-        <div class="max-h-[300px] overflow-y-auto">
-          <table class="wallet-table w-full" aria-label="Recent UTxO deltas">
+        <div class="flex-1 overflow-y-auto">
+          <table class="wallet-table w-full table-fixed" aria-label="Recent UTxO deltas">
             <thead class="sticky top-0 z-10">
               <tr>
-                <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-text-muted">Action</th>
-                <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-text-muted">Block Hash</th>
-                <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-text-muted">Data</th>
-                <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-text-muted">Time</th>
+                <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-6 py-4 text-left text-sm font-semibold uppercase tracking-wider text-text-muted w-[12%]">Action</th>
+                <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-6 py-4 text-left text-sm font-semibold uppercase tracking-wider text-text-muted w-[28%]">Block Hash</th>
+                <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-6 py-4 text-left text-sm font-semibold uppercase tracking-wider text-text-muted w-[40%]">Data</th>
+                <th scope="col" class="bg-bg-raised/95 backdrop-blur-sm px-6 py-4 text-left text-sm font-semibold uppercase tracking-wider text-text-muted w-[20%]">Time</th>
               </tr>
             </thead>
             <tbody>
@@ -306,10 +306,10 @@ const Explorer: Component = () => {
                 <For each={effectiveDeltas()}>
                   {(d) => (
                     <tr class="border-b border-border-subtle/50">
-                      <td class="px-5 py-3"><Badge variant={ACTION_VARIANT[d.action]}>{d.action}</Badge></td>
-                      <td class="px-5 py-3 font-mono text-[12px] text-text-dim">{d.blockHash.slice(0, 16)}...</td>
-                      <td class="max-w-[300px] truncate px-5 py-3 font-mono text-[11px] text-text-muted">{d.utxo}</td>
-                      <td class="px-5 py-3 text-[12px] text-text-dim">{new Date(d.createdAt).toLocaleTimeString()}</td>
+                      <td class="px-6 py-4"><Badge variant={ACTION_VARIANT[d.action]}>{d.action}</Badge></td>
+                      <td class="px-6 py-4 font-mono text-sm text-text-dim truncate">{d.blockHash.slice(0, 16)}...</td>
+                      <td class="truncate px-6 py-4 font-mono text-sm text-text-muted">{d.utxo}</td>
+                      <td class="px-6 py-4 text-sm text-text-dim">{new Date(d.createdAt).toLocaleTimeString()}</td>
                     </tr>
                   )}
                 </For>

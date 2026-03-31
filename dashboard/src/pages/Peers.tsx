@@ -162,7 +162,7 @@ const Peers: Component = () => {
                   <tr>
                     <For each={hg.headers}>
                       {(h) => (
-                        <th scope="col" class="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                        <th scope="col" class="px-6 py-4 text-left text-sm font-semibold uppercase tracking-wider text-text-muted">
                           {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
                         </th>
                       )}
@@ -177,7 +177,7 @@ const Peers: Component = () => {
                   <tr class="border-b border-border-subtle/50">
                     <For each={row.getVisibleCells()}>
                       {(cell) => (
-                        <td class="px-5 py-3 text-[13px]">
+                        <td class="px-6 py-4 text-sm">
                           {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </td>
                       )}

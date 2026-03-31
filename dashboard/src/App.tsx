@@ -1,68 +1,112 @@
-import { createSignal, lazy, Suspense, type Component } from "solid-js";
-import { Tabs } from "@kobalte/core/tabs";
-import { cn } from "@/lib/cn";
+import { createSignal, lazy, Suspense, Show, type Component } from "solid-js";
+import { Sidebar, Topbar, Footer } from "@/components/Layout";
+import { SkeletonCard } from "@/components/ui/skeleton";
+import ErrorBoundary from "@/components/ui/error-boundary";
+import { ToastProvider } from "@/components/ui/toast";
+import type { NavItemId } from "@/lib/constants";
 
+// ---------------------------------------------------------------------------
+// Lazy-loaded pages
+// ---------------------------------------------------------------------------
 const Overview = lazy(() => import("@/pages/Overview"));
 const Blocks = lazy(() => import("@/pages/Blocks"));
 const Peers = lazy(() => import("@/pages/Peers"));
+const Mempool = lazy(() => import("@/pages/Mempool"));
 const Explorer = lazy(() => import("@/pages/Explorer"));
 const Logs = lazy(() => import("@/pages/Logs"));
+const Settings = lazy(() => import("@/pages/Settings"));
+const ChainDiagram = lazy(() => import("@/components/Diagram/ChainDiagram"));
 
-const NAV_ITEMS = [
-  { id: "overview", label: "Overview" },
-  { id: "blocks", label: "Blocks" },
-  { id: "peers", label: "Peers" },
-  { id: "explorer", label: "Explorer" },
-  { id: "logs", label: "Logs" },
-] as const;
+// ---------------------------------------------------------------------------
+// Loading skeleton fallback — replaces the old spinner
+// ---------------------------------------------------------------------------
+const PageSkeleton: Component = () => (
+  <div class="flex flex-col gap-4 py-2">
+    <SkeletonCard lines={2} />
+    <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
+      <SkeletonCard lines={1} />
+      <SkeletonCard lines={1} />
+      <SkeletonCard lines={1} />
+    </div>
+    <SkeletonCard lines={4} />
+  </div>
+);
 
+// ---------------------------------------------------------------------------
+// App root
+// ---------------------------------------------------------------------------
 const App: Component = () => {
-  const [tab, setTab] = createSignal<string>("overview");
+  const [activePage, setActivePage] = createSignal<NavItemId>("overview");
+
+  // Read initial collapsed state from localStorage
+  let initialCollapsed = false;
+  try {
+    initialCollapsed = localStorage.getItem("gerolamo:sidebar-collapsed") === "true";
+  } catch { /* noop */ }
+  const [collapsed, setCollapsed] = createSignal(initialCollapsed);
+
+  function toggleSidebar() {
+    const next = !collapsed();
+    setCollapsed(next);
+    try {
+      localStorage.setItem("gerolamo:sidebar-collapsed", String(next));
+    } catch { /* noop in restricted contexts */ }
+  }
 
   return (
-    <div class="flex h-screen flex-col overflow-hidden">
-      {/* Header */}
-      <header class="flex shrink-0 items-center justify-between border-b border-border bg-bg-raised px-6 py-3">
-        <div class="flex items-center gap-3">
-          <span class="text-sm font-bold tracking-tight text-accent">GEROLAMO</span>
-          <span class="text-[10px] font-medium uppercase tracking-widest text-text-muted">
-            Cardano Node Dashboard
-          </span>
-        </div>
-        <div class="flex items-center gap-2 text-[10px] text-text-muted">
-          <span>Harmonic Labs</span>
-        </div>
-      </header>
+    <ToastProvider>
+      <div class="flex h-screen bg-mesh bg-grid-subtle">
+        {/* Skip-to-content link for a11y */}
+        <a
+          href="#main-content"
+          class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:top-2 focus-visible:left-2 focus-visible:z-[100] focus-visible:rounded focus-visible:bg-accent focus-visible:px-3 focus-visible:py-1 focus-visible:text-[13px] focus-visible:text-white"
+        >
+          Skip to content
+        </a>
 
-      {/* Navigation + Content */}
-      <Tabs value={tab()} onChange={setTab} class="flex flex-1 overflow-hidden">
-        <Tabs.List class="flex shrink-0 flex-col gap-1 border-r border-border bg-bg-raised p-2 pt-4">
-          {NAV_ITEMS.map((item) => (
-            <Tabs.Trigger
-              value={item.id}
-              class={cn(
-                "rounded-[var(--radius-sm)] px-4 py-2 text-left text-xs font-medium transition-colors",
-                "hover:bg-bg-sunken hover:text-text",
-                "data-[selected]:bg-accent-dim data-[selected]:text-accent",
-                "text-text-dim",
-              )}
-            >
-              {item.label}
-            </Tabs.Trigger>
-          ))}
-        </Tabs.List>
+        {/* ---- Sidebar ---- */}
+        <Sidebar
+          activePage={activePage()}
+          onNavigate={(page) => setActivePage(page as NavItemId)}
+          collapsed={collapsed()}
+          onToggle={toggleSidebar}
+        />
 
-        <div class="flex-1 overflow-y-auto p-6">
-          <Suspense fallback={<div class="py-12 text-center text-text-dim">Loading...</div>}>
-            <Tabs.Content value="overview" class="outline-none"><Overview /></Tabs.Content>
-            <Tabs.Content value="blocks" class="outline-none"><Blocks /></Tabs.Content>
-            <Tabs.Content value="peers" class="outline-none"><Peers /></Tabs.Content>
-            <Tabs.Content value="explorer" class="outline-none"><Explorer /></Tabs.Content>
-            <Tabs.Content value="logs" class="outline-none"><Logs /></Tabs.Content>
-          </Suspense>
+        {/* ---- Centre column: topbar + main + footer ---- */}
+        <div class="flex flex-1 flex-col min-w-0">
+          <Topbar activePage={activePage()} />
+
+          {/* Main + diagram grid */}
+          <div class="flex flex-1 min-h-0">
+            {/* Scrollable page area */}
+            <main id="main-content" class="flex-1 overflow-y-auto" aria-label="Dashboard content">
+              <div class="mx-auto max-w-[1120px] px-6 py-6">
+                <ErrorBoundary>
+                  <Suspense fallback={<PageSkeleton />}>
+                    <Show when={activePage() === "overview"}><Overview /></Show>
+                    <Show when={activePage() === "blocks"}><Blocks /></Show>
+                    <Show when={activePage() === "peers"}><Peers /></Show>
+                    <Show when={activePage() === "mempool"}><Mempool /></Show>
+                    <Show when={activePage() === "explorer"}><Explorer /></Show>
+                    <Show when={activePage() === "logs"}><Logs /></Show>
+                    <Show when={activePage() === "settings"}><Settings /></Show>
+                  </Suspense>
+                </ErrorBoundary>
+              </div>
+            </main>
+
+            {/* Right panel -- live chain diagram (hidden on mobile / small screens) */}
+            <aside class="sidebar-chain w-[280px] min-w-[280px] max-w-[360px] shrink-0 border-l border-border overflow-hidden hidden md:block" aria-label="Live chain diagram">
+              <Suspense fallback={<div />}>
+                <ChainDiagram />
+              </Suspense>
+            </aside>
+          </div>
+
+          <Footer />
         </div>
-      </Tabs>
-    </div>
+      </div>
+    </ToastProvider>
   );
 };
 

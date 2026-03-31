@@ -1,0 +1,22 @@
+{
+  "nav.overview": "Overview",
+  "nav.blocks": "Blocks",
+  "nav.peers": "Peers",
+  "nav.mempool": "Mempool",
+  "nav.explorer": "Explorer",
+  "nav.logs": "Logs",
+  "nav.settings": "Settings",
+  "common.slot": "Slot",
+  "common.hash": "Hash",
+  "common.epoch": "Epoch",
+  "common.era": "Era",
+  "common.transactions": "Transactions",
+  "common.fee": "Fee",
+  "common.status": "Status",
+  "status.syncing": "Syncing",
+  "status.synced": "Synced",
+  "status.finalized": "Finalized",
+  "status.volatile": "Volatile",
+  "a11y.skipToContent": "Skip to content",
+  "a11y.toggleNav": "Toggle navigation"
+}

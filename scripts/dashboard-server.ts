@@ -52,6 +52,24 @@ function getDb(): Database | null {
 
 const startTime = Date.now();
 
+// Speed tracking
+let speedHistory: { slot: number; time: number }[] = [];
+let lastKnownSpeed = 0;
+
+function calculateSpeed(currentSlot: number): number {
+  const now = Date.now();
+  speedHistory.push({ slot: currentSlot, time: now });
+  // Keep last 30 seconds
+  speedHistory = speedHistory.filter((s) => now - s.time < 30000);
+  if (speedHistory.length < 2) return lastKnownSpeed;
+  const oldest = speedHistory[0];
+  const newest = speedHistory[speedHistory.length - 1];
+  const timeDiffMin = (newest.time - oldest.time) / 60000;
+  if (timeDiffMin <= 0) return lastKnownSpeed;
+  lastKnownSpeed = Math.round((newest.slot - oldest.slot) / timeDiffMin);
+  return lastKnownSpeed;
+}
+
 // SSE clients
 const sseClients = new Map<string, Set<ReadableStreamDefaultController>>();
 function addSSEClient(channel: string, controller: ReadableStreamDefaultController) {
@@ -70,7 +88,16 @@ function broadcastSSE(channel: string, data: unknown) {
   }
 }
 
-// Poll node state and broadcast
+// Network tip estimation for sync progress
+// Preprod genesis: slot 0 at epoch 208 boundary
+// Slot duration: 1 second, epoch length: 432000 slots
+const PREPROD_GENESIS_TIME = 1654041600; // June 1, 2022 UTC (preprod genesis)
+function estimateNetworkTipSlot(): number {
+  const now = Math.floor(Date.now() / 1000);
+  return now - PREPROD_GENESIS_TIME;
+}
+
+// Poll and broadcast
 let lastTipSlot = 0;
 async function pollAndBroadcast() {
   try {
@@ -97,6 +124,7 @@ const EMPTY_STATUS = {
 function buildStatus() {
   const d = getDb();
   if (!d) return { ...EMPTY_STATUS, uptime: Date.now() - startTime };
+
   const tipRow = d.query("SELECT MAX(slot) as slot FROM blocks").get() as any;
   const tipSlot = tipRow?.slot ?? 0;
 
@@ -107,28 +135,31 @@ function buildStatus() {
   const immutableCount = (d.query("SELECT COUNT(*) as c FROM immutable_blocks").get() as any)?.c ?? 0;
   const utxoCount = (d.query("SELECT COUNT(*) as c FROM utxo").get() as any)?.c ?? 0;
 
-  let mempoolSize = 0;
-  let treasury = 0;
-  let reserves = 0;
+  // Sync progress based on estimated network tip
+  const networkTip = estimateNetworkTipSlot();
+  const progress = networkTip > 0 ? Math.min(1, Math.max(0, tipSlot / networkTip)) : 0;
+  const speed = calculateSpeed(tipSlot);
+
+  // Stable state for GC tracking
+  let gcCycles = 0;
   try {
-    const cas = d.query("SELECT treasury, reserves FROM chain_account_state WHERE id = 1").get() as any;
-    treasury = cas?.treasury ?? 0;
-    reserves = cas?.reserves ?? 0;
+    const ss = d.query("SELECT total_blocks FROM stable_state WHERE id = 1").get() as any;
+    gcCycles = ss?.total_blocks ?? 0;
   } catch {}
 
-  const epoch = tipSlot > 0 ? Math.floor((tipSlot - 86400) / 432000) + 208 : 0; // preprod approx
-  const era = 6; // Conway current era
+  const epoch = tipSlot > 0 ? Math.floor((tipSlot - 86400) / 432000) + 208 : 0;
+  const era = 6; // Conway
 
   return {
     tip: { slot: tipSlot, hash: typeof tipHash === "string" ? tipHash : "", epoch, era },
-    sync: { progress: 0, speed: 0, startedAt: new Date(startTime).toISOString() },
+    sync: { progress, speed, startedAt: new Date(startTime).toISOString() },
     uptime: Date.now() - startTime,
     network: process.env.NETWORK ?? "preprod",
     volatileBlocks: volatileCount,
     immutableBlocks: immutableCount,
     utxoCount,
-    mempoolSize,
-    gcCycles: 0,
+    mempoolSize: 0,
+    gcCycles,
   };
 }
 
@@ -154,14 +185,60 @@ function queryRecentBlocks(limit: number) {
   }));
 }
 
-function queryPeers() {
-  // Peers are in-memory in the running node, not in DB.
-  // Proxy to the node if available, otherwise return empty.
-  return [];
+async function queryPeers(): Promise<any[]> {
+  // Try to proxy peer data from the running node
+  try {
+    const resp = await fetch(`${NODE_URL}`, { signal: AbortSignal.timeout(2000) });
+    if (resp.ok) {
+      // Node is running — return topology-based peer info
+      return getTopologyPeers();
+    }
+  } catch {}
+  return getTopologyPeers();
+}
+
+function getTopologyPeers(): any[] {
+  // Read from topology file to show configured peers
+  const topoPath = resolve("./src/config/preprod/topology.json");
+  if (!existsSync(topoPath)) return [];
+  try {
+    const topo = JSON.parse(readFileSync(topoPath, "utf-8"));
+    const peers: any[] = [];
+    const accessPoints = topo.bootstrapPeers ?? topo.localRoots?.[0]?.accessPoints ?? topo.accessPoints ?? [];
+    for (const ap of accessPoints) {
+      peers.push({
+        id: `${ap.address}:${ap.port}`,
+        host: ap.address,
+        port: ap.port,
+        category: "bootstrap",
+        slot: 0,
+        connected: false,
+      });
+    }
+    // Also check publicRoots
+    if (topo.publicRoots) {
+      for (const root of topo.publicRoots) {
+        for (const ap of root.accessPoints ?? []) {
+          if (!peers.some((p) => p.host === ap.address && p.port === ap.port)) {
+            peers.push({
+              id: `${ap.address}:${ap.port}`,
+              host: ap.address,
+              port: ap.port,
+              category: "warm",
+              slot: 0,
+              connected: false,
+            });
+          }
+        }
+      }
+    }
+    return peers;
+  } catch {
+    return [];
+  }
 }
 
 function queryLogs(level: string, limit: number) {
-  // Read from log files if they exist
   const logDir = resolve("./logs");
   const levelMap: Record<string, string[]> = {
     DEBUG: ["debug.jsonl", "info.jsonl", "warn.jsonl", "error.jsonl"],
@@ -200,19 +277,16 @@ function queryUtxos(q: string) {
   const d = getDb();
   if (!d || !q) return [];
 
-  // utxo ref format: hash:idx
   if (/^[0-9a-f]{64}:\d+$/i.test(q)) {
     const rows = d.query("SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE utxo_ref = ?").all(q) as any[];
     return rows.map(parseUtxoRow);
   }
 
-  // tx hash
   if (/^[0-9a-f]{64}$/i.test(q)) {
     const rows = d.query("SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE tx_hash = ? ORDER BY utxo_ref LIMIT 100").all(q) as any[];
     return rows.map(parseUtxoRow);
   }
 
-  // prefix search on tx_hash
   const rows = d.query("SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE tx_hash LIKE ? LIMIT 100").all(`${q}%`) as any[];
   return rows.map(parseUtxoRow);
 }
@@ -327,7 +401,8 @@ Bun.serve({
     }
 
     if (path === "/api/peers") {
-      return json(queryPeers());
+      try { return json(await queryPeers()); }
+      catch (e: any) { return json({ error: e.message }, 500); }
     }
 
     if (path === "/api/blocks") {
@@ -383,12 +458,11 @@ Bun.serve({
 });
 
 console.log(`
-┌─────────────────────────────────────────┐
-│  GEROLAMO DASHBOARD SERVER              │
-├─────────────────────────────────────────┤
-│  API:     http://localhost:${PORT}/api   │
-│  SSE:     http://localhost:${PORT}/api/sse│
-│  DB:      ${DB_PATH}                     │
-│  Node:    ${NODE_URL}                    │
-${STATIC_DIR ? `│  Static:  ${STATIC_DIR}\n` : ""}└─────────────────────────────────────────┘
+  GEROLAMO DASHBOARD SERVER
+  ─────────────────────────
+  API:     http://localhost:${PORT}/api
+  SSE:     http://localhost:${PORT}/api/sse
+  DB:      ${DB_PATH}
+  Node:    ${NODE_URL}
+${STATIC_DIR ? `  Static:  ${STATIC_DIR}\n` : ""}  ─────────────────────────
 `);

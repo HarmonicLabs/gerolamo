@@ -10,7 +10,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Stat } from "@/components/ui/stat";
 import { fetchPeers, fetchStatus, type PeerInfo } from "@/lib/api";
-import { mockPeers } from "@/mocks";
 
 const catVariant = {
   hot: "success" as const,
@@ -74,20 +73,7 @@ const Peers: Component = () => {
   const [status] = createResource(fetchStatus);
   setInterval(refetch, 10000);
 
-  // Fall back to mock peers if API returns empty or only unconnected bootstrap peers
-  const isDemo = createMemo(() => {
-    const p = peers() ?? [];
-    if (p.length === 0) return true;
-    const hasConnected = p.some((peer) => peer.connected);
-    const hasHotOrWarm = p.some((peer) => peer.category === "hot" || peer.category === "warm");
-    return !hasConnected && !hasHotOrWarm;
-  });
-
-  const effectivePeers = createMemo<PeerInfo[]>(() => {
-    const p = peers() ?? [];
-    if (isDemo()) return mockPeers;
-    return p;
-  });
+  const effectivePeers = createMemo<PeerInfo[]>(() => peers() ?? []);
 
   const table = createSolidTable({
     get data() { return effectivePeers(); },
@@ -107,16 +93,6 @@ const Peers: Component = () => {
       transition={{ duration: 0.3 }}
       class="flex flex-col gap-5"
     >
-      {/* Demo banner */}
-      <Show when={isDemo()}>
-        <div class="flex items-center gap-2 rounded-[var(--radius-sm)] border border-accent/15 bg-accent/[0.04] px-4 py-2">
-          <div class="h-1.5 w-1.5 rounded-full bg-accent/50 pulse-live" />
-          <span class="text-[12px] text-text-secondary">
-            Demo mode — showing simulated peer connections
-          </span>
-        </div>
-      </Show>
-
       {/* Summary stats */}
       <div class="stagger grid grid-cols-2 md:grid-cols-4 gap-4">
         <Card class="glass-card-accent">
@@ -162,7 +138,7 @@ const Peers: Component = () => {
                   <tr>
                     <For each={hg.headers}>
                       {(h) => (
-                        <th scope="col" class="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-text-muted">
+                        <th scope="col" class="px-6 py-4 text-left text-sm font-semibold uppercase tracking-wider text-text-muted">
                           {h.isPlaceholder ? null : flexRender(h.column.columnDef.header, h.getContext())}
                         </th>
                       )}
@@ -177,7 +153,7 @@ const Peers: Component = () => {
                   <tr class="border-b border-border-subtle/50">
                     <For each={row.getVisibleCells()}>
                       {(cell) => (
-                        <td class="px-5 py-3 text-[13px]">
+                        <td class="px-6 py-4 text-sm">
                           {flexRender(cell.column.columnDef.cell, cell.getContext())}
                         </td>
                       )}

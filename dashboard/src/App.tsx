@@ -80,7 +80,7 @@ const App: Component = () => {
           <div class="flex flex-1 min-h-0">
             {/* Scrollable page area */}
             <main id="main-content" class="flex-1 overflow-y-auto" aria-label="Dashboard content">
-              <div class="mx-auto max-w-[1120px] px-6 py-6">
+              <div class="mx-auto max-w-[1400px] px-6 py-6 h-full">
                 <ErrorBoundary>
                   <Suspense fallback={<PageSkeleton />}>
                     <Show when={activePage() === "overview"}><Overview /></Show>

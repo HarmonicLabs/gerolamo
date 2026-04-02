@@ -14,14 +14,8 @@ import { Badge } from "@/components/ui/badge";
 import { Stat } from "@/components/ui/stat";
 import { fetchMempool, fetchStatus, useSSE, type MempoolTx, type NodeStatus } from "@/lib/api";
 
-// ---------------------------------------------------------------------------
-// Mock data loader — swap for real API once available
-// ---------------------------------------------------------------------------
-import mockMempool from "@/mocks/fixtures/mempool.json";
-
 function loadMempool(): Promise<MempoolTx[]> {
-  // Try the real API first; fall back to mock fixtures
-  return fetchMempool().catch(() => mockMempool as unknown as MempoolTx[]);
+  return fetchMempool().catch(() => [] as MempoolTx[]);
 }
 
 // ---------------------------------------------------------------------------
@@ -306,7 +300,7 @@ const Mempool: Component = () => {
                           {(h) => (
                             <th
                               scope="col"
-                              class="px-5 py-3 text-left text-[11px] font-semibold uppercase tracking-wider text-text-muted select-none"
+                              class="px-6 py-4 text-left text-sm font-semibold uppercase tracking-wider text-text-muted select-none"
                               classList={{ "cursor-pointer hover:text-text-secondary": h.column.getCanSort() }}
                               onClick={h.column.getToggleSortingHandler()}
                               aria-sort={
@@ -335,7 +329,7 @@ const Mempool: Component = () => {
                         <tr class="border-b border-border-subtle/50">
                           <For each={row.getVisibleCells()}>
                             {(cell) => (
-                              <td class="px-5 py-3 text-[13px]">
+                              <td class="px-6 py-4 text-sm">
                                 {flexRender(cell.column.columnDef.cell, cell.getContext())}
                               </td>
                             )}

@@ -26,89 +26,6 @@ import {
   type BlockInfo,
   type TxDetail,
 } from "@/lib/api";
-import { mockBlocks } from "@/mocks";
-
-// ---------------------------------------------------------------------------
-// Mock transaction data (until /api/block/:hash/txs is available)
-// ---------------------------------------------------------------------------
-
-function generateMockTxHash(seed: number): string {
-  const hex = "0123456789abcdef";
-  let h = "";
-  let s = seed;
-  for (let i = 0; i < 64; i++) {
-    s = (s * 1103515245 + 12345) & 0x7fffffff;
-    h += hex[s % 16];
-  }
-  return h;
-}
-
-function mockTxsForBlock(blockHash: string, txCount: number): TxRowData[] {
-  const txs: TxRowData[] = [];
-  let seed = 0;
-  for (let i = 0; i < blockHash.length; i++) {
-    seed = (seed * 31 + blockHash.charCodeAt(i)) & 0x7fffffff;
-  }
-  for (let i = 0; i < txCount; i++) {
-    seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-    const hasScripts = seed % 5 === 0;
-    const hasMint = seed % 7 === 0;
-    txs.push({
-      hash: generateMockTxHash(seed + i),
-      fee: 170_000 + (seed % 2_000_000),
-      inputCount: 1 + (seed % 5),
-      outputCount: 1 + ((seed >> 4) % 4),
-      hasScripts,
-      hasCollateral: hasScripts,
-      hasMint,
-      scriptResult: hasScripts ? seed % 3 !== 0 : undefined,
-    });
-  }
-  return txs;
-}
-
-function mockTxDetail(txRow: TxRowData, blockHash: string): TxDetail {
-  return {
-    hash: txRow.hash,
-    blockHash,
-    fee: txRow.fee,
-    size: 300 + (txRow.inputCount + txRow.outputCount) * 80,
-    validContract: txRow.scriptResult !== false,
-    inputs: Array.from({ length: txRow.inputCount }, (_, i) => ({
-      txHash: generateMockTxHash(txRow.hash.charCodeAt(i) + i * 7),
-      index: i,
-      address: `addr_test1qz${txRow.hash.slice(i * 2, i * 2 + 40)}`,
-      value: `${(1_500_000 + i * 500_000) / 1_000_000} ADA`,
-    })),
-    outputs: Array.from({ length: txRow.outputCount }, (_, i) => ({
-      address: `addr_test1qr${txRow.hash.slice(i * 3, i * 3 + 40)}`,
-      value: `${(1_000_000 + i * 750_000) / 1_000_000} ADA`,
-      datum: i === 0 && txRow.hasScripts ? `d87980${txRow.hash.slice(0, 56)}` : undefined,
-    })),
-    scripts: txRow.hasScripts
-      ? [
-          {
-            hash: txRow.hash.slice(0, 56),
-            type: "PlutusV2" as const,
-            result: txRow.scriptResult ? ("pass" as const) : ("fail" as const),
-          },
-        ]
-      : [],
-    collateral: txRow.hasCollateral
-      ? [{ txHash: generateMockTxHash(txRow.hash.charCodeAt(0) + 99), index: 0 }]
-      : [],
-    mint: txRow.hasMint
-      ? [
-          {
-            policyId: txRow.hash.slice(0, 56),
-            assetName: "TestToken",
-            quantity: String(1 + (txRow.hash.charCodeAt(0) % 1000)),
-          },
-        ]
-      : [],
-    metadata: undefined,
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Default filters
@@ -140,21 +57,12 @@ const Blocks: Component = () => {
   // Poll for new blocks
   setInterval(refetch, 5000);
 
-  // Whether we're in demo mode (no real blocks available)
-  const isDemo = createMemo(() => {
-    const base = blocks() ?? [];
-    return base.length === 0 && !liveBlock();
-  });
-
-  // Merge live block into list; fall back to mock blocks
+  // Merge live block into list
   const allBlocks = createMemo<BlockInfo[]>(() => {
     const base = blocks() ?? [];
     const live = liveBlock();
     if (live && base.length > 0 && live.slot !== base[0]?.slot) {
       return [live, ...base].slice(0, 50);
-    }
-    if (base.length === 0) {
-      return mockBlocks as unknown as BlockInfo[];
     }
     return base;
   });
@@ -168,7 +76,6 @@ const Blocks: Component = () => {
         next.add(live.hash);
         return next;
       });
-      // Remove animation class after animation completes
       setTimeout(() => {
         setNewBlockHashes((prev) => {
           const next = new Set(prev);
@@ -213,23 +120,6 @@ const Blocks: Component = () => {
     return result;
   });
 
-  // Get mock txs for expanded block
-  const expandedBlockTxs = createMemo<TxRowData[]>(() => {
-    const hash = expandedHash();
-    if (!hash) return [];
-    const block = allBlocks().find((b) => b.hash === hash);
-    if (!block || block.txCount === 0) return [];
-    return mockTxsForBlock(block.hash, block.txCount);
-  });
-
-  // Handle tx selection
-  const handleTxClick = (txRow: TxRowData) => {
-    const blockHash = expandedHash();
-    if (!blockHash) return;
-    setSelectedTxHash(txRow.hash);
-    setSelectedTxDetail(mockTxDetail(txRow, blockHash));
-  };
-
   return (
     <Motion.div
       initial={{ opacity: 0, y: 8 }}
@@ -237,14 +127,6 @@ const Blocks: Component = () => {
       transition={{ duration: 0.3 }}
       class="flex flex-col h-full"
     >
-      <Show when={isDemo()}>
-        <div class="flex items-center gap-2 rounded-[var(--radius-sm)] border border-accent/15 bg-accent/[0.04] px-4 py-2 mb-3">
-          <div class="h-1.5 w-1.5 rounded-full bg-accent/50 pulse-live" />
-          <span class="text-[12px] text-text-secondary">
-            Demo mode — showing sample blocks
-          </span>
-        </div>
-      </Show>
       <Card class="glass-card-accent flex flex-col flex-1 min-h-0">
         <CardHeader>
           <div class="flex items-center justify-between">
@@ -289,12 +171,12 @@ const Blocks: Component = () => {
                       prev === block.hash ? null : block.hash
                     )
                   }
-                  onSelectTx={handleTxClick as any}
+                  onSelectTx={() => {}}
                 >
                   {/* Block detail metadata */}
                   <BlockDetail block={block} />
 
-                  {/* Transaction list */}
+                  {/* Transaction count */}
                   <Show when={block.txCount > 0}>
                     <div class="mx-3 mb-3 glass-card overflow-hidden">
                       <div class="flex items-center justify-between px-3 py-2 border-b border-border-subtle/30">
@@ -305,14 +187,9 @@ const Blocks: Component = () => {
                           {block.txCount}
                         </Badge>
                       </div>
-                      <For each={expandedBlockTxs()}>
-                        {(tx) => (
-                          <TxRow
-                            tx={tx}
-                            onClick={() => handleTxClick(tx)}
-                          />
-                        )}
-                      </For>
+                      <div class="px-3 py-4 text-center text-[12px] text-text-muted">
+                        {block.txCount} transaction{block.txCount > 1 ? "s" : ""} in this block
+                      </div>
                     </div>
                   </Show>
 
@@ -363,7 +240,6 @@ const Blocks: Component = () => {
 
       {/* Transaction detail side panel */}
       <Show when={selectedTxDetail()}>
-        {/* Backdrop */}
         <div
           class="fixed inset-0 z-40 bg-black/40"
           aria-hidden="true"

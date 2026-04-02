@@ -40,9 +40,9 @@ export type ChainSelectionMode = "praos";
 export async function findIntersection(
     candidate: ChainCandidate,
 ): Promise<{ intersectionBlock: number; rollbackDistance: number }> {
-    // Query current chain blocks from database
+    // Query current chain tip info from database (indexed query)
     const currentSlots = await sql`
-        SELECT slot FROM blocks ORDER BY slot ASC
+        SELECT slot FROM blocks ORDER BY slot ASC LIMIT 10000
     `.values() as number[];
 
     if (currentSlots.length === 0) {
@@ -152,9 +152,9 @@ export async function selectBestChain(
 > {
     if (candidates.length === 0) return { candidate: null, comparison: null };
 
-    // Get current chain tip
+    // Get current chain tip (bounded query)
     const currentSlots = await sql`
-        SELECT slot FROM blocks ORDER BY slot ASC
+        SELECT slot FROM blocks ORDER BY slot ASC LIMIT 10000
     `.values() as number[];
 
     const currentBlockCount = currentSlots.length;

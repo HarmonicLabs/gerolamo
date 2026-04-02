@@ -51,10 +51,6 @@ export class MissingBlockError extends Error {
     }
 }
 
-export interface StreamTo {
-    point: RealPoint;
-}
-
 // Tip information
 export interface Tip {
     slot: bigint;

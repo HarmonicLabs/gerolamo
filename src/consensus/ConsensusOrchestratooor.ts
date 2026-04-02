@@ -190,18 +190,6 @@ export class ConsensusOrchestrator {
             const blockSlot = Number(blockHeader.body.slot);
             const blockEpoch = calculatePreProdCardanoEpoch(Number(blockSlot));
             const blockHeaderHash = blake2b_256(blockHeader.toCborBytes());
-            let currentEpoch: number | null = null;
-            let firstEpochSlot: number | null = null;
-
-            if (currentEpoch === null) currentEpoch = Number(blockEpoch);
-            if (firstEpochSlot === null) firstEpochSlot = Number(blockSlot);
-            if (currentEpoch && currentEpoch < blockEpoch) {
-                firstEpochSlot = Number(blockSlot);
-            }
-            if (currentEpoch && currentEpoch < blockEpoch) {
-                currentEpoch = Number(blockEpoch);
-            }
-
             const blockHash = toHex(blockHeaderHash);
 
             await applyBlock(

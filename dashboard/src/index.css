@@ -1,0 +1,598 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap");
+@import "tailwindcss";
+
+@theme {
+  /* ═══ ROG DEEP VOID BASE ═══ */
+  --color-bg: #0B0F13;
+  --color-bg-raised: #131920;
+  --color-bg-sunken: #060A0D;
+  --color-bg-overlay: #151C24;
+  --color-bg-card: #0F1418;
+  --color-bg-card-hover: #141A20;
+  --color-bg-input: #0A0E12;
+
+  /* ═══ BORDERS ═══ */
+  --color-border: rgba(255, 255, 255, 0.08);
+  --color-border-bright: rgba(255, 255, 255, 0.15);
+  --color-border-subtle: rgba(255, 255, 255, 0.05);
+
+  /* ═══ TEXT (WCAG AA: all pass 4.5:1+ on #0B0F13) ═══ */
+  --color-text: #E6EEF3;
+  --color-text-secondary: #9AA6B2;
+  --color-text-dim: #7E8D9E;
+  --color-text-muted: #6B7A8A;
+
+  /* ═══ ROG PRIMARY ACCENT — Blood Red ═══ */
+  --color-accent: #FF2D55;
+  --color-accent-bright: #FF5C7C;
+  --color-accent-dim: rgba(255, 45, 85, 0.08);
+  --color-accent-mid: rgba(255, 45, 85, 0.15);
+
+  /* ═══ SEMANTIC — ROG Palette ═══ */
+  --color-red: #FF2D55;
+  --color-red-dim: rgba(255, 45, 85, 0.08);
+  --color-green: #00E676;
+  --color-green-dim: rgba(0, 230, 118, 0.08);
+  --color-amber: #FF8A00;
+  --color-amber-dim: rgba(255, 138, 0, 0.08);
+  --color-blue: #00B3FF;
+  --color-blue-dim: rgba(0, 179, 255, 0.08);
+  --color-purple: #9366ff;
+  --color-purple-dim: rgba(147, 102, 255, 0.08);
+  --color-magenta: #FF2D55;
+  --color-magenta-dim: rgba(255, 45, 85, 0.08);
+  --color-orange: #FF8A00;
+  --color-orange-dim: rgba(255, 138, 0, 0.08);
+  --color-cyan: #00B3FF;
+  --color-cyan-dim: rgba(0, 179, 255, 0.08);
+
+  /* Neon aliases */
+  --color-neon-red: #FF2D55;
+  --color-neon-orange: #FF8A00;
+  --color-neon-green: #00E676;
+  --color-neon-cyan: #00B3FF;
+  --color-neon-magenta: #FF2D55;
+  --color-neon-purple: #9366ff;
+
+  /* ═══ TYPOGRAPHY ═══ */
+  --font-sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", "Fira Code", ui-monospace, monospace;
+
+  /* ═══ RADII ═══ */
+  --radius: 12px;
+  --radius-sm: 8px;
+  --radius-lg: 16px;
+  --radius-xl: 20px;
+}
+
+/* ═══════════════════════════════
+   ROG THEME CSS CUSTOM PROPERTIES
+   ═══════════════════════════════ */
+:root {
+  --bg-primary: #0B0F13;
+  --bg-card: #0F1418;
+  --accent-rog-red: #FF2D55;
+  --accent-orange: #FF8A00;
+  --accent-green: #00E676;
+  --accent-cyan: #00B3FF;
+  --text-primary: #E6EEF3;
+  --text-muted: #9AA6B2;
+  --text-dim: #7E8D9E;
+  --border-stroke: rgba(255, 255, 255, 0.08);
+  --red-glow: 0 6px 24px rgba(255, 45, 85, 0.12);
+  --orange-glow: 0 6px 24px rgba(255, 138, 0, 0.12);
+  --green-glow: 0 6px 24px rgba(0, 230, 118, 0.12);
+  --cyan-glow: 0 6px 24px rgba(0, 179, 255, 0.12);
+}
+
+*, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body, #root {
+  height: 100%;
+  overflow: hidden;
+}
+
+body {
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ═══════════════════════════════
+   TYPOGRAPHY SCALE
+   ═══════════════════════════════ */
+h1, .text-h1 { font-size: 26px; font-weight: 700; line-height: 1.2; letter-spacing: -0.02em; }
+h2, .text-h2 { font-size: 19px; font-weight: 600; line-height: 1.3; letter-spacing: -0.01em; }
+.text-body { font-size: 14px; font-weight: 400; line-height: 1.5; }
+.text-mono-sm { font-family: var(--font-mono); font-size: 12px; font-weight: 500; }
+
+/* ═══════════════════════════════
+   SCROLLBAR — ROG red accent
+   ═══════════════════════════════ */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.02); }
+::-webkit-scrollbar-thumb {
+  background: linear-gradient(180deg, var(--accent-rog-red), var(--accent-orange));
+  border-radius: 2px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: linear-gradient(180deg, #FF5C7C, #FFa633);
+}
+
+/* Firefox scrollbar */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--accent-rog-red) rgba(255, 255, 255, 0.02);
+}
+
+/* ═══════════════════════════════
+   BACKGROUND EFFECTS — ROG mesh
+   ═══════════════════════════════ */
+.bg-mesh {
+  background-image:
+    radial-gradient(ellipse 80% 60% at 50% 0%, rgba(255, 45, 85, 0.06) 0%, transparent 60%),
+    radial-gradient(ellipse 60% 40% at 80% 100%, rgba(255, 138, 0, 0.05) 0%, transparent 60%),
+    radial-gradient(ellipse 40% 30% at 10% 50%, rgba(0, 230, 118, 0.03) 0%, transparent 60%);
+}
+
+/* Grid pattern with dots */
+.bg-grid-subtle {
+  background-image:
+    radial-gradient(circle 1px at center, rgba(255, 45, 85, 0.08) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
+/* Dot pattern variant */
+.bg-dots {
+  background-image:
+    radial-gradient(circle 0.5px at center, rgba(255, 255, 255, 0.08) 0.5px, transparent 0.5px);
+  background-size: 24px 24px;
+}
+
+/* Line grid variant */
+.bg-grid-lines {
+  background-image:
+    linear-gradient(rgba(255, 45, 85, 0.02) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 45, 85, 0.02) 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+
+/* ═══════════════════════════════
+   GLASS CARD — ROG styled
+   ═══════════════════════════════ */
+.glass-card {
+  background: linear-gradient(165deg, rgba(15, 20, 24, 0.95) 0%, rgba(11, 15, 19, 0.98) 100%);
+  border: 1px solid var(--border-stroke);
+  border-radius: var(--radius);
+  backdrop-filter: blur(12px);
+  box-shadow: 0 0 20px rgba(255, 45, 85, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.05);
+  transition: border-color 0.25s ease, box-shadow 0.25s ease, transform 0.25s ease;
+}
+.glass-card:hover {
+  border-color: rgba(255, 45, 85, 0.2);
+  box-shadow: 0 4px 24px rgba(0, 0, 0, 0.4), 0 0 20px rgba(255, 45, 85, 0.08), 0 0 0 1px rgba(255, 45, 85, 0.1);
+}
+
+/* Elevated card with ROG gradient accent on top */
+.glass-card-accent {
+  background: linear-gradient(165deg, rgba(15, 20, 24, 0.95) 0%, rgba(11, 15, 19, 0.98) 100%);
+  border: 1px solid var(--border-stroke);
+  border-radius: var(--radius);
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 0 20px rgba(255, 45, 85, 0.04), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+}
+.glass-card-accent::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent 5%, var(--accent-rog-red), var(--accent-orange), transparent 95%);
+  box-shadow: 0 0 12px rgba(255, 45, 85, 0.3), 0 0 4px rgba(255, 138, 0, 0.2);
+}
+
+/* Card with ROG red top-glow */
+.glass-card-rog {
+  background: linear-gradient(165deg, rgba(15, 20, 24, 0.95) 0%, rgba(11, 15, 19, 0.98) 100%);
+  border: 1px solid var(--border-stroke);
+  border-radius: var(--radius);
+  position: relative;
+  overflow: hidden;
+  box-shadow: var(--red-glow);
+}
+.glass-card-rog::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent 5%, var(--accent-rog-red), var(--accent-orange), var(--accent-green), transparent 95%);
+}
+
+/* ═══════════════════════════════
+   GLOW — ROG variants
+   ═══════════════════════════════ */
+.glow-subtle { box-shadow: 0 0 20px rgba(255, 45, 85, 0.06); }
+.glow-accent { box-shadow: 0 0 16px rgba(255, 45, 85, 0.1), 0 0 32px rgba(255, 45, 85, 0.04); }
+.glow-red { box-shadow: var(--red-glow); }
+.glow-orange { box-shadow: var(--orange-glow); }
+.glow-green { box-shadow: var(--green-glow); }
+.glow-cyan { box-shadow: var(--cyan-glow); }
+.text-glow { text-shadow: 0 0 12px rgba(255, 45, 85, 0.3); }
+.text-glow-strong { text-shadow: 0 0 12px rgba(255, 45, 85, 0.6), 0 0 24px rgba(255, 45, 85, 0.3); }
+.text-glow-green { text-shadow: 0 0 12px rgba(0, 230, 118, 0.3); }
+.text-glow-orange { text-shadow: 0 0 12px rgba(255, 138, 0, 0.3); }
+.text-glow-cyan { text-shadow: 0 0 12px rgba(0, 179, 255, 0.3); }
+
+/* ═══════════════════════════════
+   FOCUS RING — 3px neon (focus-visible only, not on mouse click)
+   ═══════════════════════════════ */
+:focus-visible {
+  outline: 3px solid var(--accent-rog-red);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ═══════════════════════════════
+   SCREEN READER ONLY — visually hidden, accessible to assistive tech
+   ═══════════════════════════════ */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border-width: 0;
+}
+
+/* ═══════════════════════════════
+   BADGE STYLES — ROG variants
+   ═══════════════════════════════ */
+.badge-success {
+  border-color: rgba(0, 230, 118, 0.2);
+  background: rgba(0, 230, 118, 0.08);
+  color: var(--accent-green);
+  text-shadow: 0 0 8px rgba(0, 230, 118, 0.2);
+}
+.badge-warning {
+  border-color: rgba(255, 138, 0, 0.2);
+  background: rgba(255, 138, 0, 0.08);
+  color: var(--accent-orange);
+  text-shadow: 0 0 8px rgba(255, 138, 0, 0.2);
+}
+.badge-danger {
+  border-color: rgba(255, 45, 85, 0.2);
+  background: rgba(255, 45, 85, 0.08);
+  color: var(--accent-rog-red);
+  text-shadow: 0 0 8px rgba(255, 45, 85, 0.2);
+}
+.badge-info {
+  border-color: rgba(0, 179, 255, 0.2);
+  background: rgba(0, 179, 255, 0.08);
+  color: var(--accent-cyan);
+  text-shadow: 0 0 8px rgba(0, 179, 255, 0.2);
+}
+.badge-neon {
+  border-color: rgba(255, 45, 85, 0.25);
+  background: linear-gradient(135deg, rgba(255, 45, 85, 0.1), rgba(255, 138, 0, 0.08));
+  color: var(--accent-rog-red);
+  text-shadow: 0 0 10px rgba(255, 45, 85, 0.3);
+  box-shadow: 0 0 8px rgba(255, 45, 85, 0.1);
+}
+
+/* ═══════════════════════════════
+   ANIMATIONS — ROG palette
+   ═══════════════════════════════ */
+
+/* Live indicator pulse — ROG red */
+@keyframes pulse-live {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(255, 45, 85, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(255, 45, 85, 0); }
+}
+.pulse-live { animation: pulse-live 2s ease infinite; }
+
+/* Green variant for connected/synced states */
+@keyframes pulse-live-green {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(0, 230, 118, 0.5); }
+  50% { box-shadow: 0 0 0 6px rgba(0, 230, 118, 0); }
+}
+.pulse-live-green { animation: pulse-live-green 2s ease infinite; }
+
+/* Smooth fade up for cards */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fade-up { animation: fade-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.animate-card-in { animation: fade-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* Slide right for sidebar blocks */
+@keyframes slide-in {
+  from { opacity: 0; transform: translateX(12px) scale(0.96); }
+  to { opacity: 1; transform: translateX(0) scale(1); }
+}
+.animate-slide-in { animation: slide-in 0.35s cubic-bezier(0.16, 1, 0.3, 1) both; }
+
+/* Block build pop */
+@keyframes block-pop {
+  0% { opacity: 0; transform: scale(0.9); }
+  60% { transform: scale(1.02); }
+  100% { opacity: 1; transform: scale(1); }
+}
+.animate-block-pop { animation: block-pop 0.4s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+
+/* Progress shimmer — ROG red accent */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.shimmer-bar {
+  background: linear-gradient(90deg, transparent 0%, rgba(255, 45, 85, 0.08) 50%, transparent 100%);
+  background-size: 200% 100%;
+  animation: shimmer 3s ease-in-out infinite;
+}
+
+/* Border breathe — ROG red subtle */
+@keyframes border-breathe {
+  0%, 100% { border-color: rgba(255, 45, 85, 0.08); }
+  50% { border-color: rgba(255, 45, 85, 0.2); }
+}
+.animate-border-breathe { animation: border-breathe 4s ease-in-out infinite; }
+
+/* Chain backbone pulse — ROG green (synced chain) */
+@keyframes chain-glow {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.9; }
+}
+.animate-chain-glow { animation: chain-glow 2s ease-in-out infinite; }
+
+/* Stagger children */
+.stagger > * { animation: fade-up 0.4s cubic-bezier(0.16, 1, 0.3, 1) both; }
+.stagger > *:nth-child(1) { animation-delay: 0ms; }
+.stagger > *:nth-child(2) { animation-delay: 60ms; }
+.stagger > *:nth-child(3) { animation-delay: 120ms; }
+.stagger > *:nth-child(4) { animation-delay: 180ms; }
+.stagger > *:nth-child(5) { animation-delay: 240ms; }
+.stagger > *:nth-child(6) { animation-delay: 300ms; }
+
+/* Row transition group */
+.row-enter { opacity: 0; transform: translateY(-6px); }
+.row-enter-active { opacity: 1; transform: translateY(0); transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1); }
+.row-exit { opacity: 1; }
+.row-exit-active { opacity: 0; transform: translateY(6px); transition: all 0.2s ease-in; }
+
+/* ═══════════════════════════════
+   Neon border-glow animation for featured cards
+   ═══════════════════════════════ */
+@keyframes neon-border-sweep {
+  0% { background-position: 0% 50%; }
+  50% { background-position: 100% 50%; }
+  100% { background-position: 0% 50%; }
+}
+.neon-border-sweep {
+  position: relative;
+}
+.neon-border-sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1px;
+  background: linear-gradient(
+    270deg,
+    var(--accent-rog-red),
+    var(--accent-orange),
+    var(--accent-green),
+    var(--accent-cyan),
+    var(--accent-rog-red)
+  );
+  background-size: 300% 300%;
+  animation: neon-border-sweep 6s ease infinite;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  pointer-events: none;
+  opacity: 0.5;
+}
+
+/* ═══════════════════════════════
+   TABLE — ROG styled
+   ═══════════════════════════════ */
+.wallet-table th {
+  background: rgba(255, 45, 85, 0.03);
+  border-bottom: 1px solid var(--border-stroke);
+}
+.wallet-table tr {
+  transition: background-color 0.15s ease;
+}
+.wallet-table tbody tr:hover {
+  background-color: rgba(255, 45, 85, 0.04);
+}
+
+/* ═══════════════════════════════
+   NEON PULSE RIM — selected block glow
+   ═══════════════════════════════ */
+@keyframes neon-pulse-rim {
+  0%, 100% { box-shadow: 0 0 8px var(--rim-color, rgba(0,230,118,0.3)), 0 0 0 1px var(--rim-color, rgba(0,230,118,0.6)), inset 0 0 6px var(--rim-color-inset, rgba(0,230,118,0.04)); }
+  50% { box-shadow: 0 0 16px var(--rim-color, rgba(0,230,118,0.4)), 0 0 0 1px var(--rim-color, rgba(0,230,118,0.7)), inset 0 0 10px var(--rim-color-inset, rgba(0,230,118,0.08)); }
+}
+.animate-neon-pulse-rim {
+  animation: neon-pulse-rim 2.5s ease-in-out infinite;
+}
+
+/* Loading skeleton shimmer */
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+.animate-skeleton-pulse {
+  animation: skeleton-pulse 1.5s ease-in-out infinite;
+}
+
+/* Skeleton shimmer sweep — red/gray gradient sliding L-to-R */
+@keyframes skeleton-shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton-shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(19, 25, 32, 1) 0%,
+    rgba(255, 45, 85, 0.06) 25%,
+    rgba(255, 255, 255, 0.04) 50%,
+    rgba(255, 45, 85, 0.06) 75%,
+    rgba(19, 25, 32, 1) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 2s ease-in-out infinite;
+}
+
+/* Toast slide-in / fade-out */
+@keyframes toast-slide-in {
+  from { opacity: 0; transform: translateX(100%); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+@keyframes toast-fade-out {
+  from { opacity: 1; transform: translateX(0); }
+  to   { opacity: 0; transform: translateX(40px); }
+}
+.toast-enter {
+  animation: toast-slide-in 0.3s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+.toast-exit {
+  animation: toast-fade-out 0.25s ease-in both;
+}
+
+/* ═══════════════════════════════
+   CHAIN DIAGRAM — mobile strip
+   ═══════════════════════════════ */
+@media (max-width: 767px) {
+  .sidebar-chain {
+    display: block !important;
+    width: 100% !important;
+    max-height: 80px;
+    border-left: none !important;
+    border-bottom: 1px solid var(--border-stroke);
+    overflow-x: auto;
+    overflow-y: hidden;
+  }
+  .sidebar-chain .chain-diagram-vertical {
+    display: none;
+  }
+  .sidebar-chain .chain-diagram-mobile {
+    display: flex;
+  }
+}
+@media (min-width: 768px) {
+  .sidebar-chain .chain-diagram-vertical {
+    display: flex;
+  }
+  .sidebar-chain .chain-diagram-mobile {
+    display: none;
+  }
+}
+
+/* ═══════════════════════════════
+   REDUCED MOTION — respect user preference
+   ═══════════════════════════════ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ═══════════════════════════════
+   RESPONSIVE — hide on small
+   ═══════════════════════════════ */
+@media (max-width: 768px) {
+  .hide-mobile { display: none; }
+}
+
+/* ═══════════════════════════════
+   HIGH CONTRAST MODE
+   ═══════════════════════════════ */
+.high-contrast {
+  --color-border: rgba(255, 255, 255, 0.18);
+  --color-border-bright: rgba(255, 255, 255, 0.30);
+  --color-border-subtle: rgba(255, 255, 255, 0.10);
+  --color-text: #FFFFFF;
+  --color-text-secondary: #C8D4E0;
+  --color-text-dim: #9AACBE;
+  --color-text-muted: #7E8D9E;
+  --border-stroke: rgba(255, 255, 255, 0.18);
+  --text-dim: #9AACBE;
+}
+.high-contrast .glass-card,
+.high-contrast .glass-card-accent,
+.high-contrast .glass-card-rog {
+  border-width: 2px;
+}
+
+/* ═══════════════════════════════
+   COLOR BLIND MODES
+   ═══════════════════════════════ */
+
+/* Deuteranopia — red-green: replace green with blue, keep red as-is */
+.cb-deuteranopia {
+  --color-green: #00B3FF;
+  --color-green-dim: rgba(0, 179, 255, 0.08);
+  --color-neon-green: #00B3FF;
+  --accent-green: #00B3FF;
+  --green-glow: 0 6px 24px rgba(0, 179, 255, 0.12);
+}
+
+/* Protanopia — red-green: replace red with amber/yellow, green with blue */
+.cb-protanopia {
+  --color-accent: #FFD600;
+  --color-accent-bright: #FFE44D;
+  --color-accent-dim: rgba(255, 214, 0, 0.08);
+  --color-accent-mid: rgba(255, 214, 0, 0.15);
+  --color-red: #FFD600;
+  --color-red-dim: rgba(255, 214, 0, 0.08);
+  --color-neon-red: #FFD600;
+  --color-neon-magenta: #FFD600;
+  --color-magenta: #FFD600;
+  --color-magenta-dim: rgba(255, 214, 0, 0.08);
+  --accent-rog-red: #FFD600;
+  --red-glow: 0 6px 24px rgba(255, 214, 0, 0.12);
+  --color-green: #00B3FF;
+  --color-green-dim: rgba(0, 179, 255, 0.08);
+  --color-neon-green: #00B3FF;
+  --accent-green: #00B3FF;
+  --green-glow: 0 6px 24px rgba(0, 179, 255, 0.12);
+}
+
+/* Tritanopia — blue-yellow: replace blue with green, keep red */
+.cb-tritanopia {
+  --color-blue: #00E676;
+  --color-blue-dim: rgba(0, 230, 118, 0.08);
+  --color-cyan: #00E676;
+  --color-cyan-dim: rgba(0, 230, 118, 0.08);
+  --color-neon-cyan: #00E676;
+  --accent-cyan: #00E676;
+  --cyan-glow: 0 6px 24px rgba(0, 230, 118, 0.12);
+  --color-amber: #FF5C7C;
+  --color-amber-dim: rgba(255, 92, 124, 0.08);
+  --color-orange: #FF5C7C;
+  --color-orange-dim: rgba(255, 92, 124, 0.08);
+  --color-neon-orange: #FF5C7C;
+  --accent-orange: #FF5C7C;
+  --orange-glow: 0 6px 24px rgba(255, 92, 124, 0.12);
+}

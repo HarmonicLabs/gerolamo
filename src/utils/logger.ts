@@ -205,7 +205,7 @@ export class Logger {
         };
         const minPri = priority[minLevel] ?? 0;
         const filteredRecent = this.recentLogs.filter((log) =>
-            priority[log.level] ?? 0 >= minPri
+            (priority[log.level] ?? 0) >= minPri
         );
         return filteredRecent.slice(-numLines).reverse().map((
             { timestamp, level, args },
@@ -264,7 +264,8 @@ export class Logger {
         const line = JSON.stringify(entry) + "\n";
         const lowerLevel = level.toLowerCase();
         if (!this.bufferedLevels.includes(lowerLevel)) {
-            fs.appendFileSync(logFilePath, line);
+            // Use async append for non-buffered levels too (avoid blocking event loop)
+            fsPromises.appendFile(logFilePath, line).catch(() => {});
             return;
         }
         const queue = this.getQueue(level);

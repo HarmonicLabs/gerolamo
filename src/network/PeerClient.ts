@@ -88,6 +88,7 @@ export class PeerClient implements IPeerClient {
         host: string,
         port: number | bigint,
         config: GerolamoConfig,
+        shelleyGenesis: ShelleyGenesisConfig,
         onTerminate?: (peerId: string) => void,
     ) {
         this.host = host;
@@ -96,7 +97,7 @@ export class PeerClient implements IPeerClient {
         const unixTimestamp = Math.floor(Date.now() / 1000);
         this.peerId = `${host}:${port}:${unixTimestamp}`; // Set after host/port
         this.onTerminate = onTerminate;
-        this.shelleyGenesisConfig = {} as ShelleyGenesisConfig;
+        this.shelleyGenesisConfig = shelleyGenesis;
 
         this.mplexer = new Multiplexer({
             connect: () => {
@@ -121,21 +122,9 @@ export class PeerClient implements IPeerClient {
         this.peerSlotNumber = null;
         this.keepAliveInterval = null;
 
-        getShelleyGenesisConfig(this.config)
-            .then((cfg) => {
-                this.shelleyGenesisConfig = cfg;
-            })
-            .catch((err) => {
-                logger.error(
-                    `Failed to load Shelley genesis config for peer ${this.peerId}:`,
-                    err,
-                );
-            });
-
         this.mplexer.on("error", (err) => {
             logger.error(`Multiplexer error for peer ${this.peerId}:`, err);
             this.terminate();
-            process.exit(1);
         });
         this.mplexer.on("data", (data) => {
             // logger.debug(`Multiplexer data for peer ${this.peerId}:`, toHex(data));
@@ -292,7 +281,7 @@ export class PeerClient implements IPeerClient {
             async (rollForward: ChainSyncRollForward) => {
                 const tip = rollForward.tip.point.blockHeader?.slotNumber;
                 const rollForwardCborBytes = rollForward.toCborBytes();
-                this.onRollForward?.(this.peerId, rollForwardCborBytes, tip);
+                this.onRollForward?.(this.peerId, rollForwardCborBytes, tip!);
                 await this.chainSyncClient.requestNext();
             },
         );

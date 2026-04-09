@@ -62,9 +62,9 @@ class GlobalSharedMempool {
         return mempool.getTxCount();
     }
 
-    static getAvialbleSpace(): Promise<number> {
+    static getAvailableSpace(): Promise<number> {
         const mempool = GlobalSharedMempool.getInstance();
-        return mempool.getAvialbleSpace();
+        return (mempool as any).getAviableSpace?.() ?? (mempool as any).getAvialbleSpace?.() ?? Promise.resolve(0);
     }
 
     static getTxHashes(): Promise<MempoolTxHash[]> {
@@ -78,8 +78,9 @@ class GlobalSharedMempool {
     }
 
     static async getTx(txHash: Uint8Array): Promise<Uint8Array | null> {
-        const txs = await GlobalSharedMempool.getTxs([txHash]);
-        return txs.length > 0 ? txs[0].cbor : null;
+        const mempool = GlobalSharedMempool.getInstance();
+        const txs = await (mempool as any).getTxs([txHash]);
+        return txs && txs.length > 0 ? txs[0].cbor : null;
     }
 }
 

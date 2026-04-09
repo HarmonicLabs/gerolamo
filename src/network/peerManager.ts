@@ -7,8 +7,20 @@ import {
 } from "./topology";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import type { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
+import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { GlobalSharedMempool } from "./SharedMempool";
+import { headerParser, blockParser } from "../consensus/blockHeaderParser";
+import {
+    insertBlockBatchVolatile,
+    insertHeaderBatchVolatile,
+    applyTransaction,
+    rollbackChainTo,
+    maybeCompact,
+} from "../db";
+import { applyBlock } from "../consensus/BlockApplication";
+import { toHex } from "@harmoniclabs/uint8array-utils";
+import { blake2b_256 } from "@harmoniclabs/crypto";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
@@ -50,7 +62,10 @@ let bootstrapPeers: PeerClient[] = [];
 let newPeers: PeerClient[] = [];
 let monitorInterval: NodeJS.Timeout;
 
-export async function initPeerManager(config: GerolamoConfig): Promise<void> {
+export function getHotPeers(): PeerClient[] { return hotPeers; }
+export function getAllPeersMap(): Map<string, PeerClient> { return allPeers; }
+
+export async function initPeerManager(config: GerolamoConfig): Promise<{ allPeers: Map<string, PeerClient>; hotPeers: PeerClient[] }> {
     logger.setLogConfig(config.logs);
     if (config.tuiEnabled) {
         logger.setLogConfig({ logToConsole: false });
@@ -87,15 +102,6 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
             await addPeer(
                 ap.address.toString(),
                 ap.port,
-                "bootstrap",
-                allPeers,
-                bootstrapPeers,
-                hotPeers,
-                config,
-            );
-            await addPeer(
-                ap.address.toString(),
-                ap.port,
                 "hot",
                 allPeers,
                 bootstrapPeers,
@@ -121,6 +127,67 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
         }
     }
 
+    // Wire rollForward/rollBack handlers to store blocks in DB
+    for (const peer of hotPeers) {
+        peer.onRollForward = async (peerId, cborBytes, tip) => {
+            try {
+                const parsed = await headerParser(cborBytes);
+                if (!parsed) { logger.warn(`Header parse failed for ${peerId}`); return; }
+
+                const slot = parsed.slot;
+                const hash = toHex(parsed.blockHeaderHash);
+                logger.info(`rollForward slot=${slot} hash=${hash.slice(0, 16)}... tip=${tip} peer=${peerId}`);
+
+                // Fetch full block from peer
+                const fetchedBlock = await peer.fetchBlock(slot, parsed.blockHeaderHash);
+                let multiEraBlock: MultiEraBlock | undefined;
+                try { multiEraBlock = await blockParser(fetchedBlock); } catch (e: any) {
+                    logger.warn(`Block parse failed for peer ${peerId} at slot ${slot}: ${e.message}`);
+                }
+
+                // Store header
+                await insertHeaderBatchVolatile([{
+                    slot: BigInt(slot),
+                    headerHash: hash,
+                    rollforward_header_cbor: cborBytes.slice(),
+                }]);
+
+                // Store block
+                const prevHash = multiEraBlock?.block?.header?.body?.prevHash;
+                await insertBlockBatchVolatile([{
+                    slot: BigInt(slot),
+                    blockHash: hash,
+                    prevHash: prevHash ? toHex(prevHash) : "",
+                    headerData: parsed.multiEraHeader?.toCborBytes?.() ?? cborBytes,
+                    blockData: multiEraBlock?.block?.toCborBytes?.() ?? new Uint8Array(0),
+                    block_fetch_RawCbor: fetchedBlock?.toCborBytes?.() ?? new Uint8Array(0),
+                }]);
+
+                // Apply transactions (UTxO tracking)
+                if (multiEraBlock?.block) {
+                    try {
+                        await applyBlock(multiEraBlock.block as any, BigInt(slot), parsed.blockHeaderHash);
+                    } catch (e: any) {
+                        logger.warn(`applyBlock error (non-fatal): ${e.message}`);
+                    }
+                }
+
+                logger.info(`Block stored: slot=${slot} hash=${hash.slice(0, 16)}...`);
+                await maybeCompact();
+            } catch (e: any) {
+                logger.error(`rollForward handler error: ${e.message}`);
+            }
+        };
+        peer.onRollBack = async (_peerId, point) => {
+            if (point?.blockHeader?.slotNumber) {
+                logger.info(`rollBack to slot ${point.blockHeader.slotNumber}`);
+                try { await rollbackChainTo(BigInt(point.blockHeader.slotNumber)); } catch (e: any) {
+                    logger.error(`Rollback failed to slot ${point.blockHeader.slotNumber}: ${e.message}`);
+                }
+            }
+        };
+    }
+
     logger.debug("All handshakes completed, starting sync for hot peers");
     await startSync(hotPeers, config);
 
@@ -136,6 +203,8 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
             );
         }
     }, 30000);
+
+    return { allPeers, hotPeers };
 }
 
 async function addPeer(
@@ -147,19 +216,26 @@ async function addPeer(
     hotPeers: PeerClient[],
     config: GerolamoConfig,
 ): Promise<void> {
+    // Dedup check: skip if we already have a connection to this host:port
+    const hostPort = `${host}:${port}`;
+    for (const [existingId] of allPeers) {
+        if (existingId.startsWith(hostPort + ":")) return;
+    }
+
     try {
-        const peer = new PeerClient(host, port, config, (peerId) => {
-            // onTerminate
-            const peer = allPeers.get(peerId);
-            if (peer) {
+        const peer = new PeerClient(host, port, config, shelleyGenesisConfig, (peerId) => {
+            // onTerminate — use module-level arrays directly to avoid stale closure refs
+            if (allPeers.has(peerId)) {
                 allPeers.delete(peerId);
-                hotPeers = hotPeers.filter((p) => p.peerId !== peerId);
-                warmPeers = warmPeers.filter((p) => p.peerId !== peerId);
-                coldPeers = coldPeers.filter((p) => p.peerId !== peerId);
-                bootstrapPeers = bootstrapPeers.filter((p) =>
-                    p.peerId !== peerId
-                );
-                newPeers = newPeers.filter((p) => p.peerId !== peerId);
+                const removeFrom = (arr: PeerClient[]) => {
+                    const idx = arr.findIndex((p) => p.peerId === peerId);
+                    if (idx !== -1) arr.splice(idx, 1);
+                };
+                removeFrom(hotPeers);
+                removeFrom(warmPeers);
+                removeFrom(coldPeers);
+                removeFrom(bootstrapPeers);
+                removeFrom(newPeers);
                 logger.debug(`Terminated peer ${peerId}`);
             }
         });
@@ -246,9 +322,10 @@ async function replenishPeers(
     // Try to discover more peers
     if (hotPeers.length > 0) {
         const somePeer = hotPeers[0];
-        somePeer.askForPeers().then((peers) => {
+        try {
+            const peers = await somePeer.askForPeers();
             for (const p of peers) {
-                addPeer(
+                await addPeer(
                     p.address.toString(),
                     p.portNumber,
                     "hot",
@@ -258,8 +335,8 @@ async function replenishPeers(
                     config,
                 );
             }
-        }).catch((err) =>
-            logger.error(`Failed to get peers from ${somePeer.peerId}`, err)
-        );
+        } catch (err) {
+            logger.error(`Failed to get peers from ${somePeer.peerId}`, err);
+        }
     }
 }

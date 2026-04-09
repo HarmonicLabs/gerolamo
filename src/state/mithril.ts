@@ -1,7 +1,7 @@
 import { Cbor } from "@harmoniclabs/cbor";
 import { join } from "node:path";
 
-import { sql } from "bun";
+import { sql } from "../sql-compat";
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:url";
 
@@ -68,25 +68,43 @@ async function processLedgerState(stateData: any) {
     let delegationCount = 0;
 
     try {
-        // Try to extract UTxO set
+        // Extract and insert UTxO set
         if (stateData.utxo || stateData.utxos) {
             const utxoSet = stateData.utxo || stateData.utxos;
-            console.log(`Found UTxO set with ${Object.keys(utxoSet).length} entries`);
-            utxoCount = Math.min(Object.keys(utxoSet).length, 10); // Just count for now
+            const entries = Array.isArray(utxoSet) ? utxoSet : Object.values(utxoSet);
+            console.log(`Found UTxO set with ${entries.length} entries, inserting...`);
+            for (const entry of entries) {
+                if (isUtxoEntry(entry)) {
+                    await processUtxoEntry(entry);
+                    utxoCount++;
+                }
+            }
         }
 
-        // Try to extract stake distribution
+        // Extract and insert stake distribution
         if (stateData.stake || stateData.stakes) {
             const stakeSet = stateData.stake || stateData.stakes;
-            console.log(`Found stake distribution with ${Object.keys(stakeSet).length} entries`);
-            stakeCount = Math.min(Object.keys(stakeSet).length, 10); // Just count for now
+            const entries = Array.isArray(stakeSet) ? stakeSet : Object.values(stakeSet);
+            console.log(`Found stake distribution with ${entries.length} entries, inserting...`);
+            for (const entry of entries) {
+                if (isStakeEntry(entry)) {
+                    await processStakeEntry(entry);
+                    stakeCount++;
+                }
+            }
         }
 
-        // Try to extract delegations
+        // Extract and insert delegations
         if (stateData.delegations || stateData.delegs) {
             const delegationSet = stateData.delegations || stateData.delegs;
-            console.log(`Found delegations with ${Object.keys(delegationSet).length} entries`);
-            delegationCount = Math.min(Object.keys(delegationSet).length, 10); // Just count for now
+            const entries = Array.isArray(delegationSet) ? delegationSet : Object.values(delegationSet);
+            console.log(`Found delegations with ${entries.length} entries, inserting...`);
+            for (const entry of entries) {
+                if (isDelegationEntry(entry)) {
+                    await processDelegationEntry(entry);
+                    delegationCount++;
+                }
+            }
         }
 
     } catch (error) {

@@ -7,11 +7,15 @@
     "private": true,
     "scripts": {
         "start": "bun src/index.ts",
+        "gerolamo-start": "bun scripts/gerolamo-start.ts",
+        "gerolamo-start:dev": "bun scripts/gerolamo-start.ts --dev",
+        "gerolamo-start:full": "bun scripts/gerolamo-start.ts --with-node",
         "explorer": "bun scripts/gerolamo-explorer.ts",
         "stream-server": "bun scripts/mithril-stream-server.ts",
         "dashboard": "bun scripts/dashboard-server.ts",
         "dashboard:dev": "cd dashboard && bun x vite",
-        "dashboard:build": "cd dashboard && bun x vite build"
+        "dashboard:build": "cd dashboard && bun x vite build",
+        "cli": "bun scripts/gerolamo-cli.ts"
     },
     "devDependencies": {
         "@harmoniclabs/cddl-tools": "^0.0.4",
@@ -35,6 +39,7 @@
         "commander": "^14.0.2",
         "picocolors": "^1.1.1",
         "typescript-language-server": "^5.1.3",
-        "wasm-kes": "./wasm-kes-0.2.1.tgz"
+        "wasm-kes": "./wasm-kes-0.2.1.tgz",
+        "websockify": "^0.7.1"
     }
 }

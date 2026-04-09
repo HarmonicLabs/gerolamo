@@ -1,5 +1,5 @@
 import { Hash32 } from "@harmoniclabs/cardano-ledger-ts";
-import { sql } from "bun";
+import { sql } from "../sql-compat";
 import { Buffer } from "node:buffer";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { logger } from "../utils/logger";
@@ -219,8 +219,9 @@ export async function garbageCollectVolatile(blocks: Hash32[]): Promise<void> {
         count: blocks.length,
     });
 
-    const hashes = blocks.map((h) => h.toBuffer());
-    await sql`DELETE FROM blocks WHERE hash IN ${sql(hashes)}`;
+    for (const h of blocks) {
+        await sql`DELETE FROM blocks WHERE hash = ${toHex(h.toBuffer())}`;
+    }
 }
 
 // Get blocks that are ready to become immutable (older than current slot - k)
@@ -248,13 +249,13 @@ export async function makeBlocksImmutable(
     logger.info("Making blocks immutable", { count: blockHashes.length });
 
     // Get block data from volatile storage
-    const hashBuffers = blockHashes.map((h) => h.toBuffer());
-
-    const blockRows = await sql`
-        SELECT slot, hash, data FROM blocks
-        WHERE hash IN ${sql(hashBuffers)}
-        ORDER BY slot ASC
-    `.values() as [number, Uint8Array, any][];
+    const blockRows: [number, Uint8Array, any][] = [];
+    for (const h of blockHashes) {
+        const rows = await sql`
+            SELECT slot, hash, data FROM blocks WHERE hash = ${toHex(h.toBuffer())}
+        `.values();
+        for (const row of rows) blockRows.push(row as any);
+    }
 
     if (blockRows.length === 0) return;
 

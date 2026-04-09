@@ -1,113 +1,54 @@
-import { createSignal, lazy, Suspense, Show, type Component } from "solid-js";
-import { Sidebar, Topbar, Footer } from "@/components/Layout";
-import { SkeletonCard } from "@/components/ui/skeleton";
-import ErrorBoundary from "@/components/ui/error-boundary";
-import { ToastProvider } from "@/components/ui/toast";
-import type { NavItemId } from "@/lib/constants";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { BrowserRouter, Route, Routes } from "react-router-dom";
+import { Toaster as Sonner } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { DashboardLayout } from "@/components/DashboardLayout";
+import OverviewPage from "./pages/OverviewPage";
+import NodePage from "./pages/NodePage";
+import BlocksPage from "./pages/BlocksPage";
+import PeersPage from "./pages/PeersPage";
+import MempoolPage from "./pages/MempoolPage";
+import ExplorerPage from "./pages/ExplorerPage";
+import WalletPage from "./pages/WalletPage";
+import ChainDiagramPage from "./pages/ChainDiagramPage";
+import LogsPage from "./pages/LogsPage";
+import SettingsPage from "./pages/SettingsPage";
+import NotFound from "./pages/NotFound";
 
-// ---------------------------------------------------------------------------
-// Lazy-loaded pages
-// ---------------------------------------------------------------------------
-const Overview = lazy(() => import("@/pages/Overview"));
-const Blocks = lazy(() => import("@/pages/Blocks"));
-const Peers = lazy(() => import("@/pages/Peers"));
-const Mempool = lazy(() => import("@/pages/Mempool"));
-const Explorer = lazy(() => import("@/pages/Explorer"));
-const Logs = lazy(() => import("@/pages/Logs"));
-const Settings = lazy(() => import("@/pages/Settings"));
-const ChainDiagram = lazy(() => import("@/components/Diagram/ChainDiagram"));
+const queryClient = new QueryClient();
 
-// ---------------------------------------------------------------------------
-// Loading skeleton fallback — replaces the old spinner
-// ---------------------------------------------------------------------------
-const PageSkeleton: Component = () => (
-  <div class="flex flex-col gap-4 py-2">
-    <SkeletonCard lines={2} />
-    <div class="grid grid-cols-2 md:grid-cols-3 gap-4">
-      <SkeletonCard lines={1} />
-      <SkeletonCard lines={1} />
-      <SkeletonCard lines={1} />
-    </div>
-    <SkeletonCard lines={4} />
-  </div>
+const App = () => (
+  <QueryClientProvider client={queryClient}>
+    <TooltipProvider>
+      <Sonner
+        theme="dark"
+        toastOptions={{
+          style: {
+            background: "hsl(240 15% 7%)",
+            border: "1px solid hsl(240 10% 15%)",
+            color: "hsl(210 20% 90%)",
+          },
+        }}
+      />
+      <BrowserRouter>
+        <DashboardLayout>
+          <Routes>
+            <Route path="/" element={<OverviewPage />} />
+            <Route path="/node" element={<NodePage />} />
+            <Route path="/blocks" element={<BlocksPage />} />
+            <Route path="/peers" element={<PeersPage />} />
+            <Route path="/mempool" element={<MempoolPage />} />
+            <Route path="/explorer" element={<ExplorerPage />} />
+            <Route path="/wallet" element={<WalletPage />} />
+            <Route path="/chain" element={<ChainDiagramPage />} />
+            <Route path="/logs" element={<LogsPage />} />
+            <Route path="/settings" element={<SettingsPage />} />
+            <Route path="*" element={<NotFound />} />
+          </Routes>
+        </DashboardLayout>
+      </BrowserRouter>
+    </TooltipProvider>
+  </QueryClientProvider>
 );
-
-// ---------------------------------------------------------------------------
-// App root
-// ---------------------------------------------------------------------------
-const App: Component = () => {
-  const [activePage, setActivePage] = createSignal<NavItemId>("overview");
-
-  // Read initial collapsed state from localStorage
-  let initialCollapsed = false;
-  try {
-    initialCollapsed = localStorage.getItem("gerolamo:sidebar-collapsed") === "true";
-  } catch { /* noop */ }
-  const [collapsed, setCollapsed] = createSignal(initialCollapsed);
-
-  function toggleSidebar() {
-    const next = !collapsed();
-    setCollapsed(next);
-    try {
-      localStorage.setItem("gerolamo:sidebar-collapsed", String(next));
-    } catch { /* noop in restricted contexts */ }
-  }
-
-  return (
-    <ToastProvider>
-      <div class="flex h-screen bg-mesh bg-grid-subtle">
-        {/* Skip-to-content link for a11y */}
-        <a
-          href="#main-content"
-          class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:top-2 focus-visible:left-2 focus-visible:z-[100] focus-visible:rounded focus-visible:bg-accent focus-visible:px-3 focus-visible:py-1 focus-visible:text-[13px] focus-visible:text-white"
-        >
-          Skip to content
-        </a>
-
-        {/* ---- Sidebar ---- */}
-        <Sidebar
-          activePage={activePage()}
-          onNavigate={(page) => setActivePage(page as NavItemId)}
-          collapsed={collapsed()}
-          onToggle={toggleSidebar}
-        />
-
-        {/* ---- Centre column: topbar + main + footer ---- */}
-        <div class="flex flex-1 flex-col min-w-0">
-          <Topbar activePage={activePage()} />
-
-          {/* Main + diagram grid */}
-          <div class="flex flex-1 min-h-0">
-            {/* Scrollable page area */}
-            <main id="main-content" class="flex-1 overflow-y-auto" aria-label="Dashboard content">
-              <div class="mx-auto max-w-[1400px] px-6 py-6 h-full">
-                <ErrorBoundary>
-                  <Suspense fallback={<PageSkeleton />}>
-                    <Show when={activePage() === "overview"}><Overview /></Show>
-                    <Show when={activePage() === "blocks"}><Blocks /></Show>
-                    <Show when={activePage() === "peers"}><Peers /></Show>
-                    <Show when={activePage() === "mempool"}><Mempool /></Show>
-                    <Show when={activePage() === "explorer"}><Explorer /></Show>
-                    <Show when={activePage() === "logs"}><Logs /></Show>
-                    <Show when={activePage() === "settings"}><Settings /></Show>
-                  </Suspense>
-                </ErrorBoundary>
-              </div>
-            </main>
-
-            {/* Right panel -- live chain diagram (hidden on mobile / small screens) */}
-            <aside class="sidebar-chain w-[280px] min-w-[280px] max-w-[360px] shrink-0 border-l border-border overflow-hidden hidden md:block" aria-label="Live chain diagram">
-              <Suspense fallback={<div />}>
-                <ChainDiagram />
-              </Suspense>
-            </aside>
-          </div>
-
-          <Footer />
-        </div>
-      </div>
-    </ToastProvider>
-  );
-};
 
 export default App;

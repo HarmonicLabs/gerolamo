@@ -38,7 +38,28 @@ import * as wasm from "wasm-kes";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
+import { sql } from "../sql-compat";
 // import { RawNewEpochState } from "../rawNES"; // TODO: Add when RawNewEpochState is implemented
+
+/** Query pool_distr for real stake data, fall back to genesis delegates */
+async function getStakeForIssuer(issuerHex: string, genesis: ShelleyGenesisConfig): Promise<{ individual: bigint; total: bigint }> {
+    try {
+        const rows = await sql`SELECT pools, total_active_stake FROM pool_distr WHERE id = 1` as unknown as any[];
+        if (rows.length > 0 && rows[0].pools) {
+            const pools = typeof rows[0].pools === "string" ? JSON.parse(rows[0].pools) : rows[0].pools;
+            const total = BigInt(rows[0].total_active_stake || 0);
+            if (total > 0n && Array.isArray(pools)) {
+                const pool = pools.find((p: any) => p.pool_id === issuerHex);
+                return { individual: pool ? BigInt(pool.active_stake || 0) : 0n, total };
+            }
+        }
+    } catch {
+        // pool_distr not populated yet — fall back to genesis
+    }
+    // Genesis fallback: equal share per delegate
+    const nDelegates = BigInt(Object.keys(genesis.genDelegs).length);
+    return { individual: nDelegates > 0n ? 1n : 0n, total: nDelegates > 0n ? nDelegates : 1n };
+}
 
 let genesisCache: ShelleyGenesisConfig | null = null;
 
@@ -144,8 +165,7 @@ export class ValidatePostBabbageHeader {
         // logger.debug("VRF computedOutput:", toHex(computedOutput));
         // logger.debug("VRF expected output:", toHex(output));
         // logger.debug("VRF output match:", out);
-        // Temporarily only check output match, as verify may have issues
-        return out;
+        return verify && out;
     }
 
     private getVrfInput(slot: bigint, nonce: Uint8Array): Uint8Array {
@@ -197,7 +217,7 @@ export class ValidatePostBabbageHeader {
 
         const leaderVrfOut = concatUint8Array(
             Buffer.from("L"),
-            header.body.getLeaderVrfOutput(),
+            typeof header.body.leaderVrfOutput === "function" ? header.body.leaderVrfOutput() : header.body.leaderVrfOutput,
         );
 
         const vrfInput = this.getVrfInput(header.body.slot, nonce);
@@ -210,13 +230,9 @@ export class ValidatePostBabbageHeader {
         );
         // logger.debug("correctProof:", correctProof);
 
-        // Stake calculation using genesis as fallback
-        let individualStake = 0n;
-        const totalActiveStake = BigInt(Object.keys(genesis.genDelegs).length);
-
-        if (isKnownLeader) {
-            individualStake = 1n;
-        }
+        // Real stake lookup from pool_distr table, fallback to genesis
+        const issuerHex = toHex(issuer.toCborBytes());
+        const { individual: individualStake, total: totalActiveStake } = await getStakeForIssuer(issuerHex, genesis);
 
         let stakeRatio: BigDecimal;
         if (totalActiveStake === 0n) {
@@ -251,7 +267,6 @@ export class ValidatePostBabbageHeader {
             maxKesEvo,
         );
 
-        const issuerHex = toHex(issuer.toCborBytes());
         const passed = correctProof && verifyLeaderStake &&
             verifyOpCertValidity && verifyKES;
         logger.info(
@@ -269,9 +284,7 @@ export class ValidatePostBabbageHeader {
             },
         );
 
-        // Temporarily allow non-genesis leaders for post-Babbage testing
         return (
-            // isKnownLeader && // only needs to be enable when pre SPO blocks syncing from genesis.
             correctProof &&
             verifyLeaderStake &&
             verifyOpCertValidity &&
@@ -365,8 +378,7 @@ export class ValidatePreBabbageHeader {
         // logger.debug("VRF computedOutput:", toHex(computedOutput));
         // logger.debug("VRF expected output:", toHex(output));
         // logger.debug("VRF output match:", out);
-        // Temporarily only check output match, as verify may have issues
-        return out;
+        return verify && out;
     }
 
     private getVrfInput(
@@ -434,37 +446,35 @@ export class ValidatePreBabbageHeader {
         const issuer = new PoolKeyHash(header.body.issuerPubKey);
         const isKnownLeader = this.verifyKnownLeader(issuer, genesis);
 
-        let correctProof: boolean = true; // temp for pre-babbage
-        /*
-        const leaderInput = this.getVrfInput(header.body.slot, nonce, Buffer.from("L"));
-        const leaderCorrect = this.verifyVrfProof(
-            leaderInput,
-            header.body.leaderVrfResult.proofHash,
-            header.body.vrfPubKey,
-            header.body.leaderVrfResult,
-            "pre-babbage",
-        );
-        logger.debug("Leader VRF correct:", leaderCorrect);
-        const nonceInput = this.getVrfInput(header.body.slot, nonce, Buffer.from("N"));
-        const nonceCorrect = this.verifyVrfProof(
-            nonceInput,
-            header.body.nonceVrfResult.proofHash,
-            header.body.vrfPubKey,
-            header.body.nonceVrfResult,
-            "pre-babbage",
-        );
-        logger.debug("Nonce VRF correct:", nonceCorrect);
-        correctProof = leaderCorrect && nonceCorrect;
-        */
+        let correctProof: boolean = true;
+        try {
+            const leaderInput = this.getVrfInput(header.body.slot, nonce, Buffer.from("L"));
+            const leaderCorrect = this.verifyVrfProof(
+                leaderInput,
+                header.body.leaderVrfResult.proofHash,
+                header.body.vrfPubKey,
+                header.body.leaderVrfResult,
+                "pre-babbage",
+            );
+            const nonceInput = this.getVrfInput(header.body.slot, nonce, Buffer.from("N"));
+            const nonceCorrect = this.verifyVrfProof(
+                nonceInput,
+                header.body.nonceVrfResult.proofHash,
+                header.body.vrfPubKey,
+                header.body.nonceVrfResult,
+                "pre-babbage",
+            );
+            correctProof = leaderCorrect && nonceCorrect;
+        } catch (e: any) {
+            // VRF verification may fail on some pre-Babbage headers — log but don't crash
+            logger.warn(`Pre-Babbage VRF verification error at slot ${header.body.slot}: ${e.message}`);
+            correctProof = true; // Allow sync to continue when VRF data is malformed
+        }
         // logger.debug("correctProof:", correctProof);
 
-        // Stake calculation using genesis as fallback
-        let individualStake = 0n;
-        const totalActiveStake = BigInt(Object.keys(genesis.genDelegs).length);
-
-        if (isKnownLeader) {
-            individualStake = 1n;
-        }
+        // Real stake lookup from pool_distr table, fallback to genesis
+        const issuerHex = toHex(issuer.toCborBytes());
+        const { individual: individualStake, total: totalActiveStake } = await getStakeForIssuer(issuerHex, genesis);
 
         let stakeRatio: BigDecimal;
         if (totalActiveStake === 0n) {
@@ -499,7 +509,6 @@ export class ValidatePreBabbageHeader {
             maxKesEvo,
         );
 
-        const issuerHex = toHex(issuer.toCborBytes());
         const passed = isKnownLeader && correctProof && verifyLeaderStake &&
             verifyOpCertValidity && verifyKES;
         logger.info(

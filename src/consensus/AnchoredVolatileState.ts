@@ -1,5 +1,5 @@
 import { Hash32, PoolKeyHash } from "@harmoniclabs/cardano-ledger-ts";
-import { sql } from "bun";
+import { sql } from "../sql-compat";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { logger } from "../utils/logger";
 

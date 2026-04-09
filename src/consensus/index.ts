@@ -3,8 +3,8 @@
 
 // Chain selection
 export {
-    calculateStake,
-    compareChains,
+    findIntersection,
+    compareChainsPraos,
     evaluateChains,
     selectBestChain,
 } from "./chainSelection";

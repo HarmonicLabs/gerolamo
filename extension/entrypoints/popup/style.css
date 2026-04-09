@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+/* Gerolamo extension theme — matches dashboard ROG cyberpunk */
+:root {
+  --color-bg: #0B0F13;
+  --color-bg-raised: #111820;
+  --color-bg-sunken: #080C10;
+  --color-border: #1E2A36;
+  --color-border-subtle: #151D26;
+  --color-text: #E8ECF0;
+  --color-text-muted: #7A8B9A;
+  --color-text-dim: #4A5B6A;
+  --color-accent: #00D4FF;
+  --color-green: #00E676;
+  --color-amber: #FF8A00;
+  --color-red: #FF2D55;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 12px;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+  background: var(--color-bg);
+  color: var(--color-text);
+  width: 400px;
+  height: 600px;
+  overflow: hidden;
+}
+
+.glass-card {
+  background: linear-gradient(135deg, rgba(17, 24, 32, 0.8), rgba(11, 15, 19, 0.9));
+  backdrop-filter: blur(12px);
+}
+
+.bg-mesh {
+  background-image:
+    radial-gradient(ellipse at 20% 50%, rgba(0, 212, 255, 0.03) 0%, transparent 50%),
+    radial-gradient(ellipse at 80% 50%, rgba(255, 77, 93, 0.02) 0%, transparent 50%);
+}
+
+.bg-grid-subtle {
+  background-image: linear-gradient(rgba(30, 42, 54, 0.15) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(30, 42, 54, 0.15) 1px, transparent 1px);
+  background-size: 24px 24px;
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 0.4; transform: scale(1); }
+  50% { opacity: 1; transform: scale(1.2); }
+}
+.pulse-live { animation: pulse-live 2s ease-in-out infinite; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--color-border); border-radius: 2px; }
+::-webkit-scrollbar-thumb:hover { background: var(--color-text-dim); }

@@ -28,6 +28,7 @@ import {
 } from "../db";
 import { applyBlock } from "./BlockApplication";
 import { type ChainCandidate, evaluateChains } from "./chainSelection";
+import { storeVrfOutput } from "../utils/calcEpochNonce";
 
 export interface PeerAccessor {
     getPeer(peerId: string): PeerClient | null;
@@ -62,6 +63,7 @@ export class ConsensusOrchestrator {
     private batchHeaderRecords: Map<string, HeaderInsertData> = new Map();
     private volatileDbGcCounter = 0;
     private epochNonceCache: Map<number, string> = new Map();
+    private batchFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
     constructor(
         config: GerolamoConfig,
@@ -69,12 +71,20 @@ export class ConsensusOrchestrator {
     ) {
         this.config = config;
         this.peers = peers;
-        // setInterval(() => {
-        // 	if (Date.now() - this.lastActivity > 300000) { // 5 minutes
-        // 		logger.warn("Sync stalled, no rollForward for 5 minutes");
-        // 		if (this.stalledCallback) this.stalledCallback();
-        // 	}
-        // }, 60000); // check every minute
+    }
+
+    private scheduleBatchFlush(): void {
+        if (this.batchFlushTimer) return;
+        this.batchFlushTimer = setTimeout(async () => {
+            this.batchFlushTimer = null;
+            if (this.batchBlockRecords.size > 0) {
+                logger.debug(`Timer-based batch flush: ${this.batchBlockRecords.size} blocks`);
+                await insertBlockBatchVolatile(Array.from(this.batchBlockRecords.values()));
+                await insertHeaderBatchVolatile(Array.from(this.batchHeaderRecords.values()));
+                this.batchBlockRecords.clear();
+                this.batchHeaderRecords.clear();
+            }
+        }, 5000); // flush after 5s of inactivity
     }
 
     private async getCurrentTip(): Promise<
@@ -173,17 +183,15 @@ export class ConsensusOrchestrator {
                 logger.warn(
                     `Block body validation failed for peer ${peerId} at slot ${parsedHeader.slot}, hash ${
                         toHex(parsedHeader.blockHeaderHash)
-                    } (bypassing validation; applying anyway for sync tolerance)`,
+                    } — rejecting block`,
                 );
-                // continue even if invalid (temporary)
+                return;
             }
-            if (isBlockValid) {
-                logger.info(
-                    `Block body validated for peer ${peerId} at slot ${parsedHeader.slot}, hash ${
-                        toHex(parsedHeader.blockHeaderHash)
-                    }`,
-                );
-            }
+            logger.info(
+                `Block body validated for peer ${peerId} at slot ${parsedHeader.slot}, hash ${
+                    toHex(parsedHeader.blockHeaderHash)
+                }`,
+            );
 
             const era = multiEraBlock.era;
             const blockHeader = multiEraBlock.block.header;
@@ -198,6 +206,14 @@ export class ConsensusOrchestrator {
                 blockHeaderHash,
             );
             logger.info(`Applied Block: ${toHex(blockHeaderHash)}`);
+
+            // Store VRF output for epoch nonce calculation
+            try {
+                const vrfResult = (blockHeader.body as any).vrfResult ?? (blockHeader.body as any).vrfVkey;
+                if (vrfResult && vrfResult instanceof Uint8Array && vrfResult.length > 0) {
+                    await storeVrfOutput(BigInt(blockSlot), Number(blockEpoch), vrfResult);
+                }
+            } catch { /* VRF output storage is best-effort */ }
 
             const recordHeaders: HeaderInsertData = {
                 slot: BigInt(blockSlot),
@@ -219,7 +235,7 @@ export class ConsensusOrchestrator {
             this.batchBlockRecords.set(blockHash, recordBlocks);
             this.batchHeaderRecords.set(blockHash, recordHeaders);
 
-            if (this.batchBlockRecords.size >= 1) {
+            if (this.batchBlockRecords.size >= 50) {
                 await insertBlockBatchVolatile(
                     Array.from(this.batchBlockRecords.values()),
                 );
@@ -228,6 +244,8 @@ export class ConsensusOrchestrator {
                 );
                 this.batchBlockRecords.clear();
                 this.batchHeaderRecords.clear();
+            } else {
+                this.scheduleBatchFlush();
             }
 
             this.config.tuiEnabled &&

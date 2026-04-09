@@ -29,7 +29,7 @@ import { GlobalSharedMempool } from "./SharedMempool";
 import { SharedMempool } from "@harmoniclabs/shared-cardano-mempool-ts";
 import { Tx, TxBody } from "@harmoniclabs/cardano-ledger-ts";
 import { GerolamoTxSubmitServer } from "./TxSubmitServer";
-import { getBlockBySlot, getMaxSlot } from "../db";
+import { getBlockBySlot, getMaxSlot, insertMempoolTx } from "../db";
 
 export interface IPeerClient {
     host: string;
@@ -381,6 +381,10 @@ export class PeerClient implements IPeerClient {
                 tx.body.hash.toBuffer(),
                 tx.toCborBytes(),
             );
+            // Persist to DB so the dashboard can see it
+            const txId = toHex(tx.body.hash.toBuffer());
+            const fee = Number(tx.body.fee ?? 0);
+            await insertMempoolTx(txId, txCbor.length, fee).catch(() => {});
             logger.mempool(
                 `Tx submission result from peer ${this.peerId}`,
                 result,

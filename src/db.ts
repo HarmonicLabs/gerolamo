@@ -324,6 +324,16 @@ export async function ensureInitialized(): Promise<void> {
 		)
 	`;
 
+    // Mempool table (persists in-flight txs for dashboard visibility)
+    await sql`
+		CREATE TABLE IF NOT EXISTS mempool (
+			tx_hash TEXT PRIMARY KEY,
+			size INTEGER NOT NULL,
+			fee INTEGER NOT NULL DEFAULT 0,
+			received_at TIMESTAMP DEFAULT (strftime('%s','now'))
+		)
+	`;
+
     // Indexes for volatile_headers
     await sql`
 		CREATE INDEX IF NOT EXISTS idx_volatile_headers_hash ON volatile_headers(header_hash);
@@ -365,6 +375,17 @@ export async function ensureInitialized(): Promise<void> {
     // Add epoch_nonces table if missing (handled by CREATE IF NOT EXISTS above)
 
     logger.info("DB initialized with WAL mode for concurrency");
+}
+
+export async function insertMempoolTx(txHash: string, size: number, fee: number): Promise<void> {
+    await sql`INSERT OR REPLACE INTO mempool (tx_hash, size, fee) VALUES (${txHash}, ${size}, ${fee})`;
+}
+
+export async function removeMempoolTxs(txHashes: string[]): Promise<void> {
+    if (txHashes.length === 0) return;
+    for (const hash of txHashes) {
+        await sql`DELETE FROM mempool WHERE tx_hash = ${hash}`;
+    }
 }
 
 export async function getBlockByHash(hash: string): Promise<any> {

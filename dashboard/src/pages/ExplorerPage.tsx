@@ -32,8 +32,8 @@ export default function ExplorerPage() {
       } else {
         toast.error(`Submission failed: ${result.message}`);
       }
-    } catch (e: any) {
-      toast.error(`Error: ${e.message}`);
+    } catch (e: unknown) {
+      toast.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSubmitting(false);
     }

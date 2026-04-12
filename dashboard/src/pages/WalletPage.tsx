@@ -27,8 +27,8 @@ export default function WalletPage() {
       } else {
         toast.error(`Failed: ${result.message}`);
       }
-    } catch (e: any) {
-      toast.error(`Error: ${e.message}`);
+    } catch (e: unknown) {
+      toast.error(`Error: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setSubmitting(false);
     }

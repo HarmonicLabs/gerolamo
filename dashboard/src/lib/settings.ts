@@ -16,7 +16,7 @@ export function getSettings(): Settings {
   try {
     const stored = localStorage.getItem("gerolamo-settings");
     if (stored) return { ...DEFAULTS, ...JSON.parse(stored) };
-  } catch {}
+  } catch { /* localStorage unavailable */ }
   return DEFAULTS;
 }
 

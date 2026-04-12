@@ -178,7 +178,7 @@ export function useSSE<T>(channel: string, onMessage: (data: T) => void) {
     es.onmessage = (evt) => {
       try {
         onMsgRef.current(JSON.parse(evt.data));
-      } catch {}
+      } catch { /* ignore malformed SSE data */ }
     };
     return () => es.close();
   }, [channel]);

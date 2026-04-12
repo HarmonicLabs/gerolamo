@@ -1,23 +1,24 @@
 import { defineConfig } from "vite";
-import solid from "vite-plugin-solid";
-import tailwindcss from "@tailwindcss/vite";
-import { resolve } from "path";
+import react from "@vitejs/plugin-react-swc";
+import path from "path";
 
 export default defineConfig({
-  plugins: [solid(), tailwindcss()],
+  server: {
+    host: "::",
+    port: 8080,
+    hmr: { overlay: false },
+    proxy: {
+      "/api": {
+        target: "http://localhost:3050",
+        changeOrigin: true,
+      },
+    },
+  },
+  plugins: [react()],
   resolve: {
     alias: {
-      "@": resolve(__dirname, "src"),
+      "@": path.resolve(__dirname, "./src"),
     },
-  },
-  server: {
-    port: 3041,
-    proxy: {
-      "/api": "http://localhost:3050",
-    },
-  },
-  build: {
-    outDir: "dist",
-    target: "esnext",
+    dedupe: ["react", "react-dom", "react/jsx-runtime", "react/jsx-dev-runtime", "@tanstack/react-query", "@tanstack/query-core"],
   },
 });

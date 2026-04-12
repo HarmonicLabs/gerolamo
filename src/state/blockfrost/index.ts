@@ -86,13 +86,10 @@ export async function importFromBlockfrost(
     // 6. Delegations
     await populateDelegations(stakeDistribution);
 
-    // 7. Rewards
-    const { defaultShelleyProtocolParameters } = await import(
-        "@harmoniclabs/cardano-ledger-ts"
-    );
+    // 7. Rewards (use real fetched protocol params, not defaults)
     await populateRewards(
         stakeDistribution,
-        defaultShelleyProtocolParameters,
+        protocolParams,
     );
 
     // 8. Non-myopic data

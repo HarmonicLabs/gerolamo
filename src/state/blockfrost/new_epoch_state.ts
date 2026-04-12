@@ -1,4 +1,4 @@
-import { sql } from "bun";
+import { sql } from "../../sql-compat";
 
 export async function populateNewEpochState(
     currentEpoch: number,

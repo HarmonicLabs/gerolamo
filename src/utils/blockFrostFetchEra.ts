@@ -24,8 +24,7 @@ export async function blockFrostFetchEra(
         method: "GET",
         headers: {
             "Content-Type": "application/json",
-            "project_id": process.env.BLOCKFROST_PROJECT_ID ||
-                "mainnetE56SZo3i2RwHTlmjlc6xzV66N8d7fAD8",
+            "project_id": process.env.BLOCKFROST_PROJECT_ID || "",
         },
     });
 

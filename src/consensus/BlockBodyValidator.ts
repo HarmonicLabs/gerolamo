@@ -48,10 +48,11 @@ export class BlockBodyValidator {
 
     private getEraBlock(
         block: MultiEraBlock,
-    ): AlonzoBlock | BabbageBlock | ConwayBlock | null {
-        if (block.era < 5) return null; // Pre-Alonzo (no scripts/collateral)
-        // Assume correct type based on era
-        return block.block as AlonzoBlock | BabbageBlock | ConwayBlock;
+    ): CardanoBlock | null {
+        if (block.era < 2) return null; // Byron — unsupported
+        // Eras 2-4: Shelley/Allegra/Mary (basic validation, no scripts)
+        // Eras 5+: Alonzo/Babbage/Conway (full validation with scripts)
+        return block.block as CardanoBlock;
     }
 
     public async validate(
@@ -59,7 +60,7 @@ export class BlockBodyValidator {
     ): Promise<boolean | null> {
         if (!block.block) return true; // Skip if block not parsed
         const actualBlock = this.getEraBlock(block);
-        if (actualBlock === null) return null; // Unsupported era
+        if (actualBlock === null) return true; // Byron — skip validation
 
         logger.info("Starting block body validation", {
             era: block.era,

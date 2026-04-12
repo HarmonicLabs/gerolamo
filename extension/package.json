@@ -1,0 +1,34 @@
+{
+  "name": "gerolamo-extension",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build",
+    "zip": "wxt zip",
+    "lint": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.304",
+    "@types/node": "^25.5.0",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@harmoniclabs/bip32_ed25519": "*",
+    "@harmoniclabs/cardano-ledger-ts": "*",
+    "@harmoniclabs/cbor": "*",
+    "@harmoniclabs/crypto": "*",
+    "@harmoniclabs/obj-utils": "*",
+    "@harmoniclabs/ouroboros-miniprotocols-ts": "*",
+    "@harmoniclabs/plutus-data": "*",
+    "@harmoniclabs/uint8array-utils": "*",
+    "@tailwindcss/vite": "^4.2.2",
+    "clsx": "^2.1.1",
+    "solid-js": "^1.9.12",
+    "tailwind-merge": "^3.5.0",
+    "tailwindcss": "^4.2.2",
+    "vite-plugin-solid": "^2.11.11",
+    "wxt": "^0.19.0"
+  }
+}

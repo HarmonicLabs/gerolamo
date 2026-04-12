@@ -1,4 +1,4 @@
-import { sql } from "bun";
+import { sql } from "./sql-compat";
 import { logger } from "./utils/logger";
 import {
     AllegraTxBody,
@@ -293,14 +293,44 @@ export async function ensureInitialized(): Promise<void> {
 		)
 	`;
 
-    // UTxO deltas table
+    // UTxO deltas table (utxo_ref enables proper rollback)
     await sql`
 		CREATE TABLE IF NOT EXISTS utxo_deltas (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			block_hash BLOB NOT NULL,
 			action TEXT NOT NULL CHECK(action IN ('spend', 'create', 'cert', 'fee', 'withdrawal')),
 			utxo JSONB NOT NULL,
+			utxo_ref TEXT,
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`;
+
+    // VRF outputs table (for epoch nonce calculation)
+    await sql`
+		CREATE TABLE IF NOT EXISTS vrf_outputs (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			epoch INTEGER NOT NULL,
+			slot INTEGER NOT NULL,
+			vrf_output BLOB NOT NULL,
+			UNIQUE(epoch, slot)
+		)
+	`;
+
+    // Epoch nonces table
+    await sql`
+		CREATE TABLE IF NOT EXISTS epoch_nonces (
+			epoch INTEGER PRIMARY KEY,
+			nonce BLOB NOT NULL
+		)
+	`;
+
+    // Mempool table (persists in-flight txs for dashboard visibility)
+    await sql`
+		CREATE TABLE IF NOT EXISTS mempool (
+			tx_hash TEXT PRIMARY KEY,
+			size INTEGER NOT NULL,
+			fee INTEGER NOT NULL DEFAULT 0,
+			received_at TIMESTAMP DEFAULT (strftime('%s','now'))
 		)
 	`;
 
@@ -338,7 +368,24 @@ export async function ensureInitialized(): Promise<void> {
 		END
 	`;
 
+    // Schema migrations for existing DBs
+    // Add utxo_ref column to utxo_deltas if missing
+    try { await sql`ALTER TABLE utxo_deltas ADD COLUMN utxo_ref TEXT`; } catch { /* already exists */ }
+    // Add vrf_outputs table if missing (handled by CREATE IF NOT EXISTS above, but belt-and-suspenders)
+    // Add epoch_nonces table if missing (handled by CREATE IF NOT EXISTS above)
+
     logger.info("DB initialized with WAL mode for concurrency");
+}
+
+export async function insertMempoolTx(txHash: string, size: number, fee: number): Promise<void> {
+    await sql`INSERT OR REPLACE INTO mempool (tx_hash, size, fee) VALUES (${txHash}, ${size}, ${fee})`;
+}
+
+export async function removeMempoolTxs(txHashes: string[]): Promise<void> {
+    if (txHashes.length === 0) return;
+    for (const hash of txHashes) {
+        await sql`DELETE FROM mempool WHERE tx_hash = ${hash}`;
+    }
 }
 
 export async function getBlockByHash(hash: string): Promise<any> {
@@ -348,7 +395,7 @@ export async function getBlockByHash(hash: string): Promise<any> {
 			UNION
 			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
 			FROM immutable_blocks WHERE block_hash = ${hash}
-		`.values();
+		`;
     return result[0] || null;
 }
 
@@ -359,12 +406,12 @@ export async function getBlockBySlot(slot: bigint): Promise<any> {
 			UNION
 			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
 			FROM immutable_blocks WHERE slot = ${slot}
-		`.values();
+		`;
     return result[0] || null;
 }
 
 export async function getMaxSlot(): Promise<bigint> {
-    const result = await sql`SELECT MAX(slot) as max_slot FROM blocks`.values();
+    const result = await sql`SELECT MAX(slot) as max_slot FROM blocks`;
     const maxSlot = BigInt(result[0]?.max_slot ?? 0);
     return maxSlot;
 }
@@ -372,28 +419,20 @@ export async function getMaxSlot(): Promise<bigint> {
 export async function getValidHeadersBefore(
     cutoffSlot: bigint,
 ): Promise<any[]> {
-    return await sql`SELECT * FROM volatile_headers WHERE slot < ${cutoffSlot} AND is_valid = TRUE ORDER BY slot ASC`
-        .values();
+    return await sql`SELECT * FROM volatile_headers WHERE slot < ${cutoffSlot} AND is_valid = TRUE ORDER BY slot ASC`;
 }
 
 export async function getValidBlocksBefore(cutoffSlot: bigint): Promise<any[]> {
-    return await sql`SELECT * FROM blocks WHERE slot < ${cutoffSlot} AND is_valid = TRUE ORDER BY slot ASC`
-        .values();
+    return await sql`SELECT * FROM blocks WHERE slot < ${cutoffSlot} AND is_valid = TRUE ORDER BY slot ASC`;
 }
 
 export async function getNextChunk(): Promise<{ next_chunk: number }> {
     const result =
-        await sql`SELECT COALESCE(MAX(chunk_no), 0) + 1 as next_chunk FROM immutable_chunks`
-            .values();
+        await sql`SELECT COALESCE(MAX(chunk_no), 0) + 1 as next_chunk FROM immutable_chunks`;
     return result[0];
 }
 
-export async function getLedgerSnapshot(snapshotNo: number): Promise<any> {
-    const result =
-        await sql`SELECT * FROM ledger_snapshots WHERE snapshot_no = ${snapshotNo}`
-            .values();
-    return result[0] || null;
-}
+// getLedgerSnapshot removed — table ledger_snapshots never existed
 
 export async function insertHeaderBatchVolatile(
     records: Array<HeaderInsertData>,
@@ -426,9 +465,9 @@ export async function insertBlockVolatile(
     block: BlockInsertData,
 ): Promise<void> {
     await sql`
-			INSERT INTO volatile_blocks (slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor)
-			VALUES (${block.slot}, ${block.blockHash}, ${block.prevHash}, ${block.headerData}, ${block.blockData}, ${block.block_fetch_RawCbor})
-			ON CONFLICT(block_hash) DO UPDATE SET
+			INSERT INTO blocks (hash, slot, prev_hash, header_data, block_data, block_fetch_RawCbor, is_valid)
+			VALUES (${block.blockHash}, ${block.slot}, ${block.prevHash}, ${block.headerData}, ${block.blockData}, ${block.block_fetch_RawCbor}, TRUE)
+			ON CONFLICT(hash) DO UPDATE SET
 				slot = excluded.slot,
 				prev_hash = excluded.prev_hash,
 				header_data = excluded.header_data,
@@ -475,8 +514,8 @@ export async function insertChunk(chunk: ImmutableChunk): Promise<number> {
 			INSERT INTO immutable_chunks (chunk_no, tip_hash, tip_slot_no, slot_range_start, slot_range_end)
 			VALUES (${chunk.chunk_no}, ${chunk.tip_hash}, ${chunk.tip_slot_no}, ${chunk.slot_range_start}, ${chunk.slot_range_end})
 		`;
-    const result = await sql`SELECT last_insert_rowid()`.values();
-    return Number(result[0]["last_insert_rowid()"]);
+    const result = await sql`SELECT last_insert_rowid() as id`;
+    return Number((result[0] as any)?.id ?? 0);
 }
 
 export async function insertImmutableBlocks(
@@ -496,15 +535,19 @@ export async function insertImmutableBlocks(
 export async function deleteVolatileBlocks(
     blockHashes: string[],
 ): Promise<void> {
-    await sql`DELETE FROM blocks WHERE hash IN ${sql(blockHashes)}`;
+    if (blockHashes.length === 0) return;
+    for (const hash of blockHashes) {
+        await sql`DELETE FROM blocks WHERE hash = ${hash}`;
+    }
 }
 
 export async function deleteVolatileHeaders(
     headerHashes: string[],
 ): Promise<void> {
-    await sql`DELETE FROM volatile_headers WHERE header_hash IN ${
-        sql(headerHashes)
-    }`;
+    if (headerHashes.length === 0) return;
+    for (const hash of headerHashes) {
+        await sql`DELETE FROM volatile_headers WHERE header_hash = ${hash}`;
+    }
 }
 
 export async function createChunk(oldBlocks: any[]): Promise<ImmutableChunk> {
@@ -525,6 +568,21 @@ export async function createChunk(oldBlocks: any[]): Promise<ImmutableChunk> {
         slot_range_start: firstBlock.slot,
         slot_range_end: lastBlock.slot,
     };
+}
+
+let compactCounter = 0;
+const COMPACT_INTERVAL = 2160;
+
+/** Call after each block insertion. Triggers compaction every k=2160 blocks. */
+export async function maybeCompact(): Promise<void> {
+    compactCounter++;
+    if (compactCounter % COMPACT_INTERVAL === 0) {
+        try {
+            await compact();
+        } catch (e: any) {
+            logger.error(`Periodic compaction failed: ${e.message}`);
+        }
+    }
 }
 
 function logDbError(operation: string, err: unknown): void {
@@ -581,38 +639,38 @@ export async function getUtxosByRefs(
     utxoRefs: string[],
 ): Promise<Array<{ utxo_ref: string; amount: any }>> {
     if (utxoRefs.length === 0) return [];
-    const rows = await sql`SELECT utxo_ref, json_extract(tx_out, '$.amount') as amount FROM utxo WHERE utxo_ref IN ${sql(utxoRefs)}`.values() as Array<{ utxo_ref: string; amount: any }>;
-    return rows;
+    const results: Array<{ utxo_ref: string; amount: any }> = [];
+    for (const ref of utxoRefs) {
+        const rows = await sql`SELECT utxo_ref, json_extract(tx_out, '$.amount') as amount FROM utxo WHERE utxo_ref = ${ref}`;
+        for (const row of rows) results.push(row as any);
+    }
+    return results;
 }
 
 export async function getUtxoByRef(
     utxoRef: string,
 ): Promise<{ utxo_ref: string; tx_out: string } | null> {
     const result =
-        await sql`SELECT utxo_ref, tx_out FROM utxo WHERE utxo_ref = ${utxoRef}`
-            .values();
-    return result[0] as { utxo_ref: string; tx_out: string } | null;
+        await sql`SELECT utxo_ref, tx_out FROM utxo WHERE utxo_ref = ${utxoRef}`;
+    return (result[0] as { utxo_ref: string; tx_out: string }) ?? null;
 }
 
 export async function getUtxosByTxHash(
     txHash: string,
 ): Promise<Array<{ utxo_ref: string; tx_out: string }>> {
-    return await sql`SELECT utxo_ref, tx_out FROM utxo WHERE tx_hash = ${txHash} ORDER BY CAST(substr(utxo_ref, 66) AS INTEGER)`
-        .values() as Array<{ utxo_ref: string; tx_out: string }>;
+    return await sql`SELECT utxo_ref, tx_out FROM utxo WHERE tx_hash = ${txHash} ORDER BY CAST(substr(utxo_ref, 66) AS INTEGER)` as unknown as Array<{ utxo_ref: string; tx_out: string }>;
 }
 
 export async function getAllStake(): Promise<
     Array<{ stake_credentials: Uint8Array; amount: number }>
 > {
-    return await sql`SELECT stake_credentials, amount FROM stake`
-        .values() as Array<{ stake_credentials: Uint8Array; amount: number }>;
+    return await sql`SELECT stake_credentials, amount FROM stake` as unknown as Array<{ stake_credentials: Uint8Array; amount: number }>;
 }
 
 export async function getAllDelegations(): Promise<
     Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>
 > {
-    return await sql`SELECT stake_credentials, pool_key_hash FROM delegations`
-        .values() as Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>;
+    return await sql`SELECT stake_credentials, pool_key_hash FROM delegations` as unknown as Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>;
 }
 
 export async function applyTransaction(
@@ -637,16 +695,23 @@ export async function applyTransaction(
 
     if (inputRefs.length > 0) {
         const existingUtxos =
-            await sql`SELECT tx_out FROM utxo WHERE utxo_ref IN ${
-                sql(inputRefs)
-            }`.values() as [string][];
+            (await (async () => {
+                const res: Array<{ utxo_ref: string; tx_out: string }> = [];
+                for (const ref of inputRefs) {
+                    const rows = await sql`SELECT utxo_ref, tx_out FROM utxo WHERE utxo_ref = ${ref}`;
+                    for (const row of rows) res.push(row as any);
+                }
+                return res;
+            })());
         if (existingUtxos.length > 0) {
-            // Batch insert spend deltas
-            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
-                sql(existingUtxos.map(([tx_out]) => [blockHash, "spend", tx_out]))
-            }`;
-            // Delete spent UTxOs in bulk
-            await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
+            // Insert spend deltas with utxo_ref for rollback
+            for (const u of existingUtxos) {
+                await sql`INSERT INTO utxo_deltas (block_hash, action, utxo, utxo_ref) VALUES (${blockHash}, 'spend', ${u.tx_out}, ${u.utxo_ref})`;
+            }
+            // Delete spent UTxOs
+            for (const ref of inputRefs) {
+                await sql`DELETE FROM utxo WHERE utxo_ref = ${ref}`;
+            }
         }
     }
 
@@ -687,9 +752,9 @@ export async function applyTransaction(
     );
 
     if (outputData.length > 0) {
-        // Batch insert UTxO deltas and UTxOs together
-        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
-            sql(outputData.map(([_, json]) => [blockHash, "create", json]))
+        // Batch insert UTxO deltas (with utxo_ref for rollback) and UTxOs together
+        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo, utxo_ref) VALUES ${
+            sql(outputData.map(([ref, json]) => [blockHash, "create", json, ref]))
         }`;
         await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES ${
             sql(outputData)
@@ -819,16 +884,12 @@ export async function rollbackChainTo(
     const counts = { blocksDeleted: 0, headersDeleted: 0, deltasDeleted: 0 };
 
     // Pre-count
-    counts.blocksDeleted =
-        (await sql`SELECT COUNT(*) FROM blocks WHERE slot > ${slot}`.values())[
-            0
-        ]["COUNT(*)"] || 0;
-    counts.headersDeleted =
-        (await sql`SELECT COUNT(*) FROM volatile_headers WHERE slot > ${slot}`
-            .values())[0]["COUNT(*)"] || 0;
-    counts.deltasDeleted =
-        (await sql`SELECT COUNT(*) FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`
-            .values())[0]["COUNT(*)"] || 0;
+    const bc = await sql`SELECT COUNT(*) as cnt FROM blocks WHERE slot > ${slot}`;
+    counts.blocksDeleted = (bc[0] as any)?.cnt || 0;
+    const hc = await sql`SELECT COUNT(*) as cnt FROM volatile_headers WHERE slot > ${slot}`;
+    counts.headersDeleted = (hc[0] as any)?.cnt || 0;
+    const dc = await sql`SELECT COUNT(*) as cnt FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`;
+    counts.deltasDeleted = (dc[0] as any)?.cnt || 0;
 
     logger.rollback(
         `Pre-rollback to slot ${slot}: blocksDeleted=${counts.blocksDeleted}, headersDeleted=${counts.headersDeleted}, deltasDeleted=${counts.deltasDeleted}`,
@@ -836,8 +897,7 @@ export async function rollbackChainTo(
 
     const beforeTip = await getMaxSlot();
     const deletedBlocks =
-        await sql`SELECT slot, hash FROM blocks WHERE slot > ${slot} ORDER BY slot DESC LIMIT 50`
-            .values();
+        await sql`SELECT slot, hash FROM blocks WHERE slot > ${slot} ORDER BY slot DESC LIMIT 50`;
     logger.rollback(
         `Rollback to slot ${slot}; beforeTip slot ${beforeTip.toString()}; deleting ${counts.blocksDeleted} blocks (top 50: [${
             deletedBlocks.map((b: any) => `${b.slot}:${b.hash.slice(0, 8)}`)
@@ -846,6 +906,33 @@ export async function rollbackChainTo(
     );
 
     await sql.begin(async (tx) => {
+        // Reverse UTxO changes using deltas BEFORE deleting them
+        const deltasToReverse = await tx`
+            SELECT action, utxo, utxo_ref FROM utxo_deltas
+            WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})
+            ORDER BY id DESC
+        ` as unknown as Array<{ action: string; utxo: string; utxo_ref: string | null }>;
+
+        for (const delta of deltasToReverse) {
+            if (delta.action === "spend" && delta.utxo_ref) {
+                // Restore the spent UTxO
+                const txHash = delta.utxo_ref.split(":")[0] || "";
+                await tx`INSERT OR IGNORE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${delta.utxo_ref}, ${delta.utxo}, ${txHash})`;
+            } else if (delta.action === "create" && delta.utxo_ref) {
+                // Remove the created UTxO
+                await tx`DELETE FROM utxo WHERE utxo_ref = ${delta.utxo_ref}`;
+            } else if (delta.action === "fee") {
+                // Subtract fee from treasury
+                try {
+                    const parsed = JSON.parse(delta.utxo);
+                    if (parsed.amount) {
+                        await tx`UPDATE chain_account_state SET treasury = treasury - ${BigInt(parsed.amount)} WHERE id = 1`;
+                    }
+                } catch {}
+            }
+            // cert and withdrawal reversals are more complex — skip for now
+        }
+
         await tx`DELETE FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`;
         await tx`DELETE FROM volatile_headers WHERE slot > ${slot}`;
         await tx`DELETE FROM blocks WHERE slot > ${slot}`;

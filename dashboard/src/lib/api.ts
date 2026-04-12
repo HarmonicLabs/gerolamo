@@ -1,65 +1,24 @@
-import { createSignal, onCleanup, onMount } from "solid-js";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useRef, useState, useCallback } from "react";
+import { getSettings } from "./settings";
 
-// ---------------------------------------------------------------------------
-// Base URL
-// ---------------------------------------------------------------------------
-export const API_BASE_URL: string =
-  import.meta.env.VITE_API_URL || "";
-
-const API_BASE = `${API_BASE_URL}/api`;
-
-// ---------------------------------------------------------------------------
-// Error types
-// ---------------------------------------------------------------------------
-
-export class ApiError extends Error {
-  public readonly status: number;
-  public readonly statusText: string;
-  public readonly path: string;
-
-  constructor(status: number, statusText: string, path: string, body?: string) {
-    super(
-      `API ${status} ${statusText} on ${path}${body ? `: ${body}` : ""}`
-    );
-    this.name = "ApiError";
-    this.status = status;
-    this.statusText = statusText;
-    this.path = path;
-  }
+function apiBase(): string {
+  // In dev mode, vite proxies /api → dashboard server, so just use relative paths
+  if (import.meta.env.DEV) return "";
+  return getSettings().apiEndpoint;
 }
 
-export class NetworkError extends Error {
-  public readonly path: string;
-  public readonly cause: unknown;
-
-  constructor(path: string, cause: unknown) {
-    super(`Network error on ${path}: ${cause instanceof Error ? cause.message : String(cause)}`);
-    this.name = "NetworkError";
-    this.path = path;
-    this.cause = cause;
-  }
+async function fetchApi<T>(path: string): Promise<T> {
+  const res = await fetch(`${apiBase()}${path}`);
+  if (!res.ok) throw new Error(`API ${path}: ${res.status} ${res.statusText}`);
+  return res.json();
 }
 
-// ---------------------------------------------------------------------------
-// Shared interfaces — node status
-// ---------------------------------------------------------------------------
-
-export interface TipInfo {
-  slot: number;
-  hash: string;
-  epoch: number;
-  era: number;
-}
-
-export interface SyncInfo {
-  progress: number;
-  speed: number;
-  startedAt: string;
-}
+// ─── Types ────────────────────────────────────────────────────────────────
 
 export interface NodeStatus {
-  tip: TipInfo;
-  sync: SyncInfo;
+  tip: { slot: number; hash: string; epoch: number; era: number };
+  sync: { progress: number; speed: number; startedAt: string };
   uptime: number;
   network: string;
   volatileBlocks: number;
@@ -69,24 +28,7 @@ export interface NodeStatus {
   gcCycles: number;
 }
 
-// ---------------------------------------------------------------------------
-// Peers
-// ---------------------------------------------------------------------------
-
-export interface PeerInfo {
-  id: string;
-  host: string;
-  port: number;
-  category: "hot" | "warm" | "cold" | "bootstrap" | "new";
-  slot: number;
-  connected: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// Blocks
-// ---------------------------------------------------------------------------
-
-export interface BlockInfo {
+export interface Block {
   slot: number;
   hash: string;
   prevHash: string;
@@ -97,83 +39,26 @@ export interface BlockInfo {
   insertedAt: string;
 }
 
-/** Extended block detail (for future /api/block/:hash endpoint) */
-export interface BlockDetail extends BlockInfo {
-  vrf: string;
-  kesSignature: string;
-  timestamp: string;
-  status: "finalized" | "volatile";
-  totalFees: number;
-  withdrawals: number;
-  txHashes: string[];
+export interface BlockDetail extends Block {
+  isValid: boolean;
+  blockData: unknown;
 }
 
-// ---------------------------------------------------------------------------
-// Transactions
-// ---------------------------------------------------------------------------
-
-export interface TxInput {
-  txHash: string;
-  index: number;
-  address: string;
-  value: string;
+export interface Peer {
+  id: string;
+  host: string;
+  port: number;
+  category: string;
+  slot: number;
+  connected: boolean;
 }
-
-export interface TxOutput {
-  address: string;
-  value: string;
-  datum?: string;
-}
-
-export interface TxScript {
-  hash: string;
-  type: "PlutusV1" | "PlutusV2" | "PlutusV3" | "Native";
-  result: "pass" | "fail";
-}
-
-export interface TxCollateral {
-  txHash: string;
-  index: number;
-}
-
-export interface TxMint {
-  policyId: string;
-  assetName: string;
-  quantity: string;
-}
-
-export interface TxDetail {
-  hash: string;
-  blockHash: string;
-  fee: number;
-  inputs: TxInput[];
-  outputs: TxOutput[];
-  scripts: TxScript[];
-  collateral: TxCollateral[];
-  mint: TxMint[];
-  metadata?: Record<string, unknown>;
-  size: number;
-  validContract: boolean;
-}
-
-// ---------------------------------------------------------------------------
-// Mempool
-// ---------------------------------------------------------------------------
 
 export interface MempoolTx {
-  hash: string;
-  fee: number;
+  txHash: string;
   size: number;
-  arrivedAt: string;
-  inputs: TxInput[];
-  outputs: TxOutput[];
-  scripts?: TxScript[];
-  ttl: number;
+  fee: number;
+  receivedAt: string;
 }
-
-// ---------------------------------------------------------------------------
-// Logs
-// ---------------------------------------------------------------------------
 
 export interface LogEntry {
   timestamp: string;
@@ -181,34 +66,14 @@ export interface LogEntry {
   message: string;
 }
 
-// ---------------------------------------------------------------------------
-// UTxOs
-// ---------------------------------------------------------------------------
-
-export interface UtxoEntry {
+export interface UtxoResult {
   ref: string;
   txHash: string;
   outputIndex: number;
   address: string;
   amount: string;
-  assets: Record<string, Record<string, string>>;
+  assets: Record<string, unknown>;
 }
-
-// ---------------------------------------------------------------------------
-// Deltas
-// ---------------------------------------------------------------------------
-
-export interface DeltaEntry {
-  id: number;
-  blockHash: string;
-  action: "spend" | "create" | "cert" | "fee" | "withdrawal";
-  utxo: string;
-  createdAt: string;
-}
-
-// ---------------------------------------------------------------------------
-// Chain state
-// ---------------------------------------------------------------------------
 
 export interface ChainState {
   treasury: number;
@@ -218,109 +83,116 @@ export interface ChainState {
   delegationCount: number;
 }
 
-// ---------------------------------------------------------------------------
-// Fetch helper
-// ---------------------------------------------------------------------------
-
-async function fetchJson<T>(path: string): Promise<T> {
-  let res: Response;
-  try {
-    res = await fetch(`${API_BASE}${path}`);
-  } catch (err) {
-    throw new NetworkError(path, err);
-  }
-
-  if (!res.ok) {
-    let body: string | undefined;
-    try {
-      body = await res.text();
-    } catch {}
-    throw new ApiError(res.status, res.statusText, path, body);
-  }
-
-  return res.json() as Promise<T>;
+export interface Delta {
+  id: number;
+  blockHash: string;
+  action: string;
+  utxo: string;
+  createdAt: string;
 }
 
-// ---------------------------------------------------------------------------
-// Existing API functions
-// ---------------------------------------------------------------------------
+// ─── React Query Hooks ───────────────────────────────────────────────────
 
-export function fetchStatus(): Promise<NodeStatus> {
-  return fetchJson<NodeStatus>("/status");
-}
-
-export function fetchPeers(): Promise<PeerInfo[]> {
-  return fetchJson<PeerInfo[]>("/peers");
-}
-
-export function fetchRecentBlocks(limit = 50): Promise<BlockInfo[]> {
-  return fetchJson<BlockInfo[]>(`/blocks?limit=${limit}`);
-}
-
-export function fetchLogs(level = "INFO", limit = 100): Promise<LogEntry[]> {
-  return fetchJson<LogEntry[]>(`/logs?level=${level}&limit=${limit}`);
-}
-
-export function fetchUtxos(query: string): Promise<UtxoEntry[]> {
-  return fetchJson<UtxoEntry[]>(`/utxo?q=${encodeURIComponent(query)}`);
-}
-
-export function fetchRecentDeltas(limit = 100): Promise<DeltaEntry[]> {
-  return fetchJson<DeltaEntry[]>(`/deltas?limit=${limit}`);
-}
-
-export function fetchChainState(): Promise<ChainState> {
-  return fetchJson<ChainState>("/chain-state");
-}
-
-// ---------------------------------------------------------------------------
-// New API functions
-// ---------------------------------------------------------------------------
-
-export function fetchMempool(): Promise<MempoolTx[]> {
-  return fetchJson<MempoolTx[]>("/mempool");
-}
-
-export function fetchBlockDetail(hash: string): Promise<BlockDetail> {
-  return fetchJson<BlockDetail>(`/block/${hash}`);
-}
-
-export function fetchTxDetail(hash: string): Promise<TxDetail> {
-  return fetchJson<TxDetail>(`/tx/${hash}`);
-}
-
-// ---------------------------------------------------------------------------
-// SSE hook
-// ---------------------------------------------------------------------------
-
-export function useSSE<T>(path: string, initialValue: T) {
-  const [data, setData] = createSignal<T>(initialValue);
-  const [connected, setConnected] = createSignal(false);
-
-  onMount(() => {
-    let es: EventSource | null = null;
-
-    function connect() {
-      es = new EventSource(`${API_BASE}${path}`);
-      es.onopen = () => setConnected(true);
-      es.onmessage = (e) => {
-        try {
-          setData(() => JSON.parse(e.data) as T);
-        } catch {}
-      };
-      es.onerror = () => {
-        setConnected(false);
-        es?.close();
-        setTimeout(connect, 3000);
-      };
-    }
-
-    connect();
-
-    onCleanup(() => {
-      es?.close();
-    });
+export function useStatus() {
+  return useQuery<NodeStatus>({
+    queryKey: ["status"],
+    queryFn: () => fetchApi("/api/status"),
+    refetchInterval: getSettings().refreshInterval,
   });
+}
 
-  return { data, connected };
+export function useBlocks(limit = 50) {
+  return useQuery<Block[]>({
+    queryKey: ["blocks", limit],
+    queryFn: () => fetchApi(`/api/blocks?limit=${limit}`),
+    refetchInterval: getSettings().refreshInterval,
+  });
+}
+
+export function useBlockDetail(hash: string | null) {
+  return useQuery<BlockDetail>({
+    queryKey: ["block", hash],
+    queryFn: () => fetchApi(`/api/block/${hash}`),
+    enabled: !!hash,
+  });
+}
+
+export function usePeers() {
+  return useQuery<Peer[]>({
+    queryKey: ["peers"],
+    queryFn: () => fetchApi("/api/peers"),
+    refetchInterval: getSettings().refreshInterval,
+  });
+}
+
+export function useMempool() {
+  return useQuery<MempoolTx[]>({
+    queryKey: ["mempool"],
+    queryFn: () => fetchApi("/api/mempool"),
+    refetchInterval: getSettings().refreshInterval,
+  });
+}
+
+export function useLogs(level = "INFO", limit = 100) {
+  return useQuery<LogEntry[]>({
+    queryKey: ["logs", level, limit],
+    queryFn: () => fetchApi(`/api/logs?level=${level}&limit=${limit}`),
+    refetchInterval: getSettings().refreshInterval,
+  });
+}
+
+export function useUtxoLookup(query: string) {
+  return useQuery<UtxoResult[]>({
+    queryKey: ["utxo", query],
+    queryFn: () => fetchApi(`/api/utxo?q=${encodeURIComponent(query)}`),
+    enabled: !!query,
+  });
+}
+
+export function useChainState() {
+  return useQuery<ChainState>({
+    queryKey: ["chain-state"],
+    queryFn: () => fetchApi("/api/chain-state"),
+    refetchInterval: 30000,
+  });
+}
+
+export function useDeltas(limit = 100) {
+  return useQuery<Delta[]>({
+    queryKey: ["deltas", limit],
+    queryFn: () => fetchApi(`/api/deltas?limit=${limit}`),
+    refetchInterval: getSettings().refreshInterval,
+  });
+}
+
+// ─── SSE Hook ────────────────────────────────────────────────────────────
+
+export function useSSE<T>(channel: string, onMessage: (data: T) => void) {
+  const onMsgRef = useRef(onMessage);
+  onMsgRef.current = onMessage;
+
+  useEffect(() => {
+    if (!getSettings().wsEnabled) return;
+    const url = `${apiBase()}/api/sse/${channel}`;
+    const es = new EventSource(url);
+    es.onmessage = (evt) => {
+      try {
+        onMsgRef.current(JSON.parse(evt.data));
+      } catch { /* ignore malformed SSE data */ }
+    };
+    return () => es.close();
+  }, [channel]);
+}
+
+// ─── Tx Submission ───────────────────────────────────────────────────────
+
+export async function submitTransaction(cborHex: string): Promise<{ ok: boolean; message: string }> {
+  const bytes = new Uint8Array(cborHex.match(/.{1,2}/g)!.map((b) => parseInt(b, 16)));
+  const res = await fetch(`${apiBase()}/api/txsubmit`, {
+    method: "POST",
+    headers: { "Content-Type": "application/cbor" },
+    body: bytes,
+  });
+  const text = await res.text();
+  return { ok: res.ok, message: text };
 }

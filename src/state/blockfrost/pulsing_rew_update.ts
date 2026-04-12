@@ -1,4 +1,4 @@
-import { sql } from "bun";
+import { sql } from "../../sql-compat";
 
 export async function populatePulsingRewUpdate() {
     await sql`INSERT OR REPLACE INTO pulsing_rew_update (id, data) VALUES (${1}, ${JSON.stringify({})})`;

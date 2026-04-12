@@ -1,7 +1,7 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
-import { applyTransaction } from "../db";
+import { applyTransaction, removeMempoolTxs } from "../db";
 import { logger } from "../utils/logger";
-import { sql } from "bun";
+import { sql } from "../sql-compat";
 
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
@@ -22,10 +22,15 @@ export async function applyBlock(
 
         // Apply all transactions if any exist
         if (block?.transactionBodies?.length) {
+            const minedHashes: string[] = [];
             for (const txBody of block.transactionBodies) {
-                logger.debug(`Applying transaction: ${toHex(txBody.hash.toBuffer())}`);
+                const txId = toHex(txBody.hash.toBuffer());
+                logger.debug(`Applying transaction: ${txId}`);
                 await applyTransaction(txBody, blockHash);
+                minedHashes.push(txId);
             }
+            // Remove mined txs from the mempool table
+            await removeMempoolTxs(minedHashes).catch(() => {});
         }
     });
 }

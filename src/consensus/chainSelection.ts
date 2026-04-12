@@ -1,4 +1,4 @@
-import { sql } from "bun";
+import { sql } from "../sql-compat";
 import { logger } from "../utils/logger";
 
 const chainLogger = logger.child("chainSelection");

@@ -1,34 +1,29 @@
-import type { Component, JSX } from "solid-js";
+import * as React from "react";
 import { cva, type VariantProps } from "class-variance-authority";
-import { cn } from "@/lib/cn";
+
+import { cn } from "@/lib/utils";
 
 const badgeVariants = cva(
-  "inline-flex items-center rounded-full border px-2.5 py-[2px] text-[11px] font-semibold leading-[16px]",
+  "inline-flex items-center rounded-full border px-2.5 py-0.5 text-xs font-semibold transition-colors focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2",
   {
     variants: {
       variant: {
-        default: "border-accent/20 bg-accent-dim text-accent",
-        success: "border-green/20 bg-green-dim text-green",
-        warning: "border-amber/20 bg-amber-dim text-amber",
-        danger: "border-red/20 bg-red-dim text-red",
-        info: "border-blue/20 bg-blue-dim text-blue",
-        muted: "border-border bg-bg-overlay text-text-secondary",
-        neon: "border-accent/25 bg-accent-dim text-accent shadow-[0_0_8px_rgba(255,45,85,0.12)]",
-        magenta: "border-magenta/20 bg-magenta-dim text-magenta",
-        purple: "border-purple/20 bg-purple-dim text-purple",
-        orange: "border-orange/20 bg-orange-dim text-orange",
-        cyan: "border-cyan/20 bg-cyan-dim text-cyan",
+        default: "border-transparent bg-primary text-primary-foreground hover:bg-primary/80",
+        secondary: "border-transparent bg-secondary text-secondary-foreground hover:bg-secondary/80",
+        destructive: "border-transparent bg-destructive text-destructive-foreground hover:bg-destructive/80",
+        outline: "text-foreground",
       },
     },
-    defaultVariants: { variant: "default" },
+    defaultVariants: {
+      variant: "default",
+    },
   },
 );
 
-type BadgeProps = JSX.HTMLAttributes<HTMLSpanElement> & VariantProps<typeof badgeVariants>;
+export interface BadgeProps extends React.HTMLAttributes<HTMLDivElement>, VariantProps<typeof badgeVariants> {}
 
-export const Badge: Component<BadgeProps> = (props) => (
-  <span
-    {...props}
-    class={cn(badgeVariants({ variant: props.variant }), props.class)}
-  />
-);
+function Badge({ className, variant, ...props }: BadgeProps) {
+  return <div className={cn(badgeVariants({ variant }), className)} {...props} />;
+}
+
+export { Badge, badgeVariants };

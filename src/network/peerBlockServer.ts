@@ -4,10 +4,11 @@ import { getUtxosByTxHash, getUtxoByRef, getBlockBySlot, getBlockByHash } from "
 import { logger } from "../utils/logger";
 
 import type { GerolamoConfig } from "./peerManager";
+import type { PeerClient } from "./PeerClient";
 
 export async function startPeerBlockServer(
     config: GerolamoConfig,
-    manager: any,
+    manager: { allPeers: Map<string, PeerClient>; hotPeers: PeerClient[] } | null,
 ) {
     const BASE_PATH = getBasePath();
 
@@ -37,7 +38,12 @@ export async function startPeerBlockServer(
                             req.headers.get("user-agent") || "unknown"
                         }`,
                     );
-                    manager.submitTx({ txCbor });
+                    // Submit to first available hot peer
+                    const hotPeer = manager.hotPeers[0];
+                    if (!hotPeer) {
+                        return new Response("No hot peers available", { status: 503 });
+                    }
+                    await hotPeer.submitToSharedMempool(txCbor);
                     return new Response(
                         JSON.stringify({ status: "relayed to hot peers" }),
                         {

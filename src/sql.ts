@@ -24,9 +24,13 @@ function filenameFromEnvOrDefault(): string {
     return process.env.GEROLAMO_DB_PATH || "./ledger/gerolamo.db";
 }
 
+/** Resolved absolute path of the open SQLite file (Bun SQL does not expose options.filename). */
+let currentDbPath: string = resolve(filenameFromEnvOrDefault());
+
 function openSqlite(filename: string): SQL {
     const abs = resolve(filename);
     mkdirSync(dirname(abs), { recursive: true });
+    currentDbPath = abs;
     return new SQL({ adapter: "sqlite", filename: abs });
 }
 
@@ -46,5 +50,5 @@ export function initSql(dbPath?: string): SQL {
 }
 
 export function getSqlFilename(): string {
-    return (sql as any).options?.filename ?? filenameFromEnvOrDefault();
+    return currentDbPath;
 }

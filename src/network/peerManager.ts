@@ -26,6 +26,12 @@ export interface GerolamoConfig {
     readonly dbPath: string;
     readonly port?: number;
     readonly unixSocket?: boolean;
+    /**
+     * Ouroboros Node-to-Client Unix socket path (node.socket).
+     * Distinct from unixSocket (HTTP-over-unix on peerBlockServer).
+     * Env: GEROLAMO_N2C_SOCKET; disable with GEROLAMO_N2C=0.
+     */
+    readonly n2cSocketPath?: string;
     readonly logs: {
         readonly logToFile: boolean;
         readonly logToConsole: boolean;

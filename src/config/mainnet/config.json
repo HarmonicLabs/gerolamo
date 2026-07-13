@@ -16,6 +16,10 @@
     "host": "0.0.0.0",
     "port": 3030,
     "unixSocket": false,
+    "n2c": {
+        "enabled": false,
+        "socketPath": "./src/store/db/mainnet/node.socket"
+    },
     "network": "mainnet",
     "networkMagic": 764824073,
     "blockfrostUrl": "https://blockfrost-mainnet.onchainapps.io/",

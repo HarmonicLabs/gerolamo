@@ -13,6 +13,10 @@
   "dbPath": "./ledger/gerolamo.db",
   "port": 3030,
   "unixSocket": false,
+  "n2c": {
+    "enabled": false,
+    "socketPath": "./ledger/node.socket"
+  },
   "logs": {
     "logToFile": false,
     "logToConsole": true,

@@ -8,6 +8,7 @@ import { populateEpochState } from "../state/blockfrost";
 import { logger } from "../utils/logger";
 import { startPeerBlockServer } from "./peerBlockServer";
 import { getSqlFilename, initSql } from "../sql";
+import { startN2CServer, type N2CServerHandle } from "./n2c";
 
 async function runSnapShotPopulation(config: GerolamoConfig) {
     console.log(
@@ -69,10 +70,34 @@ async function loadConfig(network: string): Promise<GerolamoConfig> {
     const portEnv = process.env.PORT || process.env.GEROLAMO_PORT;
     const port = portEnv ? Number(portEnv) : (configData.port ?? 3030);
 
+    // N2C node.socket (Ouroboros) — not HTTP unixSocket.
+    // Priority: GEROLAMO_N2C=0 off → GEROLAMO_N2C_SOCKET → config n2cSocketPath
+    // → config.n2c only when n2c.enabled === true (socketPath alone does not enable).
+    const n2cDisabled =
+        process.env.GEROLAMO_N2C === "0" ||
+        process.env.GEROLAMO_N2C === "false";
+    const n2cCfg = (configData as any).n2c as
+        | { enabled?: boolean; socketPath?: string }
+        | undefined;
+    let n2cSocketPath: string | undefined;
+    if (!n2cDisabled) {
+        const fromEnv = process.env.GEROLAMO_N2C_SOCKET?.trim();
+        const fromTop = (configData as any).n2cSocketPath?.trim?.() as
+            | string
+            | undefined;
+        const fromNested =
+            n2cCfg?.enabled === true
+                ? n2cCfg.socketPath?.trim()
+                : undefined;
+        n2cSocketPath = fromEnv || fromTop || fromNested || undefined;
+    }
+    if (n2cSocketPath === "") n2cSocketPath = undefined;
+
     return {
         ...configData,
         dbPath,
         port: Number.isFinite(port) && port > 0 ? port : (configData.port ?? 3030),
+        n2cSocketPath,
     } as GerolamoConfig;
 }
 
@@ -124,5 +149,35 @@ export async function start() {
     logger.info("Starting peer block server...");
 
     await startPeerBlockServer(config, null);
-    logger.info("Peer block server started. Node is now running.");
+    logger.info("Peer block server started.");
+
+    let n2cHandle: N2CServerHandle | undefined;
+    if (config.n2cSocketPath) {
+        logger.info(`Starting N2C server on ${config.n2cSocketPath}...`);
+        n2cHandle = await startN2CServer({
+            socketPath: config.n2cSocketPath,
+            networkMagic: config.networkMagic,
+        });
+        logger.info(
+            `N2C server ready: ${n2cHandle.socketPath} (networkMagic=${n2cHandle.networkMagic})`,
+        );
+    } else {
+        logger.info(
+            "N2C server disabled (set GEROLAMO_N2C_SOCKET or config n2c.socketPath)",
+        );
+    }
+
+    const shutdown = async (signal: string) => {
+        logger.info(`Received ${signal}; shutting down...`);
+        try {
+            await n2cHandle?.stop();
+        } catch (err) {
+            logger.error("N2C shutdown error:", err);
+        }
+        process.exit(0);
+    };
+    process.once("SIGINT", () => void shutdown("SIGINT"));
+    process.once("SIGTERM", () => void shutdown("SIGTERM"));
+
+    logger.info("Node is now running.");
 }

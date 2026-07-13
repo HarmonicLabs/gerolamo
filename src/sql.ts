@@ -1,0 +1,50 @@
+import { SQL } from "bun";
+import { mkdirSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+
+/**
+ * Shared SQLite SQL client for Gerolamo.
+ *
+ * Bun's default `import { sql } from "bun"` is Postgres. Gerolamo stores
+ * chain state in SQLite (config.dbPath / DATABASE_URL / ./ledger/gerolamo.db).
+ *
+ * Call `initSql(dbPath)` from start() before ensureInitialized().
+ * Live ES-module binding: reassignment after init is visible to all importers.
+ */
+
+function filenameFromEnvOrDefault(): string {
+    const url = process.env.DATABASE_URL;
+    if (url?.startsWith("sqlite://")) {
+        // sqlite:///abs/path or sqlite://./relative
+        return url.slice("sqlite://".length);
+    }
+    if (url?.startsWith("file:")) {
+        return url.slice("file:".length);
+    }
+    return process.env.GEROLAMO_DB_PATH || "./ledger/gerolamo.db";
+}
+
+function openSqlite(filename: string): SQL {
+    const abs = resolve(filename);
+    mkdirSync(dirname(abs), { recursive: true });
+    return new SQL({ adapter: "sqlite", filename: abs });
+}
+
+/** Live binding — reassigned by initSql(). */
+export let sql: SQL = openSqlite(filenameFromEnvOrDefault());
+
+export function initSql(dbPath?: string): SQL {
+    const filename = dbPath?.trim() || filenameFromEnvOrDefault();
+    // Prefer closing previous connection if the API exists (best-effort).
+    try {
+        void (sql as any).close?.();
+    } catch {
+        /* ignore */
+    }
+    sql = openSqlite(filename);
+    return sql;
+}
+
+export function getSqlFilename(): string {
+    return (sql as any).options?.filename ?? filenameFromEnvOrDefault();
+}

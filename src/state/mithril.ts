@@ -1,7 +1,7 @@
 import { Cbor } from "@harmoniclabs/cbor";
 import { join } from "node:path";
 
-import { sql } from "bun";
+import { sql } from "../sql";
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:url";
 

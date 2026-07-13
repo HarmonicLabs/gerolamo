@@ -1,7 +1,7 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { applyTransaction } from "../db";
 import { logger } from "../utils/logger";
-import { sql } from "bun";
+import { sql } from "../sql";
 
 import { toHex } from "@harmoniclabs/uint8array-utils";
 

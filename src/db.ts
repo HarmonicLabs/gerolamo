@@ -1,4 +1,4 @@
-import { sql } from "bun";
+import { sql } from "./sql";
 import { logger } from "./utils/logger";
 import {
     AllegraTxBody,

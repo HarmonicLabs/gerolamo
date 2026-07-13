@@ -2,7 +2,7 @@
 // Tables are created during DB.ensureInitialized() which loads the schema.
 // This file can be removed once confirmed no other dependencies exist.
 
-import { sql } from "bun";
+import { sql } from "../sql";
 import { ensureInitialized } from "../db";
 
 export async function initNewEpochState() {

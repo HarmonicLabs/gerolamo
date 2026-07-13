@@ -1,4 +1,4 @@
-import { sql } from "bun";
+import { sql } from "../../sql";
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
 import {
     fetchProtocolParameters,

@@ -3,12 +3,12 @@
 
 // Chain selection
 export {
-    calculateStake,
-    compareChains,
+    compareChainsPraos,
     evaluateChains,
+    findIntersection,
     selectBestChain,
 } from "./chainSelection";
-export type { ChainCandidate } from "./chainSelection";
+export type { ChainCandidate, ChainComparison, ChainSelectionMode } from "./chainSelection";
 
 // Block validation
 export { validateHeader } from "./BlockHeaderValidator";

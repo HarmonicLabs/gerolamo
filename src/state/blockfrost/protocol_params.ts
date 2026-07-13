@@ -1,5 +1,5 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
-import { sql } from "bun";
+import { sql } from "../../sql";
 
 export async function populateProtocolParams(
     protocolParams: any,

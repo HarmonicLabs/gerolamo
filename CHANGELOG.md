@@ -6,6 +6,7 @@ All notable changes on branch **`The-Lab`** (Lab integration). Format: Keep a Ch
 
 ### Added
 
+- `docs/N2C_IMPLEMENTATION_PLAN.md` — phased plan for Ouroboros N2C `node.socket` (Handshake → LocalChainSync → LocalTxSubmit → LSQ).
 - `src/sql.ts` — shared SQLite client (`initSql`, `getSqlFilename`); honors `DATABASE_URL` / `GEROLAMO_DB_PATH`.
 - `GET /health` and `GET /healthz` on peer block server (JSON: healthy, network, port, uptimeSec).
 - Lab env overrides in start path: `DATABASE_URL`, `GEROLAMO_DB_PATH`, `PORT` / `GEROLAMO_PORT`.

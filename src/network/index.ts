@@ -7,6 +7,7 @@ import { ensureInitialized, getMaxSlot } from "../db";
 import { populateEpochState } from "../state/blockfrost";
 import { logger } from "../utils/logger";
 import { startPeerBlockServer } from "./peerBlockServer";
+import { getSqlFilename, initSql } from "../sql";
 
 async function runSnapShotPopulation(config: GerolamoConfig) {
     console.log(
@@ -50,8 +51,29 @@ async function loadConfig(network: string): Promise<GerolamoConfig> {
     if (!(await configFile.exists())) {
         throw new Error(`Config file not found: ${configPath}`);
     }
-    const configData = await configFile.json();
-    return configData as GerolamoConfig;
+    const configData = await configFile.json() as GerolamoConfig;
+
+    // Lab / ops env overrides (instance isolation without editing repo config.json)
+    // DATABASE_URL=sqlite:///abs/path  or  GEROLAMO_DB_PATH=/abs/path
+    // PORT=3030
+    let dbPath = configData.dbPath;
+    const databaseUrl = process.env.DATABASE_URL;
+    if (databaseUrl?.startsWith("sqlite://")) {
+        dbPath = databaseUrl.slice("sqlite://".length);
+    } else if (databaseUrl?.startsWith("file:")) {
+        dbPath = databaseUrl.slice("file:".length);
+    } else if (process.env.GEROLAMO_DB_PATH?.trim()) {
+        dbPath = process.env.GEROLAMO_DB_PATH.trim();
+    }
+
+    const portEnv = process.env.PORT || process.env.GEROLAMO_PORT;
+    const port = portEnv ? Number(portEnv) : (configData.port ?? 3030);
+
+    return {
+        ...configData,
+        dbPath,
+        port: Number.isFinite(port) && port > 0 ? port : (configData.port ?? 3030),
+    } as GerolamoConfig;
 }
 
 export async function start() {
@@ -80,6 +102,10 @@ export async function start() {
             "TUI enabled - console logging disabled to prevent interference.",
         );
     }
+
+    // Bun default sql is Postgres — force SQLite from config.dbPath (or DATABASE_URL).
+    initSql(config.dbPath);
+    logger.info(`SQLite client ready: ${getSqlFilename()}`);
 
     logger.info("Initializing database...");
     await ensureInitialized();

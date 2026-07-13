@@ -25,8 +25,7 @@ import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 
 import { getShelleyGenesisConfig } from "../utils/paths";
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import { GlobalSharedMempool } from "./SharedMempool";
-import { SharedMempool } from "@harmoniclabs/shared-cardano-mempool-ts";
+import { GlobalSharedMempool, type GerolamoMempool } from "./SharedMempool";
 import { Tx, TxBody } from "@harmoniclabs/cardano-ledger-ts";
 import { GerolamoTxSubmitServer } from "./TxSubmitServer";
 import { getBlockBySlot, getMaxSlot } from "../db";
@@ -44,7 +43,7 @@ export interface IPeerClient {
     syncPointFrom?: ChainPoint | null;
     syncPointTo?: ChainPoint | null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
-    sharedMempool: SharedMempool;
+    sharedMempool: GerolamoMempool;
     txSubmitServer: GerolamoTxSubmitServer;
     onTerminate?: (peerId: string) => void;
     onRollForward?: (
@@ -82,7 +81,7 @@ export class PeerClient implements IPeerClient {
     ) => void;
     onRollBack?: (peerId: string, point: any) => void;
     onNewPeers?: (peers: PeerAddress[]) => void;
-    readonly sharedMempool: SharedMempool;
+    readonly sharedMempool: GerolamoMempool;
 
     constructor(
         host: string,
@@ -290,7 +289,8 @@ export class PeerClient implements IPeerClient {
         this.chainSyncClient.on(
             "rollForward",
             async (rollForward: ChainSyncRollForward) => {
-                const tip = rollForward.tip.point.blockHeader?.slotNumber;
+                const tip =
+                    rollForward.tip.point.blockHeader?.slotNumber ?? 0n;
                 const rollForwardCborBytes = rollForward.toCborBytes();
                 this.onRollForward?.(this.peerId, rollForwardCborBytes, tip);
                 await this.chainSyncClient.requestNext();

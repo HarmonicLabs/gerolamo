@@ -21,6 +21,20 @@ export async function startPeerBlockServer(
             : { port: config.port || 3030 }),
         async fetch(req: Request): Promise<Response> {
             const url = new URL(req.url);
+            if (url.pathname === "/health" || url.pathname === "/healthz") {
+                return new Response(
+                    JSON.stringify({
+                        healthy: true,
+                        network: config.network ?? process.env.NETWORK ?? "unknown",
+                        port: config.port || 3030,
+                        uptimeSec: Math.round(process.uptime()),
+                    }),
+                    {
+                        status: 200,
+                        headers: { "Content-Type": "application/json" },
+                    },
+                );
+            }
             if (req.method === "POST" && url.pathname === "/txsubmit") {
                 if (!manager) {
                     return new Response("Peer manager not available", {

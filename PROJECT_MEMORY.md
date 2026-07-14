@@ -13,7 +13,13 @@
 ## Product truth
 
 - **Gerolamo** = HarmonicLabs TypeScript Cardano **node/relay** (Bun). N2N yes.
-- **N2C Phase 1 done**: Unix `node.socket` + Handshake Accept/Refuse (`src/network/n2c/`). LocalChainSync / LocalTxSubmit / LSQ **not** yet.
+- **N2C Phases 1–5 done** (`src/network/n2c/`): data-node Unix `node.socket` like Dolos — not Lab-only product features.
+  - Phase 1: Handshake Accept/Refuse (v16–19)
+  - Phase 2: `GerolamoChainDb` + LocalChainSync (proto 5)
+  - Phase 3: LocalTxSubmission (proto 6) → process mempool
+  - Phase 4: LocalStateQuery (proto 7) minimal acquire/tip result
+  - Phase 5: LocalTxMonitor (proto 9)
+  - Phase 6 (TheLab spawn/UI) lives in TheLab, not this repo.
 - **Not** TxPipe / `@txpipe/gerolamo`. Lab stubs that say otherwise are wrong and should be fixed in TheLab.
 - Storage: SQLite via `src/sql.ts` (`initSql`). Bun’s default `import { sql } from "bun"` is **Postgres** — never use it for chain DB.
 - HTTP API default port **3030**; Lab health: `GET /health` or `/healthz`.
@@ -27,9 +33,16 @@
 3. else top-level `n2cSocketPath`  
 4. else `n2c.enabled === true` + `n2c.socketPath`  
 
-Handshake note: parse Propose with `HandshakeProposeVersion.fromCborObj(cbor, false)` — do not use `handshakeMessageFromCborObj` (N2N default breaks N2C VersionData).
+### N2C implementation notes
 
-Plan: `docs/N2C_IMPLEMENTATION_PLAN.md`. Next code phase: LocalChainSync + `IChainDb` adapter.
+- Handshake: parse Propose with `HandshakeProposeVersion.fromCborObj(cbor, false)` — do not use `handshakeMessageFromCborObj` (N2N default breaks N2C VersionData).
+- `IChainDb` / `IExtendData` are **not** re-exported at ouroboros package root — import from `.../dist/protocols/interfaces/IChainDb.js`.
+- LocalChainSync uses protocol **5** (library `ChainSyncServer` is hard-coded to N2N 2).
+- `blockNo` currently approximated by **slot** (no dense block index yet).
+- LocalTxSubmit mempool status: numeric `0=Ok`, `1=AlreadyPresent` (Bun + local tgz enum import was flaky).
+- Hosts start eagerly after Handshake Accept (one set per connection).
+
+Plan: `docs/N2C_IMPLEMENTATION_PLAN.md`.
 
 ## Commit cadence on `The-Lab`
 
@@ -39,7 +52,7 @@ Small chunks, in order when possible:
 2. **sql** — `src/sql.ts` + import rewires + consensus export fixes  
 3. **mempool / health** — adapter, PeerClient, peerBlockServer, start env overrides  
 4. **docs** — this file, CHANGELOG, handoff context  
-5. **n2c** — Phase 1 socket+handshake; later LocalChainSync / LSQ  
+5. **n2c** — Phases 1–5 data-node N2C (socket → handshake → chainsync/txsubmit/lsq/monitor)  
 
 Convention: `feat|fix|refactor|docs(gerolamo|lab): short message`
 
@@ -59,7 +72,7 @@ Lab service lives in TheLab (`gerolamoService`); keep spawn/health wiring there,
 3. Instance dirs under `~/.local/share/thelab/gerolamo/<id>/` (Lab side)  
 4. Real spawn/stop/PID/logs in TheLab (replace TxPipe fiction)  
 5. Progressive Lab UI (Dolos-style ops template)  
-6. N2C Phase 1 (socket + handshake) — **done**; Phase 2 LocalChainSync next  
+6. N2C data-node Phases 1–5 — **done** in Gerolamo; Phase 6 = TheLab wiring only  
 
 
 ## Local-only (do not commit)

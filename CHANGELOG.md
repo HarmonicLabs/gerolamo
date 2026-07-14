@@ -9,6 +9,11 @@ All notable changes on branch **`The-Lab`** (Lab integration). Format: Keep a Ch
 - **N2C Phase 1** — `src/network/n2c/`: Unix `node.socket` server + `HandshakeResponder` (Accept/Refuse).
   - Enable: `GEROLAMO_N2C_SOCKET=/path`, or `n2c.enabled=true` + `n2c.socketPath` in config.
   - Disable: `GEROLAMO_N2C=0`. Distinct from HTTP `unixSocket`.
+- **N2C Phases 2–5** (data-node surface; hosts wired after Handshake Accept):
+  - Phase 2: `GerolamoChainDb` (`IChainDb` over SQLite) + `LocalChainSyncHost` (mini-protocol 5).
+  - Phase 3: `LocalTxSubmitHost` (protocol 6) → `GlobalSharedMempool` Accept/Reject.
+  - Phase 4: `LocalStateQueryHost` (protocol 7) — Acquire/Acquired/Release/Done + minimal tip query result.
+  - Phase 5: `LocalTxMonitorHost` (protocol 9) — Acquire snapshot, NextTx, HasTx, GetSizes.
 - `docs/N2C_IMPLEMENTATION_PLAN.md` — phased plan for Ouroboros N2C `node.socket` (Handshake → LocalChainSync → LocalTxSubmit → LSQ).
 - `src/sql.ts` — shared SQLite client (`initSql`, `getSqlFilename`); honors `DATABASE_URL` / `GEROLAMO_DB_PATH`.
 - `GET /health` and `GET /healthz` on peer block server (JSON: healthy, network, port, uptimeSec).

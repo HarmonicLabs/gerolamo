@@ -4,6 +4,11 @@ import { createServer, type Server, type Socket } from "node:net";
 import { dirname, resolve } from "node:path";
 import { logger } from "../../utils/logger";
 import { HandshakeResponder } from "./HandshakeResponder";
+import { getSharedChainDb } from "./GerolamoChainDb";
+import { LocalChainSyncHost } from "./LocalChainSyncHost";
+import { LocalTxSubmitHost } from "./LocalTxSubmitHost";
+import { LocalStateQueryHost } from "./LocalStateQueryHost";
+import { LocalTxMonitorHost } from "./LocalTxMonitorHost";
 
 const n2cLogger = logger.child("n2c");
 
@@ -23,10 +28,20 @@ interface ActiveClient {
     socket: Socket;
     mplexer: Multiplexer;
     handshake: HandshakeResponder;
+    chainSync?: LocalChainSyncHost;
+    txSubmit?: LocalTxSubmitHost;
+    stateQuery?: LocalStateQueryHost;
+    txMonitor?: LocalTxMonitorHost;
 }
 
 /**
- * Ouroboros Node-to-Client Unix socket server (Phase 1: accept + Handshake only).
+ * Ouroboros Node-to-Client Unix socket server.
+ *
+ * Phase 1: Handshake
+ * Phase 2: LocalChainSync (proto 5)
+ * Phase 3: LocalTxSubmission (proto 6)
+ * Phase 4: LocalStateQuery (proto 7, minimal)
+ * Phase 5: LocalTxMonitor (proto 9)
  *
  * Distinct from config.unixSocket (HTTP-over-unix on peerBlockServer).
  */
@@ -100,19 +115,34 @@ function onConnection(
         },
     });
 
+    const chainDb = getSharedChainDb();
+    const client: ActiveClient = {
+        socket,
+        mplexer,
+        handshake: null as any,
+    };
+
     const handshake = new HandshakeResponder(mplexer, {
         networkMagic,
         onAccepted: ({ versionNumber }) => {
             n2cLogger.info(
-                `N2C handshake ok peer=${peer} version=${versionNumber}`,
+                `N2C handshake ok peer=${peer} version=${versionNumber}; starting protocol hosts`,
             );
+            // Wire remaining N2C mini-protocols for this connection only.
+            try {
+                client.chainSync = new LocalChainSyncHost(mplexer, chainDb);
+                client.txSubmit = new LocalTxSubmitHost(mplexer);
+                client.stateQuery = new LocalStateQueryHost(mplexer, chainDb);
+                client.txMonitor = new LocalTxMonitorHost(mplexer);
+            } catch (err) {
+                n2cLogger.error(`failed to start N2C hosts for ${peer}:`, err);
+            }
         },
         onRefused: (reason) => {
             n2cLogger.info(`N2C handshake refused peer=${peer}: ${reason}`);
         },
     });
-
-    const client: ActiveClient = { socket, mplexer, handshake };
+    client.handshake = handshake;
     clients.add(client);
 
     const cleanup = () => {
@@ -120,6 +150,26 @@ function onConnection(
         clients.delete(client);
         try {
             handshake.dispose();
+        } catch {
+            /* ignore */
+        }
+        try {
+            client.chainSync?.dispose();
+        } catch {
+            /* ignore */
+        }
+        try {
+            client.txSubmit?.dispose();
+        } catch {
+            /* ignore */
+        }
+        try {
+            client.stateQuery?.dispose();
+        } catch {
+            /* ignore */
+        }
+        try {
+            client.txMonitor?.dispose();
         } catch {
             /* ignore */
         }
@@ -157,6 +207,26 @@ async function stopN2CServer(
             /* ignore */
         }
         try {
+            c.chainSync?.dispose();
+        } catch {
+            /* ignore */
+        }
+        try {
+            c.txSubmit?.dispose();
+        } catch {
+            /* ignore */
+        }
+        try {
+            c.stateQuery?.dispose();
+        } catch {
+            /* ignore */
+        }
+        try {
+            c.txMonitor?.dispose();
+        } catch {
+            /* ignore */
+        }
+        try {
             c.mplexer.close({ closeSocket: true });
         } catch {
             /* ignore */
@@ -171,7 +241,6 @@ async function stopN2CServer(
 
     await new Promise<void>((resolveClose) => {
         server.close(() => resolveClose());
-        // Unblock close if no connections linger.
         setTimeout(() => resolveClose(), 500).unref?.();
     });
 

@@ -338,7 +338,92 @@ export async function ensureInitialized(): Promise<void> {
 		END
 	`;
 
+    // Epoch nonces (η0) — local TICKN/UPDN store; external bootstrap fills mid-chain starts
+    await sql`
+		CREATE TABLE IF NOT EXISTS epoch_nonces (
+			epoch INTEGER PRIMARY KEY,
+			nonce_hex TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'external',
+			evolving_hex TEXT,
+			candidate_hex TEXT,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`;
+
     logger.info("DB initialized with WAL mode for concurrency");
+}
+
+/** Local epoch η0 (hex). Null if not yet stored. */
+export async function getEpochNonce(epoch: number): Promise<string | null> {
+    const rows = await sql`
+		SELECT nonce_hex FROM epoch_nonces WHERE epoch = ${epoch} LIMIT 1
+	`.values();
+    if (!rows.length) return null;
+    const row = rows[0] as any;
+    const hex = Array.isArray(row) ? row[0] : row?.nonce_hex;
+    return typeof hex === "string" && hex.length > 0 ? hex : null;
+}
+
+/** Full nonce row for UPDN evolution (phase 2). */
+export async function getEpochNonceState(epoch: number): Promise<{
+    epoch: number;
+    nonce_hex: string;
+    source: string;
+    evolving_hex: string | null;
+    candidate_hex: string | null;
+} | null> {
+    const rows = await sql`
+		SELECT epoch, nonce_hex, source, evolving_hex, candidate_hex
+		FROM epoch_nonces WHERE epoch = ${epoch} LIMIT 1
+	`.values();
+    if (!rows.length) return null;
+    const r = rows[0] as any;
+    if (Array.isArray(r)) {
+        return {
+            epoch: Number(r[0]),
+            nonce_hex: String(r[1]),
+            source: String(r[2] ?? "external"),
+            evolving_hex: r[3] != null ? String(r[3]) : null,
+            candidate_hex: r[4] != null ? String(r[4]) : null,
+        };
+    }
+    return {
+        epoch: Number(r.epoch),
+        nonce_hex: String(r.nonce_hex),
+        source: String(r.source ?? "external"),
+        evolving_hex: r.evolving_hex != null ? String(r.evolving_hex) : null,
+        candidate_hex: r.candidate_hex != null ? String(r.candidate_hex) : null,
+    };
+}
+
+/**
+ * Persist epoch η0 (and optional evolving/candidate). Row-by-row UPSERT.
+ * source: 'local' | 'external' | 'tickn'
+ */
+export async function storeEpochNonce(
+    epoch: number,
+    nonceHex: string,
+    source: string = "external",
+    evolvingHex?: string | null,
+    candidateHex?: string | null,
+): Promise<void> {
+    await sql`
+		INSERT INTO epoch_nonces (epoch, nonce_hex, source, evolving_hex, candidate_hex, updated_at)
+		VALUES (
+			${epoch},
+			${nonceHex},
+			${source},
+			${evolvingHex ?? null},
+			${candidateHex ?? null},
+			CURRENT_TIMESTAMP
+		)
+		ON CONFLICT(epoch) DO UPDATE SET
+			nonce_hex = excluded.nonce_hex,
+			source = excluded.source,
+			evolving_hex = excluded.evolving_hex,
+			candidate_hex = excluded.candidate_hex,
+			updated_at = CURRENT_TIMESTAMP
+	`;
 }
 
 export async function getBlockByHash(hash: string): Promise<any> {

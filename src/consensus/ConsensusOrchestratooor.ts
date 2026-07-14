@@ -18,6 +18,7 @@ import {
     applyTransaction,
     getBlockByHash,
     getBlockBySlot,
+    getEpochNonce as dbGetEpochNonce,
     getMaxSlot,
     getValidBlocksBefore,
     getValidHeadersBefore,
@@ -25,6 +26,7 @@ import {
     insertBlockVolatile,
     insertHeaderBatchVolatile,
     rollbackChainTo,
+    storeEpochNonce,
 } from "../db";
 import { applyBlock } from "./BlockApplication";
 import { type ChainCandidate, evaluateChains } from "./chainSelection";
@@ -86,16 +88,45 @@ export class ConsensusOrchestrator {
         return { blockNumber: blockCount, slotNumber: maxSlot };
     }
 
+    /**
+     * Resolve epoch η0 for header VRF:
+     * 1) in-memory cache
+     * 2) local SQLite (epoch_nonces)
+     * 3) external Blockfrost/onchainapps → persist to DB
+     *
+     * Full TICKN/UPDN self-calc needs continuous header history (phase 2).
+     * Mid-chain sync bootstraps from external once, then serves from DB.
+     */
     private async getEpochNonce(epoch: number): Promise<string | null> {
         if (this.epochNonceCache.has(epoch)) {
             logger.debug(`Cache hit for epoch nonce ${epoch}`);
             return this.epochNonceCache.get(epoch)!;
         }
+
+        try {
+            const local = await dbGetEpochNonce(epoch);
+            if (local) {
+                this.epochNonceCache.set(epoch, local);
+                logger.debug(`DB hit for epoch nonce ${epoch}`);
+                return local;
+            }
+        } catch (error: unknown) {
+            logger.warn(`Local epoch nonce read failed for ${epoch}:`, error);
+        }
+
         try {
             const nonce = await blockFrostFetchEra(this.config, epoch);
             this.epochNonceCache.set(epoch, nonce);
+            try {
+                await storeEpochNonce(epoch, nonce, "external");
+            } catch (storeErr: unknown) {
+                logger.warn(
+                    `Failed to persist epoch ${epoch} nonce to DB:`,
+                    storeErr,
+                );
+            }
             logger.debug(
-                `Fetched and cached epoch ${epoch} nonce from Blockfrost`,
+                `Fetched and cached epoch ${epoch} nonce from external (persisted)`,
             );
             return nonce;
         } catch (error: unknown) {

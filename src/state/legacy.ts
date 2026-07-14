@@ -7,6 +7,7 @@ import { blake2b_256 } from "@harmoniclabs/crypto";
 
 import { Logger } from "../utils/logger";
 import { applyBlock } from "../consensus/BlockApplication";
+import { getHeaderSlot } from "../utils/eraAccessors";
 
 interface RawChunkBlock {
     slotNo: bigint;
@@ -96,7 +97,7 @@ export async function processChunk(dir: string, chunkNo: number, logger: Logger)
 
             await applyBlock(
                 meb.block,
-                meb.block.header.body.slot,
+                getHeaderSlot(meb.block.header),
                 blake2b_256(meb.block.header.toCborBytes())
             );
         } catch {

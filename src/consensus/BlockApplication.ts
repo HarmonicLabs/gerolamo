@@ -2,6 +2,7 @@ import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { applyTransaction } from "../db";
 import { logger } from "../utils/logger";
 import { sql } from "../sql";
+import { getShelleyTxBodies } from "../utils/eraAccessors";
 
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
@@ -12,6 +13,7 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
  * Bun SQLite cannot nest sql.begin(), so we do not wrap applyTransaction in
  * another begin. Block metadata insert is best-effort before txs; full CBOR
  * is written separately via insertBlockBatchVolatile after applyBlock returns.
+ * Byron blocks: metadata only (no Shelley-style tx apply yet).
  */
 export async function applyBlock(
     block: MultiEraBlock["block"],
@@ -23,18 +25,17 @@ export async function applyBlock(
         blockHash
     }, ${Number(slot)}, NULL, ${true})`;
 
-    // Apply all transactions if any exist (row-by-row SQL; no nested begin)
-    if (block?.transactionBodies?.length) {
-        for (const txBody of block.transactionBodies) {
-            const hashBuf = typeof (txBody.hash as any)?.toBuffer === "function"
-                ? (txBody.hash as any).toBuffer()
-                : (txBody.hash as any);
-            logger.debug(
-                `Applying transaction: ${
-                    hashBuf instanceof Uint8Array ? toHex(hashBuf) : String(txBody.hash)
-                }`,
-            );
-            await applyTransaction(txBody, blockHash);
-        }
+    // Shelley+ txs only (row-by-row SQL; no nested begin)
+    const txBodies = getShelleyTxBodies(block);
+    for (const txBody of txBodies) {
+        const hashBuf = typeof (txBody.hash as any)?.toBuffer === "function"
+            ? (txBody.hash as any).toBuffer()
+            : (txBody.hash as any);
+        logger.debug(
+            `Applying transaction: ${
+                hashBuf instanceof Uint8Array ? toHex(hashBuf) : String(txBody.hash)
+            }`,
+        );
+        await applyTransaction(txBody, blockHash);
     }
 }

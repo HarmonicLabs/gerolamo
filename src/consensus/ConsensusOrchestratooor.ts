@@ -28,6 +28,7 @@ import {
 } from "../db";
 import { applyBlock } from "./BlockApplication";
 import { type ChainCandidate, evaluateChains } from "./chainSelection";
+import { getHeaderSlot, getHeaderPrevHashHex } from "../utils/eraAccessors";
 
 export interface PeerAccessor {
     getPeer(peerId: string): PeerClient | null;
@@ -187,7 +188,7 @@ export class ConsensusOrchestrator {
 
             const era = multiEraBlock.era;
             const blockHeader = multiEraBlock.block.header;
-            const blockSlot = Number(blockHeader.body.slot);
+            const blockSlot = Number(getHeaderSlot(blockHeader));
             const blockEpoch = calculatePreProdCardanoEpoch(Number(blockSlot));
             const blockHeaderHash = blake2b_256(blockHeader.toCborBytes());
             const blockHash = toHex(blockHeaderHash);
@@ -208,9 +209,7 @@ export class ConsensusOrchestrator {
             const recordBlocks: BlockInsertData = {
                 slot: BigInt(blockSlot),
                 blockHash,
-                prevHash: blockHeader.body.prevHash
-                    ? toHex(blockHeader.body.prevHash)
-                    : "",
+                prevHash: getHeaderPrevHashHex(blockHeader),
                 headerData: blockHeader.toCborBytes(),
                 blockData: multiEraBlock.block.toCborBytes(),
                 block_fetch_RawCbor: newBlockRes.toCborBytes(),

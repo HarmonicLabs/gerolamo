@@ -28,6 +28,7 @@ import {
     calculateCardanoEpoch,
     calculatePreProdCardanoEpoch,
 } from "../utils/epochFromSlotCalculations";
+import { getHeaderSlot } from "../utils/eraAccessors";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
 export async function headerParser(rollForward: Uint8Array) {
@@ -127,12 +128,10 @@ export async function headerParser(rollForward: Uint8Array) {
         header: parsedHeader,
     });
 
-    const headerEpoch = calculatePreProdCardanoEpoch(
-        Number(multiEraHeader.header.body.slot),
-    );
+    const slot = getHeaderSlot(multiEraHeader.header);
+    const headerEpoch = calculatePreProdCardanoEpoch(Number(slot));
 
     const blockHeaderHash = blake2b_256(blockHeaderParsed.data.bytes);
-    const slot = multiEraHeader.header.body.slot;
 
     logger.info("Parsed header successfully", {
         era: blockHeaderBodyEra,
@@ -173,7 +172,7 @@ export async function blockParser(
 
     logger.debug("Parsed block successfully", {
         era: newMultiEraBlock.era,
-        slot: newMultiEraBlock.block.header.body.slot.toString(),
+        slot: getHeaderSlot(newMultiEraBlock.block.header).toString(),
     });
 
     return newMultiEraBlock;

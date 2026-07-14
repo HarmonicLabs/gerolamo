@@ -585,10 +585,30 @@ export async function compact(): Promise<void> {
 
 export async function getUtxosByRefs(
     utxoRefs: string[],
-): Promise<Array<{ utxo_ref: string; amount: any }>> {
+): Promise<Array<{ utxo_ref: string; amount: string | null }>> {
     if (utxoRefs.length === 0) return [];
-    const rows = await sql`SELECT utxo_ref, json_extract(tx_out, '$.amount') as amount FROM utxo WHERE utxo_ref IN ${sql(utxoRefs)}`.values() as Array<{ utxo_ref: string; amount: any }>;
-    return rows;
+    // Bun SQL .values() returns row arrays [[ref, amount], ...], not objects.
+    // Callers (BlockBodyValidator) destructure { utxo_ref, amount }.
+    const rows = await sql`
+			SELECT utxo_ref, json_extract(tx_out, '$.amount') as amount
+			FROM utxo
+			WHERE utxo_ref IN ${sql(utxoRefs)}
+		`.values() as any[];
+
+    return rows.map((row) => {
+        if (Array.isArray(row)) {
+            const amount = row[1];
+            return {
+                utxo_ref: String(row[0]),
+                amount: amount == null ? null : String(amount),
+            };
+        }
+        const amount = row?.amount;
+        return {
+            utxo_ref: String(row?.utxo_ref ?? ""),
+            amount: amount == null ? null : String(amount),
+        };
+    });
 }
 
 export async function getUtxoByRef(

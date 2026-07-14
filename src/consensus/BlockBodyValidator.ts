@@ -20,6 +20,22 @@ import { logger } from "../utils/logger";
 
 import { getUtxosByRefs, getAllStake, getAllDelegations } from "../db";
 
+/** Safe BigInt from DB amount (string | number | null). Null/invalid → 0n. */
+function amountToBigInt(amount: unknown): bigint {
+    if (amount == null) return 0n;
+    if (typeof amount === "bigint") return amount;
+    if (typeof amount === "number" && Number.isFinite(amount)) {
+        return BigInt(Math.trunc(amount));
+    }
+    const s = String(amount).trim();
+    if (!s || !/^-?\d+$/.test(s)) return 0n;
+    try {
+        return BigInt(s);
+    } catch {
+        return 0n;
+    }
+}
+
 let genesisCache: ShelleyGenesisConfig | null = null;
 
 async function getCachedShelleyGenesis(
@@ -193,7 +209,7 @@ export class BlockBodyValidator {
             utxoRows.map(
                 (
                     { utxo_ref, amount },
-                ) => [utxo_ref, { utxo_ref, amount: BigInt(amount) }],
+                ) => [utxo_ref, { utxo_ref, amount: amountToBigInt(amount) }],
             ),
         );
 
@@ -299,7 +315,7 @@ export class BlockBodyValidator {
             utxoRows.map(
                 (
                     { utxo_ref, amount },
-                ) => [utxo_ref, { utxo_ref, amount: BigInt(amount) }],
+                ) => [utxo_ref, { utxo_ref, amount: amountToBigInt(amount) }],
             ),
         );
 
@@ -428,7 +444,7 @@ export class BlockBodyValidator {
             utxoRows.map(
                 (
                     { utxo_ref, amount },
-                ) => [utxo_ref, { utxo_ref, amount: BigInt(amount) }],
+                ) => [utxo_ref, { utxo_ref, amount: amountToBigInt(amount) }],
             ),
         );
 

@@ -9,6 +9,10 @@ import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import type { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { GlobalSharedMempool } from "./SharedMempool";
+import {
+    ConsensusOrchestrator,
+    type PeerAccessor,
+} from "../consensus/ConsensusOrchestratooor";
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
@@ -55,6 +59,36 @@ let coldPeers: PeerClient[] = [];
 let bootstrapPeers: PeerClient[] = [];
 let newPeers: PeerClient[] = [];
 let monitorInterval: NodeJS.Timeout;
+/** Shared consensus path so rollForward/rollBack actually persist chain data. */
+let consensus: ConsensusOrchestrator | undefined;
+
+function getPeerAccessor(): PeerAccessor {
+    return {
+        getPeer(peerId: string): PeerClient | null {
+            return allPeers.get(peerId) ?? null;
+        },
+        pickHotPeer(): PeerClient | null {
+            return hotPeers[0] ?? null;
+        },
+    };
+}
+
+function wirePeerConsensus(peer: PeerClient): void {
+    if (!consensus) return;
+    const orch = consensus;
+    peer.onRollForward = (peerId, rollForwardCborBytes, tip) => {
+        void orch.handleRollForward(
+            rollForwardCborBytes,
+            peerId,
+            BigInt(tip),
+        );
+    };
+    peer.onRollBack = (peerId, point) => {
+        void orch.handleRollBack(point).catch((err) => {
+            logger.error(`handleRollBack failed for ${peerId}:`, err);
+        });
+    };
+}
 
 export async function initPeerManager(config: GerolamoConfig): Promise<void> {
     logger.setLogConfig(config.logs);
@@ -88,17 +122,14 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
     GlobalSharedMempool.getInstance();
     logger.mempool("Global SharedMempool initialized in PeerManager");
 
+    // Wire N2N ChainSync → consensus → SQLite before any peer starts syncing.
+    consensus = new ConsensusOrchestrator(config, getPeerAccessor());
+    config.allPeers = allPeers;
+    logger.info("ConsensusOrchestrator ready (rollForward/rollBack → DB)");
+
     if (topology.bootstrapPeers) {
         for (const ap of topology.bootstrapPeers) {
-            await addPeer(
-                ap.address.toString(),
-                ap.port,
-                "bootstrap",
-                allPeers,
-                bootstrapPeers,
-                hotPeers,
-                config,
-            );
+            // One hot peer per bootstrap address (handshake once).
             await addPeer(
                 ap.address.toString(),
                 ap.port,
@@ -171,6 +202,7 @@ async function addPeer(
         });
         await peer.handShakePeer();
         peer.startKeepAlive();
+        wirePeerConsensus(peer);
         allPeers.set(peer.peerId, peer);
         switch (category) {
             case "hot":

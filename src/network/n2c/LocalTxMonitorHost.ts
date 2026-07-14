@@ -98,14 +98,22 @@ export class LocalTxMonitorHost {
             this.dispose();
             return;
         }
+        // Lib bug: TxMonitorAcquire.toCborObj encodes [3] (same as Release), while
+        // the parser maps n=1 → Acquire and n=3 → Release. Clients using the lib
+        // therefore send "Release" when they mean Acquire. Spec: Acquire=1, Release=3.
+        // Work around: idle-state [3]/Release → Acquire; acquired-state → real Release.
+        if (msg instanceof TxMonitorAcquire) {
+            await this.acquire();
+            return;
+        }
         if (msg instanceof TxMonitorRelease) {
+            if (!this.acquired) {
+                await this.acquire();
+                return;
+            }
             this.acquired = false;
             this.snapshotHashes = [];
             this.nextIdx = 0;
-            return;
-        }
-        if (msg instanceof TxMonitorAcquire) {
-            await this.acquire();
             return;
         }
         if (!this.acquired) return;

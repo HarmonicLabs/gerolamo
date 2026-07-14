@@ -408,15 +408,16 @@ export async function insertHeaderBatchVolatile(
         );
     }
 
-    await sql`
-		INSERT OR IGNORE INTO volatile_headers 
-		(slot, header_hash, rollforward_header_cbor)
-		VALUES ${
-        sql(records.map(
-            (r) => [r.slot, r.headerHash, r.rollforward_header_cbor],
-        ))
-    }
-	`;
+    // Bun SQLite rejects multi-row VALUES ${sql([...])} — insert row-by-row.
+    await sql.begin(async (tx) => {
+        for (const r of records) {
+            await tx`
+				INSERT OR IGNORE INTO volatile_headers
+				(slot, header_hash, rollforward_header_cbor)
+				VALUES (${r.slot}, ${r.headerHash}, ${r.rollforward_header_cbor})
+			`;
+        }
+    });
     logger.info(
         `Committed ${records.length} headers to volatile_headers (ignored dups)`,
     );
@@ -425,15 +426,17 @@ export async function insertHeaderBatchVolatile(
 export async function insertBlockVolatile(
     block: BlockInsertData,
 ): Promise<void> {
+    // Volatile store is table `blocks` (not volatile_blocks).
     await sql`
-			INSERT INTO volatile_blocks (slot, block_hash, prev_hash, header_data, block_data, block_fetch_RawCbor)
-			VALUES (${block.slot}, ${block.blockHash}, ${block.prevHash}, ${block.headerData}, ${block.blockData}, ${block.block_fetch_RawCbor})
-			ON CONFLICT(block_hash) DO UPDATE SET
+			INSERT INTO blocks (hash, slot, prev_hash, header_data, block_data, block_fetch_RawCbor, is_valid)
+			VALUES (${block.blockHash}, ${Number(block.slot)}, ${block.prevHash}, ${block.headerData}, ${block.blockData}, ${block.block_fetch_RawCbor}, ${true})
+			ON CONFLICT(hash) DO UPDATE SET
 				slot = excluded.slot,
 				prev_hash = excluded.prev_hash,
 				header_data = excluded.header_data,
 				block_data = excluded.block_data,
-				block_fetch_RawCbor = excluded.block_fetch_RawCbor
+				block_fetch_RawCbor = excluded.block_fetch_RawCbor,
+				is_valid = excluded.is_valid
 		`;
 }
 
@@ -450,20 +453,23 @@ export async function insertBlockBatchVolatile(
         );
     }
 
+    // Bun SQLite rejects multi-row VALUES ${sql([...])} — insert row-by-row.
     await sql.begin(async (tx) => {
-        await tx`INSERT OR IGNORE INTO blocks (hash, slot, header_data, block_data, block_fetch_RawCbor, is_valid, prev_hash) VALUES ${
-            sql(records.map(
-                (r) => [
-                    r.blockHash,
-                    Number(r.slot),
-                    r.headerData,
-                    r.blockData,
-                    r.block_fetch_RawCbor,
-                    true,
-                    r.prevHash,
-                ],
-            ))
-        }`;
+        for (const r of records) {
+            await tx`
+				INSERT OR IGNORE INTO blocks
+				(hash, slot, header_data, block_data, block_fetch_RawCbor, is_valid, prev_hash)
+				VALUES (
+					${r.blockHash},
+					${Number(r.slot)},
+					${r.headerData},
+					${r.blockData},
+					${r.block_fetch_RawCbor},
+					${true},
+					${r.prevHash}
+				)
+			`;
+        }
     });
     logger.info(
         `Committed ${records.length} blocks to volatile_blocks (ignored dups)`,
@@ -641,11 +647,11 @@ export async function applyTransaction(
                 sql(inputRefs)
             }`.values() as [string][];
         if (existingUtxos.length > 0) {
-            // Batch insert spend deltas
-            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
-                sql(existingUtxos.map(([tx_out]) => [blockHash, "spend", tx_out]))
-            }`;
-            // Delete spent UTxOs in bulk
+            // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
+            for (const [tx_out] of existingUtxos) {
+                await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${tx_out})`;
+            }
+            // Delete spent UTxOs in bulk (IN ${sql([...])} is supported)
             await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
         }
     }
@@ -687,13 +693,11 @@ export async function applyTransaction(
     );
 
     if (outputData.length > 0) {
-        // Batch insert UTxO deltas and UTxOs together
-        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
-            sql(outputData.map(([_, json]) => [blockHash, "create", json]))
-        }`;
-        await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES ${
-            sql(outputData)
-        }`;
+        // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
+        for (const [utxoRef, json, txHash] of outputData) {
+            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${json})`;
+            await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${json}, ${txHash})`;
+        }
     }
 
     if (txBody.certs && Array.isArray(txBody.certs)) {
@@ -705,7 +709,7 @@ export async function applyTransaction(
     }
 
     if (txBody.fee) {
-        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, "fee", ${
+        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"fee"}, ${
             JSON.stringify({ amount: txBody.fee.toString() })
         })`;
         await sql`UPDATE chain_account_state SET treasury = treasury + ${txBody.fee} WHERE id = 1`;
@@ -731,9 +735,10 @@ export async function applyCertificates(
         }));
     }
     if (certDeltas.length) {
-        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
-            sql(certDeltas.map((json) => [blockHash, "cert", json]))
-        }`;
+        // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
+        for (const json of certDeltas) {
+            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"cert"}, ${json})`;
+        }
     }
 
     await Promise.all(certs.map(async (cert) => {
@@ -796,19 +801,14 @@ export async function applyWithdrawals(
     }));
     for (const { stakeCred, amount } of withdrawalData) {
         await sql`UPDATE rewards SET amount = amount - ${amount} WHERE stake_credentials = ${stakeCred}`;
-    }
-    await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${
-        sql(withdrawalData.map((
-            { stakeCred, amount },
-        ) => [
-            blockHash,
-            "withdrawal",
+        // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
+        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"withdrawal"}, ${
             JSON.stringify({
                 stakeCred: toHex(stakeCred),
                 amount: amount.toString(),
-            }),
-        ]))
-    }`;
+            })
+        })`;
+    }
 }
 
 export async function rollbackChainTo(

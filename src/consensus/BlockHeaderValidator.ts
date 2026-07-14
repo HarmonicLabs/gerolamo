@@ -238,10 +238,8 @@ export class ValidatePostBabbageHeader {
             new PublicKey(header.body.issuerPubKey),
         );
 
-        // Cast: ledger-ts may pull cbor v2 types while Gerolamo uses cbor v1.
-        const headerBodyBytes = Cbor.encode(
-            (header.toCborObj().array?.[0] ?? header.toCborObj()) as any,
-        ).toBuffer();
+        // ledger-ts cbor v2 CborObj is not a gerolamo cbor v1 instance — use body bytes directly
+        const headerBodyBytes = header.body.toCborBytes();
 
         const verifyKES = this.verifyKESSignature(
             header.body.slot / slotsPerKESPeriod,
@@ -487,10 +485,8 @@ export class ValidatePreBabbageHeader {
             new PublicKey(header.body.issuerPubKey),
         );
 
-        // Cast: ledger-ts may pull cbor v2 types while Gerolamo uses cbor v1.
-        const headerBodyBytes = Cbor.encode(
-            (header.toCborObj().array?.[0] ?? header.toCborObj()) as any,
-        ).toBuffer();
+        // ledger-ts cbor v2 CborObj is not a gerolamo cbor v1 instance — use body bytes directly
+        const headerBodyBytes = header.body.toCborBytes();
 
         const verifyKES = this.verifyKESSignature(
             header.body.slot / slotsPerKESPeriod,

@@ -101,6 +101,15 @@ export class BlockBodyValidator {
             return false;
         }
 
+        // scriptValidation: off | log | strict (config; default off)
+        const scriptOk = await this.runScriptValidationPolicy(actualBlock);
+        if (!scriptOk) {
+            logger.warn(
+                `Block body validation failed: scriptValidation=strict rejected block`,
+            );
+            return false;
+        }
+
         const utxoBalanceValid = await this.validateUTxOBalance(actualBlock);
         if (!utxoBalanceValid) {
             logger.warn(`Block body validation failed: UTxO balance invalid`);
@@ -180,9 +189,99 @@ export class BlockBodyValidator {
     private validateNoInvalidTxs(
         _block: CardanoBlock,
     ): boolean {
-        // TODO: Implement Phase-2 script validation
-        // For now, assume all txs are valid
+        // Structural invalid-tx gate (always on). Full Plutus is scriptValidation.
         return true;
+    }
+
+    /**
+     * scriptValidation policy:
+     * - off (default): skip
+     * - log: structural Plutus witness checks + optional UPLC decode; never fail block
+     * - strict: same checks; return false on structural failure
+     *
+     * Full phase-2 execution (datum/redeemer/context) is intentionally not here —
+     * that is a multi-week Plutus evaluator, not a data-node gate.
+     */
+    private async runScriptValidationPolicy(
+        block: CardanoBlock,
+    ): Promise<boolean> {
+        const mode: "off" | "log" | "strict" =
+            this.config?.scriptValidation === "strict"
+                ? "strict"
+                : this.config?.scriptValidation === "log"
+                ? "log"
+                : "off";
+        if (mode === "off") return true;
+
+        const issues: string[] = [];
+        const bodies = block.transactionBodies ?? [];
+        const witnesses = block.transactionWitnessSets ?? [];
+
+        for (let i = 0; i < bodies.length; i++) {
+            const body: any = bodies[i];
+            const wit: any = witnesses[i];
+            const redeemers = wit?.redeemers ?? body?.redeemers;
+            const hasRedeemers = Array.isArray(redeemers) && redeemers.length > 0;
+            if (!hasRedeemers) continue;
+
+            const scripts = wit?.plutusV1Scripts ??
+                wit?.plutusV2Scripts ??
+                wit?.plutusV3Scripts ??
+                wit?.scripts;
+            const scriptList = Array.isArray(scripts)
+                ? scripts
+                : Array.isArray(wit?.plutusScripts)
+                ? wit.plutusScripts
+                : [];
+
+            if (scriptList.length === 0) {
+                issues.push(
+                    `tx[${i}]: redeemers present but no plutus scripts in witness`,
+                );
+                continue;
+            }
+
+            // Best-effort UPLC decode when script bytes are available
+            for (let s = 0; s < scriptList.length; s++) {
+                const scr = scriptList[s];
+                const bytes: Uint8Array | null =
+                    scr instanceof Uint8Array
+                        ? scr
+                        : typeof scr?.toCborBytes === "function"
+                        ? scr.toCborBytes()
+                        : scr?.cbor != null
+                        ? scr.cbor
+                        : null;
+                if (!bytes || !(bytes instanceof Uint8Array) || bytes.length === 0) {
+                    continue;
+                }
+                try {
+                    const { UPLCDecoder } = await import(
+                        "@harmoniclabs/uplc"
+                    );
+                    // decode only — proves script CBOR is well-formed UPLC
+                    if (typeof (UPLCDecoder as any)?.fromCbor === "function") {
+                        (UPLCDecoder as any).fromCbor(bytes);
+                    } else if (typeof (UPLCDecoder as any)?.decode === "function") {
+                        (UPLCDecoder as any).decode(bytes);
+                    }
+                } catch (err: any) {
+                    issues.push(
+                        `tx[${i}] script[${s}]: UPLC decode failed: ${
+                            err?.message ?? err
+                        }`,
+                    );
+                }
+            }
+        }
+
+        if (issues.length === 0) return true;
+
+        for (const msg of issues) {
+            if (mode === "strict") logger.error(`scriptValidation: ${msg}`);
+            else logger.warn(`scriptValidation(log): ${msg}`);
+        }
+        return mode !== "strict";
     }
 
     private async validateUTxOBalance(

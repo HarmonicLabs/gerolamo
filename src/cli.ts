@@ -11,10 +11,20 @@ import { readdir } from "node:fs/promises";
 
 import { processChunk, loadLedgerStateFromAncilliary } from "./state";
 
+/**
+ * Mithril snapshot download/verify is external (Dolos / The Lab).
+ * Gerolamo bootstraps from local immutable chunk dirs via read-raw-chunks.
+ */
 export async function getCbor(dbPath: string, snapshotRoot: string) {
-    // TODO: Implement Mithril snapshot import
-    console.log(
-        `Mithril import not implemented yet. Snapshot: ${snapshotRoot}, DB: ${dbPath}`,
+    console.error(
+        [
+            "Mithril snapshot import is not implemented in Gerolamo.",
+            "Mithril bootstrap is owned externally (Dolos / The Lab).",
+            "For local chain bootstrap use:",
+            "  bun src/index.ts read-raw-chunks <immutable_dir>",
+            `Snapshot root (ignored): ${snapshotRoot}`,
+            `DB path: ${dbPath}`,
+        ].join("\n"),
     );
 }
 
@@ -75,25 +85,55 @@ export function Main() {
     program
         .command("read-raw-chunks")
         .description(
-            "Read and optionally output raw blocks from Cardano immutable chunk files",
+            "Bootstrap from Cardano immutable chunk files (primary bootstrap path; Mithril is external)",
         )
         .argument(
             "<immutable_dir>",
             "Directory containing the .primary, .secondary, .chunk files",
         )
+        .option(
+            "--from-chunk <n>",
+            "First chunk number (inclusive)",
+            (v) => parseInt(v, 10),
+            0,
+        )
+        .option(
+            "--to-chunk <n>",
+            "Last chunk number (inclusive); default = max present",
+            (v) => parseInt(v, 10),
+        )
         .action(
             async (
                 immutableDir: string,
+                options: { fromChunk?: number; toChunk?: number },
             ) => {
                 await ensureInitialized();
                 const dir = resolve(immutableDir);
 
                 const logger = new Logger({ logLevel: LogLevel.INFO });
-                const maxChunkNo = Math.max(
-                    ...(await readdir(dir)).map((v) => parseInt(parse(v).name))
+                const names = await readdir(dir);
+                const chunkNos = names
+                    .map((v) => parseInt(parse(v).name, 10))
+                    .filter((n) => Number.isFinite(n) && n >= 0);
+                if (chunkNos.length === 0) {
+                    throw new Error(`No chunk files found in ${dir}`);
+                }
+                const maxChunkNo = Math.max(...chunkNos);
+                const from = Math.max(0, options.fromChunk ?? 0);
+                const to = Math.min(
+                    maxChunkNo,
+                    options.toChunk ?? maxChunkNo,
+                );
+                if (from > to) {
+                    throw new Error(
+                        `Invalid chunk range: from=${from} to=${to} (max=${maxChunkNo})`,
+                    );
+                }
+                logger.info(
+                    `read-raw-chunks: dir=${dir} chunks ${from}..${to} (max=${maxChunkNo})`,
                 );
 
-                for (let chunkNo = 0; chunkNo <= maxChunkNo; chunkNo++) {
+                for (let chunkNo = from; chunkNo <= to; chunkNo++) {
                     await processChunk(dir, chunkNo, logger);
                 }
             },

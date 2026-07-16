@@ -1,4 +1,11 @@
-import { Cbor, CborArray, CborSimple, CborUInt, type CborObj } from "@harmoniclabs/cbor";
+import {
+    Cbor,
+    CborArray,
+    CborMap,
+    CborText,
+    CborUInt,
+    type CborObj,
+} from "@harmoniclabs/cbor";
 import {
     MiniProtocol,
     Multiplexer,
@@ -15,6 +22,8 @@ import {
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 // Not re-exported at package root.
 import type { IChainDb } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/interfaces/IChainDb.js";
+import { getEpochNonce, getMaxSlot, getUtxoCount } from "../../db";
+import { calculatePreProdCardanoEpoch } from "../../utils/epochFromSlotCalculations";
 import { logger } from "../../utils/logger";
 
 const log = logger.child("n2c.localstatequery");
@@ -143,18 +152,41 @@ export class LocalStateQueryHost {
             return;
         }
         const tip = await this.chainDb.getTip();
-        const slot = tip.point.blockHeader
+        const chainSlot = tip.point.blockHeader
             ? BigInt(tip.point.blockHeader.slotNumber)
             : 0n;
-        // Minimal result: [ tipSlot, tipBlockNo, "gerolamo" ]
-        // Full query.cddl decoding is Phase 4+.
+
+        // Enrich with local DB tip/utxo/nonce (data-node surface; not full ledger query.cddl).
+        let dbTip = 0n;
+        let utxoCount = 0;
+        let epochNonce: string | null = null;
+        try {
+            dbTip = await getMaxSlot();
+            utxoCount = await getUtxoCount();
+            const epoch = Number(calculatePreProdCardanoEpoch(Number(dbTip || chainSlot)));
+            if (Number.isFinite(epoch) && epoch >= 0) {
+                epochNonce = await getEpochNonce(epoch);
+            }
+        } catch (err) {
+            log.warn("LSQ enrichment failed (returning tip-only):", err);
+        }
+
+        const entries: { k: CborObj; v: CborObj }[] = [
+            { k: new CborText("tipSlot"), v: new CborUInt(dbTip || chainSlot) },
+            { k: new CborText("tipBlockNo"), v: new CborUInt(tip.blockNo) },
+            { k: new CborText("utxoCount"), v: new CborUInt(BigInt(utxoCount)) },
+            { k: new CborText("node"), v: new CborText("gerolamo") },
+        ];
+        if (epochNonce) {
+            entries.push({
+                k: new CborText("epochNonce"),
+                v: new CborText(epochNonce),
+            });
+        }
+
         this.send(
             new QryResult({
-                result: new CborArray([
-                    new CborUInt(slot),
-                    new CborUInt(tip.blockNo),
-                    new CborSimple(true),
-                ]),
+                result: new CborMap(entries),
             }),
         );
     }

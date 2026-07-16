@@ -259,11 +259,9 @@ export class BlockBodyValidator {
                     const { UPLCDecoder } = await import(
                         "@harmoniclabs/uplc"
                     );
-                    // decode only — proves script CBOR is well-formed UPLC
-                    if (typeof (UPLCDecoder as any)?.fromCbor === "function") {
-                        (UPLCDecoder as any).fromCbor(bytes);
-                    } else if (typeof (UPLCDecoder as any)?.decode === "function") {
-                        (UPLCDecoder as any).decode(bytes);
+                    // UPLCDecoder.parse(bytes) — proves script CBOR is well-formed
+                    if (typeof (UPLCDecoder as any)?.parse === "function") {
+                        (UPLCDecoder as any).parse(bytes);
                     }
                 } catch (err: any) {
                     issues.push(

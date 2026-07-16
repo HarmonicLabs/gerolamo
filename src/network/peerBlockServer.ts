@@ -1,6 +1,15 @@
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { getBasePath } from "../utils/paths";
-import { getUtxosByTxHash, getUtxoByRef, getBlockBySlot, getBlockByHash } from "../db";
+import {
+    getUtxosByTxHash,
+    getUtxoByRef,
+    getBlockBySlot,
+    getBlockByHash,
+    getMaxSlot,
+    getUtxoCount,
+    getEpochNonce,
+} from "../db";
+import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
 import { logger } from "../utils/logger";
 
 import type { GerolamoConfig } from "./peerManager";
@@ -34,6 +43,46 @@ export async function startPeerBlockServer(
                         headers: { "Content-Type": "application/json" },
                     },
                 );
+            }
+            if (url.pathname === "/metrics") {
+                try {
+                    const tipSlot = await getMaxSlot();
+                    const utxoCount = await getUtxoCount();
+                    const epoch = Number(
+                        calculatePreProdCardanoEpoch(Number(tipSlot)),
+                    );
+                    const epochNonce =
+                        Number.isFinite(epoch) && epoch >= 0
+                            ? await getEpochNonce(epoch)
+                            : null;
+                    return new Response(
+                        JSON.stringify({
+                            network: config.network ??
+                                process.env.NETWORK ?? "unknown",
+                            tipSlot: tipSlot.toString(),
+                            utxoCount,
+                            epoch: Number.isFinite(epoch) ? epoch : null,
+                            epochNonce,
+                            bodyValidation: config.bodyValidation ?? "soft",
+                            scriptValidation: config.scriptValidation ?? "off",
+                            uptimeSec: Math.round(process.uptime()),
+                            node: "gerolamo",
+                        }),
+                        {
+                            status: 200,
+                            headers: { "Content-Type": "application/json" },
+                        },
+                    );
+                } catch (e: any) {
+                    logger.error("/metrics error:", e?.message || e);
+                    return new Response(
+                        JSON.stringify({ error: "metrics unavailable" }),
+                        {
+                            status: 500,
+                            headers: { "Content-Type": "application/json" },
+                        },
+                    );
+                }
             }
             if (req.method === "POST" && url.pathname === "/txsubmit") {
                 if (!manager) {
@@ -122,7 +171,7 @@ export async function startPeerBlockServer(
                 !url.pathname.startsWith("/utxo/")
             ) {
                 return new Response(
-                    "Endpoints: GET /block/{slot|hash} GET /utxo/{txhash:index} POST /txsubmit (CBOR tx body)",
+                    "Endpoints: GET /health GET /metrics GET /block/{slot|hash} GET /utxo/{txhash:index} POST /txsubmit (CBOR tx body)",
                     { status: 200 },
                 );
             }

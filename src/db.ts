@@ -1089,3 +1089,129 @@ export async function rollbackChainTo(
 export async function getUtxoCount(): Promise<number> {
     return countQuery(sql`SELECT COUNT(*) as c FROM utxo`);
 }
+
+/**
+ * Best-effort Byron ATxAux apply.
+ * Preprod early chunks often have empty txPayload; when present, ledger-ts shapes vary.
+ * We extract inputs/outputs when possible and use the same packed-delta path as Shelley.
+ */
+export async function applyByronTxPayload(
+    entry: any,
+    blockHash: Uint8Array,
+): Promise<void> {
+    // Common shapes: { transaction, witness }, { body, witness }, or nested .tx
+    const tx = entry?.transaction ?? entry?.tx ?? entry?.body ?? entry;
+    if (!tx || typeof tx !== "object") {
+        logger.debug("applyByronTxPayload: unrecognised entry shape — skip");
+        return;
+    }
+
+    const inputs: any[] = Array.isArray(tx.inputs)
+        ? tx.inputs
+        : Array.isArray(tx.txInputs)
+        ? tx.txInputs
+        : [];
+    const outputs: any[] = Array.isArray(tx.outputs)
+        ? tx.outputs
+        : Array.isArray(tx.txOutputs)
+        ? tx.txOutputs
+        : [];
+
+    // Derive a stable-ish tx id for UTxO refs
+    let txId = "";
+    try {
+        if (typeof tx.hash?.toString === "function") {
+            txId = String(tx.hash.toString());
+        } else if (typeof entry.hash?.toString === "function") {
+            txId = String(entry.hash.toString());
+        } else if (typeof tx.toCborBytes === "function") {
+            const { blake2b_256 } = await import("@harmoniclabs/crypto");
+            txId = toHex(blake2b_256(tx.toCborBytes()));
+        }
+    } catch {
+        /* fall through */
+    }
+    if (!txId) {
+        // Last resort: hash JSON of keys (non-canonical but unique enough for local DB)
+        const { blake2b_256 } = await import("@harmoniclabs/crypto");
+        const seed = new TextEncoder().encode(
+            JSON.stringify({
+                nIn: inputs.length,
+                nOut: outputs.length,
+                s: String(tx.slot ?? ""),
+            }),
+        );
+        txId = toHex(blake2b_256(seed));
+    }
+
+    // Inputs: try UTxORef-like fields
+    const inputRefs: string[] = [];
+    for (const inp of inputs) {
+        try {
+            const id = inp?.utxoRef?.id?.toString?.() ??
+                inp?.txId?.toString?.() ??
+                inp?.id?.toString?.() ??
+                (inp?.txHash != null ? String(inp.txHash) : null);
+            const index = inp?.utxoRef?.index ?? inp?.index ?? inp?.outputIndex;
+            if (id != null && index != null) {
+                inputRefs.push(`${id}:${Number(index)}`);
+            }
+        } catch {
+            /* skip bad input */
+        }
+    }
+
+    if (inputRefs.length > 0) {
+        const existingUtxos = await sql`
+            SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}
+        ` as any[];
+        for (const row of existingUtxos) {
+            const utxo_ref = Array.isArray(row)
+                ? String(row[0])
+                : String(row.utxo_ref);
+            const tx_out = Array.isArray(row)
+                ? String(row[1])
+                : String(row.tx_out);
+            const tx_hash = Array.isArray(row)
+                ? (row[2] != null ? String(row[2]) : undefined)
+                : (row.tx_hash != null ? String(row.tx_hash) : undefined);
+            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${
+                packUtxoDelta({ utxo_ref, tx_out, tx_hash })
+            })`;
+        }
+        if (existingUtxos.length > 0) {
+            await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
+        }
+    }
+
+    for (let i = 0; i < outputs.length; i++) {
+        const out = outputs[i];
+        let address = "";
+        let amount = "0";
+        try {
+            address = out?.address?.toString?.() ??
+                out?.addr?.toString?.() ??
+                String(out?.address ?? "");
+            const coin = out?.value?.lovelaces ?? out?.coin ?? out?.amount ??
+                out?.value;
+            amount = coin != null ? String(coin) : "0";
+        } catch {
+            /* keep defaults */
+        }
+        const utxoRef = `${txId}:${i}`;
+        const txOutJson = JSON.stringify({
+            address,
+            amount,
+            assets: {},
+            era: "byron",
+        });
+        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${
+            packUtxoDelta({ utxo_ref: utxoRef, tx_out: txOutJson, tx_hash: txId })
+        })`;
+        await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${txOutJson}, ${txId})`;
+    }
+
+    logger.debug(
+        `Byron tx applied: ${txId.slice(0, 16)}… in=${inputRefs.length} out=${outputs.length}`,
+    );
+}

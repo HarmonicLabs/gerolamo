@@ -4,7 +4,7 @@
  * Shelley+ headers:  header.body.slot / header.body.prevHash
  * Byron headers:     consensusData.slotId.slot / prevBlock
  * Shelley+ blocks:   transactionBodies
- * Byron blocks:      body.txPayload (not applied as Shelley txs yet)
+ * Byron blocks:      body.txPayload
  */
 
 import type {
@@ -43,11 +43,32 @@ export function getHeaderPrevHashHex(h: AnyEraHeader): string {
 }
 
 /**
- * Shelley+ transaction bodies. Byron returns [] (txPayload is a different type;
- * apply path stays Shelley-only until Byron UTxO apply is implemented).
+ * Shelley+ transaction bodies. Byron returns [] (use getByronTxPayloads).
  */
 export function getShelleyTxBodies(b: AnyEraBlock): any[] {
     const any = b as any;
     if (Array.isArray(any?.transactionBodies)) return any.transactionBodies;
     return [];
+}
+
+/** True when block is Byron (era 0/1 or has txPayload, no Shelley bodies). */
+export function isByronBlock(b: AnyEraBlock): boolean {
+    const any = b as any;
+    if (Array.isArray(any?.transactionBodies)) return false;
+    if (Array.isArray(any?.body?.txPayload)) return true;
+    // Header-only Byron epochs (empty payload) still count as Byron
+    if (any?.consensusData?.slotId != null || any?.prevBlock != null) {
+        return true;
+    }
+    return false;
+}
+
+/**
+ * Byron body.txPayload entries (may be empty on preprod early chunks).
+ * Each entry is ledger-ts Byron ATxAux-shaped; shape varies by version.
+ */
+export function getByronTxPayloads(b: AnyEraBlock): any[] {
+    const any = b as any;
+    const payload = any?.body?.txPayload;
+    return Array.isArray(payload) ? payload : [];
 }

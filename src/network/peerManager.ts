@@ -47,6 +47,19 @@ export interface GerolamoConfig {
     };
     readonly tuiEnabled?: boolean;
     readonly blockfrostUrl?: string;
+    /**
+     * Body validation policy.
+     * - soft (default): log failures but still apply (mid-chain tolerance)
+     * - strict: reject invalid bodies — no apply / no nonce feed / no insert
+     */
+    readonly bodyValidation?: "soft" | "strict";
+    /**
+     * Plutus/native script validation.
+     * - off (default): skip
+     * - log: run checks, log failures, still accept
+     * - strict: reject on script failure
+     */
+    readonly scriptValidation?: "off" | "log" | "strict";
     allPeers: Map<string, PeerClient>;
 }
 

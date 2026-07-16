@@ -328,15 +328,22 @@ export class ConsensusOrchestrator {
                 multiEraBlock!,
                 this.config,
             );
+            const bodyPolicy = this.config.bodyValidation ?? "soft";
             if (!isBlockValid) {
+                if (bodyPolicy === "strict") {
+                    logger.warn(
+                        `Block body validation failed for peer ${peerId} at slot ${parsedHeader.slot}, hash ${
+                            toHex(parsedHeader.blockHeaderHash)
+                        } (strict: rejecting — no apply)`,
+                    );
+                    return;
+                }
                 logger.warn(
                     `Block body validation failed for peer ${peerId} at slot ${parsedHeader.slot}, hash ${
                         toHex(parsedHeader.blockHeaderHash)
-                    } (bypassing validation; applying anyway for sync tolerance)`,
+                    } (soft: applying anyway for mid-chain sync tolerance)`,
                 );
-                // continue even if invalid (temporary)
-            }
-            if (isBlockValid) {
+            } else {
                 logger.info(
                     `Block body validated for peer ${peerId} at slot ${parsedHeader.slot}, hash ${
                         toHex(parsedHeader.blockHeaderHash)

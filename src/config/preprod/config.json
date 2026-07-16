@@ -27,5 +27,7 @@
     "source": "blockfrost"
   },
   "tuiEnabled": false,
-  "blockfrostUrl": "https://cardano-preprod.blockfrost.io/api/v0"
+  "blockfrostUrl": "https://cardano-preprod.blockfrost.io/api/v0",
+  "bodyValidation": "soft",
+  "scriptValidation": "off"
 }

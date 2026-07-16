@@ -24,9 +24,18 @@ Gerolamo is a lightweight, modular **Cardano node/relay** implementation in
 - **SQLite3 storage** (volatile → immutable chunks, WAL concurrency).
 - **Peer categorization** (hot/warm/cold/bootstrap/new).
 - **Block serving API** (HTTP `/block/{slot|hash}`).
+- **Epoch nonce** (continuous UPDN + TICKN, local-first DB; synthetic MATCH
+  external η0 for epochs 5–8).
+- **Body validation** (`bodyValidation: "soft" | "strict"`).
+- **N2C** (LocalChainSync / LocalStateQuery / LocalTxSubmit) when enabled.
 
-**No consensus validation** (yet)—focuses on networking/storage. Inspired by
-Cardano node specs.
+**Consensus status:** header validation (KES/VRF) and body checks (UTxO
+balance, fees) exist. Soft body-bypass remains available for mid-chain sync.
+Plutus phase-2 validation is optional (`scriptValidation`). Full Praos
+leadership / governance parity with cardano-node is **not** in scope.
+
+DB default (preprod): `./ledger/gerolamo.db` (override via `GEROLAMO_DB_PATH`
+or `DATABASE_URL=sqlite:///…`).
 
 ## 🚀 Quick Start
 
@@ -39,22 +48,22 @@ Cardano node specs.
 ### 1. Clone & Install
 
 ```bash
-git clone https://github.com/HarmonicLabs/gerolamo-network.git
-cd gerolamo-network
-bun install  # Installs @harmoniclabs/* deps (5s)
+git clone https://github.com/HarmonicLabs/gerolamo.git
+cd gerolamo
+bun install
 ```
 
 ### 2. Run (Preprod Default)
 
 ```bash
-bun src/start.ts
+NETWORK=preprod bun src/index.ts start-gerolamo
 ```
 
-- Syncs **preprod** chain (edit `NETWORK=mainnet` for mainnet).
-- Starts **peer server** (port 3000), **block API** (port 3030).
-- Logs: `./logs/preprod/*.jsonl` (debug/info/warn/error).
+- Syncs **preprod** chain (`NETWORK=mainnet` for mainnet).
+- **Block/UTxO HTTP API**: port **3030** (config `port`).
+- Optional N2C: `GEROLAMO_N2C_SOCKET=./ledger/node.socket` (or `n2c.enabled`).
+- Logs: `./logs/` JSONL when `logs.logToFile` is true.
 
-**Done!** Gerolamo handshakes peers, syncs chain, stores blocks.
 
 ### 3. Monitor
 

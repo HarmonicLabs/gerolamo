@@ -24,6 +24,10 @@ Gerolamo is a lightweight, modular **Cardano node/relay** implementation in
 - **SQLite3 storage** (volatile → immutable chunks, WAL concurrency).
 - **Peer categorization** (hot/warm/cold/bootstrap/new).
 - **Block serving API** (HTTP `/block/{slot|hash}`).
+- **Mini-Blockfrost HTTP core** (`GET/POST /api/v0/*`) — Blockfrost-compatible
+  subset: tip/blocks, epochs, address UTxOs, tx submit.
+- **Optional Mithril bootstrap** (`mithril-bootstrap` CLI) — wraps external
+  `mithril-client`, then applies immutable chunks into Gerolamo SQLite.
 - **Epoch nonce** (continuous UPDN + TICKN, local-first DB; synthetic MATCH
   external η0 for epochs 5–8).
 - **Body validation** (`bodyValidation: "soft" | "strict"`).
@@ -74,6 +78,32 @@ tail -f logs/preprod/*.jsonl | jq -r '.level, .args[] | @text'
 # Block API test
 curl http://localhost:3030/block/3542390  # Slot → hex CBOR
 curl http://localhost:3030/block/f93e682d5b91a94d8660e748aef229c19cb285bfb9830db48941d6a78183d81f  # Hash
+
+# Mini-Blockfrost core (subset — not full Blockfrost parity)
+curl http://localhost:3030/api/v0/
+curl http://localhost:3030/api/v0/health
+curl http://localhost:3030/api/v0/epochs/latest
+curl http://localhost:3030/api/v0/blocks/latest
+curl "http://localhost:3030/api/v0/addresses/<addr>/utxos"
+```
+
+### 4. Optional Mithril bootstrap
+
+Requires external [`mithril-client`](https://mithril.network/doc/manual/getting-started/bootstrap-cardano-node)
+on `PATH` (or `--client` / `MITHRIL_CLIENT`). Gerolamo does **not** reimplement
+certificate verification — it orchestrates the client, then applies chunks.
+
+```bash
+# Download + apply (preprod aggregator defaults)
+bun src/index.ts mithril-bootstrap --network preprod \
+  --download-dir ./snapshots/preprod
+
+# Apply already-downloaded chunks only
+bun src/index.ts mithril-bootstrap --skip-download \
+  --download-dir ./snapshots/preprod --from-chunk 0 --to-chunk 10
+
+# Or apply chunks directly
+bun src/index.ts read-raw-chunks ./snapshots/preprod/db/immutable
 ```
 
 ## ⚙️ Configuration (src/config/{preprod|mainnet}/config.json)

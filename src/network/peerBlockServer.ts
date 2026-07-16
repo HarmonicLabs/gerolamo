@@ -9,6 +9,7 @@ import {
     getUtxoCount,
     getEpochNonce,
 } from "../db";
+import { handleMiniBlockfrost } from "../api/miniBlockfrost";
 import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
 import { logger } from "../utils/logger";
 
@@ -30,6 +31,18 @@ export async function startPeerBlockServer(
             : { port: config.port || 3030 }),
         async fetch(req: Request): Promise<Response> {
             const url = new URL(req.url);
+
+            // Mini-Blockfrost core (/api/v0/*) — before generic fallback
+            const bfResp = await handleMiniBlockfrost(req, url, {
+                network: config.network ?? process.env.NETWORK,
+                submitTx: manager
+                    ? (txCbor: Uint8Array) => {
+                        manager.submitTx({ txCbor });
+                    }
+                    : undefined,
+            });
+            if (bfResp) return bfResp;
+
             if (url.pathname === "/health" || url.pathname === "/healthz") {
                 return new Response(
                     JSON.stringify({
@@ -171,7 +184,7 @@ export async function startPeerBlockServer(
                 !url.pathname.startsWith("/utxo/")
             ) {
                 return new Response(
-                    "Endpoints: GET /health GET /metrics GET /block/{slot|hash} GET /utxo/{txhash:index} POST /txsubmit (CBOR tx body)",
+                    "Endpoints: GET /health GET /metrics GET /api/v0/* GET /block/{slot|hash} GET /utxo/{txhash:index} POST /txsubmit (CBOR tx body)",
                     { status: 200 },
                 );
             }

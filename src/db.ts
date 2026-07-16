@@ -729,6 +729,70 @@ export async function getUtxosByTxHash(
         .values() as Array<{ utxo_ref: string; tx_out: string }>;
 }
 
+/**
+ * Address-indexed UTxO lookup for Mini-Blockfrost.
+ * Filters via json_extract on tx_out.address (O(N) until a materialised index).
+ * Dual-shape row handling for Bun SQL object vs array rows.
+ */
+export async function getUtxosByAddress(
+    address: string,
+): Promise<Array<{ utxo_ref: string; tx_out: string; tx_hash: string }>> {
+    const rows = await sql`
+        SELECT utxo_ref, tx_out, tx_hash
+        FROM utxo
+        WHERE json_extract(tx_out, '$.address') = ${address}
+        ORDER BY tx_hash, CAST(substr(utxo_ref, 66) AS INTEGER)
+    `;
+    const list = Array.isArray(rows) ? rows : [];
+    return list.map((row: any) => {
+        if (Array.isArray(row)) {
+            return {
+                utxo_ref: String(row[0] ?? ""),
+                tx_out: typeof row[1] === "string" ? row[1] : JSON.stringify(row[1] ?? {}),
+                tx_hash: String(row[2] ?? ""),
+            };
+        }
+        return {
+            utxo_ref: String(row?.utxo_ref ?? ""),
+            tx_out: typeof row?.tx_out === "string"
+                ? row.tx_out
+                : JSON.stringify(row?.tx_out ?? {}),
+            tx_hash: String(row?.tx_hash ?? ""),
+        };
+    });
+}
+
+/** Latest protocol params JSONB row (if any). */
+export async function getLatestProtocolParams(): Promise<unknown | null> {
+    const rows = await sql`
+        SELECT params FROM protocol_params ORDER BY id DESC LIMIT 1
+    `;
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    if (row == null) return null;
+    if (Array.isArray(row)) {
+        const v = row[0];
+        if (v == null) return null;
+        if (typeof v === "string") {
+            try {
+                return JSON.parse(v);
+            } catch {
+                return v;
+            }
+        }
+        return v;
+    }
+    const params = (row as any)?.params;
+    if (params == null) return null;
+    if (typeof params === "string") {
+        try {
+            return JSON.parse(params);
+        } catch {
+            return params;
+        }
+    }
+    return params;
+}
+
 export async function getAllStake(): Promise<
     Array<{ stake_credentials: Uint8Array; amount: number }>
 > {

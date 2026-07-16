@@ -448,10 +448,27 @@ export async function getBlockBySlot(slot: bigint): Promise<any> {
     return result[0] || null;
 }
 
+/** Bun sql`.values()` → [[v]]; without `.values()` → [{max_slot:v}]. Handle both. */
+function firstScalar(row: unknown): unknown {
+    if (row == null) return undefined;
+    if (Array.isArray(row)) return row[0];
+    if (typeof row === "object") {
+        const o = row as Record<string, unknown>;
+        // prefer named keys used by callers
+        if ("max_slot" in o) return o.max_slot;
+        if ("next_chunk" in o) return o.next_chunk;
+        const vals = Object.values(o);
+        return vals.length ? vals[0] : undefined;
+    }
+    return row;
+}
+
 export async function getMaxSlot(): Promise<bigint> {
-    const result = await sql`SELECT MAX(slot) as max_slot FROM blocks`.values();
-    const maxSlot = BigInt(result[0]?.max_slot ?? 0);
-    return maxSlot;
+    // Prefer object rows; still tolerate `.values()` array-of-arrays.
+    const result = await sql`SELECT MAX(slot) as max_slot FROM blocks`;
+    const raw = firstScalar(Array.isArray(result) ? result[0] : result);
+    if (raw == null) return 0n;
+    return BigInt(raw as string | number | bigint);
 }
 
 export async function getValidHeadersBefore(
@@ -468,9 +485,9 @@ export async function getValidBlocksBefore(cutoffSlot: bigint): Promise<any[]> {
 
 export async function getNextChunk(): Promise<{ next_chunk: number }> {
     const result =
-        await sql`SELECT COALESCE(MAX(chunk_no), 0) + 1 as next_chunk FROM immutable_chunks`
-            .values();
-    return result[0];
+        await sql`SELECT COALESCE(MAX(chunk_no), 0) + 1 as next_chunk FROM immutable_chunks`;
+    const raw = firstScalar(Array.isArray(result) ? result[0] : result);
+    return { next_chunk: Number(raw ?? 1) };
 }
 
 export async function getLedgerSnapshot(snapshotNo: number): Promise<any> {

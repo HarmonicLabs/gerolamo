@@ -743,6 +743,43 @@ export async function getAllDelegations(): Promise<
         .values() as Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>;
 }
 
+/** Delta payload for spend/create — must carry utxo_ref so rollback can restore. */
+function packUtxoDelta(opts: {
+    utxo_ref: string;
+    tx_out: string;
+    tx_hash?: string;
+}): string {
+    return JSON.stringify({
+        utxo_ref: opts.utxo_ref,
+        tx_out: opts.tx_out,
+        ...(opts.tx_hash ? { tx_hash: opts.tx_hash } : {}),
+    });
+}
+
+function parseUtxoDelta(raw: unknown): {
+    utxo_ref: string | null;
+    tx_out: string;
+    tx_hash: string | null;
+} {
+    const s = typeof raw === "string" ? raw : String(raw ?? "");
+    try {
+        const j = JSON.parse(s);
+        if (j && typeof j === "object" && "tx_out" in j) {
+            return {
+                utxo_ref: j.utxo_ref != null ? String(j.utxo_ref) : null,
+                tx_out: typeof j.tx_out === "string"
+                    ? j.tx_out
+                    : JSON.stringify(j.tx_out),
+                tx_hash: j.tx_hash != null ? String(j.tx_hash) : null,
+            };
+        }
+        // Legacy create delta: raw tx_out JSON only (no ref) — unrestorable alone
+        return { utxo_ref: null, tx_out: s, tx_hash: null };
+    } catch {
+        return { utxo_ref: null, tx_out: s, tx_hash: null };
+    }
+}
+
 export async function applyTransaction(
     txBody: TxBody,
     blockHash: Uint8Array,
@@ -764,14 +801,25 @@ export async function applyTransaction(
     logger.debug(`Input refs: ${inputRefs.length} - ${inputRefs.slice(0, 3).join(', ')}`);
 
     if (inputRefs.length > 0) {
-        const existingUtxos =
-            await sql`SELECT tx_out FROM utxo WHERE utxo_ref IN ${
-                sql(inputRefs)
-            }`.values() as [string][];
+        // Object rows preferred; tolerate array rows from .values()
+        const existingUtxos = await sql`
+            SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}
+        ` as any[];
         if (existingUtxos.length > 0) {
             // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
-            for (const [tx_out] of existingUtxos) {
-                await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${tx_out})`;
+            for (const row of existingUtxos) {
+                const utxo_ref = Array.isArray(row)
+                    ? String(row[0])
+                    : String(row.utxo_ref);
+                const tx_out = Array.isArray(row)
+                    ? String(row[1])
+                    : String(row.tx_out);
+                const tx_hash = Array.isArray(row)
+                    ? (row[2] != null ? String(row[2]) : undefined)
+                    : (row.tx_hash != null ? String(row.tx_hash) : undefined);
+                await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${
+                    packUtxoDelta({ utxo_ref, tx_out, tx_hash })
+                })`;
             }
             // Delete spent UTxOs in bulk (IN ${sql([...])} is supported)
             await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
@@ -817,7 +865,9 @@ export async function applyTransaction(
     if (outputData.length > 0) {
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
         for (const [utxoRef, json, txHash] of outputData) {
-            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${json})`;
+            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${
+                packUtxoDelta({ utxo_ref: utxoRef, tx_out: json, tx_hash: txHash })
+            })`;
             await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${json}, ${txHash})`;
         }
     }
@@ -933,39 +983,93 @@ export async function applyWithdrawals(
     }
 }
 
+/**
+ * Count helper — Bun `.values()` returns [[n]] not [{ "COUNT(*)": n }].
+ */
+async function countQuery(q: Promise<any>): Promise<number> {
+    const rows = await q;
+    const row = Array.isArray(rows) ? rows[0] : rows;
+    const v = firstScalar(row);
+    return Number(v ?? 0);
+}
+
+/**
+ * Reverse UTxO effects for blocks with slot > target, then drop those blocks.
+ * Creates are deleted; spends are re-inserted from packed delta JSON.
+ * Legacy deltas without utxo_ref are skipped (logged).
+ */
 export async function rollbackChainTo(
     slot: bigint,
 ): Promise<
-    { blocksDeleted: number; headersDeleted: number; deltasDeleted: number }
+    {
+        blocksDeleted: number;
+        headersDeleted: number;
+        deltasDeleted: number;
+        utxoRestored: number;
+        utxoRemoved: number;
+        skippedLegacyDeltas: number;
+    }
 > {
-    const counts = { blocksDeleted: 0, headersDeleted: 0, deltasDeleted: 0 };
+    const counts = {
+        blocksDeleted: 0,
+        headersDeleted: 0,
+        deltasDeleted: 0,
+        utxoRestored: 0,
+        utxoRemoved: 0,
+        skippedLegacyDeltas: 0,
+    };
 
-    // Pre-count
-    counts.blocksDeleted =
-        (await sql`SELECT COUNT(*) FROM blocks WHERE slot > ${slot}`.values())[
-            0
-        ]["COUNT(*)"] || 0;
-    counts.headersDeleted =
-        (await sql`SELECT COUNT(*) FROM volatile_headers WHERE slot > ${slot}`
-            .values())[0]["COUNT(*)"] || 0;
-    counts.deltasDeleted =
-        (await sql`SELECT COUNT(*) FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`
-            .values())[0]["COUNT(*)"] || 0;
+    counts.blocksDeleted = await countQuery(
+        sql`SELECT COUNT(*) as c FROM blocks WHERE slot > ${slot}`,
+    );
+    counts.headersDeleted = await countQuery(
+        sql`SELECT COUNT(*) as c FROM volatile_headers WHERE slot > ${slot}`,
+    );
+    counts.deltasDeleted = await countQuery(
+        sql`SELECT COUNT(*) as c FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`,
+    );
 
     logger.rollback(
         `Pre-rollback to slot ${slot}: blocksDeleted=${counts.blocksDeleted}, headersDeleted=${counts.headersDeleted}, deltasDeleted=${counts.deltasDeleted}`,
     );
 
     const beforeTip = await getMaxSlot();
-    const deletedBlocks =
-        await sql`SELECT slot, hash FROM blocks WHERE slot > ${slot} ORDER BY slot DESC LIMIT 50`
-            .values();
-    logger.rollback(
-        `Rollback to slot ${slot}; beforeTip slot ${beforeTip.toString()}; deleting ${counts.blocksDeleted} blocks (top 50: [${
-            deletedBlocks.map((b: any) => `${b.slot}:${b.hash.slice(0, 8)}`)
-                .join(", ") || "none"
-        }])`,
-    );
+
+    // Capture deltas before delete — newest first so reverse order is natural
+    const deltaRows = await sql`
+        SELECT d.action, d.utxo, b.slot
+        FROM utxo_deltas d
+        INNER JOIN blocks b ON b.hash = d.block_hash
+        WHERE b.slot > ${slot}
+        ORDER BY b.slot DESC, d.id DESC
+    ` as any[];
+
+    for (const row of deltaRows) {
+        const action = Array.isArray(row) ? String(row[0]) : String(row.action);
+        const utxoRaw = Array.isArray(row) ? row[1] : row.utxo;
+        const parsed = parseUtxoDelta(utxoRaw);
+
+        if (action === "create") {
+            if (!parsed.utxo_ref) {
+                counts.skippedLegacyDeltas++;
+                continue;
+            }
+            await sql`DELETE FROM utxo WHERE utxo_ref = ${parsed.utxo_ref}`;
+            counts.utxoRemoved++;
+        } else if (action === "spend") {
+            if (!parsed.utxo_ref) {
+                counts.skippedLegacyDeltas++;
+                continue;
+            }
+            const txHash = parsed.tx_hash ??
+                (parsed.utxo_ref.includes(":")
+                    ? parsed.utxo_ref.split(":")[0]
+                    : "");
+            await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${parsed.utxo_ref}, ${parsed.tx_out}, ${txHash})`;
+            counts.utxoRestored++;
+        }
+        // fee / cert / withdrawal: no UTxO table change on reverse (best-effort)
+    }
 
     await sql.begin(async (tx) => {
         await tx`DELETE FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`;
@@ -975,8 +1079,13 @@ export async function rollbackChainTo(
 
     const afterTip = await getMaxSlot();
     logger.rollback(
-        `Post-rollback to slot ${slot}; afterTip: ${afterTip.toString()}`,
+        `Post-rollback to slot ${slot}; beforeTip=${beforeTip.toString()} afterTip=${afterTip.toString()} utxoRestored=${counts.utxoRestored} utxoRemoved=${counts.utxoRemoved} skippedLegacy=${counts.skippedLegacyDeltas}`,
     );
 
     return counts;
+}
+
+/** UTxO set size (object-row safe). */
+export async function getUtxoCount(): Promise<number> {
+    return countQuery(sql`SELECT COUNT(*) as c FROM utxo`);
 }

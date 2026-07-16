@@ -19,6 +19,7 @@ import {
     getBlockByHash,
     getBlockBySlot,
     getEpochNonce as dbGetEpochNonce,
+    getEpochNonceState,
     getMaxSlot,
     getValidBlocksBefore,
     getValidHeadersBefore,
@@ -30,7 +31,14 @@ import {
 } from "../db";
 import { applyBlock } from "./BlockApplication";
 import { type ChainCandidate, evaluateChains } from "./chainSelection";
-import { getHeaderSlot, getHeaderPrevHashHex } from "../utils/eraAccessors";
+import {
+    getHeaderSlot,
+    getHeaderPrevHash,
+    getHeaderPrevHashHex,
+} from "../utils/eraAccessors";
+import { getShelleyGenesisConfig } from "../utils/paths";
+import { NonceEvolver } from "../utils/nonceEvolver";
+import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 
 export interface PeerAccessor {
     getPeer(peerId: string): PeerClient | null;
@@ -65,6 +73,9 @@ export class ConsensusOrchestrator {
     private batchHeaderRecords: Map<string, HeaderInsertData> = new Map();
     private volatileDbGcCounter = 0;
     private epochNonceCache: Map<number, string> = new Map();
+    /** Continuous UPDN+TICKN (phase 3). Lazy-init after genesis load. */
+    private nonceEvolver: NonceEvolver | null = null;
+    private nonceEvolverInit: Promise<void> | null = null;
 
     constructor(
         config: GerolamoConfig,
@@ -78,6 +89,121 @@ export class ConsensusOrchestrator {
         // 		if (this.stalledCallback) this.stalledCallback();
         // 	}
         // }, 60000); // check every minute
+    }
+
+    private async ensureNonceEvolver(): Promise<NonceEvolver | null> {
+        if (this.nonceEvolver) return this.nonceEvolver;
+        if (!this.nonceEvolverInit) {
+            this.nonceEvolverInit = (async () => {
+                try {
+                    const genesis = (await getShelleyGenesisConfig(
+                        this.config,
+                    )) as ShelleyGenesisConfig;
+                    this.nonceEvolver = new NonceEvolver(genesis);
+                    logger.debug(
+                        `NonceEvolver ready (stabilityWindow=${this.nonceEvolver.getStabilityWindow()})`,
+                    );
+                } catch (err: unknown) {
+                    logger.warn("NonceEvolver init failed:", err);
+                    this.nonceEvolver = null;
+                }
+            })();
+        }
+        await this.nonceEvolverInit;
+        return this.nonceEvolver;
+    }
+
+    /**
+     * Bootstrap continuous ηv/ηc when inactive.
+     * Prefer DB evolving/candidate; else ηv=ηc=η0 (correct at epoch start).
+     */
+    private async ensureEvolverBootstrapped(
+        epoch: number,
+        eta0Hex: string,
+    ): Promise<void> {
+        const evolver = await this.ensureNonceEvolver();
+        if (!evolver || evolver.isActive()) return;
+        try {
+            const st = await getEpochNonceState(epoch);
+            if (st?.evolving_hex && st?.candidate_hex) {
+                evolver.bootstrap(epoch, eta0Hex, {
+                    etaVHex: st.evolving_hex,
+                    etaCHex: st.candidate_hex,
+                });
+                logger.debug(
+                    `NonceEvolver restored ηv/ηc from DB for epoch ${epoch}`,
+                );
+            } else {
+                evolver.bootstrap(epoch, eta0Hex);
+                logger.debug(
+                    `NonceEvolver bootstrapped ηv=ηc=η0 for epoch ${epoch}`,
+                );
+            }
+        } catch (err: unknown) {
+            logger.warn(
+                `NonceEvolver bootstrap failed for epoch ${epoch}:`,
+                err,
+            );
+        }
+    }
+
+    /** Feed one applied Shelley+ block into UPDN; persist any TICKN η0. */
+    private async feedNonceEvolver(
+        slot: bigint | number,
+        header: unknown,
+        epoch: number,
+        eta0Hex: string,
+    ): Promise<void> {
+        try {
+            await this.ensureEvolverBootstrapped(epoch, eta0Hex);
+            const evolver = this.nonceEvolver;
+            if (!evolver?.isActive()) return;
+
+            const bnonce = NonceEvolver.extractBlockNonce(header);
+            if (!bnonce) return; // Byron / missing VRF
+
+            const prevHash = getHeaderPrevHash(header as any);
+            const tickns = evolver.processBlock(slot, bnonce, prevHash);
+            for (const t of tickns) {
+                this.epochNonceCache.set(t.epoch, t.eta0Hex);
+                try {
+                    await storeEpochNonce(
+                        t.epoch,
+                        t.eta0Hex,
+                        "local",
+                        t.etaVHex,
+                        t.etaCHex,
+                    );
+                    logger.info(
+                        `TICKN η0_${t.epoch}=${t.eta0Hex.slice(0, 16)}… ` +
+                            `(blocks=${t.nBlocksPrev} freeze=${t.nBeforeFreeze})`,
+                    );
+                } catch (storeErr: unknown) {
+                    logger.warn(
+                        `Failed to persist TICKN η0 for epoch ${t.epoch}:`,
+                        storeErr,
+                    );
+                }
+            }
+
+            // Persist evolving/candidate for current epoch (mid-chain resume)
+            if (tickns.length === 0 && evolver.isActive()) {
+                const snap = evolver.snapshot();
+                try {
+                    await storeEpochNonce(
+                        snap.epoch,
+                        eta0Hex,
+                        "local",
+                        snap.etaVHex,
+                        snap.etaCHex,
+                    );
+                } catch {
+                    // non-fatal; next TICKN still persists
+                }
+            }
+        } catch (err: unknown) {
+            logger.warn("NonceEvolver feed failed:", err);
+        }
     }
 
     private async getCurrentTip(): Promise<
@@ -94,8 +220,9 @@ export class ConsensusOrchestrator {
      * 2) local SQLite (epoch_nonces)
      * 3) external Blockfrost/onchainapps → persist to DB
      *
-     * Full TICKN/UPDN self-calc needs continuous header history (phase 2).
-     * Mid-chain sync bootstraps from external once, then serves from DB.
+     * Continuous UPDN+TICKN (phase 3) evolves ηv/ηc on applied blocks and
+     * writes next-epoch η0 via storeEpochNonce(source='local').
+     * Mid-chain still bootstraps η0 from DB/external when needed.
      */
     private async getEpochNonce(epoch: number): Promise<string | null> {
         if (this.epochNonceCache.has(epoch)) {
@@ -220,7 +347,9 @@ export class ConsensusOrchestrator {
             const era = multiEraBlock.era;
             const blockHeader = multiEraBlock.block.header;
             const blockSlot = Number(getHeaderSlot(blockHeader));
-            const blockEpoch = calculatePreProdCardanoEpoch(Number(blockSlot));
+            const blockEpoch = Number(
+                calculatePreProdCardanoEpoch(Number(blockSlot)),
+            );
             const blockHeaderHash = blake2b_256(blockHeader.toCborBytes());
             const blockHash = toHex(blockHeaderHash);
 
@@ -230,6 +359,14 @@ export class ConsensusOrchestrator {
                 blockHeaderHash,
             );
             logger.info(`Applied Block: ${toHex(blockHeaderHash)}`);
+
+            // Phase 3: continuous UPDN+TICKN (η0 for this epoch already resolved)
+            await this.feedNonceEvolver(
+                BigInt(blockSlot),
+                blockHeader,
+                blockEpoch,
+                nonce,
+            );
 
             const recordHeaders: HeaderInsertData = {
                 slot: BigInt(blockSlot),
@@ -319,6 +456,8 @@ export class ConsensusOrchestrator {
                     logger.rollback(
                         `Praos-approved rollback to slot ${rollbackSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`,
                     );
+                    this.nonceEvolver?.reset();
+                    this.epochNonceCache.clear();
                     return {
                         rolledBack: true,
                         fromSlot: currentTip.slotNumber,
@@ -336,6 +475,8 @@ export class ConsensusOrchestrator {
                 logger.rollback(
                     `Unconditional tip rollback to slot ${pointSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`,
                 );
+                this.nonceEvolver?.reset();
+                this.epochNonceCache.clear();
                 return {
                     rolledBack: true,
                     fromSlot: currentTip.slotNumber,

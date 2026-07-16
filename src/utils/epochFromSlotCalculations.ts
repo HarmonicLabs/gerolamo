@@ -21,7 +21,9 @@ export function calculatePreProdCardanoEpoch(
 ): number | bigint {
     const byronSlotsPerEpoch = 21600n;
     const shelleySlotsPerEpoch = 432000n;
-    const shelleyTransitionSlot = 86400n; // Adjusted to 86,409 to match epoch 13 start at 3,974,409
+    // Preprod Shelley HF: first Shelley block is slot 86400 (epoch 4, epoch_slot 0).
+    // Confirmed via Blockfrost: /blocks/slot/86400 → epoch=4, epoch_slot=0.
+    const shelleyTransitionSlot = 86400n;
     const byronEpochOffset = 4n; // Shelley starts at epoch 4 after Byron 0-3
 
     const slot = BigInt(absoluteSlot);
@@ -39,7 +41,8 @@ export function getFirstSlotOfEpoch(
 ): bigint | number {
     const byronSlotsPerEpoch = 21600n;
     const shelleySlotsPerEpoch = BigInt(genesis.epochLength); // Use genesis for flexibility (e.g., 432000)
-    const shelleyTransitionSlot = 86409n; // Shelley hard fork slot (preprod/mainnet)
+    // Must match calculatePreProdCardanoEpoch (86400, not 86409).
+    const shelleyTransitionSlot = 86400n;
     const byronEpochOffset = 4n; // Shelley starts at epoch 4
 
     const epochNum = BigInt(epoch);

@@ -34,11 +34,47 @@ import {
 import { PoolOperationalCert } from "@harmoniclabs/cardano-ledger-ts";
 import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
+import { verify as tsKesVerify } from "@harmoniclabs/kes";
 import * as wasm from "wasm-kes";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
 // import { RawNewEpochState } from "../rawNES"; // TODO: Add when RawNewEpochState is implemented
+
+/**
+ * KES backend for header verification.
+ * - ts: pure TS @harmoniclabs/kes (default after dual-run soak)
+ * - wasm: legacy wasm-kes
+ * - both: dual-run, log divergence, return pure-TS result
+ *
+ * Override with GEROLAMO_KES=ts|wasm|both
+ */
+const KES_MODE = (process.env.GEROLAMO_KES ?? "both").toLowerCase();
+
+function verifyKesCrypto(
+    signature: KesSignature,
+    kesPeriod: number,
+    pubKey: KesPubKey,
+    body: Uint8Array,
+): boolean {
+    if (KES_MODE === "wasm") {
+        return wasm.verify(signature, kesPeriod, pubKey, body);
+    }
+    if (KES_MODE === "ts") {
+        return tsKesVerify(signature, kesPeriod, pubKey, body);
+    }
+    // both (default soak mode)
+    const tsOk = tsKesVerify(signature, kesPeriod, pubKey, body);
+    const wasmOk = wasm.verify(signature, kesPeriod, pubKey, body);
+    if (tsOk !== wasmOk) {
+        logger.error("KES verify divergence (pure-TS vs wasm-kes)", {
+            kesPeriod,
+            tsOk,
+            wasmOk,
+        });
+    }
+    return tsOk;
+}
 
 let genesisCache: ShelleyGenesisConfig | null = null;
 
@@ -106,7 +142,7 @@ export class ValidatePostBabbageHeader {
         const kesPeriod = Number(slotKESPeriod - opcertKESPeriod);
         if (kesPeriod < 0) return false;
 
-        return wasm.verify(signature, kesPeriod, pubKey, body);
+        return verifyKesCrypto(signature, kesPeriod, pubKey, body);
     }
 
     private verifyOpCertError(
@@ -326,7 +362,7 @@ export class ValidatePreBabbageHeader {
         const kesPeriod = Number(slotKESPeriod - opcertKESPeriod);
         if (kesPeriod < 0) return false;
 
-        return wasm.verify(signature, kesPeriod, pubKey, body);
+        return verifyKesCrypto(signature, kesPeriod, pubKey, body);
     }
 
     private verifyOpCertError(

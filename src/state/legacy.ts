@@ -60,7 +60,12 @@ export function parseChunk(
         });
 }
 
-export async function processChunk(dir: string, chunkNo: number, logger: Logger): Promise<void> {
+export async function processChunk(
+    dir: string,
+    chunkNo: number,
+    logger: Logger,
+    client?: import("../db").SqlClient,
+): Promise<void> {
     assert(isAbsolute(dir));
 
     const parsedFNo = chunkNo.toString().padStart(5, "0");
@@ -98,7 +103,8 @@ export async function processChunk(dir: string, chunkNo: number, logger: Logger)
             await applyBlock(
                 meb.block,
                 getHeaderSlot(meb.block.header),
-                blake2b_256(meb.block.header.toCborBytes())
+                blake2b_256(meb.block.header.toCborBytes()),
+                client,
             );
         } catch {
             logger.info(`Skipping Byron block: ${toHex(block.blockHash)}`);

@@ -11,6 +11,9 @@ import {
 } from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
+/** Optional Bun SQL client / transaction handle for batch hydrate. */
+export type SqlClient = typeof sql;
+
 interface HeaderInsertData {
     slot: bigint;
     headerHash: string;
@@ -847,7 +850,9 @@ function parseUtxoDelta(raw: unknown): {
 export async function applyTransaction(
     txBody: TxBody,
     blockHash: Uint8Array,
+    client?: SqlClient,
 ): Promise<void> {
+    const db = client ?? sql;
     const txId = txBody.hash.toString(); // Canonical blake2b_256(txBody CBOR) hex from ledger-ts
 
     if (!txBody.inputs || !Array.isArray(txBody.inputs)) {
@@ -866,8 +871,8 @@ export async function applyTransaction(
 
     if (inputRefs.length > 0) {
         // Object rows preferred; tolerate array rows from .values()
-        const existingUtxos = await sql`
-            SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}
+        const existingUtxos = await db`
+            SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE utxo_ref IN ${db(inputRefs)}
         ` as any[];
         if (existingUtxos.length > 0) {
             // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
@@ -881,12 +886,12 @@ export async function applyTransaction(
                 const tx_hash = Array.isArray(row)
                     ? (row[2] != null ? String(row[2]) : undefined)
                     : (row.tx_hash != null ? String(row.tx_hash) : undefined);
-                await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${
+                await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${
                     packUtxoDelta({ utxo_ref, tx_out, tx_hash })
                 })`;
             }
             // Delete spent UTxOs in bulk (IN ${sql([...])} is supported)
-            await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
+            await db`DELETE FROM utxo WHERE utxo_ref IN ${db(inputRefs)}`;
         }
     }
 
@@ -929,33 +934,35 @@ export async function applyTransaction(
     if (outputData.length > 0) {
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
         for (const [utxoRef, json, txHash] of outputData) {
-            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${
+            await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${
                 packUtxoDelta({ utxo_ref: utxoRef, tx_out: json, tx_hash: txHash })
             })`;
-            await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${json}, ${txHash})`;
+            await db`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${json}, ${txHash})`;
         }
     }
 
     if (txBody.certs && Array.isArray(txBody.certs)) {
-        await applyCertificates(txBody.certs, blockHash);
+        await applyCertificates(txBody.certs, blockHash, client);
     }
 
     if (txBody.withdrawals && Array.isArray(txBody.withdrawals)) {
-        await applyWithdrawals(txBody.withdrawals, blockHash);
+        await applyWithdrawals(txBody.withdrawals, blockHash, client);
     }
 
     if (txBody.fee) {
-        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"fee"}, ${
+        await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"fee"}, ${
             JSON.stringify({ amount: txBody.fee.toString() })
         })`;
-        await sql`UPDATE chain_account_state SET treasury = treasury + ${txBody.fee} WHERE id = 1`;
+        await db`UPDATE chain_account_state SET treasury = treasury + ${txBody.fee} WHERE id = 1`;
     }
 }
 
 export async function applyCertificates(
     certs: any[],
     blockHash: Uint8Array,
+    client?: SqlClient,
 ): Promise<void> {
+    const db = client ?? sql;
     const certDeltas: string[] = [];
     for (const cert of certs) {
         const certAny = cert as any;
@@ -973,7 +980,7 @@ export async function applyCertificates(
     if (certDeltas.length) {
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
         for (const json of certDeltas) {
-            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"cert"}, ${json})`;
+            await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"cert"}, ${json})`;
         }
     }
 
@@ -984,20 +991,20 @@ export async function applyCertificates(
         switch (cert.certType) {
             case 0: // CertificateType.StakeRegistration
                 if (stakeCred) {
-                    await sql`INSERT OR REPLACE INTO stake (stake_credentials, amount) VALUES (${stakeCred}, 0)`;
+                    await db`INSERT OR REPLACE INTO stake (stake_credentials, amount) VALUES (${stakeCred}, 0)`;
                 }
                 break;
             case 1: // CertificateType.StakeDeRegistration
                 if (stakeCred) {
-                    await sql`DELETE FROM stake WHERE stake_credentials = ${stakeCred}`;
-                    await sql`DELETE FROM delegations WHERE stake_credentials = ${stakeCred}`;
+                    await db`DELETE FROM stake WHERE stake_credentials = ${stakeCred}`;
+                    await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred}`;
                 }
                 break;
             case 2: // CertificateType.StakeDelegation
                 if (stakeCred) {
                     const poolId = certAny.poolKeyHash?.toBuffer();
                     if (poolId) {
-                        await sql`INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash) VALUES (${stakeCred}, ${poolId})`;
+                        await db`INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash) VALUES (${stakeCred}, ${poolId})`;
                     }
                 }
                 break;
@@ -1008,13 +1015,13 @@ export async function applyCertificates(
                         pool_id: toHex(poolId),
                         active_stake: "0",
                     });
-                    await sql`UPDATE pool_distr SET pools = json_insert(pools, "$[#]", json(${newPoolJson})) WHERE id = 1`;
+                    await db`UPDATE pool_distr SET pools = json_insert(pools, "$[#]", json(${newPoolJson})) WHERE id = 1`;
                 }
                 break;
             case 4: // CertificateType.PoolRetirement
                 const retiringPoolId = certAny.poolHash?.toBuffer();
                 if (retiringPoolId) {
-                    await sql`UPDATE pool_distr SET pools = (SELECT json_group_array(json(value)) FROM json_each(pools) WHERE json_extract(value, '$.pool_id') != ${
+                    await db`UPDATE pool_distr SET pools = (SELECT json_group_array(json(value)) FROM json_each(pools) WHERE json_extract(value, '$.pool_id') != ${
                         toHex(retiringPoolId)
                     }) WHERE id = 1`;
                 }
@@ -1026,7 +1033,9 @@ export async function applyCertificates(
 export async function applyWithdrawals(
     withdrawals: any,
     blockHash: Uint8Array,
+    client?: SqlClient,
 ): Promise<void> {
+    const db = client ?? sql;
     if (withdrawals.map.length === 0) return;
 
     const withdrawalData = withdrawals.map.map((
@@ -1036,9 +1045,9 @@ export async function applyWithdrawals(
         amount,
     }));
     for (const { stakeCred, amount } of withdrawalData) {
-        await sql`UPDATE rewards SET amount = amount - ${amount} WHERE stake_credentials = ${stakeCred}`;
+        await db`UPDATE rewards SET amount = amount - ${amount} WHERE stake_credentials = ${stakeCred}`;
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
-        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"withdrawal"}, ${
+        await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"withdrawal"}, ${
             JSON.stringify({
                 stakeCred: toHex(stakeCred),
                 amount: amount.toString(),
@@ -1162,7 +1171,9 @@ export async function getUtxoCount(): Promise<number> {
 export async function applyByronTxPayload(
     entry: any,
     blockHash: Uint8Array,
+    client?: SqlClient,
 ): Promise<void> {
+    const db = client ?? sql;
     // Common shapes: { transaction, witness }, { body, witness }, or nested .tx
     const tx = entry?.transaction ?? entry?.tx ?? entry?.body ?? entry;
     if (!tx || typeof tx !== "object") {
@@ -1226,8 +1237,8 @@ export async function applyByronTxPayload(
     }
 
     if (inputRefs.length > 0) {
-        const existingUtxos = await sql`
-            SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}
+        const existingUtxos = await db`
+            SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE utxo_ref IN ${db(inputRefs)}
         ` as any[];
         for (const row of existingUtxos) {
             const utxo_ref = Array.isArray(row)
@@ -1239,12 +1250,12 @@ export async function applyByronTxPayload(
             const tx_hash = Array.isArray(row)
                 ? (row[2] != null ? String(row[2]) : undefined)
                 : (row.tx_hash != null ? String(row.tx_hash) : undefined);
-            await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${
+            await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${
                 packUtxoDelta({ utxo_ref, tx_out, tx_hash })
             })`;
         }
         if (existingUtxos.length > 0) {
-            await sql`DELETE FROM utxo WHERE utxo_ref IN ${sql(inputRefs)}`;
+            await db`DELETE FROM utxo WHERE utxo_ref IN ${db(inputRefs)}`;
         }
     }
 
@@ -1269,10 +1280,10 @@ export async function applyByronTxPayload(
             assets: {},
             era: "byron",
         });
-        await sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${
+        await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${
             packUtxoDelta({ utxo_ref: utxoRef, tx_out: txOutJson, tx_hash: txId })
         })`;
-        await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${txOutJson}, ${txId})`;
+        await db`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${txOutJson}, ${txId})`;
     }
 
     logger.debug(

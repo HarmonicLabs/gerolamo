@@ -1,5 +1,5 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
-import { applyByronTxPayload, applyTransaction } from "../db";
+import { applyByronTxPayload, applyTransaction, type SqlClient } from "../db";
 import { logger } from "../utils/logger";
 import { sql } from "../sql";
 import {
@@ -13,19 +13,21 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 /**
  * Applies a validated block to the ledger state according to Praos consensus rules.
  *
- * Note: applyTransaction uses the shared `sql` client (not the outer `tx`).
- * Bun SQLite cannot nest sql.begin(), so we do not wrap applyTransaction in
- * another begin. Block metadata insert is best-effort before txs; full CBOR
- * is written separately via insertBlockBatchVolatile after applyBlock returns.
+ * Optional `client` = Bun SQL handle or open transaction (batch hydrate).
+ * Default = shared module `sql`. Do not nest sql.begin() inside apply*.
+ * Block metadata is best-effort before txs; full CBOR is written separately
+ * via insertBlockBatchVolatile after applyBlock returns.
  * Byron: metadata + best-effort txPayload apply (preprod often empty payloads).
  */
 export async function applyBlock(
     block: MultiEraBlock["block"],
     slot: bigint,
     blockHash: Uint8Array,
+    client?: SqlClient,
 ): Promise<void> {
+    const db = client ?? sql;
     // Metadata stub so getMaxSlot / tip can advance even if body UTxO apply is partial.
-    await sql`INSERT OR IGNORE INTO blocks (hash, slot, prev_hash, is_valid) VALUES (${
+    await db`INSERT OR IGNORE INTO blocks (hash, slot, prev_hash, is_valid) VALUES (${
         blockHash
     }, ${Number(slot)}, NULL, ${true})`;
 
@@ -38,12 +40,12 @@ export async function applyBlock(
             return;
         }
         for (const entry of payloads) {
-            await applyByronTxPayload(entry, blockHash);
+            await applyByronTxPayload(entry, blockHash, client);
         }
         return;
     }
 
-    // Shelley+ txs only (row-by-row SQL; no nested begin)
+    // Shelley+ txs (writes go through optional client for batch hydrate)
     const txBodies = getShelleyTxBodies(block);
     for (const txBody of txBodies) {
         const hashBuf = typeof (txBody.hash as any)?.toBuffer === "function"
@@ -54,6 +56,6 @@ export async function applyBlock(
                 hashBuf instanceof Uint8Array ? toHex(hashBuf) : String(txBody.hash)
             }`,
         );
-        await applyTransaction(txBody, blockHash);
+        await applyTransaction(txBody, blockHash, client);
     }
 }

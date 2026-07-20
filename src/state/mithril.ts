@@ -1,20 +1,33 @@
-import { Cbor } from "@harmoniclabs/cbor";
 import { join } from "node:path";
-
-import { sql } from "../sql";
 import { readdir } from "node:fs/promises";
 import { resolve } from "node:url";
 
+import { sql } from "../sql";
+
+/**
+ * Ancillary ledger loader (Mithril Cardano DB snapshot).
+ *
+ * A2 BLOCKER (2026-07-17, local preprod snapshot):
+ * - `state` is CborArray(2) NewEpochState-shaped, not JSON maps with `.utxo` keys.
+ * - Nested indefinite CborMaps + `SubCborRef` deferred blobs; map entries not
+ *   iterable via simple Object.keys / Map.entries after `@harmoniclabs/cbor` parse.
+ * - Full unwrap of ~800MB `tables/tvar` OOMs in Bun.
+ * - No TxIn-keyed UTxO pair-list found in walkable state (largest hit was
+ *   unrelated pair-list keys all `n1`).
+ *
+ * Density path today: immutable chunks via `processChunk` / `read-raw-chunks`
+ * (Path 1). Do not claim ancillary UTxO hydrate until a streaming/deferred
+ * CBOR reader lands. Stock mithril-client is still correct for file download —
+ * the gap is adapter, not client.
+ */
 export async function loadLedgerStateFromAncilliary(ledgerPath: string) {
     console.log("Loading ledger state from ancillary files...");
-    // Find the latest ledger snapshot
     const ledgerDirs = await readdir(ledgerPath);
     if (ledgerDirs.length === 0) {
         console.log("No ledger directories found");
         return;
     }
 
-    // Use the latest (highest slot number) ledger directory
     const latestLedgerDir = Math.max(...ledgerDirs.flatMap((dir) => {
         const ret = parseInt(dir);
         return isNaN(ret) ? [] : ret;
@@ -22,73 +35,60 @@ export async function loadLedgerStateFromAncilliary(ledgerPath: string) {
     const latestLedgerDirPath = resolve(ledgerPath, latestLedgerDir.toString());
     console.log(`Using ledger snapshot from slot ${latestLedgerDir}: ${latestLedgerDirPath}`);
 
-    // Read the ledger state files
-    const stateFile = Bun.file(join(latestLedgerDirPath, 'state'));
-    const metaFile = Bun.file(join(latestLedgerDirPath, 'meta'));
-    const tvarFile = Bun.file(join(latestLedgerDirPath, 'tables', 'tvar'));
+    const stateFile = Bun.file(join(latestLedgerDirPath, "state"));
+    const metaFile = Bun.file(join(latestLedgerDirPath, "meta"));
+    const tvarFile = Bun.file(join(latestLedgerDirPath, "tables", "tvar"));
 
-    console.log("Reading ledger state files...");
-    const [stateData, metaData, tvarData] = await Promise.all([
-        stateFile.exists().then(async (v) => {
-            return v ? (await stateFile.arrayBuffer()) : undefined;
-        }),
-        metaFile.exists().then(async (v) => {
-            return v ? (await metaFile.arrayBuffer()) : undefined;
-        }),
-        tvarFile.exists().then(async (v) => {
-            return v ? (await tvarFile.arrayBuffer()) : undefined;
-        })
+    const [stateExists, metaExists, tvarExists] = await Promise.all([
+        stateFile.exists(),
+        metaFile.exists(),
+        tvarFile.exists(),
     ]);
-
-    if (!stateData) {
-        throw new Error("Could not read state file");
+    console.log(
+        `Ancillary files: state=${stateExists} meta=${metaExists} tvar=${tvarExists}`,
+    );
+    if (stateExists) {
+        console.log(`State size: ${stateFile.size} bytes`);
+    }
+    if (tvarExists) {
+        console.log(`TVAR size: ${tvarFile.size} bytes`);
     }
 
-    console.log(`State file size: ${stateData?.byteLength} bytes`);
-    console.log(`Meta file size: ${metaData?.byteLength || 0} bytes`);
-    console.log(`TVAR file size: ${tvarData?.byteLength || 0} bytes`);
-
-    // Try to decode the state file as CBOR
-    const decodedState = Cbor.parse(new Uint8Array(stateData));
-    console.log("Decoded state file structure:", typeof decodedState);
-
-    if (typeof decodedState === 'object' && decodedState !== null) {
-        console.log("State object keys:", Object.keys(decodedState));
-
-        // Try to extract ledger components
-        await processLedgerState(decodedState);
-    }
+    console.warn(
+        "ANCILLARY UTxO EXTRACT BLOCKED: indefinite CBOR / SubCborRef — " +
+            "use immutable chunk replay (read-raw-chunks / processChunk) for density.",
+    );
+    // Intentionally no Cbor.parse of full tvar (OOM) and no fake UTxO inserts.
+    return;
 }
 
+/** @deprecated kept for reference; not called — see A2 blocker above */
 async function processLedgerState(stateData: any) {
     console.log("Processing ledger state...");
+    console.log(
+        "[BLOCKED] Indefinite CBOR maps / SubCborRef prevent UTxO extraction.",
+    );
 
     let utxoCount = 0;
     let stakeCount = 0;
     let delegationCount = 0;
 
     try {
-        // Try to extract UTxO set
         if (stateData.utxo || stateData.utxos) {
             const utxoSet = stateData.utxo || stateData.utxos;
             console.log(`Found UTxO set with ${Object.keys(utxoSet).length} entries`);
-            utxoCount = Math.min(Object.keys(utxoSet).length, 10); // Just count for now
+            utxoCount = Math.min(Object.keys(utxoSet).length, 10);
         }
-
-        // Try to extract stake distribution
         if (stateData.stake || stateData.stakes) {
             const stakeSet = stateData.stake || stateData.stakes;
             console.log(`Found stake distribution with ${Object.keys(stakeSet).length} entries`);
-            stakeCount = Math.min(Object.keys(stakeSet).length, 10); // Just count for now
+            stakeCount = Math.min(Object.keys(stakeSet).length, 10);
         }
-
-        // Try to extract delegations
         if (stateData.delegations || stateData.delegs) {
             const delegationSet = stateData.delegations || stateData.delegs;
             console.log(`Found delegations with ${Object.keys(delegationSet).length} entries`);
-            delegationCount = Math.min(Object.keys(delegationSet).length, 10); // Just count for now
+            delegationCount = Math.min(Object.keys(delegationSet).length, 10);
         }
-
     } catch (error) {
         console.error("Error processing ledger state:", error);
     }

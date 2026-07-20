@@ -127,13 +127,28 @@ function report() {
     (log.completeJson
       ? (log.completeJson.applied ?? 0) + (log.completeJson.failed ?? 0)
       : 0);
-  const total = log.rangeLen || 0;
+  // Prefer per-line total/remaining/pct (new hydrate logs); fall back to header rangeLen.
+  const total =
+    Number(last.total ?? log.completeJson?.total ?? log.rangeLen ?? 0) || 0;
   const sec = Number(last.secPerChunk ?? log.completeJson?.secPerChunk ?? 0);
-  const rem = total > 0 ? Math.max(total - done, 0) : null;
+  const rem =
+    last.remaining != null
+      ? Number(last.remaining)
+      : log.completeJson?.remaining != null
+        ? Number(log.completeJson.remaining)
+        : total > 0
+          ? Math.max(total - done, 0)
+          : null;
   const etaH =
     rem != null && sec > 0 ? Number(((rem * sec) / 3600).toFixed(2)) : null;
   const pct =
-    total > 0 && done >= 0 ? Number(((100 * done) / total).toFixed(2)) : null;
+    last.pct != null
+      ? Number(last.pct)
+      : log.completeJson?.pct != null
+        ? Number(log.completeJson.pct)
+        : total > 0 && done >= 0
+          ? Number(((100 * done) / total).toFixed(2))
+          : null;
 
   const out = {
     ts: new Date().toISOString(),
@@ -149,6 +164,9 @@ function report() {
       lastChunk: last.chunk ?? log.completeJson?.to,
       applied: last.applied ?? log.completeJson?.applied,
       failed: last.failed ?? log.completeJson?.failed,
+      total: total || last.total || log.completeJson?.total || null,
+      remaining: rem,
+      pct,
       tipLog: last.tip ?? log.completeJson?.tip,
       utxoLog: last.utxo ?? log.completeJson?.utxo,
       secPerChunk: sec || null,

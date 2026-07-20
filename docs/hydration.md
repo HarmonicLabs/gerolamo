@@ -59,7 +59,7 @@ bun scripts/batch-watch.mjs
 2. Pragmas: `WAL`, `synchronous=OFF`, large `cache_size` / `mmap` (disposable rebuild).
 3. `ensureInitialized()` schema.
 4. Per chunk: `sql.begin(tx => processChunk(..., tx))` so apply* write through optional `SqlClient`.
-5. Progress JSON: `chunk`, `applied`, `failed`, `tip`, `utxo`, `secPerChunk`.
+5. Progress JSON: `chunk`, `applied`, `failed`, `total`, `remaining`, `pct`, `tip`, `utxo`, `secPerChunk`.
 
 ### Isolation rules
 

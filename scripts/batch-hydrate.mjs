@@ -158,22 +158,40 @@ let applied = 0;
 let failed = 0;
 const failSamples = [];
 
+// Absolute chain size (all immutable chunk numbers on disk), not session range.
+// Resume --from N still reports done/total against the full dataset.
+const chainTotal = chunkNos.length;
+const chunkIndex = new Map(chunkNos.map((n, idx) => [n, idx]));
+const sessionTotal = range.length;
+
 async function progress(i) {
   const ms = Date.now() - t0;
   const tip = String(await getMaxSlot());
   const utxo = await getUtxoCount();
-  const done = applied + failed;
-  const rate = done / (ms / 1000 || 1);
+  const sessionDone = applied + failed;
+  // 1-based absolute position of this chunk in the full on-disk set
+  const doneAbs = (chunkIndex.get(i) ?? -1) + 1;
+  const rate = sessionDone / (ms / 1000 || 1);
   console.log(
     JSON.stringify({
       chunk: i,
-      applied,
+      // absolute completed-through index (matches from-0 applied semantics)
+      applied: doneAbs,
+      sessionApplied: applied,
       failed,
+      total: chainTotal,
+      remaining: Math.max(chainTotal - doneAbs, 0),
+      pct: chainTotal
+        ? Number(((100 * doneAbs) / chainTotal).toFixed(2))
+        : null,
+      sessionTotal,
       tip,
       utxo,
       ms,
       chunksPerSec: Number(rate.toFixed(3)),
-      secPerChunk: done ? Number((ms / 1000 / done).toFixed(2)) : null,
+      secPerChunk: sessionDone
+        ? Number((ms / 1000 / sessionDone).toFixed(2))
+        : null,
     }),
   );
 }
@@ -207,24 +225,35 @@ for (const i of range) {
   }
 }
 
+const doneFinal = applied + failed;
+const lastChunk = range[range.length - 1];
+const doneAbsFinal =
+  lastChunk != null ? (chunkIndex.get(lastChunk) ?? -1) + 1 : doneFinal;
 const result = {
   ok: failed === 0,
   mode: "batch",
   db: DB_PATH,
   from: fromChunk,
   to: toChunk,
-  applied,
+  applied: doneAbsFinal,
+  sessionApplied: applied,
   failed,
+  total: chainTotal,
+  remaining: Math.max(chainTotal - doneAbsFinal, 0),
+  pct: chainTotal
+    ? Number(((100 * doneAbsFinal) / chainTotal).toFixed(2))
+    : null,
+  sessionTotal,
   failSamples,
   tip: String(await getMaxSlot()),
   utxo: await getUtxoCount(),
   ms: Date.now() - t0,
   secPerChunk:
-    applied + failed
-      ? Number(((Date.now() - t0) / 1000 / (applied + failed)).toFixed(2))
+    doneFinal
+      ? Number(((Date.now() - t0) / 1000 / doneFinal).toFixed(2))
       : null,
   chunksPerSec: Number(
-    ((applied + failed) / ((Date.now() - t0) / 1000 || 1)).toFixed(3),
+    (doneFinal / ((Date.now() - t0) / 1000 || 1)).toFixed(3),
   ),
 };
 console.log("\n=== Batch Hydrate Complete ===");

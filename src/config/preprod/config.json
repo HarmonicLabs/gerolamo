@@ -29,5 +29,17 @@
   "tuiEnabled": false,
   "blockfrostUrl": "https://cardano-preprod.blockfrost.io/api/v0",
   "bodyValidation": "soft",
-  "scriptValidation": "off"
+  "scriptValidation": "off",
+  "peerGovernor": {
+    "enabled": true,
+    "targetHot": 2,
+    "targetWarm": 6,
+    "targetCold": 64,
+    "maxHot": 8,
+    "maxWarm": 24,
+    "maxCold": 256,
+    "tickMs": 15000,
+    "shareBatch": 10,
+    "shareEveryTicks": 2
+  }
 }

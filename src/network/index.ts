@@ -1,6 +1,10 @@
 import * as path from "node:path/posix";
 
-import { GerolamoConfig, initPeerManager } from "./peerManager";
+import {
+    GerolamoConfig,
+    initPeerManager,
+    stopPeerManager,
+} from "./peerManager";
 import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
 import { setupKeyboard } from "../tui";
 import { ensureInitialized, getMaxSlot } from "../db";
@@ -169,6 +173,11 @@ export async function start() {
 
     const shutdown = async (signal: string) => {
         logger.info(`Received ${signal}; shutting down...`);
+        try {
+            await stopPeerManager();
+        } catch (err) {
+            logger.error("PeerManager shutdown error:", err);
+        }
         try {
             await n2cHandle?.stop();
         } catch (err) {

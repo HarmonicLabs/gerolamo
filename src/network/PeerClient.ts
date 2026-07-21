@@ -29,10 +29,14 @@ import { GlobalSharedMempool, type GerolamoMempool } from "./SharedMempool";
 import { Tx, TxBody } from "@harmoniclabs/cardano-ledger-ts";
 import { GerolamoTxSubmitServer } from "./TxSubmitServer";
 import { getBlockBySlot, getMaxSlot } from "../db";
+import { peerKey as makePeerKey } from "./PeerGovernor";
 
 export interface IPeerClient {
     host: string;
     port: number | bigint;
+    /** Stable host:port key (governor identity). */
+    peerKey: string;
+    /** Log id — may include connect timestamp. */
     peerId: string;
     mplexer: Multiplexer;
     chainSyncClient: ChainSyncClient;
@@ -45,7 +49,9 @@ export interface IPeerClient {
     shelleyGenesisConfig: ShelleyGenesisConfig;
     sharedMempool: GerolamoMempool;
     txSubmitServer: GerolamoTxSubmitServer;
-    onTerminate?: (peerId: string) => void;
+    /** True while ChainSync rollForward loop is active (hot tier). */
+    isSyncing: boolean;
+    onTerminate?: (peerId: string, peerKey: string) => void;
     onRollForward?: (
         peerId: string,
         rollForwardCborBytes: Uint8Array,
@@ -58,6 +64,7 @@ export interface IPeerClient {
 export class PeerClient implements IPeerClient {
     readonly host: string;
     readonly port: number | bigint;
+    readonly peerKey: string;
     readonly peerId: string;
     readonly mplexer: Multiplexer;
     readonly chainSyncClient: ChainSyncClient;
@@ -68,12 +75,14 @@ export class PeerClient implements IPeerClient {
     peerSlotNumber: number | null;
     private cookieCounter: number;
     private keepAliveInterval: NodeJS.Timeout | null;
-    private isRangeSyncComplete: boolean = false;
+    private terminated = false;
+    private syncLoopStarted = false;
+    isSyncing = false;
     shelleyGenesisConfig: ShelleyGenesisConfig;
 
     readonly txSubmitClient!: TxSubmitClient;
     readonly txSubmitServer!: GerolamoTxSubmitServer;
-    onTerminate?: (peerId: string) => void;
+    onTerminate?: (peerId: string, peerKey: string) => void;
     onRollForward?: (
         peerId: string,
         rollForwardCborBytes: Uint8Array,
@@ -87,13 +96,14 @@ export class PeerClient implements IPeerClient {
         host: string,
         port: number | bigint,
         config: GerolamoConfig,
-        onTerminate?: (peerId: string) => void,
+        onTerminate?: (peerId: string, peerKey: string) => void,
     ) {
         this.host = host;
         this.port = port;
         this.config = config;
+        this.peerKey = makePeerKey(host, port);
         const unixTimestamp = Math.floor(Date.now() / 1000);
-        this.peerId = `${host}:${port}:${unixTimestamp}`; // Set after host/port
+        this.peerId = `${this.peerKey}:${unixTimestamp}`;
         this.onTerminate = onTerminate;
         this.shelleyGenesisConfig = {} as ShelleyGenesisConfig;
 
@@ -105,7 +115,6 @@ export class PeerClient implements IPeerClient {
             protocolType: "node-to-node",
         });
 
-        //* Load up the mini protocols /w mplexer *//
         this.chainSyncClient = new ChainSyncClient(this.mplexer);
         this.blockFetchClient = new BlockFetchClient(this.mplexer);
         this.keepAliveClient = new KeepAliveClient(this.mplexer);
@@ -131,12 +140,12 @@ export class PeerClient implements IPeerClient {
                 );
             });
 
+        // Peer death must demote, not kill the whole node process.
         this.mplexer.on("error", (err) => {
             logger.error(`Multiplexer error for peer ${this.peerId}:`, err);
             this.terminate();
-            process.exit(1);
         });
-        this.mplexer.on("data", (data) => {
+        this.mplexer.on("data", (_data) => {
             // logger.debug(`Multiplexer data for peer ${this.peerId}:`, toHex(data));
         });
 
@@ -153,45 +162,58 @@ export class PeerClient implements IPeerClient {
                 error,
             );
         });
-        // this.keepAliveClient.on("response", (response: KeepAliveResponse) => {
-        //     logger.debug(
-        //         `KeepAliveResponse received for peer ${this.peerId}:`,
-        //         response,
-        //     );
-        // });
         this.keepAliveClient.on("error", (err) => {
             logger.error(`KeepAliveClient error for peer ${this.peerId}:`, err);
         });
 
-        this.txSubmitClient.on("requestTxs", (requestTxs) => {
+        this.txSubmitClient.on("requestTxs", (_requestTxs) => {
             // logger.mempool(`TxSubmitClient requestTxs for peer ${this.peerId}:`, requestTxs);
         });
-        this.txSubmitClient.on("requestTxIds", (requestTxIds) => {
+        this.txSubmitClient.on("requestTxIds", (_requestTxIds) => {
             // logger.mempool(`TxSubmitClient requestTxIds for peer ${this.peerId}:`, requestTxIds);
-        });
-
-        process.on("beforeExit", () => {
-            this.terminate();
         });
     }
 
     terminate() {
+        if (this.terminated) return;
+        this.terminated = true;
         logger.info(`Terminating connections for peer ${this.peerId}...`);
-        if (this.onTerminate) this.onTerminate(this.peerId);
-        this.chainSyncClient.removeAllListeners("rollForward");
-        this.chainSyncClient.removeAllListeners("rollBackwards");
-        logger.debug(
-            `Removed all ChainSyncClient listeners for peer ${this.peerId}`,
-        );
-        this.chainSyncClient.done();
-        this.blockFetchClient.done();
-        this.keepAliveClient.done();
-        this.peerSharingClient.done();
+        this.stopSyncLoop();
+        try {
+            this.chainSyncClient.done();
+        } catch {
+            /* */
+        }
+        try {
+            this.blockFetchClient.done();
+        } catch {
+            /* */
+        }
+        try {
+            this.keepAliveClient.done();
+        } catch {
+            /* */
+        }
+        try {
+            this.peerSharingClient.done();
+        } catch {
+            /* */
+        }
         if (this.keepAliveInterval) {
             clearInterval(this.keepAliveInterval);
             this.keepAliveInterval = null;
         }
-        this.mplexer.close();
+        try {
+            this.mplexer.close();
+        } catch {
+            /* */
+        }
+        // Notify after local cleanup so manager can detach safely.
+        try {
+            this.onTerminate?.(this.peerId, this.peerKey);
+        } catch (err) {
+            logger.error(`onTerminate handler error for ${this.peerId}:`, err);
+        }
     }
 
     async handShakePeer() {
@@ -216,17 +238,14 @@ export class PeerClient implements IPeerClient {
         }
 
         logger.debug(`Handshake success for peer ${this.peerId}`);
-        // return "handshake success";
     }
 
     async syncToTip(): Promise<ChainPoint> {
         logger.debug(`Starting chain sync for peer ${this.peerId}...`);
 
-        // Get peer's tip
         const intersectEmpty = await this.chainSyncClient.findIntersect([]);
         const peerTipPoint = intersectEmpty.tip.point;
 
-        // Get DB tip
         let dbTipPoint: ChainPoint | null = null;
         try {
             const maxSlot = await getMaxSlot();
@@ -264,11 +283,9 @@ export class PeerClient implements IPeerClient {
                 "Invalid sync configuration: enable syncFromTip or syncFromPoint",
             );
         }
-        // logger.info(`Finding intersect from point for peer ${this.peerId}:`, startPoint);
         const intersectResult = await this.chainSyncClient.findIntersect([
             startPoint,
         ]);
-        // logger.info(`Intersect result for peer ${this.peerId}:`, intersectResult);
         if (intersectResult instanceof ChainSyncIntersectFound) {
             logger.debug(
                 `Intersect found at slot ${intersectResult.point.blockHeader?.slotNumber} for peer ${this.peerId}`,
@@ -282,24 +299,45 @@ export class PeerClient implements IPeerClient {
         return intersectResult.tip.point;
     }
 
-    // starts sync loop for all peers in parrallel
+    /**
+     * Hot tier: ChainSync rollForward loop.
+     * Idempotent — warm peers call this only on promote.
+     */
     async startSyncLoop(): Promise<void> {
-        let timeout = 0;
+        if (this.terminated) {
+            throw new Error(`Cannot start sync on terminated peer ${this.peerKey}`);
+        }
+        if (this.syncLoopStarted) {
+            logger.debug(`Sync loop already running for ${this.peerId}`);
+            return;
+        }
+        this.syncLoopStarted = true;
+        this.isSyncing = true;
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
+
         this.chainSyncClient.on(
             "rollForward",
             async (rollForward: ChainSyncRollForward) => {
+                if (!this.isSyncing || this.terminated) return;
                 const tip =
                     rollForward.tip.point.blockHeader?.slotNumber ?? 0n;
                 const rollForwardCborBytes = rollForward.toCborBytes();
                 this.onRollForward?.(this.peerId, rollForwardCborBytes, tip);
-                await this.chainSyncClient.requestNext();
+                try {
+                    await this.chainSyncClient.requestNext();
+                } catch (err) {
+                    logger.error(
+                        `requestNext failed for ${this.peerId}:`,
+                        err,
+                    );
+                }
             },
         );
 
         this.chainSyncClient.on(
             "rollBackwards",
             async (rollBack: ChainSyncRollBackwards) => {
+                if (!this.isSyncing || this.terminated) return;
                 if (!rollBack.point.blockHeader) return;
                 const tip = rollBack.tip.point;
                 logger.debug(
@@ -308,7 +346,14 @@ export class PeerClient implements IPeerClient {
                 );
                 this.onRollBack?.(this.peerId, rollBack.point);
 
-                await this.chainSyncClient.requestNext();
+                try {
+                    await this.chainSyncClient.requestNext();
+                } catch (err) {
+                    logger.error(
+                        `requestNext (rollback) failed for ${this.peerId}:`,
+                        err,
+                    );
+                }
             },
         );
 
@@ -323,23 +368,34 @@ export class PeerClient implements IPeerClient {
         await this.chainSyncClient.requestNext();
     }
 
+    /**
+     * Demote hot → warm: stop ChainSync listeners, keep bearer + keepalive.
+     */
+    stopSyncLoop(): void {
+        if (!this.syncLoopStarted && !this.isSyncing) return;
+        logger.debug(`Stopping sync loop for peer ${this.peerId}`);
+        this.isSyncing = false;
+        this.syncLoopStarted = false;
+        try {
+            this.chainSyncClient.removeAllListeners("rollForward");
+            this.chainSyncClient.removeAllListeners("rollBackwards");
+        } catch {
+            /* */
+        }
+    }
+
     async fetchBlock(
         slot: number | bigint,
         blockHash: Uint8Array,
     ): Promise<BlockFetchNoBlocks | BlockFetchBlock> {
-        // logger.debug(`Peer: ${this.peerId}...`, `Fetching Block `, { slot, hash: toHex(blockHash)} );
         const chainPoint = new ChainPoint({
             blockHeader: { slotNumber: slot, hash: blockHash },
         });
-        // logger.debug(`Fetching block at chain point for peer ${this.peerId}:`, chainPoint);
         const blockData = await this.blockFetchClient.request(chainPoint);
-        // logger.debug(`Fetched block at slot ${slot} for peer ${this.peerId}`);
         return blockData;
     }
 
     async fetchMultipleBlocks(points: ChainPoint[]): Promise<any[]> {
-        /* Not tested yet */
-        // logger.debug(`Peer: ${this.peerId}...`, `Fetching multiple blocks`, points.map(p => ({ slot: p.blockHeader?.slotNumber, hash: p.blockHeader?.hash ? toHex(p.blockHeader.hash) : undefined })) );
         const blocksData: any[] = [];
         for (const point of points) {
             try {
@@ -359,9 +415,9 @@ export class PeerClient implements IPeerClient {
         return blocksData;
     }
 
-    async askForPeers(): Promise<PeerAddress[]> {
+    async askForPeers(amount = 10): Promise<PeerAddress[]> {
         logger.debug(`Requesting peers from peer ${this.peerId}...`);
-        const peerResponse = await this.peerSharingClient.request(10);
+        const peerResponse = await this.peerSharingClient.request(amount);
         logger.debug(
             `Received peers from peer ${this.peerId}:`,
             peerResponse.peerAddresses.length,
@@ -404,13 +460,29 @@ export class PeerClient implements IPeerClient {
     }
 
     startKeepAlive(interval: number = 60000) {
+        if (this.keepAliveInterval) return;
         this.keepAliveInterval = setInterval(() => {
+            if (this.terminated) return;
             this.cookieCounter = (this.cookieCounter + 1) % 65536;
             logger.debug(
                 `Sending keepAliveRequest cookie for peer ${this.peerId}:`,
                 this.cookieCounter,
             );
-            this.keepAliveClient.request(this.cookieCounter);
+            try {
+                this.keepAliveClient.request(this.cookieCounter);
+            } catch (err) {
+                logger.error(
+                    `keepAlive request failed for ${this.peerId}:`,
+                    err,
+                );
+            }
         }, interval);
+    }
+
+    stopKeepAlive() {
+        if (this.keepAliveInterval) {
+            clearInterval(this.keepAliveInterval);
+            this.keepAliveInterval = null;
+        }
     }
 }

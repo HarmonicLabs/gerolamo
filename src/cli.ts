@@ -10,7 +10,12 @@ import { Logger, LogLevel } from "./utils/logger";
 import { parse, resolve } from "node:path";
 import { readdir } from "node:fs/promises";
 
-import { processChunk, loadLedgerStateFromAncilliary } from "./state";
+import {
+    processChunk,
+    loadLedgerStateFromAncilliary,
+    streamTablesToUtxo,
+    resolveTablesPath,
+} from "./state";
 import {
     runMithrilBootstrap,
     type MithrilEngine,
@@ -160,6 +165,104 @@ export function Main() {
             await ensureInitialized();
             await loadLedgerStateFromAncilliary(ledgerPath);
         });
+
+    /**
+     * A2 partial UTxO extract: stream utxohd-mem tables → SQLite utxo.
+     * Inserts tag0/tag2 fully-decoded rows only (datum/script still blocked).
+     * Prefer a temp --db for smoke; full apply to .live is opt-in.
+     */
+    program
+        .command("apply-ancillary-utxo")
+        .description(
+            "Stream Mithril ancillary tables file into SQLite utxo (partial: tag0/2 only)",
+        )
+        .argument(
+            "<ledger_or_tables>",
+            "Path to ledger dir (…/ledger/<slot>) or tables file",
+        )
+        .option(
+            "--db <path>",
+            "SQLite path (default: temp under /tmp — not .live)",
+            process.env.A2_UTXO_DB || "",
+        )
+        .option(
+            "--limit <n>",
+            "Max map entries to scan (smoke); omit = full file",
+            (v) => parseInt(v, 10),
+        )
+        .option(
+            "--batch-size <n>",
+            "Rows per SQLite transaction",
+            (v) => parseInt(v, 10),
+            2000,
+        )
+        .action(
+            async (
+                ledgerOrTables: string,
+                options: {
+                    db?: string;
+                    limit?: number;
+                    batchSize?: number;
+                },
+            ) => {
+                const logger = new Logger({ logLevel: LogLevel.INFO });
+                const root = resolve(ledgerOrTables);
+                // Accept tables file or ledger dir containing tables
+                let tablesPath = root;
+                try {
+                    const { statSync } = await import("node:fs");
+                    const st = statSync(root);
+                    if (st.isDirectory()) {
+                        const resolved = await resolveTablesPath(root);
+                        if (!resolved || resolved.kind === "missing") {
+                            throw new Error(
+                                `no tables file under ledger dir: ${root}`,
+                            );
+                        }
+                        tablesPath = resolved.path;
+                    }
+                } catch (e) {
+                    if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") {
+                        throw e;
+                    }
+                }
+
+                const dbPath = resolve(
+                    options.db?.trim() ||
+                        process.env.A2_UTXO_DB ||
+                        `/tmp/a2-utxo-smoke-${Date.now()}.db`,
+                );
+                logger.info(`tables=${tablesPath}`);
+                logger.info(`db=${dbPath}`);
+                if (dbPath.includes(".live/test.db") && options.limit == null) {
+                    logger.warn(
+                        "Full apply into .live/test.db — single writer; partial UTxO only (tag0/2)",
+                    );
+                }
+
+                const result = streamTablesToUtxo({
+                    tablesPath,
+                    dbPath,
+                    limit: options.limit,
+                    batchSize: options.batchSize ?? 2000,
+                    logger: {
+                        info: (m) => logger.info(m),
+                        warn: (m) => logger.warn(m),
+                    },
+                });
+
+                logger.info(
+                    `apply-ancillary-utxo complete scanned=${result.scanned} ` +
+                        `inserted=${result.inserted} skipped=${result.skipped} ` +
+                        `errors=${result.decodeErrors} ` +
+                        `utxoExtracted=${result.utxoExtracted} partial=${result.partial} ` +
+                        `elapsedMs=${result.elapsedMs}`,
+                );
+                logger.info(
+                    `byTag=${JSON.stringify(result.byTag)} insertedByTag=${JSON.stringify(result.insertedByTag)}`,
+                );
+            },
+        );
 
     /**
      * Optional Mithril bootstrap (hybrid):

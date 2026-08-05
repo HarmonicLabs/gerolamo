@@ -45,4 +45,13 @@ export {
     type MultiAssetRepDecoded,
     type DecodeResult,
 } from "./utxohdMemCodec";
+export {
+    streamTablesToUtxo,
+    tag2Addr28ToBech32,
+    compactAddrRawToBech32,
+    txOutToDbRow,
+    type StreamTablesToUtxoOpts,
+    type StreamTablesToUtxoResult,
+    type TxOutJson,
+} from "./streamTablesToUtxo";
 export { processChunk } from "./legacy";

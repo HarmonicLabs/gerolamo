@@ -7,8 +7,9 @@
  * Stage 4: Merkle batch path root verify (Blake2b-256; rootVerified may be true).
  * Stage 5a: STM preliminary (lottery + bounds + k; preliminaryOk may be true).
  * Stage 5b: BLS multi-sig aggregate verify (aggregateOk may be true; n=1 identity proven).
+ * Stage 5c: certificate-chain walk (chainOk only when genesis reached + Ed25519).
  *
- * verified / pureTsStmImplemented stay false until full cert-chain-to-genesis.
+ * verified / pureTsStmImplemented stay false until full chain-to-genesis dual-run soak.
  * WASM remains source of truth for certificate-chain verification.
  *
  * See docs/phase-4-pure-ts-crypto-research.md
@@ -72,3 +73,30 @@ export {
     type MerkleBatchRootVerifyResult,
     type PureTsMerkleValidateResult,
 } from "./merkle";
+
+export {
+    PROTOCOL_MESSAGE_PART_KEY_ORDER,
+    computeProtocolMessageHash,
+    verifySignedMessageMatchesProtocolMessage,
+    decodeGenesisVkey,
+    decodeGenesisSignature,
+    isGenesisCertificate,
+    isStandardCertificate,
+    verifyEpochChaining,
+    verifyAvkChaining,
+    verifyParamsChaining,
+    verifyStructuralLink,
+    verifyStandardCertificateIntegrity,
+    verifyGenesisCertificate,
+    createAggregatorCertificateFetcher,
+    walkCertificateChain,
+    walkTipWithPredecessor,
+    DEFAULT_CHAIN_MAX_DEPTH,
+    type ProtocolMessageParts,
+    type StructuralLinkResult,
+    type StandardCertIntegrityResult,
+    type GenesisCertVerifyResult,
+    type CertificateFetcher,
+    type ChainStepResult,
+    type PureTsChainWalkResult,
+} from "./chain";

@@ -80,12 +80,18 @@ export function blake2b256(...parts: Uint8Array[]): Uint8Array {
 }
 
 /**
- * Minimum sibling-path length for a complete binary tree covering `nrLeaves`.
- * ceil(log2(nrLeaves)) — structural heuristic only (not a crypto proof).
+ * Typical single-leaf path depth for a complete binary tree covering `nrLeaves`.
+ *
+ * IntersectMBO batch proofs use the Octopus algorithm and can return *fewer*
+ * sibling hashes than full tree depth (shared parents collapse). So this is
+ * informational only — Stage 3 must NOT hard-fail on values.length < this.
+ * Stage 4 `verifyMerkleBatchRoot` is the real membership check.
+ *
+ * floor(log2(nrLeaves)) matches observed preprod paths (e.g. nr=21 → 4).
  */
 export function expectedMerklePathLen(nrLeaves: number): number {
     if (!Number.isFinite(nrLeaves) || nrLeaves <= 1) return 0;
-    return Math.ceil(Math.log2(nrLeaves));
+    return Math.floor(Math.log2(nrLeaves));
 }
 
 /** Heap parent: nodes[(i-1)/2] owns nodes[i]. */
@@ -458,15 +464,13 @@ export function validateBatchProofStructural(
         }
     }
 
-    if (expectedMinPathLen != null && nValues > 0 && nValues < expectedMinPathLen) {
-        errors.push(
-            `batch_proof.values length ${nValues} < expectedMinPathLen ${expectedMinPathLen} for nr_leaves=${nrLeaves}`,
-        );
-    }
+    // NOTE: Do NOT hard-fail when nValues < expectedMinPathLen.
+    // Octopus batch paths can be shorter than full tree depth (ep296: 4 vs ceil-log2 5).
+    // Stage 4 root verify is the membership gate.
 
     const merkleStructOk = errors.length === 0;
     const reason = merkleStructOk
-        ? "Stage 3 merkleStruct OK — batch_proof sizes/indices/depth heuristic pass; " +
+        ? "Stage 3 merkleStruct OK — batch_proof sizes/indices pass; " +
           "run verifyBatchProofWithRoot for Stage 4 rootVerified"
         : `Stage 3 merkleStruct FAILED: ${errors.join("; ")}`;
 

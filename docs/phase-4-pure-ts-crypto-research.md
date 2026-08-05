@@ -1,8 +1,8 @@
 # Phase 4 — Pure-TS Mithril crypto research spike
 
-**Status:** research + **Stage 1–5b** (shape → cryptoPrep → merkle → root → preliminary → **BLS aggregate**) + dual-run shadow.  
-**Decision:** **do not claim full cert-chain yet.** `rootVerified` / `preliminaryOk` / `aggregateOk` can be true; `verified` / `match` / `implemented` stay false. Hybrid client (WASM certs + pure-TS I/O) is the production path.  
-**Date:** 2026-08-05 (density 0–199 green; Stage 1–5b aggregate landed; A2 tvar head scan only).
+**Status:** research + **Stage 1–5c** (shape → cryptoPrep → merkle → root → preliminary → BLS aggregate → **chain walk**) + dual-run shadow.  
+**Decision:** **do not claim full cert-chain SoT yet.** `rootVerified` / `preliminaryOk` / `aggregateOk` can be true; `chainOk` only when walk reaches genesis + Ed25519; `verified` / `match` / `implemented` stay false. Hybrid client (WASM certs + pure-TS I/O) is the production path.  
+**Date:** 2026-08-05 (density 0–199 green; Stage 1–5c chain walk landed; A2 tvar head scan only).
 
 ---
 
@@ -146,17 +146,36 @@ From `cryptoInventory()` in `src/mithril/dualRun.ts` and package d.ts:
 
 A2 is a CBOR adapter problem, not STM.
 
+### Stage 5c done (certificate-chain *walk* — chainOk only at genesis)
+
+| Artifact | Role |
+|----------|------|
+| `computeProtocolMessageHash` | SHA-256(message_parts) in **ProtocolMessagePartKey enum order** (not alpha) |
+| `verifyStructuralLink` | previous_hash + epoch ±0/1 + AVK chaining + params chaining + PM hash |
+| `verifyStandardCertificateIntegrity` | shape + PM + root + prelim + aggregate per hop |
+| `verifyGenesisCertificate` | PM hash + Ed25519(`signed_message` utf8, genesis_sig, genesis_pk) |
+| `walkCertificateChain` / `walkTipWithPredecessor` | tip → … → genesis; fetcher or predecessors |
+| dualRun shadow | `pureTs.chainOk` + `chainWalk`; `match` stays false |
+| Smoke (tip+prev) | tip/prev integrity **OK**; **`chainOk=false`** (no genesis in 2-hop golden) — honest |
+
+**Critical PM hash detail:** BTreeMap iterates enum declaration order, not alphabetical Display strings. Proven on tip+prev goldens.
+
+**Honest limits:**
+- Preprod chain depth to genesis is large (50+ hops sampled, all standard). Full genesis soak needs long walk + real genesis cert golden.
+- Certificate `try_compute_hash` content-hash recompute not fully ported (aggregator hash trusted for links).
+- `chainOk ≠ verified ≠ match ≠ implemented`.
+
 ### Still missing (crypto — remaining Phase 4 work)
 
-1. Certificate-chain walk rules to **genesis verification key**  
-2. Message encoding for `verify_message_match_certificate` (Cardano DB digests)  
-3. Genesis vkey handling + epoch transitions in pure-TS  
+1. Full chain-to-genesis soak (preprod genesis cert golden + Ed25519 proven end-to-end)  
+2. Certificate `try_compute_hash` content-hash recompute (metadata/signers/sig feed)  
+3. Message encoding for `verify_message_match_certificate` (Cardano DB digests)  
 4. Dual-run **crypto** match vs WASM on preprod **and** mainnet (`match: true`)  
-5. Weighted n≥2 aggregate soak on multi-signer real certs  
+5. Weighted n≥2 aggregate path soak on multi-signer real certs  
 
 **Critical distinction:**  
 `millerLoop` / `pairing` ≠ full Mithril cert-chain.  
-**`shapeOk` ≠ `cryptoPrepOk` ≠ `merkleStructOk` ≠ `rootVerified` ≠ `preliminaryOk` ≠ `aggregateOk` ≠ `verified` ≠ `match`.**
+**`shapeOk` ≠ `cryptoPrepOk` ≠ `merkleStructOk` ≠ `rootVerified` ≠ `preliminaryOk` ≠ `aggregateOk` ≠ `chainOk` ≠ `verified` ≠ `match`.**
 
 ---
 

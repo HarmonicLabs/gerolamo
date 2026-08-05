@@ -5,12 +5,13 @@
  * Research: docs/mithril-native-client-research.md
  *
  * Honesty:
- *   - Cert chain verify = IOG @mithril-dev/mithril-client-wasm (not pure-TS crypto)
+ *   - Cert chain verify = IOG @mithril-dev/mithril-client-wasm (not pure-TS crypto SoT)
  *   - Download/extract = TS HTTP + fzstd + tar-stream (no system zstd/tar)
  *   - Full multi-GB restore can still use --engine bin (external mithril-client)
  *   - Ancillary UTxO extract = A2 blocked (probe/download + tvar head scan only)
- *   - Phase 4 pure-TS = Stage 1–5b (shape/cryptoPrep/merkle/root/preliminary/aggregate);
- *     WASM remains SoT for full cert-chain / genesis walk
+ *   - Phase 4 pure-TS = Stage 1–5c (shape/cryptoPrep/merkle/root/preliminary/aggregate/chainWalk);
+ *     chainOk only when walk reaches genesis + Ed25519; match/implemented stay false
+ *     WASM remains SoT for production cert-chain
  */
 
 export type {
@@ -57,6 +58,7 @@ export {
     type CryptoInventory,
     type DualRunVerifyResult,
     type PureTsVerifyResult,
+    type PureTsVerifyOptions,
 } from "./dualRun";
 
 export {
@@ -93,6 +95,23 @@ export {
     leafHashesFromMultiSignature,
     merkleParent,
     merkleSibling,
+    PROTOCOL_MESSAGE_PART_KEY_ORDER,
+    computeProtocolMessageHash,
+    verifySignedMessageMatchesProtocolMessage,
+    decodeGenesisVkey,
+    decodeGenesisSignature,
+    isGenesisCertificate,
+    isStandardCertificate,
+    verifyEpochChaining,
+    verifyAvkChaining,
+    verifyParamsChaining,
+    verifyStructuralLink,
+    verifyStandardCertificateIntegrity,
+    verifyGenesisCertificate,
+    createAggregatorCertificateFetcher,
+    walkCertificateChain,
+    walkTipWithPredecessor,
+    DEFAULT_CHAIN_MAX_DEPTH,
     type PureTsCertParseResult,
     type PureTsParsedCertificate,
     type PureTsStmCryptoPrepResult,
@@ -102,6 +121,13 @@ export {
     type StmParameters,
     type PureTsMerkleValidateResult,
     type MerkleBatchRootVerifyResult,
+    type ProtocolMessageParts,
+    type StructuralLinkResult,
+    type StandardCertIntegrityResult,
+    type GenesisCertVerifyResult,
+    type CertificateFetcher,
+    type ChainStepResult,
+    type PureTsChainWalkResult,
 } from "./pureTs";
 
 export { runMithrilBootstrap } from "./bootstrap";

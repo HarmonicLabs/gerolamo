@@ -6,14 +6,17 @@
  *   → tar contains immutable/00000.{chunk,primary,secondary}
  *
  * WASM client lists/verifies only — multi-GB unpack stays here or external bin.
- * Extract path uses fzstd + tar-stream (no system zstd/tar required).
+ * Extract path:
+ *   - Small packs: fzstd + tar-stream (pure-TS, no system tools)
+ *   - Large packs (ancillary ~400MB+): disk-backed system `zstd -d` then
+ *     tar-stream (or system tar). Bun cannot pipe child stdio streams.
  *
- * Memory note: fzstd.decompress loads one chunk archive into heap.
- * Mithril immutable packs are ~MB-scale; streaming Decompress if that grows.
+ * Memory note: fzstd.decompress loads one archive into heap — fine for MB
+ * immutable packs; fails on preprod ancillary (~394MB compressed / ~970MB tar).
  */
 
-import { spawn } from "node:child_process";
-import { createWriteStream, existsSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import {
     access,
     constants as fsConstants,
@@ -31,6 +34,8 @@ import { extract as tarExtract } from "tar-stream";
 
 import type { MithrilCdbSnapshot, MithrilLocation } from "./types";
 
+/** Prefer system zstd when compressed size exceeds this (fzstd heap + large-frame issues). */
+export const FZSTD_MAX_BYTES = 64 * 1024 * 1024; // 64 MiB
 export function padImmutableNo(n: number): string {
     return n.toString().padStart(5, "0");
 }
@@ -90,15 +95,26 @@ export async function downloadToFile(
     return file.size;
 }
 
+function hasSystemZstd(): boolean {
+    try {
+        const r = spawnSync("zstd", ["--version"], {
+            encoding: "utf8",
+            timeout: 5_000,
+        });
+        return r.status === 0;
+    } catch {
+        return false;
+    }
+}
+
 /**
- * Pure-TS: decompress .tar.zst bytes and extract file entries under root.
- * Rejects path traversal outside root.
+ * Stream tar entries from a Readable into root. Rejects path traversal.
+ * Used by both pure-TS (in-memory tar) and disk-backed (file stream) paths.
  */
-export async function extractTarZstToDir(
-    zstBytes: Uint8Array,
+async function extractTarStreamToDir(
+    tarReadable: Readable,
     root: string,
 ): Promise<string[]> {
-    const tarBytes = decompress(zstBytes);
     const rootAbs = resolve(root);
     const written: string[] = [];
 
@@ -117,66 +133,144 @@ export async function extractTarZstToDir(
         };
 
         ex.on("entry", (header, stream, next) => {
-            const chunks: Buffer[] = [];
-            stream.on("data", (c: Buffer | Uint8Array) => {
-                chunks.push(Buffer.isBuffer(c) ? c : Buffer.from(c));
-            });
-            stream.on("error", fail);
-            stream.on("end", () => {
-                void (async () => {
-                    try {
-                        const type = header.type as string | undefined;
-                        const isFile =
-                            type === "file" ||
-                            type === "File" ||
-                            type === "0" ||
-                            type === undefined ||
-                            type === null;
-                        if (isFile && header.name) {
-                            // normalize + reject traversal
-                            const rel = header.name.replace(/^\.?\//, "");
-                            if (
-                                rel.includes("..") ||
-                                rel.startsWith("/") ||
-                                rel.includes("\0")
-                            ) {
-                                throw new Error(
-                                    `Refusing unsafe tar path: ${header.name}`,
-                                );
-                            }
-                            const dest = resolve(rootAbs, rel);
-                            if (
-                                dest !== rootAbs &&
-                                !dest.startsWith(rootAbs + "/")
-                            ) {
-                                throw new Error(
-                                    `Refusing path escape: ${header.name}`,
-                                );
-                            }
-                            await mkdir(dirname(dest), { recursive: true });
-                            const buf = Buffer.concat(chunks);
-                            await writeFile(dest, buf);
-                            written.push(rel);
-                        } else {
-                            // drain non-file entries
-                            stream.resume();
-                        }
-                        next();
-                    } catch (e) {
-                        fail(e);
-                    }
-                })();
-            });
+            const type = header.type as string | undefined;
+            const isFile =
+                type === "file" ||
+                type === "File" ||
+                type === "0" ||
+                type === undefined ||
+                type === null;
+
+            if (!isFile || !header.name) {
+                stream.resume();
+                stream.on("end", () => next());
+                stream.on("error", fail);
+                return;
+            }
+
+            // normalize + reject traversal
+            const rel = header.name.replace(/^\.?\//, "");
+            if (
+                rel.includes("..") ||
+                rel.startsWith("/") ||
+                rel.includes("\0")
+            ) {
+                stream.resume();
+                fail(new Error(`Refusing unsafe tar path: ${header.name}`));
+                return;
+            }
+            const dest = resolve(rootAbs, rel);
+            if (dest !== rootAbs && !dest.startsWith(rootAbs + "/")) {
+                stream.resume();
+                fail(new Error(`Refusing path escape: ${header.name}`));
+                return;
+            }
+
+            void (async () => {
+                try {
+                    await mkdir(dirname(dest), { recursive: true });
+                    const out = createWriteStream(dest);
+                    await pipeline(stream, out);
+                    written.push(rel);
+                    next();
+                } catch (e) {
+                    fail(e);
+                }
+            })();
         });
         ex.on("finish", done);
         ex.on("error", fail);
-
-        const r = Readable.from([Buffer.from(tarBytes)]);
-        r.on("error", fail);
-        r.pipe(ex);
+        tarReadable.on("error", fail);
+        tarReadable.pipe(ex);
     });
 
     return written;
+}
+
+/**
+ * Disk-backed extract: system `zstd -d` → temp .tar → tar-stream into root.
+ * Two-step (no Bun child stdio pipes). Prefer for large ancillary archives.
+ */
+export async function extractTarZstFromFile(
+    zstPath: string,
+    root: string,
+    opts?: { log?: (msg: string) => void },
+): Promise<string[]> {
+    const log = opts?.log ?? (() => {});
+    const zstAbs = resolve(zstPath);
+    if (!existsSync(zstAbs)) {
+        throw new Error(`extractTarZstFromFile: missing ${zstAbs}`);
+    }
+    if (!hasSystemZstd()) {
+        throw new Error(
+            "extractTarZstFromFile: system zstd not found (needed for large archives)",
+        );
+    }
+
+    const tarPath = zstAbs.replace(/\.zst$/i, "") + ".tmp.tar";
+    // If input is foo.tar.zst → foo.tar.tmp.tar is ugly; prefer sibling .tar
+    const tarOut = zstAbs.endsWith(".tar.zst")
+        ? zstAbs.slice(0, -4) // strip .zst → .tar
+        : tarPath;
+
+    try {
+        log(`  system zstd -d ${zstAbs} → ${tarOut}`);
+        const dec = spawnSync(
+            "zstd",
+            ["-d", "-f", "-o", tarOut, zstAbs],
+            {
+                encoding: "utf8",
+                // large ancillary ~1GB tar; give room
+                timeout: 600_000,
+                maxBuffer: 16 * 1024 * 1024,
+            },
+        );
+        if (dec.status !== 0) {
+            throw new Error(
+                `zstd -d failed (status=${dec.status}): ${dec.stderr || dec.stdout || "no output"}`,
+            );
+        }
+        if (!existsSync(tarOut)) {
+            throw new Error(`zstd -d produced no tar at ${tarOut}`);
+        }
+
+        log(`  tar-stream extract ${tarOut} → ${root}`);
+        const written = await extractTarStreamToDir(
+            createReadStream(tarOut),
+            root,
+        );
+        return written;
+    } finally {
+        await rm(tarOut, { force: true }).catch(() => {});
+    }
+}
+
+/**
+ * Decompress .tar.zst and extract file entries under root.
+ *
+ * - In-memory fzstd path for small buffers (immutable chunks).
+ * - Falls back to message if fzstd fails — callers with a file path should
+ *   use extractTarZstFromFile instead for large archives.
+ * Rejects path traversal outside root.
+ */
+export async function extractTarZstToDir(
+    zstBytes: Uint8Array,
+    root: string,
+): Promise<string[]> {
+    let tarBytes: Uint8Array;
+    try {
+        tarBytes = decompress(zstBytes);
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(
+            `fzstd decompress failed (${msg}). ` +
+                `For large archives use extractTarZstFromFile (system zstd disk path).`,
+        );
+    }
+    return extractTarStreamToDir(
+        Readable.from([Buffer.from(tarBytes)]),
+        root,
+    );
 }
 
 /**
@@ -289,12 +383,13 @@ export function ancillaryUrlFromSnapshot(snap: MithrilCdbSnapshot): string | nul
 }
 
 /**
- * Download + pure-TS extract ancillary archive into downloadDir.
+ * Download + extract ancillary archive into downloadDir.
  *
  * Honesty:
  *   - Does NOT apply UTxO (A2 blocked) — only lands files for probeAncillaryLedger
- *   - Archive can be ~1GB; download streams to disk; extract uses fzstd (heap load of tar)
- *   - Prefer --include-ancillary only when you have RAM/disk headroom
+ *   - Archive ~394MB compressed / ~970MB tar — uses disk-backed system zstd
+ *     (fzstd fails on this size; Bun cannot pipe child stdio)
+ *   - Prefer --include-ancillary only when you have disk headroom
  */
 export async function downloadAncillary(opts: {
     snapshot: MithrilCdbSnapshot;
@@ -320,14 +415,24 @@ export async function downloadAncillary(opts: {
         url.split("/").pop()?.replace(/\.tar\.zst$/i, "") || "ancillary";
     const zstPath = join(archivesDir, `${base}.tar.zst`);
 
-    log(`GET ancillary ${url}`);
-    const bytes = await downloadToFile(url, zstPath);
-    log(`  saved ${zstPath} (${bytes} bytes)`);
+    // Reuse on-disk archive if present and non-empty (avoid re-download)
+    let bytes = 0;
+    if (existsSync(zstPath)) {
+        const existing = Bun.file(zstPath);
+        bytes = existing.size;
+        if (bytes > 0) {
+            log(`  reuse on-disk ancillary ${zstPath} (${bytes} bytes)`);
+        }
+    }
+    if (bytes === 0) {
+        log(`GET ancillary ${url}`);
+        bytes = await downloadToFile(url, zstPath);
+        log(`  saved ${zstPath} (${bytes} bytes)`);
+    }
 
-    // Extract into root; typical layout: ledger/<slot>/{state,meta,tables/…}
-    log(`  pure-TS fzstd+tar-stream extract ancillary → ${root}`);
-    const zstBuf = new Uint8Array(await Bun.file(zstPath).arrayBuffer());
-    const written = await extractTarZstToDir(zstBuf, root);
+    // Large archive: disk-backed system zstd → tar-stream (no fzstd heap)
+    log(`  system zstd + tar-stream extract ancillary → ${root}`);
+    const written = await extractTarZstFromFile(zstPath, root, { log });
     log(`  extracted ${written.length} ancillary entries`);
 
     if (!opts.keepArchive) {

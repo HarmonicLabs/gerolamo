@@ -7,11 +7,17 @@ export {
     probeAncillaryLedger,
     sniffFileHead,
     guessFormatFromHead,
+    resolveTablesPath,
+    streamTablesHead,
     streamTvarHead,
+    scanAncillaryTablesHead,
     scanAncillaryTvarHead,
+    sampleTablesMapFromHead,
     type AncillaryProbeResult,
+    type AncillaryMeta,
     type FileSniff,
     type LazyShape,
+    type TablesHeadScanResult,
     type TvarHeadScanResult,
 } from "./mithril";
 export { processChunk } from "./legacy";

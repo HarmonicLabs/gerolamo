@@ -8,20 +8,16 @@
  *
  * Honesty:
  *   - tag2 AdaOnly fully decoded (lovelace + stake cred + addr28)
- *   - tag0 Compact: addr SBS + AdaOnly value fully; MultiAsset body partial
- *   - tag1/3/4/5: tag + addr/value prefix only — datum/script/MA body blocked
+ *   - tag0 Compact: CompactAddr (base/enterprise) + AdaOnly fully;
+ *     MultiAsset lovelace + asset triples (policy/name/qty) when rep parses
+ *   - tag1/3/4/5: prefix + optional MA; datum/script body still blocked
  *   - utxoExtracted stays false until full TxOut → DB path exists
  *
  * Sources: docs/a2-utxohd-mem-codec-research.md
  *   - lehins/mempack Tag=Word8, Length=VarLen LEB128, VarLen Word64 LEB128
- *   - cardano-ledger Babbage/Alonzo/Shelley TxOut MemPack
+ *   - cardano-ledger Babbage/Alonzo/Shelley TxOut MemPack, Address.hs, Mary/Value.hs
  *   - ouroboros-consensus InMemory.hs tables CBOR map
  */
-
-export type MemPackCursor = {
-    buf: Uint8Array;
-    off: number;
-};
 
 export type DecodeError = { ok: false; error: string; off: number };
 export type DecodeOk<T> = { ok: true; value: T; next: number };
@@ -33,23 +29,75 @@ export type TxInDecoded = {
 };
 
 export type CredentialKind = "script" | "key";
+export type NetworkId = "mainnet" | "testnet";
+
+/** CompactAddr = serialiseAddr bytes (header + raw 28B hashes, no MemPack cred tags). */
+export type CompactAddrDecoded =
+    | {
+          kind: "base";
+          network: NetworkId;
+          payScript: boolean;
+          stakeScript: boolean;
+          payHashHex: string;
+          stakeHashHex: string;
+      }
+    | {
+          kind: "enterprise";
+          network: NetworkId;
+          payScript: boolean;
+          payHashHex: string;
+      }
+    | {
+          kind: "pointer";
+          network: NetworkId;
+          payScript: boolean;
+          payHashHex: string;
+          slot: bigint;
+          txIx: bigint;
+          certIx: bigint;
+      }
+    | {
+          kind: "byron";
+          header: number;
+          rawLen: number;
+      };
+
+export type MultiAssetTriple = {
+    policyIdHex: string;
+    assetNameHex: string;
+    quantity: bigint;
+};
+
+export type MultiAssetRepDecoded = {
+    numAssets: number;
+    assets: MultiAssetTriple[];
+};
 
 export type CompactValueDecoded =
     | { kind: "ada"; lovelace: bigint }
-    | { kind: "multiAsset"; lovelace: bigint; restOff: number; restLen: number };
+    | {
+          kind: "multiAsset";
+          lovelace: bigint;
+          numAssets: number;
+          assets: MultiAssetTriple[];
+          /** true when MA header + rep SBS fully consumed in the value blob */
+          repFullyDecoded: boolean;
+      };
 
 export type TxOutDecoded =
     | {
           tag: 0;
           variant: "TxOutCompact";
-          addr: Uint8Array;
+          addrRaw: Uint8Array;
+          addr: CompactAddrDecoded | null;
           value: CompactValueDecoded;
           fullyConsumed: boolean;
       }
     | {
           tag: 1;
           variant: "TxOutCompactDH";
-          addr: Uint8Array;
+          addrRaw: Uint8Array;
+          addr: CompactAddrDecoded | null;
           value: CompactValueDecoded;
           dataHashHex?: string;
           fullyConsumed: boolean;
@@ -76,9 +124,9 @@ export type TxOutDecoded =
     | {
           tag: 4;
           variant: "TxOutCompactDatum";
-          addr: Uint8Array;
+          addrRaw: Uint8Array;
+          addr: CompactAddrDecoded | null;
           value: CompactValueDecoded;
-          /** Datum bytes remain — not decoded yet. */
           restOff: number;
           restLen: number;
           fullyConsumed: false;
@@ -86,7 +134,8 @@ export type TxOutDecoded =
     | {
           tag: 5;
           variant: "TxOutCompactRefScript";
-          addr: Uint8Array;
+          addrRaw: Uint8Array;
+          addr: CompactAddrDecoded | null;
           value: CompactValueDecoded;
           restOff: number;
           restLen: number;
@@ -107,23 +156,29 @@ export type UtxoEntryPartial = {
 
 // ── MemPack primitives ──────────────────────────────────────────────────────
 
-/** LEB128 unsigned (MemPack VarLen Word / Length). */
+/**
+ * MemPack VarLen / Length (unsigned).
+ *
+ * NOT standard LEB128 (LSB-first). lehins/mempack uses MSB-first 7-bit groups:
+ *   packIntoCont7 writes high chunks first with continuation bit 0x80;
+ *   unpack7BitVarLen does `acc = (acc << 7) | (b & 0x7f)` until cont bit clear.
+ *
+ * Examples: 45 → `2d`; 208 → `8150`; 218 → `815a`.
+ */
 export function readVarLenU(
     buf: Uint8Array,
     off: number,
 ): DecodeResult<bigint> {
     if (off >= buf.length) return { ok: false, error: "varLen eof", off };
-    let result = 0n;
-    let shift = 0n;
+    let acc = 0n;
     let pos = off;
     for (let i = 0; i < 10; i++) {
         if (pos >= buf.length) {
             return { ok: false, error: "varLen truncated", off: pos };
         }
         const b = buf[pos++]!;
-        result |= BigInt(b & 0x7f) << shift;
-        if ((b & 0x80) === 0) return { ok: true, value: result, next: pos };
-        shift += 7n;
+        acc = (acc << 7n) | BigInt(b & 0x7f);
+        if ((b & 0x80) === 0) return { ok: true, value: acc, next: pos };
     }
     return { ok: false, error: "varLen too long", off };
 }
@@ -138,7 +193,7 @@ export function readTag(buf: Uint8Array, off: number): DecodeResult<number> {
 export function readShortByteString(
     buf: Uint8Array,
     off: number,
-    maxLen = 256,
+    maxLen = 65_536,
 ): DecodeResult<Uint8Array> {
     const lenR = readVarLenU(buf, off);
     if (!lenR.ok) return lenR;
@@ -158,19 +213,43 @@ export function readShortByteString(
     return { ok: true, value: buf.subarray(start, end), next: end };
 }
 
-/** Fixed-width big-endian Word16 (TxIx in tables key bytes). */
-export function readWord16BE(
+/** Host-endian Word16 (MemPack / Mary MA offsets — LE on x86). */
+export function readWord16LE(
     buf: Uint8Array,
     off: number,
 ): DecodeResult<number> {
     if (off + 2 > buf.length) {
-        return { ok: false, error: "w16 eof", off };
+        return { ok: false, error: "w16le eof", off };
     }
     return {
         ok: true,
-        value: (buf[off]! << 8) | buf[off + 1]!,
+        value: buf[off]! | (buf[off + 1]! << 8),
         next: off + 2,
     };
+}
+
+/** Host-endian Word64 (MemPack MA quantities — LE on x86). */
+export function readWord64LE(
+    buf: Uint8Array,
+    off: number,
+): DecodeResult<bigint> {
+    if (off + 8 > buf.length) {
+        return { ok: false, error: "w64le eof", off };
+    }
+    const lo =
+        buf[off]! |
+        (buf[off + 1]! << 8) |
+        (buf[off + 2]! << 16) |
+        (buf[off + 3]! << 24);
+    const hi =
+        buf[off + 4]! |
+        (buf[off + 5]! << 8) |
+        (buf[off + 6]! << 16) |
+        (buf[off + 7]! << 24);
+    // >>> 0 for unsigned 32-bit
+    const value =
+        (BigInt(hi >>> 0) << 32n) | BigInt(lo >>> 0);
+    return { ok: true, value, next: off + 8 };
 }
 
 /** CompactForm Coin = packTagM 0 >> VarLen Word64. */
@@ -188,47 +267,6 @@ export function readCompactFormCoin(
         };
     }
     return readVarLenU(buf, tag.next);
-}
-
-/**
- * Mary CompactValue (no nested CompactForm Coin tag on ada):
- *   tag0 → VarLen lovelace
- *   tag1 → VarLen lovelace + MultiAsset body (rest opaque here)
- */
-export function readCompactValue(
-    buf: Uint8Array,
-    off: number,
-): DecodeResult<CompactValueDecoded> {
-    const tag = readTag(buf, off);
-    if (!tag.ok) return tag;
-    if (tag.value === 0) {
-        const coin = readVarLenU(buf, tag.next);
-        if (!coin.ok) return coin;
-        return {
-            ok: true,
-            value: { kind: "ada", lovelace: coin.value },
-            next: coin.next,
-        };
-    }
-    if (tag.value === 1) {
-        const coin = readVarLenU(buf, tag.next);
-        if (!coin.ok) return coin;
-        return {
-            ok: true,
-            value: {
-                kind: "multiAsset",
-                lovelace: coin.value,
-                restOff: coin.next,
-                restLen: buf.length - coin.next,
-            },
-            next: coin.next, // body not consumed
-        };
-    }
-    return {
-        ok: false,
-        error: `CompactValue unexpected tag ${tag.value}`,
-        off,
-    };
 }
 
 /** Credential = packTagM 0 script | 1 key  >> 28-byte hash. */
@@ -260,6 +298,279 @@ export function readCredential(
     };
 }
 
+// ── CompactAddr (serialiseAddr) ─────────────────────────────────────────────
+
+/**
+ * Decode CompactAddr bytes from Address.hs putAddr / decodeAddrStateLenientT.
+ *
+ * Header bits (Shelley):
+ *   bit0 network (1=mainnet)
+ *   bit4 payment is script
+ *   bit5 stake is script (base) OR enterprise when bit6 set
+ *   bit6 not base (pointer or enterprise)
+ * Byron: header 0x82
+ */
+export function decodeCompactAddr(
+    bytes: Uint8Array,
+): DecodeResult<CompactAddrDecoded> {
+    if (bytes.length < 1) {
+        return { ok: false, error: "empty CompactAddr", off: 0 };
+    }
+    const h = bytes[0]!;
+    // Byron: 0b10000010
+    if (h === 0x82 || (h & 0x80) !== 0) {
+        return {
+            ok: true,
+            value: { kind: "byron", header: h, rawLen: bytes.length },
+            next: bytes.length,
+        };
+    }
+    // unused Shelley header bits 2–3 must be 0 (headerNonShelleyBits check)
+    if ((h & 0x0c) !== 0) {
+        return {
+            ok: false,
+            error: `invalid Shelley header bits: 0x${h.toString(16)}`,
+            off: 0,
+        };
+    }
+
+    const network: NetworkId = (h & 1) !== 0 ? "mainnet" : "testnet";
+    const payScript = (h & (1 << 4)) !== 0;
+    const bit5 = (h & (1 << 5)) !== 0;
+    const notBase = (h & (1 << 6)) !== 0;
+
+    if (!notBase) {
+        // base: header + pay28 + stake28 = 57
+        if (bytes.length !== 57) {
+            return {
+                ok: false,
+                error: `base addr len ${bytes.length} !== 57`,
+                off: 0,
+            };
+        }
+        return {
+            ok: true,
+            value: {
+                kind: "base",
+                network,
+                payScript,
+                stakeScript: bit5,
+                payHashHex: bytesToHex(bytes.subarray(1, 29)),
+                stakeHashHex: bytesToHex(bytes.subarray(29, 57)),
+            },
+            next: 57,
+        };
+    }
+
+    if (bit5) {
+        // enterprise (StakeRefNull): header + pay28 = 29
+        if (bytes.length !== 29) {
+            return {
+                ok: false,
+                error: `enterprise addr len ${bytes.length} !== 29`,
+                off: 0,
+            };
+        }
+        return {
+            ok: true,
+            value: {
+                kind: "enterprise",
+                network,
+                payScript,
+                payHashHex: bytesToHex(bytes.subarray(1, 29)),
+            },
+            next: 29,
+        };
+    }
+
+    // pointer: header + pay28 + varlen slot/txIx/certIx
+    if (bytes.length < 29) {
+        return { ok: false, error: "pointer addr too short", off: 0 };
+    }
+    let p = 29;
+    const slot = readVarLenU(bytes, p);
+    if (!slot.ok) return slot;
+    p = slot.next;
+    const txIx = readVarLenU(bytes, p);
+    if (!txIx.ok) return txIx;
+    p = txIx.next;
+    const certIx = readVarLenU(bytes, p);
+    if (!certIx.ok) return certIx;
+    p = certIx.next;
+    if (p !== bytes.length) {
+        return {
+            ok: false,
+            error: `pointer leftover ${bytes.length - p} bytes`,
+            off: p,
+        };
+    }
+    return {
+        ok: true,
+        value: {
+            kind: "pointer",
+            network,
+            payScript,
+            payHashHex: bytesToHex(bytes.subarray(1, 29)),
+            slot: slot.value,
+            txIx: txIx.value,
+            certIx: certIx.value,
+        },
+        next: p,
+    };
+}
+
+// ── MultiAsset compact rep (Mary/Value.hs) ──────────────────────────────────
+
+/**
+ * Decode CompactValueMultiAsset `rep` ShortByteString.
+ *
+ * Layout (host-endian Word16/Word64 — LE on x86):
+ *   A) n × Word64 quantities
+ *   B) n × Word16 policyId offsets (into whole rep)
+ *   C) n × Word16 assetName offsets (into whole rep)
+ *   D) policyId blob (28B each, unique)
+ *   E) asset name blob (sorted, unique) + padding
+ *
+ * Asset name length = next greater name offset − this offset
+ * (or rep.length − offset). Empty names point at end of E.
+ */
+export function decodeMultiAssetRep(
+    rep: Uint8Array,
+    numAssets: number,
+): DecodeResult<MultiAssetRepDecoded> {
+    if (numAssets < 0 || numAssets > 1_000_000) {
+        return { ok: false, error: `numAssets ${numAssets}`, off: 0 };
+    }
+    const n = numAssets;
+    const headerBytes = 12 * n; // 8 + 2 + 2
+    if (rep.length < headerBytes) {
+        return {
+            ok: false,
+            error: `rep short ${rep.length} < ${headerBytes}`,
+            off: 0,
+        };
+    }
+
+    const qtys: bigint[] = [];
+    const polOff: number[] = [];
+    const nameOff: number[] = [];
+    let p = 0;
+    for (let i = 0; i < n; i++) {
+        const q = readWord64LE(rep, p);
+        if (!q.ok) return q;
+        qtys.push(q.value);
+        p = q.next;
+    }
+    for (let i = 0; i < n; i++) {
+        const o = readWord16LE(rep, p);
+        if (!o.ok) return o;
+        polOff.push(o.value);
+        p = o.next;
+    }
+    for (let i = 0; i < n; i++) {
+        const o = readWord16LE(rep, p);
+        if (!o.ok) return o;
+        nameOff.push(o.value);
+        p = o.next;
+    }
+
+    // unique sorted name offsets → lengths (Mary from())
+    const uniqueNameOffs = [...new Set(nameOff)].sort((a, b) => a - b);
+    const nameLen = new Map<number, number>();
+    for (let i = 0; i < uniqueNameOffs.length; i++) {
+        const cur = uniqueNameOffs[i]!;
+        const next =
+            i + 1 < uniqueNameOffs.length
+                ? uniqueNameOffs[i + 1]!
+                : rep.length;
+        nameLen.set(cur, Math.max(0, next - cur));
+    }
+
+    const assets: MultiAssetTriple[] = [];
+    for (let i = 0; i < n; i++) {
+        const po = polOff[i]!;
+        const no = nameOff[i]!;
+        if (po + 28 > rep.length) {
+            return {
+                ok: false,
+                error: `policy offset ${po} OOB`,
+                off: po,
+            };
+        }
+        const len = nameLen.get(no) ?? 0;
+        if (no + len > rep.length) {
+            return {
+                ok: false,
+                error: `name offset ${no}+${len} OOB`,
+                off: no,
+            };
+        }
+        assets.push({
+            policyIdHex: bytesToHex(rep.subarray(po, po + 28)),
+            assetNameHex: bytesToHex(rep.subarray(no, no + len)),
+            quantity: qtys[i]!,
+        });
+    }
+
+    return {
+        ok: true,
+        value: { numAssets: n, assets },
+        next: rep.length,
+    };
+}
+
+/**
+ * Mary CompactValue:
+ *   tag0 → VarLen lovelace
+ *   tag1 → VarLen lovelace ‖ VarLen numMA ‖ ShortByteString rep
+ */
+export function readCompactValue(
+    buf: Uint8Array,
+    off: number,
+): DecodeResult<CompactValueDecoded> {
+    const tag = readTag(buf, off);
+    if (!tag.ok) return tag;
+    if (tag.value === 0) {
+        const coin = readVarLenU(buf, tag.next);
+        if (!coin.ok) return coin;
+        return {
+            ok: true,
+            value: { kind: "ada", lovelace: coin.value },
+            next: coin.next,
+        };
+    }
+    if (tag.value === 1) {
+        const coin = readVarLenU(buf, tag.next);
+        if (!coin.ok) return coin;
+        const nma = readVarLenU(buf, coin.next);
+        if (!nma.ok) return nma;
+        const numAssets = Number(nma.value);
+        const repS = readShortByteString(buf, nma.next);
+        if (!repS.ok) return repS;
+        const ma = decodeMultiAssetRep(repS.value, numAssets);
+        if (!ma.ok) {
+            // keep lovelace + empty assets but report failure as decode error
+            return ma;
+        }
+        return {
+            ok: true,
+            value: {
+                kind: "multiAsset",
+                lovelace: coin.value,
+                numAssets,
+                assets: ma.value.assets,
+                repFullyDecoded: true,
+            },
+            next: repS.next,
+        };
+    }
+    return {
+        ok: false,
+        error: `CompactValue unexpected tag ${tag.value}`,
+        off,
+    };
+}
+
 // ── TxIn / TxOut ────────────────────────────────────────────────────────────
 
 /**
@@ -284,6 +595,23 @@ export function decodeTxInKey(key: Uint8Array): DecodeResult<TxInDecoded> {
     };
 }
 
+function decodeAddrField(
+    raw: Uint8Array,
+): { addr: CompactAddrDecoded | null; addrOk: boolean } {
+    const d = decodeCompactAddr(raw);
+    if (!d.ok) return { addr: null, addrOk: false };
+    return { addr: d.value, addrOk: true };
+}
+
+function valueFullyConsumed(
+    value: CompactValueDecoded,
+    valueEnd: number,
+    blobLen: number,
+): boolean {
+    if (value.kind === "ada") return valueEnd === blobLen;
+    return value.repFullyDecoded && valueEnd === blobLen;
+}
+
 /** Decode one MemPack TxOut value blob (Babbage-compatible tags 0–5). */
 export function decodeTxOutValue(
     val: Uint8Array,
@@ -297,22 +625,23 @@ export function decodeTxOutValue(
     let off = tagR.next;
 
     if (tag === 0 || tag === 1) {
-        const addr = readShortByteString(val, off);
-        if (!addr.ok) return addr;
-        off = addr.next;
+        const addrRaw = readShortByteString(val, off);
+        if (!addrRaw.ok) return addrRaw;
+        off = addrRaw.next;
+        const { addr } = decodeAddrField(addrRaw.value);
         const value = readCompactValue(val, off);
         if (!value.ok) return value;
         off = value.next;
 
         if (tag === 0) {
-            const fully =
-                value.value.kind === "ada" && off === val.length;
+            const fully = valueFullyConsumed(value.value, off, val.length);
             return {
                 ok: true,
                 value: {
                     tag: 0,
                     variant: "TxOutCompact",
-                    addr: addr.value,
+                    addrRaw: addrRaw.value,
+                    addr,
                     value: value.value,
                     fullyConsumed: fully,
                 },
@@ -320,25 +649,30 @@ export function decodeTxOutValue(
             };
         }
 
-        // tag 1: optional dataHash (32 bytes) after value when ada-only;
-        // multiAsset leaves rest opaque.
+        // tag 1: DataHash (32 raw bytes) after value when remaining is exactly 32
         let dataHashHex: string | undefined;
         let fully = false;
-        if (value.value.kind === "ada" && off + 32 <= val.length) {
-            // DataHash is MemPack of SafeHash — typically raw 32 bytes after value
-            // when remaining is exactly 32. If more remains, leave partial.
-            if (off + 32 === val.length) {
-                dataHashHex = bytesToHex(val.subarray(off, off + 32));
-                off += 32;
-                fully = true;
-            }
+        if (value.value.kind === "ada" && off + 32 === val.length) {
+            dataHashHex = bytesToHex(val.subarray(off, off + 32));
+            off += 32;
+            fully = true;
+        } else if (
+            value.value.kind === "multiAsset" &&
+            off + 32 === val.length
+        ) {
+            dataHashHex = bytesToHex(val.subarray(off, off + 32));
+            off += 32;
+            fully = value.value.repFullyDecoded;
+        } else {
+            fully = valueFullyConsumed(value.value, off, val.length);
         }
         return {
             ok: true,
             value: {
                 tag: 1,
                 variant: "TxOutCompactDH",
-                addr: addr.value,
+                addrRaw: addrRaw.value,
+                addr,
                 value: value.value,
                 dataHashHex,
                 fullyConsumed: fully,
@@ -398,23 +732,21 @@ export function decodeTxOutValue(
     }
 
     if (tag === 4 || tag === 5) {
-        const addr = readShortByteString(val, off);
-        if (!addr.ok) return addr;
-        off = addr.next;
+        const addrRaw = readShortByteString(val, off);
+        if (!addrRaw.ok) return addrRaw;
+        off = addrRaw.next;
+        const { addr } = decodeAddrField(addrRaw.value);
         const value = readCompactValue(val, off);
         if (!value.ok) return value;
-        // datum / script remain
-        const restOff =
-            value.value.kind === "multiAsset"
-                ? value.value.restOff
-                : value.next;
+        const restOff = value.next;
         if (tag === 4) {
             return {
                 ok: true,
                 value: {
                     tag: 4,
                     variant: "TxOutCompactDatum",
-                    addr: addr.value,
+                    addrRaw: addrRaw.value,
+                    addr,
                     value: value.value,
                     restOff,
                     restLen: val.length - restOff,
@@ -428,7 +760,8 @@ export function decodeTxOutValue(
             value: {
                 tag: 5,
                 variant: "TxOutCompactRefScript",
-                addr: addr.value,
+                addrRaw: addrRaw.value,
+                addr,
                 value: value.value,
                 restOff,
                 restLen: val.length - restOff,
@@ -498,7 +831,6 @@ function readCborHdr(buf: Uint8Array, off: number): CborHdr | null {
             0;
         pos += 4;
     } else if (ai === 27) {
-        // 64-bit — only support values that fit JS number safely for lengths
         if (pos + 8 > buf.length) return null;
         const hi =
             ((buf[pos]! << 24) |
@@ -515,7 +847,7 @@ function readCborHdr(buf: Uint8Array, off: number): CborHdr | null {
         pos += 8;
         len = hi * 2 ** 32 + lo;
     } else if (ai === 31) {
-        len = -1; // indefinite
+        len = -1;
     } else {
         return null;
     }
@@ -527,6 +859,12 @@ export type TablesDecodeStats = {
     byTag: Record<number, number>;
     tag2FullyConsumed: number;
     tag0AdaFullyConsumed: number;
+    tag0MaFullyConsumed: number;
+    addrBase: number;
+    addrEnterprise: number;
+    addrPointer: number;
+    addrByron: number;
+    maAssetsDecoded: number;
     decodeErrors: number;
     samples: UtxoEntryPartial[];
     /** Always false — scaffold does not insert UTxO rows. */
@@ -548,6 +886,12 @@ export function decodeTablesHeadEntries(
         byTag: {},
         tag2FullyConsumed: 0,
         tag0AdaFullyConsumed: 0,
+        tag0MaFullyConsumed: 0,
+        addrBase: 0,
+        addrEnterprise: 0,
+        addrPointer: 0,
+        addrByron: 0,
+        maAssetsDecoded: 0,
         decodeErrors: 0,
         samples: [],
         utxoExtracted: false,
@@ -564,7 +908,6 @@ export function decodeTablesHeadEntries(
     while (off < head.length - 2 && stats.scanned < limit) {
         const kHdr = readCborHdr(head, off);
         if (!kHdr) break;
-        // break
         if (kHdr.major === 7 && kHdr.ai === 31) break;
         if (kHdr.major !== 2 || kHdr.len == null || kHdr.len < 0) break;
         const key = head.subarray(kHdr.next, kHdr.next + kHdr.len);
@@ -583,24 +926,35 @@ export function decodeTablesHeadEntries(
             stats.decodeErrors++;
             continue;
         }
-        const tag =
-            typeof entry.value.txOut.tag === "number"
-                ? entry.value.txOut.tag
-                : -1;
+        const txOut = entry.value.txOut;
+        const tag = typeof txOut.tag === "number" ? txOut.tag : -1;
         stats.byTag[tag] = (stats.byTag[tag] ?? 0) + 1;
 
-        if (
-            entry.value.txOut.tag === 2 &&
-            entry.value.txOut.fullyConsumed
-        ) {
+        if (txOut.tag === 2 && txOut.fullyConsumed) {
             stats.tag2FullyConsumed++;
         }
-        if (
-            entry.value.txOut.tag === 0 &&
-            entry.value.txOut.fullyConsumed
-        ) {
-            stats.tag0AdaFullyConsumed++;
+        if (txOut.tag === 0 && txOut.fullyConsumed) {
+            if (txOut.value.kind === "ada") stats.tag0AdaFullyConsumed++;
+            else stats.tag0MaFullyConsumed++;
         }
+
+        // addr + MA stats — narrow by variant (unknown has neither addr nor value)
+        if (
+            txOut.variant === "TxOutCompact" ||
+            txOut.variant === "TxOutCompactDH" ||
+            txOut.variant === "TxOutCompactDatum" ||
+            txOut.variant === "TxOutCompactRefScript"
+        ) {
+            const a = txOut.addr;
+            if (a?.kind === "base") stats.addrBase++;
+            else if (a?.kind === "enterprise") stats.addrEnterprise++;
+            else if (a?.kind === "pointer") stats.addrPointer++;
+            else if (a?.kind === "byron") stats.addrByron++;
+            if (txOut.value.kind === "multiAsset") {
+                stats.maAssetsDecoded += txOut.value.assets.length;
+            }
+        }
+
         if (stats.samples.length < sampleLimit) {
             stats.samples.push(entry.value);
         }

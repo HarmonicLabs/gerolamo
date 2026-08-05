@@ -1,7 +1,7 @@
 # A2 utxohd-mem codec research (tablesCodecVersion = 1)
 
-**Status (2026-08):** research + decode **scaffold** done.  
-**`utxoExtracted` stays `false`** — no DB UTxO inserts, no full MultiAsset/datum/script decode.
+**Status (2026-08):** research + decode scaffold **extended** (CompactAddr + MultiAsset rep).  
+**`utxoExtracted` stays `false`** — no DB UTxO inserts; datum/script body still blocked.
 
 ---
 
@@ -37,27 +37,74 @@ Each key/value is a **CBOR bstr** whose payload is **MemPack**, not nested CBOR 
 | Artifact | Where |
 |----------|--------|
 | Snapshot meta / `utxohd-mem` / `TablesCodecVersion1` | `ouroboros-consensus` `Storage/LedgerDB/Snapshots.hs` |
-| Write/read tables CBOR map | `…/LedgerDB/V2/InMemory.hs` (`valuesMKEncoder` / `valuesMKDecoder`) |
-| Streaming yield/sink | `…/Cardano/StreamingLedgerTables.hs` — `encodeMemPack` / `decodeMemPack` |
-| UTxO-HD overview | `docs/…/utxo-hd/utxo-hd_in_depth.md` |
+| Write/read tables CBOR map | `…/LedgerDB/V2/InMemory.hs` |
 | `TxIn` MemPack | `cardano-ledger` `Cardano/Ledger/TxIn.hs` |
 | `BabbageTxOut` MemPack tags 0–5 | `…/Babbage/TxOut.hs` |
-| `AlonzoTxOut` tags 0–3 + `Addr28Extra` | `…/Alonzo/TxOut.hs` |
 | `CompactForm Coin` | `…/Coin.hs` — `packTagM 0 >> VarLen` |
 | `CompactValue` (Mary) | `…/Mary/Value.hs` — **no** nested Coin tag on ada |
-| `Credential` | `…/Credential.hs` — tag0 script / tag1 key + 28B hash |
-| `CompactAddr` | `…/Address.hs` — newtype SBS (`serialiseAddr`) |
+| `CompactAddr` / `serialiseAddr` | `…/Address.hs` — header + raw 28B hashes |
+| MultiAsset compact `rep` | `…/Mary/Value.hs` `from` / diagram A–E |
 | MemPack primitives | `lehins/mempack` `Data/MemPack.hs` |
 
 ### MemPack wire rules (verified)
 
 | Primitive | Encoding |
 |-----------|----------|
-| `Tag` / `packTagM` | **1× Word8** (`packedTagByteCount = 1`) |
-| `VarLen Word64` | **LEB128** (7-bit groups, high bit continue) |
-| `Length` (SBS) | `VarLen` of byte length |
+| `Tag` / `packTagM` | **1× Word8** |
+| `VarLen` / `Length` | **MSB-first 7-bit groups** (NOT LEB128). High chunk first; cont bit `0x80`. Ex: `45→2d`, `208→8150` |
 | `ShortByteString` | `Length` ‖ raw bytes |
-| `Word64` (Addr28 words) | **8-byte native** (host endian in GHC; treat as opaque 32B block) |
+| `Word16` / `Word64` in MA rep | **host endian** (LE on x86) |
+
+> **Pitfall (2026-08):** LEB128 (LSB-first) misreads large MA `Length` as huge values (`0x8150` → 10241 instead of 208) → `sbs truncated`. Fix is MSB-first `readVarLenU`.
+
+---
+
+## CompactAddr (`serialiseAddr`)
+
+Header bits (Shelley):
+
+| Bit | Meaning |
+|-----|---------|
+| 0 | network (1 = mainnet) |
+| 4 | payment is script |
+| 5 | stake is script (base) **or** enterprise when bit6 set |
+| 6 | not base (pointer or enterprise) |
+| 7 | Byron when set (`0x82`) |
+
+| Kind | Layout | Len |
+|------|--------|-----|
+| base | header ‖ pay28 ‖ stake28 | **57** |
+| enterprise | header ‖ pay28 | **29** |
+| pointer | header ‖ pay28 ‖ varlen slot/txIx/certIx | variable |
+| byron | Byron CBOR blob | variable |
+
+**No** MemPack credential tags inside CompactAddr — hashes are raw 28 bytes.
+
+Live spike (tag0/4/5, n≈4356): base **1496** · enterprise **2859** · byron **1** · fail **1**.
+
+---
+
+## MultiAsset compact `rep` (Mary)
+
+```text
+tag1 CompactValueMultiAsset:
+  packTagM 1 >> VarLen lovelace >> VarLen numMA >> ShortByteString rep
+```
+
+`rep` layout (offsets relative to **start of rep**):
+
+```text
+A) n × Word64 quantities          (LE)
+B) n × Word16 policyId offsets    (LE)
+C) n × Word16 assetName offsets   (LE)
+D) policyId blob (28B each, unique)
+E) asset names blob (sorted unique) + padding
+```
+
+Asset name length = next greater name offset − this offset (or `rep.length − offset`).  
+Empty names point at end of E.
+
+Live spike: MA header+rep parse **ok** on samples (`NIGHT` / policy `387c0fb5…`).
 
 ---
 
@@ -65,37 +112,19 @@ Each key/value is a **CBOR bstr** whose payload is **MemPack**, not nested CBOR 
 
 ```text
 tag0 TxOutCompact'        → CompactAddr ‖ CompactValue
-tag1 TxOutCompactDH'      → CompactAddr ‖ CompactValue ‖ DataHash
+tag1 TxOutCompactDH'      → CompactAddr ‖ CompactValue ‖ DataHash?
 tag2 AddrHash28_AdaOnly   → Credential ‖ Addr28Extra(32) ‖ CompactForm Coin
 tag3 AddrHash28_AdaOnly_DH32 → Cred ‖ Addr28 ‖ Coin ‖ DataHash32(32)
-tag4 TxOutCompactDatum    → CompactAddr ‖ CompactValue ‖ Datum
-tag5 TxOutCompactRefScript→ CompactAddr ‖ CompactValue ‖ Datum ‖ Script
+tag4 TxOutCompactDatum    → CompactAddr ‖ CompactValue ‖ Datum…
+tag5 TxOutCompactRefScript→ CompactAddr ‖ CompactValue ‖ Datum ‖ Script…
 ```
 
-### CompactValue (Mary) — important
+### CompactValue
 
 ```text
-tag0 AdaOnly     → VarLen lovelace          (NOT CompactForm Coin’s extra tag)
-tag1 MultiAsset  → VarLen lovelace ‖ VarLen numMA ‖ rep…
+tag0 AdaOnly     → VarLen lovelace
+tag1 MultiAsset  → VarLen lovelace ‖ VarLen numMA ‖ SBS(rep)
 ```
-
-`CompactForm Coin` (used by tag2/3) **does** use `packTagM 0 >> VarLen`.
-
----
-
-## Live spike (preprod tables head, n=4811)
-
-| Tag | Count | Scaffold result |
-|-----|------:|-----------------|
-| 0 | 2755 | Ada-only fully consumed **1668**; MA partial **1087**; fail **0** |
-| 1 | 102 | prefix only |
-| 2 | 1098 | **1098/1098 fully consumed** (lovelace + cred + addr28) |
-| 3 | 2 | rare |
-| 4 | 778 | addr+value ok; datum body blocked |
-| 5 | 76 | addr+value ok; datum+script blocked |
-
-Sample tag2: `cred=key`, `lovelace=48284929`, `payHash=f72d0e90…`.  
-Sample tag0 ada: `addrLen=29`, `addr0=0x60`, `lovelace=245029510`, fully consumed.
 
 ---
 
@@ -103,9 +132,9 @@ Sample tag0 ada: `addrLen=29`, `addr0=0x60`, `lovelace=245029510`, fully consume
 
 | Path | Role |
 |------|------|
-| `src/state/utxohdMemCodec.ts` | MemPack primitives + TxIn/TxOut scaffold + head entry decoder |
+| `src/state/utxohdMemCodec.ts` | MemPack + CompactAddr + MA rep + TxIn/TxOut + head scanner |
 | `src/state/mithril.ts` | probe/stream only; **no** UTxO insert |
-| `src/state/index.ts` | re-exports scaffold |
+| `src/state/index.ts` | re-exports |
 
 ---
 
@@ -113,11 +142,12 @@ Sample tag0 ada: `addrLen=29`, `addr0=0x60`, `lovelace=245029510`, fully consume
 
 | Done | Not done |
 |------|----------|
-| Research + tag map | MultiAsset `rep` body |
-| TxIn 34B keys | Datum / RefScript MemPack |
-| tag2 full structural decode | CompactAddr → bech32/hex address |
-| tag0 ada lovelace | Full 940MB stream→DB |
-| `utxoExtracted: false` forced | `utxoExtracted: true` |
+| Research + tag map | Datum / RefScript MemPack |
+| TxIn 34B keys | CompactAddr → bech32 |
+| tag2 full structural | Full 940MB stream→DB |
+| CompactAddr base/enterprise/pointer | `utxoExtracted: true` |
+| MultiAsset triples (policy/name/qty) | Checksum verify on full tables |
+| `utxoExtracted: false` forced | |
 
 **Density (immutable chunks) ≠ UTxO extract.** Do not fake UTxO row counts.
 
@@ -125,8 +155,7 @@ Sample tag0 ada: `addrLen=29`, `addr0=0x60`, `lovelace=245029510`, fully consume
 
 ## Next (when resuming A2)
 
-1. CompactAddr (`serialiseAddr`) → payment/stake credentials  
-2. MultiAsset map body  
-3. Datum + script MemPack  
-4. Streaming full `tables` → Gerolamo `utxo` with checksum verify  
-5. Only then flip `utxoExtracted`  
+1. Datum + script MemPack  
+2. bech32 address encode (optional)  
+3. Streaming full `tables` → Gerolamo `utxo` with checksum  
+4. Only then flip `utxoExtracted`  

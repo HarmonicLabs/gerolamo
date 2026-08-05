@@ -20,4 +20,22 @@ export {
     type TablesHeadScanResult,
     type TvarHeadScanResult,
 } from "./mithril";
+export {
+    decodeTablesHeadEntries,
+    decodeTxInKey,
+    decodeTxOutValue,
+    decodeUtxoEntry,
+    readVarLenU,
+    readTag,
+    readShortByteString,
+    readCompactFormCoin,
+    readCompactValue,
+    readCredential,
+    type TxInDecoded,
+    type TxOutDecoded,
+    type UtxoEntryPartial,
+    type TablesDecodeStats,
+    type CompactValueDecoded,
+    type DecodeResult,
+} from "./utxohdMemCodec";
 export { processChunk } from "./legacy";

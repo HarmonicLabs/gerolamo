@@ -41,12 +41,15 @@ Artifacts clients care about:
 
 | Piece | Reality |
 |-------|---------|
-| `mithril-bootstrap` CLI | Spawns external **`mithril-client`** binary; sets aggregator + genesis vkey |
-| Download/verify | **Delegated** to that binary — Gerolamo does **not** verify STM multi-sigs itself |
+| `src/mithril/*` | Hybrid client: WASM list/verify + pure-TS download/extract |
+| `mithril-bootstrap` CLI | `--engine wasm\|bin\|auto` → `runMithrilBootstrap` |
+| Cert chain | **IOG** `@mithril-dev/mithril-client-wasm` (`verify_certificate_chain`) — not pure-TS STM |
+| Download/extract | HTTP + **fzstd** + **tar-stream** (no system `zstd`/`tar`) |
+| `--engine bin` | Optional external `mithril-client` for full multi-GB restore |
 | Density after download | `processChunk` / batch hydrate on **immutable** dir |
 | `load-ancillary` / `mithril.ts` | **A2 blocked**: indefinite CBOR + `SubCborRef` + OOM on full `tvar`; honest early-exit, no fake UTxO |
 
-Honesty already in CLI comments: *does NOT reimplement cert verification*.
+Honesty: we do **not** reimplement Mithril STM multi-sigs in TypeScript (Phase 4 only if needed).
 
 ---
 
@@ -106,66 +109,106 @@ Download snapshot URLs from aggregator JSON **without** cert chain.
 
 ## Recommended roadmap
 
-### Phase 0 — Documented hybrid (now)
+### Phase 0 — Documented hybrid ✅ DONE
 
-- External `mithril-client` for Cardano DB restore  
+- External `mithril-client` path retained as `--engine bin`  
 - Gerolamo batch apply for soft state  
 - Ancillary: **do not claim** UTxO load (A2)  
-- Lab: one-click = install client → bootstrap → batch-hydrate progress  
 
-### Phase 1 — In-process verify (WASM)
+### Phase 1 — In-process verify (WASM) ✅ DONE
 
-1. Depend on `@mithril-dev/mithril-client-wasm` (Node target).  
-2. Implement: genesis vkey fetch, aggregator endpoint by network, `verify_certificate_chain` for selected snapshot cert.  
-3. Download: either keep CLI for multi-GB `download_unpack`, or use Rust lib via sidecar if WASM lacks full fs pipeline.  
-4. Wire feedback events → structured logs / Lab poll.  
-5. Tests: preprod fixture cert hash + known snapshot digest (no full mainnet in CI).
+1. Depend on `@mithril-dev/mithril-client-wasm` 0.10.8 (Node target).  
+2. `src/mithril/client.ts`: genesis vkey fetch, aggregator by network, `list_cardano_database_v2`, `verify_certificate_chain`.  
+3. CLI: `mithril-bootstrap --engine wasm|bin|auto`.  
+4. Smoke: preprod list + cert chain OK (logged).  
 
-### Phase 2 — Cardano DB v2 digests / range restore
+**Not pure-TS crypto** — cert verify stays in IOG WASM (correct; see Phase 4).
 
-Match Rust example flow:
+### Phase 2 — Cardano DB download / range restore ✅ DONE (partial honesty)
 
-- `cardano_database_v2().get`  
-- `certificate().verify_chain`  
-- `download_unpack` (+ optional ancillary flag)  
-- `download_and_verify_digests` / `verify_cardano_database`  
-- `MessageBuilder` + `certificate.match_message`  
+| Done | Not done yet |
+|------|----------------|
+| `get_cardano_database_v2` for locations | Full multi-GB parallel restore UX |
+| HTTP download of immutable `{n}.tar.zst` | `download_and_verify_digests` / merkle message match beyond chain verify |
+| Pure-TS unpack: **fzstd** + **tar-stream** | Ancillary download/apply (A2 blocked) |
+| `--from-chunk` / `--to-chunk` / `--limit-chunks` | Lab progress UI polish |
+| Optional `processChunk` apply after download | |
 
-Then point `--chunks` at unpacked `immutable`.
+```text
+src/mithril/
+  types.ts       # snapshot / bootstrap option shapes
+  client.ts      # WASM wrapper (list + verify)
+  download.ts    # HTTP + fzstd + tar-stream + bin fallback
+  bootstrap.ts   # engine orchestration
+  index.ts       # public barrel
+cli: mithril-bootstrap --engine wasm|bin|auto --limit-chunks N
+```
 
-### Phase 3 — Ancillary / ledger state (hard)
+### Phase 3 — Ancillary / ledger state 🟡 PARTIAL (UTxO still A2)
 
-Separate from “client”:
+| Done | Not done |
+|------|----------|
+| `probeAncillaryLedger` — hex sniff (`guessFormatFromHead` / `sniffFileHead`) + LazyCbor top of `state`/`meta` | Full UTxO extract from `tables/tvar` |
+| `downloadAncillary` — HTTP + fzstd/tar-stream (~397MB zst / ~1GB unpack) | Streaming CBOR walker for indefinite maps |
+| CLI `--include-ancillary` + bootstrap wire + probe after land | Instant UTxO hydrate claim |
+| Honest `utxoExtracted: false` always | |
 
-- Streaming CBOR reader for indefinite maps / `SubCborRef`  
-- Or convert snapshot flavors with IOG tools  
-- Or **ignore ancillary** forever and only chunk-replay (current winning path)
-
+**Still blocked (A2):** nested indefinite CBOR + ~800MB–1GB `tvar` OOM if fully unwrapped.  
+Density path remains immutable chunks (`processChunk` / `read-raw-chunks`).  
 **A2 is an adapter problem, not an aggregator problem.**
 
-### Phase 4 — Optional pure-TS crypto
+```text
+src/state/mithril.ts     # probe + hex sniff + load-ancillary (probe JSON only)
+src/mithril/download.ts  # downloadAncillary / findAncillaryLedgerDir
+cli: mithril-bootstrap --include-ancillary
+cli: load-ancillary <ledgerPath>
+```
 
-Only if WASM packaging is unacceptable; port verify path with dual-run vs WASM like KES cutover.
+Ancillary URL (preprod, HEAD 200 ~397MB):  
+`…/cardano-database/ancillary/preprod-e305-i6024.ancillary.tar.zst`
+
+### Phase 4 — Optional pure-TS crypto 🟡 SCAFFOLD ONLY
+
+| Done | Not done |
+|------|----------|
+| WASM `verifyCertificateChain` / message-match wrappers | Pure-TS STM multi-sig |
+| `cryptoInventory()` — BLS primitives present vs STM gaps listed | Dual-run `match: true` on real certs |
+| `dualRun.ts` — pure-TS always `implemented: false` | Cert chain rules port |
+| BLS12-381 in deps (`@harmoniclabs/crypto` millerLoop/finalVerify; `@noble/curves` pairing) | Genesis vkey + message encoding in pure-TS |
+| Research spike: dual-run stages + golden-vector plan | Actual STM port |
+
+**WASM remains SoT.** Do not claim pure-TS verify works. Port only if WASM packaging is a product blocker (KES-style dual-run cutover).
+
+**Full spike write-up:** [`docs/phase-4-pure-ts-crypto-research.md`](./phase-4-pure-ts-crypto-research.md)
+
+```text
+src/mithril/dualRun.ts
+  cryptoInventory()                 → primitives vs mithrilGaps[]
+  pureTsVerifyCertificateChain()    → always refuses
+  dualRunCertificateChain(client,h) → wasm SoT + stub side channel (match=false)
+docs/phase-4-pure-ts-crypto-research.md  → inventory, gaps, dual-run stages 0–4
+```
 
 ---
 
 ## What “done” means for Gerolamo
 
-| Claim | Requires |
-|-------|----------|
-| “Mithril bootstrap built-in” | Phase 1–2: verify + obtain immutable dir without manual CLI folklore |
-| “Trustless snapshot” | Full cert chain to genesis vkey + message match |
-| “Instant UTxO from Mithril ledger” | Phase 3 adapter **or** finished chunk soft-apply |
+| Claim | Status |
+|-------|--------|
+| “Mithril bootstrap built-in” | ✅ Phase 1–2: verify + obtain immutable dir without manual CLI folklore |
+| “Trustless snapshot” | 🟡 Cert chain to genesis vkey ✅; full digest/message match still thin |
+| “Instant UTxO from Mithril ledger” | ❌ Phase 3 A2 — probe/download only; use chunk soft-apply |
 | “Replaces cardano-node” | **Never** Mithril’s job |
+| “Pure-TS Mithril crypto” | ❌ Scaffold only; WASM certs by design |
 
 ---
 
-## Concrete next engineering steps (when hydrate idle)
+## Concrete next engineering steps
 
-1. Spike: `bun` load `@mithril-dev/mithril-client-wasm` Node target; list preprod snapshots; verify one cert chain (no download).  
-2. Compare digest list API vs what `mithril-bootstrap` already passes to CLI.  
-3. Design Lab progress: cert validate → download % → batch-hydrate %.  
-4. Leave ancillary until streaming CBOR exists; keep `mithril.ts` blocker text.
+1. Lab progress: cert validate → download % → batch-hydrate %.  
+2. Optional: compute digests + `verify_message_match_certificate` after unpack.  
+3. Phase 3 UTxO: streaming LazyCbor walker for `tvar` (hard; separate spike).  
+4. Phase 4 pure-TS STM only if WASM is blocked in product.
 
 ---
 

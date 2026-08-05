@@ -33,33 +33,45 @@ Parity with Dolos is **not** “same binary”; it is “same *jobs* a dApp/wall
 
 ## HTTP / Mini-Blockfrost
 
-### Implemented (`handleMiniBlockfrost`)
+### Implemented (`handleMiniBlockfrost` v0.2.0)
 
 | Method | Path | Honest limits |
 |--------|------|----------------|
-| GET | `/api/v0` | Lists endpoints + `note: subset` |
+| GET | `/api/v0` | Lists endpoints + `version: 0.2.0` + subset note |
 | GET | `/api/v0/health` | `{ is_healthy: true }` only |
 | GET | `/api/v0/epochs/latest` | tip_slot, utxo_count, epoch_nonce; many BF fields `null` |
 | GET | `/api/v0/epochs/latest/parameters` | Needs `protocol_params` row; else empty note |
 | GET | `/api/v0/blocks/latest` | From tip slot |
 | GET | `/api/v0/blocks/{slot\|hash}` | Slot or 64-hex |
+| GET | `/api/v0/blocks/{slot\|hash}/txs` | Tx hashes from `block_tx` (empty until backfill) |
 | GET | `/api/v0/addresses/{addr}/utxos` | Page/count; **no** datum/script/block fields filled |
+| GET | `/api/v0/addresses/{addr}/transactions` | From `address_tx` (output-side only until spend join) |
+| GET | `/api/v0/txs/{hash}` | From `tx_index` — fees/slot/size subset; many BF fields `null` |
 | GET | `/api/v0/txs/{hash}/utxos` | **Unspent only** — not full tx IO |
 | GET | `/api/v0/txs/{hash}/utxos/{index}` | Single unspent out |
-| POST | `/api/v0/tx/submit` | Plus legacy `POST /txsubmit` |
+| GET | `/api/v0/mempool` | Local SharedMempool snapshot (not full BF mempool shape) |
+| POST | `/api/v0/tx/submit` | Returns `hash` = blake2b_256(raw body); + legacy `POST /txsubmit` |
+| WS | `/ws/stats` | Ops stream: tip/peers/metrics/governor (not a Mini-BF WS) |
+
+**Indexes:** `tx_index` / `address_tx` / `block_tx` created empty on DB init. Populate off hot path:
+
+```bash
+bun scripts/backfill-tx-index.mjs --db .live/test.db
+# never dual-write soak `.hydrate/batch.db` while hydrate runs
+```
 
 ### Missing for BF / Dolos-like wallets (high value first)
 
-1. **Tx by hash** — full body, fees, block, invalid_hereafter, redeemers, metadata  
+1. **Tx by hash (full)** — body, redeemers, metadata, full IO (index has fee/slot/size subset)  
 2. **Address summary** — total amount, tx_count, received/sent  
-3. **Address txs** — paginated history (needs spend/create index, not just live UTxO)  
-4. **Block txs** — list hashes in block  
-5. **Assets** — by policy/asset, address holdings, txs  
-6. **Scripts / datums / redeemers** — Plutus surface  
-7. **Pools / accounts / delegations / rewards** — stake query plane  
-8. **Metadata labels**, **network**, **genesis**, **mempool** BF shapes  
-9. **Epoch history** — not only “latest”  
-10. **Stable BF field parity** — times, confirmations, output amounts as strings consistently  
+3. **Address txs spend-side** — input-side history needs UTxO join at index time  
+4. **Assets** — by policy/asset, address holdings, txs  
+5. **Scripts / datums / redeemers** — Plutus surface  
+6. **Pools / accounts / delegations / rewards** — stake query plane  
+7. **Metadata labels**, **network**, **genesis** BF shapes  
+8. **Epoch history** — not only “latest”  
+9. **Stable BF field parity** — times, confirmations, output amounts as strings consistently  
+10. **Forward index on apply** — backfill covers history; live apply path does not yet write indexes 
 
 ### Indexing gaps (root cause of many API holes)
 
@@ -100,7 +112,7 @@ Without those, Mini-BF will stay a **tip + UTxO peek**, not an explorer backend.
 | Handshake | `HandshakeResponder` | N2C versions wired |
 | LocalChainSync | `LocalChainSyncHost` | Custom host (lib N2N id workaround) |
 | LocalTxSubmission | `LocalTxSubmitHost` | Present |
-| LocalTxMonitor | `LocalTxMonitorHost` | Present; lib Acquire/Release quirk documented |
+| LocalTxMonitor | `LocalTxMonitorHost` | Present; lib Acquire/GetSizes encode bug — see `docs/OUROBOROS_TXMONITOR_ENCODING_BUG.md` |
 | LocalStateQuery | `LocalStateQueryHost` | **Minimal**: tip / utxoCount / epochNonce map — **not** ledger query CDDL |
 
 **Dolos/Lab gap:** clients that expect full LSQ (UTxO whole, PParams CDDL, stake, gov) will not be satisfied. Either grow LSQ query set from SQLite or document “HTTP Mini-BF only.”

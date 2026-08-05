@@ -1,236 +1,461 @@
-import { join } from "node:path";
-import { readdir } from "node:fs/promises";
-import { resolve } from "node:url";
+/**
+ * Ancillary ledger loader / probe (Mithril Cardano DB snapshot).
+ *
+ * Phase 3 status (honest):
+ * - Download path: optional via mithril-bootstrap --include-ancillary
+ * - Probe path: metadata + hex sniff + safe LazyCbor top of `state` / `meta`
+ * - UTxO extract: still **blocked** — full `tables/tvar` (~800MB–1GB) OOMs;
+ *   nested indefinite maps + deferred blobs are not a simple Object.keys walk
+ *
+ * Density path remains: immutable chunks via processChunk / read-raw-chunks.
+ * Do not claim ancillary UTxO hydrate until a streaming UTxO adapter lands.
+ */
 
-import { sql } from "../sql";
+import { join } from "node:path";
+import { readdir, open } from "node:fs/promises";
+
+import { Cbor, LazyCborArray, LazyCborMap } from "@harmoniclabs/cbor";
+
+export type FileSniff = {
+    size: number;
+    exists: boolean;
+    /** First N bytes as lowercase hex (empty if missing). */
+    headHex: string;
+    /** Best-effort format guess from magic / CBOR major type. */
+    formatGuess: string;
+};
+
+export type LazyShape = {
+    kind: string;
+    indefinite?: boolean;
+    length?: number;
+    note?: string;
+};
+
+export type AncillaryProbeResult = {
+    ledgerPath: string;
+    latestSlotDir: string | null;
+    files: {
+        state: FileSniff;
+        meta: FileSniff;
+        tvar: FileSniff;
+    };
+    /** Top-level LazyCbor shape of `state` (never full unwrap of tvar). */
+    stateShape?: LazyShape;
+    metaShape?: LazyShape;
+    /** Always false until streaming UTxO adapter exists. */
+    utxoExtracted: false;
+    blockedReason: string;
+};
+
+const BLOCKED_REASON =
+    "A2: indefinite CBOR / large tables/tvar — use immutable chunk replay " +
+    "(read-raw-chunks / processChunk) for density. No fake UTxO inserts.";
+
+const EMPTY_SNIFF: FileSniff = {
+    exists: false,
+    size: 0,
+    headHex: "",
+    formatGuess: "missing",
+};
+
+function describeLazy(obj: unknown): LazyShape {
+    if (obj == null) return { kind: "null" };
+    if (obj instanceof LazyCborArray) {
+        return {
+            kind: "LazyCborArray",
+            indefinite: obj.indefinite,
+            length: obj.array.length,
+            note: "elements are raw byte slices (not expanded)",
+        };
+    }
+    if (obj instanceof LazyCborMap) {
+        return {
+            kind: "LazyCborMap",
+            indefinite: obj.indefinite,
+            length: obj.map.length,
+            note: "entries are raw k/v byte slices (not expanded)",
+        };
+    }
+    const name =
+        typeof obj === "object" && obj !== null && "constructor" in obj
+            ? (obj as { constructor?: { name?: string } }).constructor?.name
+            : typeof obj;
+    return { kind: name || typeof obj };
+}
+
+/** Guess file format from first bytes — no full parse. */
+export function guessFormatFromHead(head: Uint8Array): string {
+    if (head.length === 0) return "empty";
+    // zstd magic: 28 B5 2F FD
+    if (
+        head.length >= 4 &&
+        head[0] === 0x28 &&
+        head[1] === 0xb5 &&
+        head[2] === 0x2f &&
+        head[3] === 0xfd
+    ) {
+        return "zstd";
+    }
+    // gzip
+    if (head.length >= 2 && head[0] === 0x1f && head[1] === 0x8b) {
+        return "gzip";
+    }
+    // zlib (common 78 01 / 78 9c / 78 da)
+    if (head.length >= 2 && head[0] === 0x78 && [0x01, 0x9c, 0xda].includes(head[1]!)) {
+        return "zlib";
+    }
+    // sqlite magic "SQLi" (full header is 16 bytes; 4-byte prefix is enough to distinguish)
+    if (
+        head.length >= 4 &&
+        head[0] === 0x53 &&
+        head[1] === 0x51 &&
+        head[2] === 0x4c &&
+        head[3] === 0x69
+    ) {
+        return "sqlite";
+    }
+    // CBOR major type from first byte high 3 bits
+    const major = head[0]! >> 5;
+    const cborMajors = [
+        "cbor_uint",
+        "cbor_nint",
+        "cbor_bytes",
+        "cbor_text",
+        "cbor_array",
+        "cbor_map",
+        "cbor_tag",
+        "cbor_simple_float",
+    ];
+    // Indefinite length marker: additional info = 31 (0x1f in low 5 bits)
+    const ai = head[0]! & 0x1f;
+    const indef = ai === 31 ? "_indef" : "";
+    if (major >= 0 && major <= 7) {
+        return `${cborMajors[major]}${indef}`;
+    }
+    return `unknown_0x${head[0]!.toString(16).padStart(2, "0")}`;
+}
+
+/** Read first `n` bytes of a file for sniffing (no full load). */
+export async function sniffFileHead(
+    path: string,
+    n = 64,
+): Promise<{ exists: boolean; size: number; head: Uint8Array }> {
+    try {
+        const fh = await open(path, "r");
+        try {
+            const st = await fh.stat();
+            const size = st.size;
+            if (size === 0) {
+                return { exists: true, size: 0, head: new Uint8Array(0) };
+            }
+            const buf = Buffer.alloc(Math.min(n, size));
+            const { bytesRead } = await fh.read(buf, 0, buf.length, 0);
+            return {
+                exists: true,
+                size,
+                head: new Uint8Array(buf.buffer, buf.byteOffset, bytesRead),
+            };
+        } finally {
+            await fh.close();
+        }
+    } catch {
+        return { exists: false, size: 0, head: new Uint8Array(0) };
+    }
+}
+
+function toSniff(s: {
+    exists: boolean;
+    size: number;
+    head: Uint8Array;
+}): FileSniff {
+    if (!s.exists) return { ...EMPTY_SNIFF };
+    return {
+        exists: true,
+        size: s.size,
+        headHex: Buffer.from(s.head).toString("hex"),
+        formatGuess: guessFormatFromHead(s.head),
+    };
+}
 
 /**
- * Ancillary ledger loader (Mithril Cardano DB snapshot).
- *
- * A2 BLOCKER (2026-07-17, local preprod snapshot):
- * - `state` is CborArray(2) NewEpochState-shaped, not JSON maps with `.utxo` keys.
- * - Nested indefinite CborMaps + `SubCborRef` deferred blobs; map entries not
- *   iterable via simple Object.keys / Map.entries after `@harmoniclabs/cbor` parse.
- * - Full unwrap of ~800MB `tables/tvar` OOMs in Bun.
- * - No TxIn-keyed UTxO pair-list found in walkable state (largest hit was
- *   unrelated pair-list keys all `n1`).
- *
- * Density path today: immutable chunks via `processChunk` / `read-raw-chunks`
- * (Path 1). Do not claim ancillary UTxO hydrate until a streaming/deferred
- * CBOR reader lands. Stock mithril-client is still correct for file download —
- * the gap is adapter, not client.
+ * Probe ancillary ledger dir without loading full tvar into UTxO tables.
+ * Safe: hex sniff always; LazyCbor-parse small `state`/`meta` only under size cap.
+ */
+export async function probeAncillaryLedger(
+    ledgerPath: string,
+    opts: { maxParseBytes?: number; sniffBytes?: number; log?: (msg: string) => void } = {},
+): Promise<AncillaryProbeResult> {
+    const log = opts.log ?? console.log;
+    const maxParse = opts.maxParseBytes ?? 64 * 1024 * 1024; // 64 MiB soft cap for state/meta only
+    const sniffN = opts.sniffBytes ?? 64;
+
+    log(`Probing ancillary ledger at ${ledgerPath}…`);
+    let dirs: string[] = [];
+    try {
+        dirs = await readdir(ledgerPath);
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        throw new Error(`Cannot read ledger path ${ledgerPath}: ${msg}`);
+    }
+
+    const slotDirs = dirs
+        .map((d) => parseInt(d, 10))
+        .filter((n) => Number.isFinite(n) && n >= 0);
+    const latestSlot =
+        slotDirs.length > 0 ? Math.max(...slotDirs) : null;
+    const latestLedgerDirPath =
+        latestSlot != null ? join(ledgerPath, String(latestSlot)) : null;
+
+    if (!latestLedgerDirPath) {
+        log("No numeric slot directories under ledger path");
+        return {
+            ledgerPath,
+            latestSlotDir: null,
+            files: {
+                state: { ...EMPTY_SNIFF },
+                meta: { ...EMPTY_SNIFF },
+                tvar: { ...EMPTY_SNIFF },
+            },
+            utxoExtracted: false,
+            blockedReason: BLOCKED_REASON + " (no slot dir)",
+        };
+    }
+
+    log(`Using ledger snapshot dir: ${latestLedgerDirPath}`);
+
+    const statePath = join(latestLedgerDirPath, "state");
+    const metaPath = join(latestLedgerDirPath, "meta");
+    const tvarPath = join(latestLedgerDirPath, "tables", "tvar");
+
+    const [stateSniff, metaSniff, tvarSniff] = await Promise.all([
+        sniffFileHead(statePath, sniffN),
+        sniffFileHead(metaPath, sniffN),
+        sniffFileHead(tvarPath, sniffN),
+    ]);
+
+    const files = {
+        state: toSniff(stateSniff),
+        meta: toSniff(metaSniff),
+        tvar: toSniff(tvarSniff),
+    };
+
+    log(
+        `Ancillary files: state=${files.state.exists}(${files.state.size},${files.state.formatGuess}) ` +
+            `meta=${files.meta.exists}(${files.meta.size},${files.meta.formatGuess}) ` +
+            `tvar=${files.tvar.exists}(${files.tvar.size},${files.tvar.formatGuess})`,
+    );
+    if (files.state.headHex) log(`  state head: ${files.state.headHex.slice(0, 32)}…`);
+    if (files.meta.headHex) log(`  meta head: ${files.meta.headHex}`);
+    if (files.tvar.headHex) log(`  tvar head: ${files.tvar.headHex.slice(0, 32)}…`);
+
+    const result: AncillaryProbeResult = {
+        ledgerPath,
+        latestSlotDir: latestLedgerDirPath,
+        files,
+        utxoExtracted: false,
+        blockedReason: BLOCKED_REASON,
+    };
+
+    // Safe LazyCbor probe of state/meta only — never full tvar
+    if (files.state.exists && files.state.size > 0 && files.state.size <= maxParse) {
+        try {
+            const bytes = new Uint8Array(await Bun.file(statePath).arrayBuffer());
+            const parsed = Cbor.parseLazy(bytes);
+            result.stateShape = describeLazy(parsed);
+            log(
+                `state LazyCbor: kind=${result.stateShape.kind} ` +
+                    `len=${result.stateShape.length ?? "?"} ` +
+                    `indef=${result.stateShape.indefinite ?? "?"}`,
+            );
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            result.stateShape = {
+                kind: "parse_error",
+                note: `${msg} (formatGuess=${files.state.formatGuess})`,
+            };
+            log(`state LazyCbor probe failed: ${msg}`);
+        }
+    } else if (files.state.exists && files.state.size > maxParse) {
+        result.stateShape = {
+            kind: "skipped",
+            note: `size ${files.state.size} > maxParseBytes ${maxParse}; sniff=${files.state.formatGuess}`,
+        };
+        log(result.stateShape.note!);
+    }
+
+    if (files.meta.exists && files.meta.size > 0 && files.meta.size <= maxParse) {
+        try {
+            const bytes = new Uint8Array(await Bun.file(metaPath).arrayBuffer());
+            const parsed = Cbor.parseLazy(bytes);
+            result.metaShape = describeLazy(parsed);
+            log(
+                `meta LazyCbor: kind=${result.metaShape.kind} ` +
+                    `len=${result.metaShape.length ?? "?"}`,
+            );
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            result.metaShape = {
+                kind: "parse_error",
+                note: `${msg} (formatGuess=${files.meta.formatGuess})`,
+            };
+            log(`meta LazyCbor probe failed: ${msg}`);
+        }
+    }
+
+    if (files.tvar.exists) {
+        log(
+            `tvar present (${files.tvar.size} bytes, sniff=${files.tvar.formatGuess}) — NOT parsed (OOM risk). ` +
+                BLOCKED_REASON,
+        );
+    }
+
+    console.warn("ANCILLARY UTxO EXTRACT BLOCKED: " + BLOCKED_REASON);
+
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// A2 scaffold — streaming tvar *head* only. Never full unwrap. Never UTxO insert.
+// ---------------------------------------------------------------------------
+
+export type TvarHeadScanResult = {
+    path: string;
+    exists: boolean;
+    size: number;
+    /** Bytes actually read (capped). */
+    bytesRead: number;
+    headHex: string;
+    formatGuess: string;
+    /**
+     * Best-effort top-level CBOR major from first byte only.
+     * Not a full parse — OOM-safe.
+     */
+    cborMajorHint: string | null;
+    /** Always false until streaming UTxO adapter exists. */
+    utxoExtracted: false;
+    blockedReason: string;
+};
+
+/**
+ * Read a bounded head of `tables/tvar` for format diagnostics.
+ * Never loads the full ~800MB–1GB file. Never extracts UTxO.
+ */
+export async function streamTvarHead(
+    tvarPath: string,
+    opts: { maxBytes?: number } = {},
+): Promise<TvarHeadScanResult> {
+    const maxBytes = opts.maxBytes ?? 64;
+    const sniff = await sniffFileHead(tvarPath, maxBytes);
+    let cborMajorHint: string | null = null;
+    if (sniff.exists && sniff.head.length > 0) {
+        const major = sniff.head[0]! >> 5;
+        const names = [
+            "uint",
+            "nint",
+            "bstr",
+            "tstr",
+            "array",
+            "map",
+            "tag",
+            "simple/float",
+        ];
+        cborMajorHint = names[major] ?? `major_${major}`;
+        if ((sniff.head[0]! & 0x1f) === 31) {
+            cborMajorHint += "_indef";
+        }
+    }
+    return {
+        path: tvarPath,
+        exists: sniff.exists,
+        size: sniff.size,
+        bytesRead: sniff.head.length,
+        headHex: Buffer.from(sniff.head).toString("hex"),
+        formatGuess: sniff.exists
+            ? guessFormatFromHead(sniff.head)
+            : "missing",
+        cborMajorHint,
+        utxoExtracted: false,
+        blockedReason: BLOCKED_REASON,
+    };
+}
+
+/**
+ * Locate latest slot dir under ledger path and scan `tables/tvar` head only.
+ * Convenience wrapper for A2 diagnostics — still utxoExtracted=false.
+ */
+export async function scanAncillaryTvarHead(
+    ledgerPath: string,
+    opts: { maxBytes?: number } = {},
+): Promise<TvarHeadScanResult & { latestSlotDir: string | null }> {
+    let dirs: string[] = [];
+    try {
+        dirs = await readdir(ledgerPath);
+    } catch {
+        return {
+            path: join(ledgerPath, "tables", "tvar"),
+            exists: false,
+            size: 0,
+            bytesRead: 0,
+            headHex: "",
+            formatGuess: "missing",
+            cborMajorHint: null,
+            utxoExtracted: false,
+            blockedReason: BLOCKED_REASON + " (ledger path unreadable)",
+            latestSlotDir: null,
+        };
+    }
+    const slotDirs = dirs
+        .map((d) => parseInt(d, 10))
+        .filter((n) => Number.isFinite(n) && n >= 0);
+    const latestSlot = slotDirs.length > 0 ? Math.max(...slotDirs) : null;
+    const latestLedgerDirPath =
+        latestSlot != null ? join(ledgerPath, String(latestSlot)) : null;
+    if (!latestLedgerDirPath) {
+        return {
+            path: join(ledgerPath, "tables", "tvar"),
+            exists: false,
+            size: 0,
+            bytesRead: 0,
+            headHex: "",
+            formatGuess: "missing",
+            cborMajorHint: null,
+            utxoExtracted: false,
+            blockedReason: BLOCKED_REASON + " (no slot dir)",
+            latestSlotDir: null,
+        };
+    }
+    const tvarPath = join(latestLedgerDirPath, "tables", "tvar");
+    const scan = await streamTvarHead(tvarPath, opts);
+    return { ...scan, latestSlotDir: latestLedgerDirPath };
+}
+
+/**
+ * CLI entry: probe only. Never inserts UTxO.
+ * Kept name for backward compatibility with `load-ancillary` command.
  */
 export async function loadLedgerStateFromAncilliary(ledgerPath: string) {
-    console.log("Loading ledger state from ancillary files...");
-    const ledgerDirs = await readdir(ledgerPath);
-    if (ledgerDirs.length === 0) {
-        console.log("No ledger directories found");
-        return;
+    const probe = await probeAncillaryLedger(ledgerPath);
+    let tvarHead: TvarHeadScanResult | null = null;
+    if (probe.latestSlotDir) {
+        tvarHead = await streamTvarHead(
+            join(probe.latestSlotDir, "tables", "tvar"),
+        );
     }
-
-    const latestLedgerDir = Math.max(...ledgerDirs.flatMap((dir) => {
-        const ret = parseInt(dir);
-        return isNaN(ret) ? [] : ret;
-    }));
-    const latestLedgerDirPath = resolve(ledgerPath, latestLedgerDir.toString());
-    console.log(`Using ledger snapshot from slot ${latestLedgerDir}: ${latestLedgerDirPath}`);
-
-    const stateFile = Bun.file(join(latestLedgerDirPath, "state"));
-    const metaFile = Bun.file(join(latestLedgerDirPath, "meta"));
-    const tvarFile = Bun.file(join(latestLedgerDirPath, "tables", "tvar"));
-
-    const [stateExists, metaExists, tvarExists] = await Promise.all([
-        stateFile.exists(),
-        metaFile.exists(),
-        tvarFile.exists(),
-    ]);
     console.log(
-        `Ancillary files: state=${stateExists} meta=${metaExists} tvar=${tvarExists}`,
+        JSON.stringify(
+            {
+                utxoExtracted: probe.utxoExtracted,
+                latestSlotDir: probe.latestSlotDir,
+                files: probe.files,
+                stateShape: probe.stateShape,
+                metaShape: probe.metaShape,
+                tvarHead,
+                blockedReason: probe.blockedReason,
+            },
+            null,
+            2,
+        ),
     );
-    if (stateExists) {
-        console.log(`State size: ${stateFile.size} bytes`);
-    }
-    if (tvarExists) {
-        console.log(`TVAR size: ${tvarFile.size} bytes`);
-    }
-
-    console.warn(
-        "ANCILLARY UTxO EXTRACT BLOCKED: indefinite CBOR / SubCborRef — " +
-            "use immutable chunk replay (read-raw-chunks / processChunk) for density.",
-    );
-    // Intentionally no Cbor.parse of full tvar (OOM) and no fake UTxO inserts.
-    return;
-}
-
-/** @deprecated kept for reference; not called — see A2 blocker above */
-async function processLedgerState(stateData: any) {
-    console.log("Processing ledger state...");
-    console.log(
-        "[BLOCKED] Indefinite CBOR maps / SubCborRef prevent UTxO extraction.",
-    );
-
-    let utxoCount = 0;
-    let stakeCount = 0;
-    let delegationCount = 0;
-
-    try {
-        if (stateData.utxo || stateData.utxos) {
-            const utxoSet = stateData.utxo || stateData.utxos;
-            console.log(`Found UTxO set with ${Object.keys(utxoSet).length} entries`);
-            utxoCount = Math.min(Object.keys(utxoSet).length, 10);
-        }
-        if (stateData.stake || stateData.stakes) {
-            const stakeSet = stateData.stake || stateData.stakes;
-            console.log(`Found stake distribution with ${Object.keys(stakeSet).length} entries`);
-            stakeCount = Math.min(Object.keys(stakeSet).length, 10);
-        }
-        if (stateData.delegations || stateData.delegs) {
-            const delegationSet = stateData.delegations || stateData.delegs;
-            console.log(`Found delegations with ${Object.keys(delegationSet).length} entries`);
-            delegationCount = Math.min(Object.keys(delegationSet).length, 10);
-        }
-    } catch (error) {
-        console.error("Error processing ledger state:", error);
-    }
-
-    console.log(`Ledger state processing summary:`);
-    console.log(`- UTxO entries processed: ${utxoCount}`);
-    console.log(`- Stake entries processed: ${stakeCount}`);
-    console.log(`- Delegation entries processed: ${delegationCount}`);
-}
-
-// Type guards and processing functions
-function isUtxoEntry(data: any): data is UtxoEntry {
-    // Look for UTxO-like structure: transaction hash, output index, address, amount
-    return data && typeof data === 'object' &&
-           ((data.tx_hash && data.tx_index !== undefined) ||
-            (data.txHash && data.outputIndex !== undefined)) &&
-           (data.address || data.addr) &&
-           (data.amount || data.value);
-}
-
-function isStakeEntry(data: any): data is StakeEntry {
-    // Look for stake-like structure: stake key/credential and amount
-    return data && typeof data === 'object' &&
-           ((data.stake_key || data.stake_credential || data.credential) &&
-            (data.amount !== undefined || data.value !== undefined));
-}
-
-function isDelegationEntry(data: any): data is DelegationEntry {
-    // Look for delegation-like structure: stake key and pool ID
-    return data && typeof data === 'object' &&
-           ((data.stake_key || data.stake_credential) &&
-            (data.pool_id || data.pool_hash || data.pool));
-}
-
-// Data types (flexible to handle different field names)
-interface UtxoEntry {
-    txHash?: string;
-    tx_hash?: string;
-    outputIndex?: number;
-    tx_index?: number;
-    address?: string;
-    addr?: string;
-    amount?: any;
-    value?: any;
-}
-
-interface StakeEntry {
-    stakeKey?: string;
-    stake_key?: string;
-    stake_credential?: string;
-    credential?: string;
-    amount?: any;
-    value?: any;
-}
-
-interface DelegationEntry {
-    stakeKey?: string;
-    stake_key?: string;
-    stake_credential?: string;
-    poolId?: string;
-    pool_id?: string;
-    pool_hash?: string;
-    pool?: string;
-}
-
-// Processing functions that load data into SQL database
-async function processUtxoEntry(entry: UtxoEntry) {
-    try {
-        // Extract fields with fallbacks
-        const txHash = entry.txHash || entry.tx_hash;
-        const outputIndex = entry.outputIndex ?? entry.tx_index;
-        const address = entry.address || entry.addr;
-        const amount = entry.amount || entry.value;
-
-        if (!txHash || outputIndex === undefined || !address || !amount) {
-            console.log("Skipping incomplete UTxO entry:", entry);
-            return;
-        }
-
-        // Generate UTxO reference
-        const utxoRef = `${txHash}:${outputIndex}`;
-
-        // Convert amount to JSON format expected by database
-        let lovelace = "0";
-        let assets = {};
-
-        if (typeof amount === 'object') {
-            lovelace = (amount.lovelace || amount.coin || amount.value || 0).toString();
-            assets = amount.assets || amount.multiasset || {};
-        } else if (typeof amount === 'number' || typeof amount === 'bigint') {
-            lovelace = amount.toString();
-        }
-
-        const txOut = {
-            address,
-            amount: lovelace,
-            assets,
-        };
-
-        console.log(`Processing UTxO: ${utxoRef}`);
-
-        // Insert into utxo table
-        await sql`INSERT OR IGNORE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${JSON.stringify(txOut)}, ${txHash})`;
-    } catch (error) {
-        console.error("Error processing UTxO entry:", error, entry);
-    }
-}
-
-async function processStakeEntry(entry: StakeEntry) {
-    try {
-        const stakeKey = entry.stakeKey || entry.stake_key || entry.stake_credential || entry.credential;
-        const amount = entry.amount ?? entry.value;
-
-        if (!stakeKey || amount === undefined) {
-            console.log("Skipping incomplete stake entry:", entry);
-            return;
-        }
-
-        console.log(`Processing stake: ${stakeKey}, amount: ${amount}`);
-
-        // Insert into stake table
-        await sql`INSERT OR REPLACE INTO stake (stake_credentials, amount) VALUES (${stakeKey}, ${amount})`;
-    } catch (error) {
-        console.error("Error processing stake entry:", error, entry);
-    }
-}
-
-async function processDelegationEntry(entry: DelegationEntry) {
-    try {
-        const stakeKey = entry.stakeKey || entry.stake_key || entry.stake_credential;
-        const poolId = entry.poolId || entry.pool_id || entry.pool_hash || entry.pool;
-
-        if (!stakeKey || !poolId) {
-            console.log("Skipping incomplete delegation entry:", entry);
-            return;
-        }
-
-        console.log(`Processing delegation: ${stakeKey} -> ${poolId}`);
-
-        // Insert into delegations table
-        await sql`INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash) VALUES (${stakeKey}, ${poolId})`;
-    } catch (error) {
-        console.error("Error processing delegation entry:", error, entry);
-    }
+    return probe;
 }

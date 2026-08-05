@@ -6,10 +6,12 @@ import { dirname, resolve } from "node:path";
  * Shared SQLite SQL client for Gerolamo.
  *
  * Bun's default `import { sql } from "bun"` is Postgres. Gerolamo stores
- * chain state in SQLite (config.dbPath / DATABASE_URL / ./ledger/gerolamo.db).
+ * chain state in SQLite (config.dbPath / DATABASE_URL / ./.live/test.db).
  *
  * Call `initSql(dbPath)` from start() before ensureInitialized().
  * Live ES-module binding: reassignment after init is visible to all importers.
+ *
+ * Default path is the live Mithril-populated DB (not ./ledger/gerolamo.db).
  */
 
 function filenameFromEnvOrDefault(): string {
@@ -21,7 +23,7 @@ function filenameFromEnvOrDefault(): string {
     if (url?.startsWith("file:")) {
         return url.slice("file:".length);
     }
-    return process.env.GEROLAMO_DB_PATH || "./ledger/gerolamo.db";
+    return process.env.GEROLAMO_DB_PATH || "./.live/test.db";
 }
 
 /** Resolved absolute path of the open SQLite file (Bun SQL does not expose options.filename). */

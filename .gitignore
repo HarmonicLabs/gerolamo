@@ -20,10 +20,14 @@ store/
 tx/
 ledger/
 /snapshots/
+.live/
 output/
 scripts/output/
 .vscode
 .github
+
+# Hermes agent local state
+.hermes/
 
 
 # dotenv environment variable files

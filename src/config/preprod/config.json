@@ -10,7 +10,7 @@
   "syncFromPointBlockHash": "0000000000000000000000000000000000000000000000000000000000000000",
   "logLevel": "info",
   "shelleyGenesisFile": "./src/config/preprod/shelley-genesis.json",
-  "dbPath": "./ledger/gerolamo.db",
+  "dbPath": "./.live/test.db",
   "port": 3030,
   "unixSocket": false,
   "n2c": {

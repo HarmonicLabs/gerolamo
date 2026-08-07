@@ -9,8 +9,12 @@
  * Stage 5b: BLS multi-sig aggregate verify (aggregateOk may be true; n=1 identity proven).
  * Stage 5c: certificate-chain walk (chainOk only when genesis reached + Ed25519).
  * Stage 5d: Certificate::try_compute_hash content-hash (contentHashOk may be true).
+ * Stage 5e: Certificate::match_message identity (messageMatchOk; side-channel).
+ * Stage 5f: CDB MessageBuilder bind snapshot merkle_root (cdbMessageMatchOk; side-channel).
+ * Stage 5g: CDB merkle_root from digests MKTree/MMR (cdbMerkleRootOk; side-channel).
  *
- * verified / pureTsStmImplemented / match stay false until dual-run crypto agree.
+ * verified / pureTsStmImplemented stay false until cutover.
+ * dual-run match = wasmOk && Stages 1–5d only (5e/5f/5g are side-channels).
  * WASM remains source of truth for certificate-chain verification.
  *
  * See docs/phase-4-pure-ts-crypto-research.md
@@ -122,3 +126,24 @@ export {
     type CertificateMetadataHashInput,
     type TryComputeCertificateHashResult,
 } from "./certHash";
+
+export {
+    MKTREE_GOLDEN_ROOT_HEX,
+    MKTREE_GOLDEN_LEAVES,
+    blake2s256,
+    mkTreeLeafFromHexDigestString,
+    mkTreeLeafFromUtf8,
+    getPeakMap,
+    getPeaks,
+    bagRhsPeaks,
+    MkTreeMmr,
+    computeMkTreeRootFromLeaves,
+    verifyMkTreeGoldenRoot,
+    immutableFileNumberFromName,
+    filterImmutableDigests,
+    computeCardanoDatabaseMerkleRootFromDigests,
+    verifyCardanoDatabaseMerkleRootFromDigests,
+    type ImmutableFileDigest,
+    type ComputeMkTreeRootResult,
+    type VerifyCardanoDatabaseMerkleRootResult,
+} from "./mkTree";

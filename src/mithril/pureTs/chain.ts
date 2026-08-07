@@ -65,8 +65,36 @@ export const PROTOCOL_MESSAGE_PART_KEY_ORDER = [
 export type ProtocolMessageParts = Record<string, string>;
 
 /**
+ * WASM `@mithril-dev/mithril-client-wasm` returns `message_parts` as a JS `Map`
+ * (JSON.stringify → `{}`, Object.keys → []). HTTP aggregator certs use a plain
+ * object. Normalize both shapes before hashing.
+ */
+export function normalizeProtocolMessageParts(
+    parts: unknown,
+): ProtocolMessageParts {
+    if (parts == null) return {};
+    if (parts instanceof Map) {
+        const out: ProtocolMessageParts = {};
+        for (const [k, v] of parts.entries()) {
+            if (k != null && v != null) out[String(k)] = String(v);
+        }
+        return out;
+    }
+    if (typeof parts === "object" && !Array.isArray(parts)) {
+        const out: ProtocolMessageParts = {};
+        for (const [k, v] of Object.entries(parts as Record<string, unknown>)) {
+            if (v != null) out[k] = String(v);
+        }
+        return out;
+    }
+    return {};
+}
+
+/**
  * SHA-256 hex of protocol_message.message_parts in enum order.
  * Must equal certificate.signed_message for integrity.
+ *
+ * Accepts plain objects (HTTP) and Map (WASM verify_certificate_chain).
  */
 export function computeProtocolMessageHash(
     protocolMessage: unknown,
@@ -75,17 +103,35 @@ export function computeProtocolMessageHash(
         return null;
     }
     const pm = protocolMessage as {
-        message_parts?: ProtocolMessageParts;
+        message_parts?: unknown;
     };
-    const parts = pm.message_parts ?? {};
+    // Some callers may pass message_parts directly
+    const rawParts =
+        pm.message_parts !== undefined
+            ? pm.message_parts
+            : (protocolMessage as unknown);
+    const parts = normalizeProtocolMessageParts(rawParts);
     const h = createHash("sha256");
+    let any = false;
     for (const k of PROTOCOL_MESSAGE_PART_KEY_ORDER) {
         const v = parts[k];
         if (v != null) {
             h.update(k);
             h.update(String(v));
+            any = true;
         }
     }
+    // If Map/object had keys outside our order list, still hash them last so we
+    // don't silently accept empty — but enum order is the SoT when known.
+    if (!any) {
+        const extra = Object.keys(parts).sort();
+        for (const k of extra) {
+            h.update(k);
+            h.update(String(parts[k]));
+            any = true;
+        }
+    }
+    if (!any) return null;
     return h.digest("hex");
 }
 
@@ -277,9 +323,11 @@ export function verifyAvkChaining(
         return curAvk === prevAvk;
     }
 
-    const parts = (prev.protocol_message as { message_parts?: ProtocolMessageParts } | undefined)
-        ?.message_parts;
-    const nextAvk = parts?.next_aggregate_verification_key;
+    const parts = normalizeProtocolMessageParts(
+        (prev.protocol_message as { message_parts?: unknown } | undefined)
+            ?.message_parts,
+    );
+    const nextAvk = parts.next_aggregate_verification_key;
     return typeof nextAvk === "string" && nextAvk === curAvk;
 }
 
@@ -313,12 +361,17 @@ export function verifyParamsChaining(
         );
     }
 
-    const parts = (prev.protocol_message as { message_parts?: ProtocolMessageParts } | undefined)
-        ?.message_parts;
+    const parts = normalizeProtocolMessageParts(
+        (prev.protocol_message as { message_parts?: unknown } | undefined)
+            ?.message_parts,
+    );
     // Different epoch: previous must advertise next_protocol_parameters.
     // Full equality vs hash(current params) needs ProtocolParameters::compute_hash port;
     // presence + current params exist is the structural minimum we enforce today.
-    return typeof parts?.next_protocol_parameters === "string" && parts.next_protocol_parameters.length > 0;
+    return (
+        typeof parts.next_protocol_parameters === "string" &&
+        parts.next_protocol_parameters.length > 0
+    );
 }
 
 function extractParameters(

@@ -98,6 +98,7 @@ export {
     merkleParent,
     merkleSibling,
     PROTOCOL_MESSAGE_PART_KEY_ORDER,
+    normalizeProtocolMessageParts,
     computeProtocolMessageHash,
     verifySignedMessageMatchesProtocolMessage,
     decodeGenesisVkey,

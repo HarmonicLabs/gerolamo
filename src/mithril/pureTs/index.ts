@@ -76,6 +76,7 @@ export {
 
 export {
     PROTOCOL_MESSAGE_PART_KEY_ORDER,
+    normalizeProtocolMessageParts,
     computeProtocolMessageHash,
     verifySignedMessageMatchesProtocolMessage,
     decodeGenesisVkey,

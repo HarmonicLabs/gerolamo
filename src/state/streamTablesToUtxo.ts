@@ -1,18 +1,19 @@
 /**
- * A2 stream tables → Gerolamo `utxo` rows (partial extract).
+ * A2 stream tables → Gerolamo `utxo` rows.
  *
  * Streams CBOR indefinite map from utxohd-mem `tables` file without full unwrap.
  * Inserts fully-decoded entries we can address:
  *   - tag0 TxOutCompact (ada + multiAsset) via CompactAddr → bech32
+ *   - tag1 TxOutCompactDH: same as tag0 + datum_hash (32B DataHash)
  *   - tag2 AddrHash28_AdaOnly via PackedBytes28 BE rebuild → bech32
+ *   - tag3 AddrHash28_AdaOnly_DataHash32: same as tag2 + datum_hash
  *   - tag4 TxOutCompactDatum: same value fields + optional inline_datum hex
  *   - tag5 TxOutCompactRefScript: same value fields + datum/script metadata
  *
  * Honesty:
- *   - tags 1/3 skipped (dataHash-only variants not yet mapped to DB address path)
  *   - datum/script bodies stored as opaque hex/len — no Plutus interpreter
- *   - `utxoExtracted` is true only when stream finishes without hard fail AND
- *     inserted > 0; still partial vs full ledger UTxO set
+ *   - skips only decode failures / non-fullyConsumed envelopes
+ *   - `utxoExtracted` is true when stream finishes without hard fail AND inserted > 0
  *   - does not claim checksum verify of full 940MB tables
  *
  * DB shape matches apply path:
@@ -180,7 +181,7 @@ function valueToAmountAssets(value: CompactValueDecoded): {
 
 /**
  * Map a fully-decoded TxOut to DB row fields, or null if not insertable yet.
- * tag0/2/4/5 when fullyConsumed + addressable; tag1/3 still skipped.
+ * tag0–5 when fullyConsumed + addressable.
  */
 export function txOutToDbRow(
     txIdHex: string,
@@ -193,7 +194,10 @@ export function txOutToDbRow(
     const meta: Partial<TxOutJson> = {};
 
     if (
-        (txOut.tag === 0 || txOut.tag === 4 || txOut.tag === 5) &&
+        (txOut.tag === 0 ||
+            txOut.tag === 1 ||
+            txOut.tag === 4 ||
+            txOut.tag === 5) &&
         txOut.fullyConsumed &&
         txOut.addrRaw
     ) {
@@ -206,7 +210,11 @@ export function txOutToDbRow(
         amount = va.amount;
         assets = va.assets;
 
-        if (txOut.tag === 4) {
+        if (txOut.tag === 1) {
+            // Compact + DataHash (32B) — only insert when hash was consumed
+            if (!txOut.dataHashHex) return null;
+            meta.datum_hash = txOut.dataHashHex;
+        } else if (txOut.tag === 4) {
             // opaque inline BinaryData (Plutus Data CBOR)
             meta.inline_datum = Buffer.from(txOut.inlineDatum).toString("hex");
         } else if (txOut.tag === 5) {
@@ -227,7 +235,10 @@ export function txOutToDbRow(
             );
             meta.script_bytes_len = txOut.script.bytes.length;
         }
-    } else if (txOut.tag === 2 && txOut.fullyConsumed) {
+    } else if (
+        (txOut.tag === 2 || txOut.tag === 3) &&
+        txOut.fullyConsumed
+    ) {
         try {
             address = tag2Addr28ToBech32(txOut);
         } catch {
@@ -235,6 +246,9 @@ export function txOutToDbRow(
         }
         amount = txOut.lovelace.toString();
         assets = {};
+        if (txOut.tag === 3) {
+            meta.datum_hash = txOut.dataHash32Hex;
+        }
     } else {
         return null;
     }

@@ -4,7 +4,9 @@
  * Honesty:
  * - Parses AVK + multi_signature hex→JSON structure from aggregator cert JSON.
  * - Validates field presence, types, and known layout from preprod golden cert.
- * - Does NOT verify STM multi-sig, cert chain, or genesis. verified === false always.
+ * - Genesis certs: empty multi_signature + non-empty genesis_signature is valid shape
+ *   (STM multi-sig N/A; Ed25519 is Stage 5c). verified === false always.
+ * - Does NOT verify STM multi-sig, cert chain, or genesis crypto.
  * - WASM remains source of truth for cryptographic acceptance.
  *
  * Observed preprod layout (testdata/mithril/certs/preprod/latest-verified-chain.json):
@@ -13,9 +15,31 @@
  *     signatures: [ [ { sigma: u8[48], indexes: number[], signer_index }, [ u8[], ... ] ] ],
  *     batch_proof: { values: u8[][], indices: number[], hasher }
  *   }))
+ * Genesis wire (preprod ep196): multi_signature "" + genesis_signature 128-hex; AVK still present.
  */
 
 import type { MithrilCertificate } from "../types";
+
+/**
+ * Genesis shape SoT (aligned with chain.ts isGenesisCertificate):
+ * non-empty genesis_signature and empty/absent multi_signature, OR hash === previous_hash.
+ * Kept local so Stage 1 does not import chain (avoids cycle); logic must stay in lockstep.
+ */
+function isGenesisShapeCert(c: Record<string, unknown>): boolean {
+    const gs = c.genesis_signature;
+    const ms = c.multi_signature;
+    const hasGs = typeof gs === "string" && gs.length > 0;
+    const hasMs = typeof ms === "string" && ms.length > 0;
+    if (hasGs && !hasMs) return true;
+    if (
+        typeof c.hash === "string" &&
+        typeof c.previous_hash === "string" &&
+        c.hash === c.previous_hash
+    ) {
+        return true;
+    }
+    return false;
+}
 
 /** Merkle-tree commitment inside aggregate verification key. */
 export type PureTsAvkMtCommitment = {
@@ -302,8 +326,21 @@ export function parseAndValidateCertificate(
         typeof c.aggregate_verification_key === "string"
             ? c.aggregate_verification_key
             : null;
-    const msHex =
+    // Empty string is wire-normal for genesis — treat as absent for parse.
+    const msHexRaw =
         typeof c.multi_signature === "string" ? c.multi_signature : null;
+    const msHex =
+        msHexRaw != null && msHexRaw.length > 0 ? msHexRaw : null;
+
+    // genesis_signature may be empty string on non-genesis certs (observed preprod)
+    const genesis_signature =
+        typeof c.genesis_signature === "string" && c.genesis_signature.length > 0
+            ? c.genesis_signature
+            : typeof c.genesis_signature === "string"
+              ? c.genesis_signature
+              : null;
+
+    const isGenesis = isGenesisShapeCert(c);
 
     let avk: PureTsAggregateVerificationKey | null = null;
     let ms: PureTsMultiSignature | null = null;
@@ -314,17 +351,38 @@ export function parseAndValidateCertificate(
         try {
             avk = parseAvk(avkHex);
         } catch (e) {
+            // Genesis wire still carries AVK hex-JSON; if decode fails, keep error
+            // (preprod genesis AVK decodes — do not silently drop AVK failures).
             errors.push(e instanceof Error ? e.message : String(e));
         }
     }
 
-    if (!msHex) {
+    if (isGenesis) {
+        // IntersectMBO genesis: multi_signature empty; STM multi-sig N/A.
+        // Do not require ms decode. Leave ms = null.
+        if (msHex) {
+            // Unusual: genesis_signature + multi_signature both set — try parse, non-fatal for shape
+            try {
+                ms = parseMultiSignature(msHex);
+            } catch {
+                /* ignore dual-sig oddity for Stage 1 */
+            }
+        }
+    } else if (!msHex) {
         errors.push("multi_signature: missing");
     } else {
         try {
             ms = parseMultiSignature(msHex);
         } catch (e) {
             errors.push(e instanceof Error ? e.message : String(e));
+        }
+    }
+
+    if (isGenesis) {
+        const gsOk =
+            typeof genesis_signature === "string" && genesis_signature.length > 0;
+        if (!gsOk) {
+            errors.push("genesis_signature: missing on genesis cert");
         }
     }
 
@@ -335,10 +393,6 @@ export function parseAndValidateCertificate(
     } else if (!isHexString(signed_message)) {
         errors.push("signed_message: not hex");
     }
-
-    // genesis_signature may be empty string on non-genesis certs (observed preprod)
-    const genesis_signature =
-        typeof c.genesis_signature === "string" ? c.genesis_signature : null;
 
     const parsed = emptyParsed({
         hash,
@@ -357,11 +411,18 @@ export function parseAndValidateCertificate(
         },
     });
 
-    const shapeOk = errors.length === 0 && avk != null && ms != null;
+    // Standard: need AVK + multi_sig. Genesis: need AVK + genesis_signature; multi_sig N/A.
+    const shapeOk = isGenesis
+        ? errors.length === 0 &&
+          avk != null &&
+          typeof genesis_signature === "string" &&
+          genesis_signature.length > 0
+        : errors.length === 0 && avk != null && ms != null;
     const reason = shapeOk
-        ? "Stage 1 shape OK — AVK + multi_signature decoded; STM verify NOT implemented (verified=false)"
+        ? isGenesis
+            ? "Stage 1 shape OK — genesis (AVK + genesis_signature; multi_signature N/A; verified=false)"
+            : "Stage 1 shape OK — AVK + multi_signature decoded; STM verify NOT implemented (verified=false)"
         : `Stage 1 shape FAILED: ${errors.join("; ")}`;
-
     return {
         shapeOk,
         verified: false,

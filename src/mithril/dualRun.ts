@@ -43,6 +43,7 @@ import {
     walkCertificateChain,
     certificateMatchOwnProtocolMessage,
     verifyCardanoDatabaseMessageMatch,
+    isGenesisCertificate,
     type CertificateFetcher,
     type CertificateMatchMessageResult,
     type PureTsChainWalkResult,
@@ -370,7 +371,10 @@ export async function pureTsVerifyCertificateChain(
         let cdbLocalDigestsOk = false;
         let reason = shape.reason;
 
-        if (shape.shapeOk && shape.parsed.ms) {
+        const isGenesis = isGenesisCertificate(certJson);
+
+        if (shape.shapeOk && shape.parsed.ms && !isGenesis) {
+            // Standard cert: full STM ladder Stages 2–5b
             stmPrep = prepareStmCrypto(shape.parsed.ms);
             cryptoPrepOk = stmPrep.cryptoPrepOk;
             reason = stmPrep.reason;
@@ -402,6 +406,18 @@ export async function pureTsVerifyCertificateChain(
             ) {
                 reason = stmAggregate.reason;
             }
+        } else if (shape.shapeOk && isGenesis) {
+            // Genesis: STM multi-sig Stages 2–5b are N/A (no multi_signature).
+            // SoT: IntersectMBO verify_genesis_certificate = content hash + PM match + Ed25519.
+            // Mark STM stages true so pureTsFullChainStagesOk can pass when chainOk+contentHashOk.
+            // Honesty: implemented/ok stay false; match still requires chain walk to genesis Ed25519.
+            cryptoPrepOk = true;
+            merkleStructOk = true;
+            rootVerified = true;
+            preliminaryOk = true;
+            aggregateOk = true;
+            reason =
+                "Stage 1 genesis shape OK — STM Stages 2–5b N/A (Ed25519 via Stage 5c walk)";
         } else if (shape.shapeOk) {
             reason =
                 "Stage 1 shape OK but multi_signature missing — Stage 2–5b skipped";

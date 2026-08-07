@@ -287,9 +287,11 @@ export function tryComputeCertificateHash(
             : null;
     if (!expected) errors.push("cert.hash missing");
 
+    // SoT: hasher.update(self.previous_hash.as_bytes()) — empty string is valid
+    // (preprod genesis wire: previous_hash === ""). Only reject non-string/absent.
     const previousHash =
         typeof cert.previous_hash === "string" ? cert.previous_hash : null;
-    if (!previousHash) errors.push("previous_hash missing");
+    if (previousHash == null) errors.push("previous_hash missing");
 
     const epoch =
         typeof cert.epoch === "number" && Number.isFinite(cert.epoch)

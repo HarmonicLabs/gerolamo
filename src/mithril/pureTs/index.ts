@@ -8,8 +8,9 @@
  * Stage 5a: STM preliminary (lottery + bounds + k; preliminaryOk may be true).
  * Stage 5b: BLS multi-sig aggregate verify (aggregateOk may be true; n=1 identity proven).
  * Stage 5c: certificate-chain walk (chainOk only when genesis reached + Ed25519).
+ * Stage 5d: Certificate::try_compute_hash content-hash (contentHashOk may be true).
  *
- * verified / pureTsStmImplemented stay false until full chain-to-genesis dual-run soak.
+ * verified / pureTsStmImplemented / match stay false until dual-run crypto agree.
  * WASM remains source of truth for certificate-chain verification.
  *
  * See docs/phase-4-pure-ts-crypto-research.md
@@ -101,3 +102,15 @@ export {
     type ChainStepResult,
     type PureTsChainWalkResult,
 } from "./chain";
+
+export {
+    parseRfc3339Nanos,
+    computeProtocolParametersHash,
+    computeStakePartyHash,
+    computeCertificateMetadataHash,
+    feedSignedEntityType,
+    tryComputeCertificateHash,
+    verifyCertificateContentHash,
+    type CertificateMetadataHashInput,
+    type TryComputeCertificateHashResult,
+} from "./certHash";

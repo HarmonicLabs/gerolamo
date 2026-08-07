@@ -131,6 +131,13 @@ export {
     type CertificateFetcher,
     type ChainStepResult,
     type PureTsChainWalkResult,
+    tryComputeCertificateHash,
+    verifyCertificateContentHash,
+    computeCertificateMetadataHash,
+    computeProtocolParametersHash,
+    parseRfc3339Nanos,
+    type TryComputeCertificateHashResult,
+    type CertificateMetadataHashInput,
 } from "./pureTs";
 
 export { runMithrilBootstrap } from "./bootstrap";

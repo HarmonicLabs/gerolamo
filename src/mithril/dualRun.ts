@@ -8,6 +8,7 @@
  * Stage 5a (done): pure-TS STM preliminary (lottery + bounds + k).
  * Stage 5b (done): pure-TS BLS multi-sig aggregate verify (aggregateOk).
  * Stage 5c (done): pure-TS certificate-chain walk (chainOk only at genesis+Ed25519).
+ * Stage 5d (done): Certificate::try_compute_hash content-hash (contentHashOk).
  *   Still NOT dual-run match / pureTsStmImplemented.
  *
  * Do not claim pure-TS crypto works until PureTsVerifyResult.implemented === true
@@ -39,6 +40,10 @@ import {
     type CertificateFetcher,
     type PureTsChainWalkResult,
 } from "./pureTs/chain";
+import {
+    tryComputeCertificateHash,
+    type TryComputeCertificateHashResult,
+} from "./pureTs/certHash";
 
 export type PureTsVerifyResult = {
     /**
@@ -75,6 +80,11 @@ export type PureTsVerifyResult = {
      * False when only tip+predecessor (no genesis) or genesis vkey missing.
      */
     chainOk: boolean;
+    /**
+     * Stage 5d: Certificate::try_compute_hash recomputes cert.hash
+     * (metadata + PM + AVK + signed_entity + sig feed). Not dual-run match.
+     */
+    contentHashOk: boolean;
     reason: string;
     certShape?: PureTsCertParseResult;
     stmPrep?: PureTsStmCryptoPrepResult;
@@ -82,6 +92,7 @@ export type PureTsVerifyResult = {
     stmPrelim?: PureTsStmPreliminaryResult;
     stmAggregate?: PureTsStmAggregateResult;
     chainWalk?: PureTsChainWalkResult;
+    contentHash?: TryComputeCertificateHashResult;
 };
 
 export type DualRunVerifyResult = {
@@ -126,6 +137,8 @@ export type CryptoInventory = {
     pureTsStmAggregate: boolean;
     /** Stage 5c certificate-chain walk (structural + per-cert STM + genesis Ed25519). */
     pureTsCertChainWalk: boolean;
+    /** Stage 5d Certificate::try_compute_hash content-hash recompute. */
+    pureTsCertContentHash: boolean;
     mithrilGaps: string[];
     pureTsStmImplemented: false;
     wasmIsSourceOfTruth: true;
@@ -153,12 +166,12 @@ export function cryptoInventory(): CryptoInventory {
         pureTsStmPreliminary: true,
         pureTsStmAggregate: true,
         pureTsCertChainWalk: true,
+        pureTsCertContentHash: true,
         mithrilGaps: [
-            "Full chain-to-genesis soak (preprod genesis cert golden + Ed25519 proven)",
-            "Certificate try_compute_hash content-hash recompute (metadata/signers/sig feed)",
             "Message encoding for verify_message_match_certificate (Cardano DB digests)",
-            "Dual-run golden vectors vs WASM on preprod/mainnet certs (crypto match)",
+            "Dual-run crypto match vs WASM (match:true / implemented:true) — contentHashOk alone is not match",
             "Weighted n≥2 aggregate path soak (golden cert is n=1 identity)",
+            "CardanoBlocksTransactions signed-entity discriminant index feed (CDB tip is CardanoDatabase)",
         ],
         pureTsStmImplemented: false,
         wasmIsSourceOfTruth: true,
@@ -171,9 +184,11 @@ export function cryptoInventory(): CryptoInventory {
             "Stage 5a: preliminaryVerifyFromParsed lottery/bounds/k (preliminaryOk).",
             "Stage 5b: verifyStmAggregateFromParsed BLS pairing (aggregateOk).",
             "Stage 5c: walkCertificateChain structural+STM+genesis Ed25519 (chainOk).",
+            "Stage 5d: tryComputeCertificateHash (contentHashOk; proven on preprod tip).",
             "msgp = utf8(signed_message hex string) || AVK root — NOT decoded hex.",
             "Protocol message hash = SHA-256(parts) in ProtocolMessagePartKey ENUM order.",
             "BLS min_sig DST is empty string (blst default); proven on golden.",
+            "contentHashOk ≠ match ≠ implemented — dual-run match stays false until full crypto agree.",
             "Source of truth today: client.verifyCertificateChain (IOG mithril-client-wasm).",
         ],
     };
@@ -232,6 +247,7 @@ export async function pureTsVerifyCertificateChain(
                 preliminaryOk: false,
                 aggregateOk: false,
                 chainOk: false,
+                contentHashOk: false,
                 reason: `Stage 1: cert.hash ${shape.parsed.hash} !== requested ${certificateHash}`,
                 certShape: shape,
             };
@@ -242,12 +258,14 @@ export async function pureTsVerifyCertificateChain(
         let stmPrelim: PureTsStmPreliminaryResult | undefined;
         let stmAggregate: PureTsStmAggregateResult | undefined;
         let chainWalk: PureTsChainWalkResult | undefined;
+        let contentHash: TryComputeCertificateHashResult | undefined;
         let cryptoPrepOk = false;
         let merkleStructOk = false;
         let rootVerified = false;
         let preliminaryOk = false;
         let aggregateOk = false;
         let chainOk = false;
+        let contentHashOk = false;
         let reason = shape.reason;
 
         if (shape.shapeOk && shape.parsed.ms) {
@@ -287,6 +305,16 @@ export async function pureTsVerifyCertificateChain(
                 "Stage 1 shape OK but multi_signature missing — Stage 2–5b skipped";
         }
 
+        // Stage 5d: try_compute_hash content-hash (independent of STM stages)
+        if (shape.shapeOk) {
+            contentHash = tryComputeCertificateHash(certJson);
+            contentHashOk = contentHash.ok;
+            // Prefer content-hash reason only when it fails; chain walk may override later
+            if (!contentHashOk) {
+                reason = contentHash.reason;
+            }
+        }
+
         // Stage 5c: optional chain walk (tip integrity re-runs STM; predecessors/fetcher optional)
         if (runChainWalk && shape.shapeOk) {
             chainWalk = await walkCertificateChain(certJson, {
@@ -310,6 +338,7 @@ export async function pureTsVerifyCertificateChain(
             preliminaryOk,
             aggregateOk,
             chainOk,
+            contentHashOk,
             reason,
             certShape: shape,
             stmPrep,
@@ -317,6 +346,7 @@ export async function pureTsVerifyCertificateChain(
             stmPrelim,
             stmAggregate,
             chainWalk,
+            contentHash,
         };
     }
 
@@ -330,11 +360,12 @@ export async function pureTsVerifyCertificateChain(
         preliminaryOk: false,
         aggregateOk: false,
         chainOk: false,
+        contentHashOk: false,
         reason:
             "Phase 4 pure-TS full cert-chain not dual-run matched. " +
-            "No cert JSON provided for Stage 1–5c. " +
+            "No cert JSON provided for Stage 1–5d. " +
             "Use WASM verifyCertificateChain as SoT. " +
-            `Have: Stage 1–5c (shape/cryptoPrep/merkle/root/preliminary/aggregate/chainWalk). ` +
+            `Have: Stage 1–5d (shape/cryptoPrep/merkle/root/preliminary/aggregate/chainWalk/contentHash). ` +
             `Missing: ${inv.mithrilGaps.slice(0, 3).join("; ")}.`,
     };
 }

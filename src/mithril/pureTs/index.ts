@@ -124,6 +124,11 @@ export {
     feedSignedEntityType,
     tryComputeCertificateHash,
     verifyCertificateContentHash,
+    ENTITY_TYPE_MITHRIL_STAKE_DISTRIBUTION,
+    ENTITY_TYPE_CARDANO_STAKE_DISTRIBUTION,
+    ENTITY_TYPE_CARDANO_TRANSACTIONS,
+    ENTITY_TYPE_CARDANO_DATABASE,
+    ENTITY_TYPE_CARDANO_BLOCKS_TRANSACTIONS,
     type CertificateMetadataHashInput,
     type TryComputeCertificateHashResult,
 } from "./certHash";

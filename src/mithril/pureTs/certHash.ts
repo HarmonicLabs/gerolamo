@@ -43,6 +43,23 @@ function beI64(n: bigint): Buffer {
     return b;
 }
 
+/** SignedEntityTypeId = u16 BE (IntersectMBO signed_entity_type.rs). */
+function beU16(n: number): Buffer {
+    const b = Buffer.alloc(2);
+    b.writeUInt16BE(n & 0xffff);
+    return b;
+}
+
+/**
+ * Database SignedEntityTypeId values (immutable; do not reuse removed ids).
+ * CardanoImmutableFilesFull = 2 was removed — never reuse.
+ */
+export const ENTITY_TYPE_MITHRIL_STAKE_DISTRIBUTION = 0;
+export const ENTITY_TYPE_CARDANO_STAKE_DISTRIBUTION = 1;
+export const ENTITY_TYPE_CARDANO_TRANSACTIONS = 3;
+export const ENTITY_TYPE_CARDANO_DATABASE = 4;
+export const ENTITY_TYPE_CARDANO_BLOCKS_TRANSACTIONS = 5;
+
 /** fixed::types::U8F24 — round(f * 2^24) as u32 BE. Proven on params golden. */
 function u8f24BeRound(f: number): Buffer {
     const bits = Math.round(f * 2 ** 24) >>> 0;
@@ -136,7 +153,12 @@ export function computeCertificateMetadataHash(
 
 /**
  * SignedEntityType::feed_hash into an existing hasher.
- * CardanoDatabase: epoch u64 BE + immutable_file_number u64 BE (no discriminant index).
+ *
+ * SoT (IntersectMBO signed_entity_type.rs):
+ *   - Discriminant index (u16 BE) is fed ONLY for CardanoBlocksTransactions
+ *     (ENTITY_TYPE_CARDANO_BLOCKS_TRANSACTIONS = 5). Other variants intentionally
+ *     omit index until a future hash migration.
+ *   - Then beacon fields as u64 BE (epoch / imm / block_number / offset).
  */
 export function feedSignedEntityType(
     hasher: ReturnType<typeof createHash>,
@@ -171,9 +193,8 @@ export function feedSignedEntityType(
         return;
     }
     if (Array.isArray(set.CardanoBlocksTransactions)) {
-        // Discriminant index is fed ONLY for CardanoBlocksTransactions (SoT).
-        // ENTITY_TYPE_CARDANO_BLOCKS_TRANSACTIONS — leave index port for when needed;
-        // preprod CDB tip is CardanoDatabase.
+        // Discriminant index ONLY for CBT (SoT TODO: eventually all variants).
+        hasher.update(beU16(ENTITY_TYPE_CARDANO_BLOCKS_TRANSACTIONS));
         const [ep, bn, off] = set.CardanoBlocksTransactions as [
             number,
             number,

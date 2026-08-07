@@ -229,7 +229,6 @@ export function cryptoInventory(): CryptoInventory {
         pureTsCdbLocalDigests: true,
         mithrilGaps: [
             "pureTsStmImplemented / pureTs.ok cutover — match is dual-run assert only; WASM remains SoT",
-            "CardanoBlocksTransactions signed-entity discriminant index feed (CDB tip is CardanoDatabase)",
         ],
         pureTsStmImplemented: false,
         wasmIsSourceOfTruth: true,

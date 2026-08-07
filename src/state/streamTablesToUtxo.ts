@@ -2,19 +2,22 @@
  * A2 stream tables → Gerolamo `utxo` rows (partial extract).
  *
  * Streams CBOR indefinite map from utxohd-mem `tables` file without full unwrap.
- * Inserts only fully-decoded entries we can address:
+ * Inserts fully-decoded entries we can address:
  *   - tag0 TxOutCompact (ada + multiAsset) via CompactAddr → bech32
  *   - tag2 AddrHash28_AdaOnly via PackedBytes28 BE rebuild → bech32
+ *   - tag4 TxOutCompactDatum: same value fields + optional inline_datum hex
+ *   - tag5 TxOutCompactRefScript: same value fields + datum/script metadata
  *
  * Honesty:
- *   - tags 1/3/4/5 skipped (datum/script body blocked)
+ *   - tags 1/3 skipped (dataHash-only variants not yet mapped to DB address path)
+ *   - datum/script bodies stored as opaque hex/len — no Plutus interpreter
  *   - `utxoExtracted` is true only when stream finishes without hard fail AND
  *     inserted > 0; still partial vs full ledger UTxO set
  *   - does not claim checksum verify of full 940MB tables
  *
  * DB shape matches apply path:
  *   utxo_ref = `${txHash}:${txIx}`
- *   tx_out   = JSON { address, amount, assets }
+ *   tx_out   = JSON { address, amount, assets, ...optional datum/script meta }
  *   tx_hash  = hex tx id
  */
 
@@ -140,6 +143,14 @@ export type TxOutJson = {
     address: string;
     amount: string;
     assets: Record<string, Record<string, string>>;
+    /** Present for tag4/5 when fullyConsumed. Opaque — not interpreted. */
+    inline_datum?: string;
+    datum_hash?: string;
+    /** tag5: native | plutus */
+    script_kind?: "native" | "plutus";
+    script_language?: number;
+    script_bytes_hex?: string;
+    script_bytes_len?: number;
 };
 
 function assetsFromTriples(
@@ -169,6 +180,7 @@ function valueToAmountAssets(value: CompactValueDecoded): {
 
 /**
  * Map a fully-decoded TxOut to DB row fields, or null if not insertable yet.
+ * tag0/2/4/5 when fullyConsumed + addressable; tag1/3 still skipped.
  */
 export function txOutToDbRow(
     txIdHex: string,
@@ -178,8 +190,13 @@ export function txOutToDbRow(
     let address: string | null = null;
     let amount = "0";
     let assets: Record<string, Record<string, string>> = {};
+    const meta: Partial<TxOutJson> = {};
 
-    if (txOut.tag === 0 && txOut.fullyConsumed && txOut.addrRaw) {
+    if (
+        (txOut.tag === 0 || txOut.tag === 4 || txOut.tag === 5) &&
+        txOut.fullyConsumed &&
+        txOut.addrRaw
+    ) {
         try {
             address = compactAddrRawToBech32(txOut.addrRaw);
         } catch {
@@ -188,6 +205,28 @@ export function txOutToDbRow(
         const va = valueToAmountAssets(txOut.value);
         amount = va.amount;
         assets = va.assets;
+
+        if (txOut.tag === 4) {
+            // opaque inline BinaryData (Plutus Data CBOR)
+            meta.inline_datum = Buffer.from(txOut.inlineDatum).toString("hex");
+        } else if (txOut.tag === 5) {
+            if (txOut.datum.kind === "datumHash") {
+                meta.datum_hash = txOut.datum.hashHex;
+            } else if (txOut.datum.kind === "inline") {
+                meta.inline_datum = Buffer.from(txOut.datum.bytes).toString(
+                    "hex",
+                );
+            }
+            // kind === "noDatum" → no meta field
+            meta.script_kind = txOut.script.kind;
+            if (txOut.script.kind === "plutus") {
+                meta.script_language = txOut.script.language;
+            }
+            meta.script_bytes_hex = Buffer.from(txOut.script.bytes).toString(
+                "hex",
+            );
+            meta.script_bytes_len = txOut.script.bytes.length;
+        }
     } else if (txOut.tag === 2 && txOut.fullyConsumed) {
         try {
             address = tag2Addr28ToBech32(txOut);
@@ -206,6 +245,7 @@ export function txOutToDbRow(
         address,
         amount,
         assets,
+        ...meta,
     } satisfies TxOutJson);
 
     return {

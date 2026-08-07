@@ -10,12 +10,14 @@
  *   - tag2 AdaOnly fully decoded (lovelace + stake cred + addr28)
  *   - tag0 Compact: CompactAddr (base/enterprise) + AdaOnly fully;
  *     MultiAsset lovelace + asset triples (policy/name/qty) when rep parses
- *   - tag1/3/4/5: prefix + optional MA; datum/script body still blocked
- *   - utxoExtracted stays false until full TxOut → DB path exists
+ *   - tag1/3: dataHash when present; tag3 Addr28+hash fully when lengths match
+ *   - tag4: CompactAddr + CompactValue + BinaryData (SBS) — envelope fullyConsumed
+ *   - tag5: + Datum (0/1/2) + AlonzoScript (native SBS / plutus lang+SBS) — envelope only
+ *   - Plutus body is opaque bytes (no interpreter); DB path may store hex/len metadata
  *
  * Sources: docs/a2-utxohd-mem-codec-research.md
- *   - lehins/mempack Tag=Word8, Length=VarLen LEB128, VarLen Word64 LEB128
- *   - cardano-ledger Babbage/Alonzo/Shelley TxOut MemPack, Address.hs, Mary/Value.hs
+ *   - lehins/mempack Tag=Word8, Length=VarLen MSB-first, VarLen Word64
+ *   - cardano-ledger Babbage/Alonzo TxOut + Plutus Data.hs + Alonzo Scripts MemPack
  *   - ouroboros-consensus InMemory.hs tables CBOR map
  */
 
@@ -127,9 +129,9 @@ export type TxOutDecoded =
           addrRaw: Uint8Array;
           addr: CompactAddrDecoded | null;
           value: CompactValueDecoded;
-          restOff: number;
-          restLen: number;
-          fullyConsumed: false;
+          /** Inline BinaryData = MemPack ShortByteString (opaque Plutus Data CBOR). */
+          inlineDatum: Uint8Array;
+          fullyConsumed: boolean;
       }
     | {
           tag: 5;
@@ -137,15 +139,30 @@ export type TxOutDecoded =
           addrRaw: Uint8Array;
           addr: CompactAddrDecoded | null;
           value: CompactValueDecoded;
-          restOff: number;
-          restLen: number;
-          fullyConsumed: false;
+          datum: DatumDecoded;
+          script: ScriptDecoded;
+          fullyConsumed: boolean;
       }
     | {
           tag: number;
           variant: "unknown";
           fullyConsumed: false;
       };
+
+/** MemPack Datum era: tag0 NoDatum | tag1 DataHash(32) | tag2 BinaryData SBS. */
+export type DatumDecoded =
+    | { kind: "noDatum" }
+    | { kind: "datumHash"; hashHex: string }
+    | { kind: "inline"; bytes: Uint8Array };
+
+/**
+ * MemPack AlonzoScript:
+ *   tag0 NativeScript = Timelock MemoBytes ≈ ShortByteString of CBOR
+ *   tag1 PlutusScript = langTag (0=V1,1=V2,…) + PlutusBinary SBS
+ */
+export type ScriptDecoded =
+    | { kind: "native"; bytes: Uint8Array }
+    | { kind: "plutus"; language: number; bytes: Uint8Array };
 
 export type UtxoEntryPartial = {
     txIn: TxInDecoded;
@@ -267,6 +284,108 @@ export function readCompactFormCoin(
         };
     }
     return readVarLenU(buf, tag.next);
+}
+
+/**
+ * MemPack BinaryData = ShortByteString (opaque Plutus Data CBOR bytes).
+ * Proven on preprod tables: tag4 rest is always one SBS to EOF.
+ */
+export function decodeBinaryData(
+    buf: Uint8Array,
+    off: number,
+): DecodeResult<Uint8Array> {
+    return readShortByteString(buf, off);
+}
+
+/**
+ * MemPack Datum era:
+ *   packTagM 0 → NoDatum
+ *   packTagM 1 → DatumHash (32-byte SafeHash / DataHash)
+ *   packTagM 2 → Datum BinaryData (SBS)
+ */
+export function decodeDatum(
+    buf: Uint8Array,
+    off: number,
+): DecodeResult<DatumDecoded> {
+    const tag = readTag(buf, off);
+    if (!tag.ok) return tag;
+    if (tag.value === 0) {
+        return { ok: true, value: { kind: "noDatum" }, next: tag.next };
+    }
+    if (tag.value === 1) {
+        const start = tag.next;
+        const end = start + 32;
+        if (end > buf.length) {
+            return { ok: false, error: "datum hash truncated", off: start };
+        }
+        return {
+            ok: true,
+            value: {
+                kind: "datumHash",
+                hashHex: bytesToHex(buf.subarray(start, end)),
+            },
+            next: end,
+        };
+    }
+    if (tag.value === 2) {
+        const sbs = decodeBinaryData(buf, tag.next);
+        if (!sbs.ok) return sbs;
+        return {
+            ok: true,
+            value: { kind: "inline", bytes: sbs.value },
+            next: sbs.next,
+        };
+    }
+    return {
+        ok: false,
+        error: `Datum unexpected tag ${tag.value}`,
+        off,
+    };
+}
+
+/**
+ * MemPack AlonzoScript (Babbage era Script):
+ *   packTagM 0 → NativeScript (Timelock MemoBytes ≈ SBS of CBOR)
+ *   packTagM 1 → PlutusScript:
+ *     packTagM lang (0=V1, 1=V2, …) >> PlutusBinary SBS
+ *
+ * Bodies are opaque — no Plutus interpreter.
+ */
+export function decodeScript(
+    buf: Uint8Array,
+    off: number,
+): DecodeResult<ScriptDecoded> {
+    const st = readTag(buf, off);
+    if (!st.ok) return st;
+    if (st.value === 0) {
+        const sbs = readShortByteString(buf, st.next);
+        if (!sbs.ok) return sbs;
+        return {
+            ok: true,
+            value: { kind: "native", bytes: sbs.value },
+            next: sbs.next,
+        };
+    }
+    if (st.value === 1) {
+        const lt = readTag(buf, st.next);
+        if (!lt.ok) return lt;
+        const sbs = readShortByteString(buf, lt.next);
+        if (!sbs.ok) return sbs;
+        return {
+            ok: true,
+            value: {
+                kind: "plutus",
+                language: lt.value,
+                bytes: sbs.value,
+            },
+            next: sbs.next,
+        };
+    }
+    return {
+        ok: false,
+        error: `AlonzoScript unexpected tag ${st.value}`,
+        off,
+    };
 }
 
 /** Credential = packTagM 0 script | 1 key  >> 28-byte hash. */
@@ -738,8 +857,12 @@ export function decodeTxOutValue(
         const { addr } = decodeAddrField(addrRaw.value);
         const value = readCompactValue(val, off);
         if (!value.ok) return value;
-        const restOff = value.next;
+        off = value.next;
         if (tag === 4) {
+            // TxOutCompactDatum: addr >> value >> BinaryData (SBS)
+            const inline = decodeBinaryData(val, off);
+            if (!inline.ok) return inline;
+            off = inline.next;
             return {
                 ok: true,
                 value: {
@@ -748,13 +871,19 @@ export function decodeTxOutValue(
                     addrRaw: addrRaw.value,
                     addr,
                     value: value.value,
-                    restOff,
-                    restLen: val.length - restOff,
-                    fullyConsumed: false,
+                    inlineDatum: inline.value,
+                    fullyConsumed: off === val.length,
                 },
-                next: restOff,
+                next: off,
             };
         }
+        // TxOutCompactRefScript: addr >> value >> Datum >> Script
+        const datum = decodeDatum(val, off);
+        if (!datum.ok) return datum;
+        off = datum.next;
+        const script = decodeScript(val, off);
+        if (!script.ok) return script;
+        off = script.next;
         return {
             ok: true,
             value: {
@@ -763,11 +892,11 @@ export function decodeTxOutValue(
                 addrRaw: addrRaw.value,
                 addr,
                 value: value.value,
-                restOff,
-                restLen: val.length - restOff,
-                fullyConsumed: false,
+                datum: datum.value,
+                script: script.value,
+                fullyConsumed: off === val.length,
             },
-            next: restOff,
+            next: off,
         };
     }
 

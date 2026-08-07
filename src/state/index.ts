@@ -27,6 +27,9 @@ export {
     decodeUtxoEntry,
     decodeCompactAddr,
     decodeMultiAssetRep,
+    decodeBinaryData,
+    decodeDatum,
+    decodeScript,
     readVarLenU,
     readTag,
     readShortByteString,
@@ -43,6 +46,8 @@ export {
     type CompactAddrDecoded,
     type MultiAssetTriple,
     type MultiAssetRepDecoded,
+    type DatumDecoded,
+    type ScriptDecoded,
     type DecodeResult,
 } from "./utxohdMemCodec";
 export {

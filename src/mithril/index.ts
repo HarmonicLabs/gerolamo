@@ -165,6 +165,15 @@ export {
     type ImmutableFileDigest,
     type ComputeMkTreeRootResult,
     type VerifyCardanoDatabaseMerkleRootResult,
+    sha256FileHex,
+    listLocalImmutableFileNames,
+    resolveImmutableDir,
+    maxLocalImmutableNumber,
+    listCompletedLocalImmutableNames,
+    computeLocalImmutableDigests,
+    verifyLocalDigestsAgainstPublished,
+    type LocalDigestEntry,
+    type VerifyLocalDigestsAgainstPublishedResult,
 } from "./pureTs";
 
 export { runMithrilBootstrap } from "./bootstrap";

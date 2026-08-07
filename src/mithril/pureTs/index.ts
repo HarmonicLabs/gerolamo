@@ -12,9 +12,10 @@
  * Stage 5e: Certificate::match_message identity (messageMatchOk; side-channel).
  * Stage 5f: CDB MessageBuilder bind snapshot merkle_root (cdbMessageMatchOk; side-channel).
  * Stage 5g: CDB merkle_root from digests MKTree/MMR (cdbMerkleRootOk; side-channel).
+ * Stage 5h: local immutable SHA-256 digests vs published artifact (cdbLocalDigestsOk; side-channel).
  *
  * verified / pureTsStmImplemented stay false until cutover.
- * dual-run match = wasmOk && Stages 1–5d only (5e/5f/5g are side-channels).
+ * dual-run match = wasmOk && Stages 1–5d only (5e/5f/5g/5h are side-channels).
  * WASM remains source of truth for certificate-chain verification.
  *
  * See docs/phase-4-pure-ts-crypto-research.md
@@ -147,3 +148,15 @@ export {
     type ComputeMkTreeRootResult,
     type VerifyCardanoDatabaseMerkleRootResult,
 } from "./mkTree";
+
+export {
+    sha256FileHex,
+    listLocalImmutableFileNames,
+    resolveImmutableDir,
+    maxLocalImmutableNumber,
+    listCompletedLocalImmutableNames,
+    computeLocalImmutableDigests,
+    verifyLocalDigestsAgainstPublished,
+    type LocalDigestEntry,
+    type VerifyLocalDigestsAgainstPublishedResult,
+} from "./localDigests";

@@ -56,6 +56,7 @@ export {
 export {
     cryptoInventory,
     dualRunCertificateChain,
+    pureTsFullChainStagesOk,
     pureTsVerifyCertificateChain,
     type CryptoInventory,
     type DualRunVerifyResult,

@@ -104,9 +104,10 @@ export type DualRunVerifyResult = {
     };
     pureTs: PureTsVerifyResult;
     /**
-     * True only when both engines cryptographically agree on full cert-chain.
-     * Impossible until pure-TS chain-to-genesis exists and dual-run soak is green
-     * (shape/cryptoPrep/merkle/root/prelim/aggregate/chain alone never sets match).
+     * True when WASM verifyCertificateChain succeeds AND pure-TS Stages 1–5d all
+     * succeed on the same cert (shape+prep+merkle+root+prelim+aggregate+chain+contentHash).
+     * Partial stage flags alone never set match. Does NOT flip pureTs.implemented/ok
+     * (WASM remains SoT until cutover).
      */
     match: boolean;
 };
@@ -168,10 +169,11 @@ export function cryptoInventory(): CryptoInventory {
         pureTsCertChainWalk: true,
         pureTsCertContentHash: true,
         mithrilGaps: [
-            "Message encoding for verify_message_match_certificate (Cardano DB digests)",
-            "Dual-run crypto match vs WASM (match:true / implemented:true) — contentHashOk alone is not match",
+            "Message encoding for verify_message_match_certificate (Cardano DB digests / artifact binding)",
+            "pureTsStmImplemented / pureTs.ok cutover — match is dual-run assert only; WASM remains SoT",
             "Weighted n≥2 aggregate path soak (golden cert is n=1 identity)",
             "CardanoBlocksTransactions signed-entity discriminant index feed (CDB tip is CardanoDatabase)",
+            "Mainnet dual-run golden soak (preprod tip proven)",
         ],
         pureTsStmImplemented: false,
         wasmIsSourceOfTruth: true,
@@ -185,10 +187,11 @@ export function cryptoInventory(): CryptoInventory {
             "Stage 5b: verifyStmAggregateFromParsed BLS pairing (aggregateOk).",
             "Stage 5c: walkCertificateChain structural+STM+genesis Ed25519 (chainOk).",
             "Stage 5d: tryComputeCertificateHash (contentHashOk; proven on preprod tip).",
+            "match = wasmOk && ALL Stages 1–5d (not any single flag).",
+            "implemented/ok stay false until cutover — match ≠ pure-TS SoT.",
             "msgp = utf8(signed_message hex string) || AVK root — NOT decoded hex.",
             "Protocol message hash = SHA-256(parts) in ProtocolMessagePartKey ENUM order.",
             "BLS min_sig DST is empty string (blst default); proven on golden.",
-            "contentHashOk ≠ match ≠ implemented — dual-run match stays false until full crypto agree.",
             "Source of truth today: client.verifyCertificateChain (IOG mithril-client-wasm).",
         ],
     };
@@ -371,8 +374,28 @@ export async function pureTsVerifyCertificateChain(
 }
 
 /**
- * Dual-run: WASM verify (SoT) + pure-TS Stage 1–5c shadow on the same cert JSON.
- * match stays false until pure-TS cryptographic cert-chain verify exists and agrees.
+ * True when every pure-TS Stage 1–5d flag is green.
+ * Single-stage flags (shape/prep/… alone) never qualify.
+ */
+export function pureTsFullChainStagesOk(pureTs: PureTsVerifyResult): boolean {
+    return (
+        pureTs.shapeOk &&
+        pureTs.cryptoPrepOk &&
+        pureTs.merkleStructOk &&
+        pureTs.rootVerified &&
+        pureTs.preliminaryOk &&
+        pureTs.aggregateOk &&
+        pureTs.chainOk &&
+        pureTs.contentHashOk
+    );
+}
+
+/**
+ * Dual-run: WASM verify (SoT) + pure-TS Stage 1–5d shadow on the same cert JSON.
+ *
+ * match = wasmOk && pureTsFullChainStagesOk — engines agree on full cert-chain crypto.
+ * pureTs.implemented / pureTs.ok stay false (shadow/assert only; WASM remains SoT).
+ * Skipping chain walk (runChainWalk=false) keeps chainOk false → match false.
  */
 export async function dualRunCertificateChain(
     client: GerolamoMithrilClient,
@@ -397,11 +420,14 @@ export async function dualRunCertificateChain(
         opts,
     );
 
+    // Honest dual-run assert: WASM accept + full pure-TS Stage 1–5d ladder.
+    // Not cutover — implemented/ok remain false on PureTsVerifyResult.
+    const match = wasmOk && pureTsFullChainStagesOk(pureTs);
+
     return {
         certificateHash,
         wasm: { ok: wasmOk, cert, error: wasmError },
         pureTs,
-        // Cryptographic full-chain match only — Stage flags alone never set match
-        match: false,
+        match,
     };
 }

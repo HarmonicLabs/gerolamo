@@ -10,11 +10,12 @@
  * Stage 5c (done): pure-TS certificate-chain walk (chainOk only at genesis+Ed25519).
  * Stage 5d (done): Certificate::try_compute_hash content-hash (contentHashOk).
  * Stage 5e (done): Certificate::match_message identity (messageMatchOk).
- *   Artifact MessageBuilder digests (CDB merkle proof from disk) still open.
+ * Stage 5f (done): CDB MessageBuilder bind snapshot merkle_root (cdbMessageMatchOk).
+ *   Full disk digest/merkle-proof recompute still open.
  *   Still NOT pureTsStmImplemented / pureTs.ok cutover.
  *
  * Do not claim pure-TS crypto SoT until PureTsVerifyResult.implemented === true.
- * dual-run match = wasmOk && Stages 1–5d (messageMatchOk is side-channel).
+ * dual-run match = wasmOk && Stages 1–5d (5e/5f are side-channels).
  *
  * See docs/phase-4-pure-ts-crypto-research.md
  */
@@ -40,9 +41,11 @@ import {
 import {
     walkCertificateChain,
     certificateMatchOwnProtocolMessage,
+    verifyCardanoDatabaseMessageMatch,
     type CertificateFetcher,
     type CertificateMatchMessageResult,
     type PureTsChainWalkResult,
+    type VerifyCardanoDatabaseMessageMatchResult,
 } from "./pureTs/chain";
 import {
     tryComputeCertificateHash,
@@ -93,9 +96,15 @@ export type PureTsVerifyResult = {
      * Stage 5e: Certificate::match_message identity —
      * cert.protocol_message.compute_hash() === cert.signed_message.
      * Side-channel; does NOT enter pureTsFullChainStagesOk / dual-run match.
-     * Full artifact binding (MessageBuilder + CDB merkle from disk) still open.
      */
     messageMatchOk: boolean;
+    /**
+     * Stage 5f: MessageBuilder::compute_cardano_database_message + match_message.
+     * Binds snapshot merkle_root into PM and checks signed_message.
+     * Side-channel only — requires opts.cardanoDatabaseMerkleRoot.
+     * Does NOT recompute merkle root from immutable files on disk.
+     */
+    cdbMessageMatchOk: boolean;
     reason: string;
     certShape?: PureTsCertParseResult;
     stmPrep?: PureTsStmCryptoPrepResult;
@@ -105,6 +114,7 @@ export type PureTsVerifyResult = {
     chainWalk?: PureTsChainWalkResult;
     contentHash?: TryComputeCertificateHashResult;
     messageMatch?: CertificateMatchMessageResult;
+    cdbMessageMatch?: VerifyCardanoDatabaseMessageMatchResult;
 };
 
 export type DualRunVerifyResult = {
@@ -154,6 +164,8 @@ export type CryptoInventory = {
     pureTsCertContentHash: boolean;
     /** Stage 5e Certificate::match_message identity (protocol_message ↔ signed_message). */
     pureTsCertMessageMatch: boolean;
+    /** Stage 5f CDB MessageBuilder bind snapshot merkle_root → match_message. */
+    pureTsCdbMessageMatch: boolean;
     mithrilGaps: string[];
     pureTsStmImplemented: false;
     wasmIsSourceOfTruth: true;
@@ -183,8 +195,9 @@ export function cryptoInventory(): CryptoInventory {
         pureTsCertChainWalk: true,
         pureTsCertContentHash: true,
         pureTsCertMessageMatch: true,
+        pureTsCdbMessageMatch: true,
         mithrilGaps: [
-            "CDB/artifact MessageBuilder digests from disk (cardano_database_merkle_root / merkle proof) — Stage 5e is identity match_message only",
+            "CDB merkle root recompute from immutable digests on disk (Stage 5f binds published snapshot merkle_root only)",
             "pureTsStmImplemented / pureTs.ok cutover — match is dual-run assert only; WASM remains SoT",
             "CardanoBlocksTransactions signed-entity discriminant index feed (CDB tip is CardanoDatabase)",
         ],
@@ -201,7 +214,8 @@ export function cryptoInventory(): CryptoInventory {
             "Stage 5c: walkCertificateChain structural+STM+genesis Ed25519 (chainOk).",
             "Stage 5d: tryComputeCertificateHash (contentHashOk; preprod + mainnet tip).",
             "Stage 5e: certificateMatchMessage identity (messageMatchOk; == WASM verify_message_match_certificate).",
-            "match = wasmOk && Stages 1–5d only (messageMatchOk is side-channel, not match gate).",
+            "Stage 5f: computeCardanoDatabaseMessage + match (cdbMessageMatchOk; binds snapshot merkle_root).",
+            "match = wasmOk && Stages 1–5d only (5e/5f side-channels, not match gate).",
             "implemented/ok stay false until cutover — match ≠ pure-TS SoT.",
             "Preprod dual-run soak: match=true depth 111; contentHashOk; no-walk match=false.",
             "Mainnet dual-run soak: match=true depth 110; nSig=53 weighted aggregateOk; contentHashOk.",
@@ -231,6 +245,12 @@ export type PureTsVerifyOptions = {
      * Set false to skip network/walk and only report Stage 1–5b.
      */
     runChainWalk?: boolean;
+    /**
+     * Stage 5f: Cardano DB snapshot merkle_root (64-char hex) from
+     * list/get_cardano_database_v2. When set, runs MessageBuilder bind + match_message.
+     * Does NOT enter pureTsFullChainStagesOk / dual-run match.
+     */
+    cardanoDatabaseMerkleRoot?: string;
 };
 
 /**
@@ -269,6 +289,7 @@ export async function pureTsVerifyCertificateChain(
                 chainOk: false,
                 contentHashOk: false,
                 messageMatchOk: false,
+                cdbMessageMatchOk: false,
                 reason: `Stage 1: cert.hash ${shape.parsed.hash} !== requested ${certificateHash}`,
                 certShape: shape,
             };
@@ -281,6 +302,7 @@ export async function pureTsVerifyCertificateChain(
         let chainWalk: PureTsChainWalkResult | undefined;
         let contentHash: TryComputeCertificateHashResult | undefined;
         let messageMatch: CertificateMatchMessageResult | undefined;
+        let cdbMessageMatch: VerifyCardanoDatabaseMessageMatchResult | undefined;
         let cryptoPrepOk = false;
         let merkleStructOk = false;
         let rootVerified = false;
@@ -289,6 +311,7 @@ export async function pureTsVerifyCertificateChain(
         let chainOk = false;
         let contentHashOk = false;
         let messageMatchOk = false;
+        let cdbMessageMatchOk = false;
         let reason = shape.reason;
 
         if (shape.shapeOk && shape.parsed.ms) {
@@ -344,6 +367,19 @@ export async function pureTsVerifyCertificateChain(
                 // Surface 5e failure only when 5d already passed and walk may not run
                 reason = messageMatch.reason;
             }
+
+            // Stage 5f: CDB MessageBuilder bind snapshot merkle_root (side-channel)
+            // Requires opts.cardanoDatabaseMerkleRoot — does NOT enter match gate.
+            if (opts.cardanoDatabaseMerkleRoot) {
+                cdbMessageMatch = verifyCardanoDatabaseMessageMatch(
+                    certJson,
+                    opts.cardanoDatabaseMerkleRoot,
+                );
+                cdbMessageMatchOk = cdbMessageMatch.ok;
+                if (!cdbMessageMatchOk && contentHashOk && messageMatchOk) {
+                    reason = cdbMessageMatch.reason;
+                }
+            }
         }
 
         // Stage 5c: optional chain walk (tip integrity re-runs STM; predecessors/fetcher optional)
@@ -371,6 +407,7 @@ export async function pureTsVerifyCertificateChain(
             chainOk,
             contentHashOk,
             messageMatchOk,
+            cdbMessageMatchOk,
             reason,
             certShape: shape,
             stmPrep,
@@ -380,6 +417,7 @@ export async function pureTsVerifyCertificateChain(
             chainWalk,
             contentHash,
             messageMatch,
+            cdbMessageMatch,
         };
     }
 
@@ -395,11 +433,12 @@ export async function pureTsVerifyCertificateChain(
         chainOk: false,
         contentHashOk: false,
         messageMatchOk: false,
+        cdbMessageMatchOk: false,
         reason:
             "Phase 4 pure-TS full cert-chain not dual-run matched. " +
-            "No cert JSON provided for Stage 1–5e. " +
+            "No cert JSON provided for Stage 1–5f. " +
             "Use WASM verifyCertificateChain as SoT. " +
-            `Have: Stage 1–5e (shape/cryptoPrep/merkle/root/preliminary/aggregate/chainWalk/contentHash/messageMatch). ` +
+            `Have: Stage 1–5f (shape/cryptoPrep/merkle/root/preliminary/aggregate/chainWalk/contentHash/messageMatch/cdbMessage). ` +
             `Missing: ${inv.mithrilGaps.slice(0, 3).join("; ")}.`,
     };
 }

@@ -9,10 +9,12 @@
  * Stage 5b (done): pure-TS BLS multi-sig aggregate verify (aggregateOk).
  * Stage 5c (done): pure-TS certificate-chain walk (chainOk only at genesis+Ed25519).
  * Stage 5d (done): Certificate::try_compute_hash content-hash (contentHashOk).
- *   Still NOT dual-run match / pureTsStmImplemented.
+ * Stage 5e (done): Certificate::match_message identity (messageMatchOk).
+ *   Artifact MessageBuilder digests (CDB merkle proof from disk) still open.
+ *   Still NOT pureTsStmImplemented / pureTs.ok cutover.
  *
- * Do not claim pure-TS crypto works until PureTsVerifyResult.implemented === true
- * and dual-run matches WASM on real preprod/mainnet certs.
+ * Do not claim pure-TS crypto SoT until PureTsVerifyResult.implemented === true.
+ * dual-run match = wasmOk && Stages 1–5d (messageMatchOk is side-channel).
  *
  * See docs/phase-4-pure-ts-crypto-research.md
  */
@@ -37,7 +39,9 @@ import {
 } from "./pureTs/merkle";
 import {
     walkCertificateChain,
+    certificateMatchOwnProtocolMessage,
     type CertificateFetcher,
+    type CertificateMatchMessageResult,
     type PureTsChainWalkResult,
 } from "./pureTs/chain";
 import {
@@ -85,6 +89,13 @@ export type PureTsVerifyResult = {
      * (metadata + PM + AVK + signed_entity + sig feed). Not dual-run match.
      */
     contentHashOk: boolean;
+    /**
+     * Stage 5e: Certificate::match_message identity —
+     * cert.protocol_message.compute_hash() === cert.signed_message.
+     * Side-channel; does NOT enter pureTsFullChainStagesOk / dual-run match.
+     * Full artifact binding (MessageBuilder + CDB merkle from disk) still open.
+     */
+    messageMatchOk: boolean;
     reason: string;
     certShape?: PureTsCertParseResult;
     stmPrep?: PureTsStmCryptoPrepResult;
@@ -93,6 +104,7 @@ export type PureTsVerifyResult = {
     stmAggregate?: PureTsStmAggregateResult;
     chainWalk?: PureTsChainWalkResult;
     contentHash?: TryComputeCertificateHashResult;
+    messageMatch?: CertificateMatchMessageResult;
 };
 
 export type DualRunVerifyResult = {
@@ -140,6 +152,8 @@ export type CryptoInventory = {
     pureTsCertChainWalk: boolean;
     /** Stage 5d Certificate::try_compute_hash content-hash recompute. */
     pureTsCertContentHash: boolean;
+    /** Stage 5e Certificate::match_message identity (protocol_message ↔ signed_message). */
+    pureTsCertMessageMatch: boolean;
     mithrilGaps: string[];
     pureTsStmImplemented: false;
     wasmIsSourceOfTruth: true;
@@ -168,8 +182,9 @@ export function cryptoInventory(): CryptoInventory {
         pureTsStmAggregate: true,
         pureTsCertChainWalk: true,
         pureTsCertContentHash: true,
+        pureTsCertMessageMatch: true,
         mithrilGaps: [
-            "Message encoding for verify_message_match_certificate (Cardano DB digests / artifact binding)",
+            "CDB/artifact MessageBuilder digests from disk (cardano_database_merkle_root / merkle proof) — Stage 5e is identity match_message only",
             "pureTsStmImplemented / pureTs.ok cutover — match is dual-run assert only; WASM remains SoT",
             "CardanoBlocksTransactions signed-entity discriminant index feed (CDB tip is CardanoDatabase)",
         ],
@@ -185,7 +200,8 @@ export function cryptoInventory(): CryptoInventory {
             "Stage 5b: verifyStmAggregateFromParsed BLS pairing (aggregateOk).",
             "Stage 5c: walkCertificateChain structural+STM+genesis Ed25519 (chainOk).",
             "Stage 5d: tryComputeCertificateHash (contentHashOk; preprod + mainnet tip).",
-            "match = wasmOk && ALL Stages 1–5d (not any single flag).",
+            "Stage 5e: certificateMatchMessage identity (messageMatchOk; == WASM verify_message_match_certificate).",
+            "match = wasmOk && Stages 1–5d only (messageMatchOk is side-channel, not match gate).",
             "implemented/ok stay false until cutover — match ≠ pure-TS SoT.",
             "Preprod dual-run soak: match=true depth 111; contentHashOk; no-walk match=false.",
             "Mainnet dual-run soak: match=true depth 110; nSig=53 weighted aggregateOk; contentHashOk.",
@@ -252,6 +268,7 @@ export async function pureTsVerifyCertificateChain(
                 aggregateOk: false,
                 chainOk: false,
                 contentHashOk: false,
+                messageMatchOk: false,
                 reason: `Stage 1: cert.hash ${shape.parsed.hash} !== requested ${certificateHash}`,
                 certShape: shape,
             };
@@ -263,6 +280,7 @@ export async function pureTsVerifyCertificateChain(
         let stmAggregate: PureTsStmAggregateResult | undefined;
         let chainWalk: PureTsChainWalkResult | undefined;
         let contentHash: TryComputeCertificateHashResult | undefined;
+        let messageMatch: CertificateMatchMessageResult | undefined;
         let cryptoPrepOk = false;
         let merkleStructOk = false;
         let rootVerified = false;
@@ -270,6 +288,7 @@ export async function pureTsVerifyCertificateChain(
         let aggregateOk = false;
         let chainOk = false;
         let contentHashOk = false;
+        let messageMatchOk = false;
         let reason = shape.reason;
 
         if (shape.shapeOk && shape.parsed.ms) {
@@ -317,6 +336,14 @@ export async function pureTsVerifyCertificateChain(
             if (!contentHashOk) {
                 reason = contentHash.reason;
             }
+
+            // Stage 5e: match_message identity (side-channel; not dual-run match gate)
+            messageMatch = certificateMatchOwnProtocolMessage(certJson);
+            messageMatchOk = messageMatch.ok;
+            if (!messageMatchOk && contentHashOk) {
+                // Surface 5e failure only when 5d already passed and walk may not run
+                reason = messageMatch.reason;
+            }
         }
 
         // Stage 5c: optional chain walk (tip integrity re-runs STM; predecessors/fetcher optional)
@@ -343,6 +370,7 @@ export async function pureTsVerifyCertificateChain(
             aggregateOk,
             chainOk,
             contentHashOk,
+            messageMatchOk,
             reason,
             certShape: shape,
             stmPrep,
@@ -351,6 +379,7 @@ export async function pureTsVerifyCertificateChain(
             stmAggregate,
             chainWalk,
             contentHash,
+            messageMatch,
         };
     }
 
@@ -365,11 +394,12 @@ export async function pureTsVerifyCertificateChain(
         aggregateOk: false,
         chainOk: false,
         contentHashOk: false,
+        messageMatchOk: false,
         reason:
             "Phase 4 pure-TS full cert-chain not dual-run matched. " +
-            "No cert JSON provided for Stage 1–5d. " +
+            "No cert JSON provided for Stage 1–5e. " +
             "Use WASM verifyCertificateChain as SoT. " +
-            `Have: Stage 1–5d (shape/cryptoPrep/merkle/root/preliminary/aggregate/chainWalk/contentHash). ` +
+            `Have: Stage 1–5e (shape/cryptoPrep/merkle/root/preliminary/aggregate/chainWalk/contentHash/messageMatch). ` +
             `Missing: ${inv.mithrilGaps.slice(0, 3).join("; ")}.`,
     };
 }

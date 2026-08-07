@@ -148,6 +148,72 @@ export function verifySignedMessageMatchesProtocolMessage(
     };
 }
 
+/**
+ * Certificate::match_message — IntersectMBO SoT:
+ *   message.compute_hash() == certificate.signed_message
+ *
+ * Accepts ProtocolMessage-shaped objects (`{ message_parts }`), bare parts
+ * maps/objects, or WASM Map message_parts (via computeProtocolMessageHash).
+ * Proven equal to WASM verify_message_match_certificate on preprod CDB tip
+ * identity + MSD compute path (2026-08).
+ *
+ * This is artifact binding after MessageBuilder, NOT full snapshot digest
+ * recompute from disk (cardano_database_merkle_root still needs merkle proof).
+ */
+export type CertificateMatchMessageResult = {
+    ok: boolean;
+    computed: string | null;
+    signed: string | null;
+    reason: string;
+};
+
+export function certificateMatchMessage(
+    message: unknown,
+    cert: MithrilCertificate | Record<string, unknown>,
+): CertificateMatchMessageResult {
+    const signed =
+        typeof cert.signed_message === "string" ? cert.signed_message : null;
+    const computed = computeProtocolMessageHash(message);
+    if (computed == null) {
+        return {
+            ok: false,
+            computed: null,
+            signed,
+            reason: "match_message: empty/unparseable protocol message",
+        };
+    }
+    if (signed == null) {
+        return {
+            ok: false,
+            computed,
+            signed: null,
+            reason: "match_message: cert.signed_message missing",
+        };
+    }
+    const ok = computed === signed;
+    return {
+        ok,
+        computed,
+        signed,
+        reason: ok
+            ? "match_message OK — message.compute_hash == signed_message"
+            : `match_message FAIL — computed=${computed.slice(0, 16)} signed=${signed.slice(0, 16)}`,
+    };
+}
+
+/**
+ * Identity check: cert.protocol_message hashes to cert.signed_message.
+ * Equivalent to certificateMatchMessage(cert.protocol_message, cert).
+ */
+export function certificateMatchOwnProtocolMessage(
+    cert: MithrilCertificate | Record<string, unknown>,
+): CertificateMatchMessageResult {
+    return certificateMatchMessage(
+        (cert as { protocol_message?: unknown }).protocol_message,
+        cert,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Genesis vkey / signature helpers
 // ---------------------------------------------------------------------------

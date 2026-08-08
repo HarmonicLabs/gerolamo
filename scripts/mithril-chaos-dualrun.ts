@@ -242,13 +242,8 @@ async function main(): Promise<void> {
         const ms = Date.now() - t1;
         const pure = dual.pureTs;
         const stagesOk = pureTsFullChainStagesOk(pure);
-        // dualRun already computes match; re-check formula for honesty
         const wasmOk = dual.wasm.ok === true;
         const match = dual.match === true;
-        // formula must agree with dual.match (gate honesty)
-        if (match !== (wasmOk && stagesOk)) {
-            // counted later via gateBad on rows; still store stagesOk honestly
-        }
         const nSig = nSigOf(pure);
         if (typeof nSig === "number") {
             maxNSig = Math.max(maxNSig, nSig);

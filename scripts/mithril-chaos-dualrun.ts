@@ -22,9 +22,11 @@ import {
     fetchGenesisVkey,
     isGenesisCertificate,
     networkConfig,
+    persistMithrilCertificate,
     pureTsFullChainStagesOk,
     selectSnapshot,
     type DualRunVerifyResult,
+    type MithrilCertificate,
     type PureTsVerifyOptions,
 } from "../src/mithril/index.ts";
 
@@ -280,6 +282,24 @@ async function main(): Promise<void> {
             ms,
         };
         rows.push(row);
+
+        // Audit trail (non-fatal): persist cert + observed verdict
+        if (process.env.PERSIST_CERTS !== "0") {
+            try {
+                const certObj =
+                    (cert as MithrilCertificate) ??
+                    ({ hash: s.hash } as MithrilCertificate);
+                await persistMithrilCertificate(certObj, {
+                    network,
+                    wasmOk,
+                    dualMatch: match,
+                    stagesOk: stagesOk === true,
+                    source: "chaos-dualrun",
+                });
+            } catch {
+                /* persist is best-effort */
+            }
+        }
 
         console.log(
             JSON.stringify({

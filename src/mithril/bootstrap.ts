@@ -23,6 +23,7 @@ import {
     networkConfig,
     selectSnapshot,
 } from "./client";
+import { persistMithrilCertificate } from "./certStore";
 import {
     downloadAncillary,
     downloadImmutableRange,
@@ -112,6 +113,17 @@ async function runWasmBootstrap(
             logger,
             `Certificate chain OK cert.hash=${cert.hash} epoch=${cert.epoch ?? "?"}`,
         );
+        // Audit trail: persist verified tip cert (WASM verdict; not SoT cutover)
+        try {
+            await persistMithrilCertificate(cert, {
+                network: opts.network,
+                wasmOk: true,
+                source: "mithril-bootstrap",
+            });
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            logWarn(logger, `Certificate persist failed (non-fatal): ${msg}`);
+        }
 
         const downloadDir = resolve(opts.downloadDir);
         await mkdir(downloadDir, { recursive: true });

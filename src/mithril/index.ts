@@ -184,3 +184,11 @@ export {
 } from "./pureTs";
 
 export { runMithrilBootstrap } from "./bootstrap";
+
+export {
+    countMithrilCertificates,
+    ensureCertificatesTable,
+    persistMithrilCertificate,
+    persistMithrilCertificates,
+    type MithrilCertVerdict,
+} from "./certStore";

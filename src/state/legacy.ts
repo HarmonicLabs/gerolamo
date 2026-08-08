@@ -93,7 +93,13 @@ export async function processChunk(
         secondaryDV,
         chunkDV,
     );
-    
+
+    logger.info(
+        `Chunk ${chunkNo} (padded ${parsedFNo}): ${blocks.length} blocks to apply`,
+    );
+
+    let appliedCount = 0;
+    let errorCount = 0;
     for (let block of blocks) {
         let era: number | string = "?";
         let blockHashHex = "";
@@ -102,7 +108,9 @@ export async function processChunk(
             era = meb.era;
             blockHashHex = toHex(block.blockHash);
 
-            logger.info(`Applying era ${meb.era} block: ${blockHashHex}`);
+            logger.info(
+                `Applying chunk ${chunkNo} era ${meb.era} block: ${blockHashHex}`,
+            );
 
             await applyBlock(
                 meb.block,
@@ -110,14 +118,20 @@ export async function processChunk(
                 blake2b_256(meb.block.header.toCborBytes()),
                 client,
             );
+            appliedCount++;
         } catch (e) {
             // Honest error surface: this catch is NOT Byron-specific.
             // (Byron empty-payload blocks return normally in applyBlock and
             // never reach here.) Log the real error + era for triage.
             const msg = e instanceof Error ? e.message : String(e);
             logger.warn(
-                `Block apply error (era ${era}, block ${blockHashHex || toHex(block.blockHash)}): ${msg}`,
+                `Chunk ${chunkNo} block apply error (era ${era}, block ${blockHashHex || toHex(block.blockHash)}): ${msg}`,
             );
+            errorCount++;
         }
     }
+
+    logger.info(
+        `Chunk ${chunkNo} done: applied=${appliedCount} errors=${errorCount}`,
+    );
 }

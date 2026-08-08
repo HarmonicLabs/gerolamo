@@ -23,13 +23,13 @@ while true; do
   round=$((round + 1))
   echo "APPLY_ROUND $round $(date -u +%FT%TZ)" >> "$LOG"
 
-  # Run one pass; capture its output separately so the caught-check uses
-  # only THIS round (not the whole accumulated log).
+  # Run one pass; stream output live to $LOG (tee) so `tail -f` works
+  # mid-round, and keep a per-round copy so the caught-check uses only
+  # THIS round (not the whole accumulated log).
   roundout=$(mktemp /tmp/apply-round-XXXXXX.out)
   MARGIN=3 GEROLAMO_DB_PATH=./.live/test.db \
-    bun scripts/mithril-apply-gapfill.ts > "$roundout" 2>&1
-  ec=$?
-  cat "$roundout" >> "$LOG"
+    bun scripts/mithril-apply-gapfill.ts 2>&1 | tee -a "$LOG" > "$roundout"
+  ec=${PIPESTATUS[0]}
 
   if [ "$ec" -eq 3 ]; then
     echo "APPLY_RUNNER_STOP: another applier holds the lock (exit=3). $(date -u +%FT%TZ)" | tee -a "$LOG"
@@ -78,9 +78,8 @@ while true; do
     # MARGIN=0 sweep to pick up any tail chunks, then exit.
     sweep=$(mktemp /tmp/apply-round-XXXXXX.out)
     MARGIN=0 GEROLAMO_DB_PATH=./.live/test.db \
-      bun scripts/mithril-apply-gapfill.ts > "$sweep" 2>&1
-    sec=$?
-    cat "$sweep" >> "$LOG"
+      bun scripts/mithril-apply-gapfill.ts 2>&1 | tee -a "$LOG" > "$sweep"
+    sec=${PIPESTATUS[0]}
     if [ "$sec" -eq 0 ] && grep -q 'APPLY_CAUGHT_UP' "$sweep"; then
       echo "APPLY_RUNNER_COMPLETE $(date -u +%FT%TZ)" | tee -a "$LOG"
       rm -f "$sweep"

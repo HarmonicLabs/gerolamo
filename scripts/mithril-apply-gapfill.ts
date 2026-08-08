@@ -14,8 +14,8 @@
  *   APPLY_LIMIT=2 bun scripts/mithril-apply-gapfill.ts   # smoke: 2 chunks max
  *   GEROLAMO_DB_PATH=./.live/test.db bun scripts/mithril-apply-gapfill.ts
  */
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 
 import { ensureInitialized } from "../src/db";
 import { processChunk } from "../src/state/legacy";
@@ -70,6 +70,7 @@ function loadState(): ApplyState {
 }
 
 function saveState(s: ApplyState): void {
+    mkdirSync(dirname(STATE_PATH), { recursive: true });
     writeFileSync(STATE_PATH, JSON.stringify(s, null, 2));
 }
 

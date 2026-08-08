@@ -95,10 +95,14 @@ export async function processChunk(
     );
     
     for (let block of blocks) {
+        let era: number | string = "?";
+        let blockHashHex = "";
         try {
             const meb = MultiEraBlock.fromCbor(block.blockCbor);
-            
-            logger.info(`Applying era ${meb.era} block: ${toHex(block.blockHash)}`);
+            era = meb.era;
+            blockHashHex = toHex(block.blockHash);
+
+            logger.info(`Applying era ${meb.era} block: ${blockHashHex}`);
 
             await applyBlock(
                 meb.block,
@@ -106,8 +110,14 @@ export async function processChunk(
                 blake2b_256(meb.block.header.toCborBytes()),
                 client,
             );
-        } catch {
-            logger.info(`Skipping Byron block: ${toHex(block.blockHash)}`);
+        } catch (e) {
+            // Honest error surface: this catch is NOT Byron-specific.
+            // (Byron empty-payload blocks return normally in applyBlock and
+            // never reach here.) Log the real error + era for triage.
+            const msg = e instanceof Error ? e.message : String(e);
+            logger.warn(
+                `Block apply error (era ${era}, block ${blockHashHex || toHex(block.blockHash)}): ${msg}`,
+            );
         }
     }
 }

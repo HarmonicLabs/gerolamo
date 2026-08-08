@@ -65,7 +65,7 @@ export async function processChunk(
     chunkNo: number,
     logger: Logger,
     client?: import("../db").SqlClient,
-): Promise<void> {
+): Promise<{ blocks: number; applied: number; errors: number }> {
     assert(isAbsolute(dir));
 
     const parsedFNo = chunkNo.toString().padStart(5, "0");
@@ -134,4 +134,10 @@ export async function processChunk(
     logger.info(
         `Chunk ${chunkNo} done: applied=${appliedCount} errors=${errorCount}`,
     );
+
+    return {
+        blocks: blocks.length,
+        applied: appliedCount,
+        errors: errorCount,
+    };
 }

@@ -49,7 +49,13 @@ const DB_PATH = resolve(
 );
 const STATE_PATH = join(SNAP_ROOT, ".apply-state.json");
 const LOCK_PATH = join(SNAP_ROOT, ".apply.lock");
-const MARGIN = Math.max(1, parseInt(process.env.MARGIN || "3", 10));
+/**
+ * Chunks closer than MARGIN to the download frontier are not applied yet
+ * (never read a chunk mid-extract). MARGIN=0 is valid and means "apply up
+ * to and including the frontier" — used by the runner's final sweep after
+ * the download has exited. Default 3.
+ */
+const MARGIN = Math.max(0, parseInt(process.env.MARGIN ?? "3", 10));
 const APPLY_LIMIT = process.env.APPLY_LIMIT
     ? parseInt(process.env.APPLY_LIMIT, 10)
     : null;
@@ -224,18 +230,20 @@ async function main(): Promise<void> {
         const result = await processChunk(IMM_DIR, n, logger);
         applied++;
 
-        if (result.applied === 0 && result.errors > 0) {
-            // Catastrophic chunk (database locked / disk full / env failure):
-            // nothing landed. Do NOT advance progress — resume retries it.
+        if (result.applied === 0) {
+            // Nothing landed for this chunk — either an environmental
+            // failure (database locked / disk full) or corrupt/empty
+            // chunk data. Do NOT advance progress: resume retries this
+            // chunk; persistent halt needs human triage.
             console.log(
                 JSON.stringify({
-                    phase: "halt_errors",
+                    phase: "halt_zero_applied",
                     chunk: n,
                     ...result,
                     lastAppliedKept: state.lastApplied,
                 }),
             );
-            console.log("APPLY_HALTED_ERRORS");
+            console.log("APPLY_HALTED_ZERO_APPLIED");
             process.exit(2);
         }
 

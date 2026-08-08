@@ -273,9 +273,32 @@ export async function extractTarZstToDir(
     );
 }
 
+/** True when immutable/{padded}.{chunk,primary,secondary} all exist. */
+export async function hasCompleteImmutableTrio(
+    downloadDir: string,
+    chunkNo: number,
+): Promise<{ complete: boolean; immutableDir: string | null }> {
+    const root = resolve(downloadDir);
+    const immutableDir = await findImmutableDir(root);
+    if (!immutableDir) return { complete: false, immutableDir: null };
+    const padded = padImmutableNo(chunkNo);
+    const expected = [
+        `${padded}.chunk`,
+        `${padded}.primary`,
+        `${padded}.secondary`,
+    ];
+    for (const name of expected) {
+        if (!existsSync(join(immutableDir, name))) {
+            return { complete: false, immutableDir };
+        }
+    }
+    return { complete: true, immutableDir };
+}
+
 /**
  * Download one immutable file number and extract into downloadDir.
  * Returns path to immutable dir (…/immutable).
+ * When skipIfPresent (default true), reuses a complete on-disk trio.
  */
 export async function downloadImmutableChunk(opts: {
     template: string;
@@ -283,14 +306,33 @@ export async function downloadImmutableChunk(opts: {
     downloadDir: string;
     /** Keep .tar.zst after extract (default false). */
     keepArchive?: boolean;
+    /** Skip GET+extract when trio already on disk (default true). */
+    skipIfPresent?: boolean;
     log?: (msg: string) => void;
-}): Promise<{ immutableDir: string; files: string[] }> {
+}): Promise<{ immutableDir: string; files: string[]; skipped: boolean }> {
     const log = opts.log ?? (() => {});
     const padded = padImmutableNo(opts.chunkNo);
-    const url = opts.template.replaceAll("{immutable_file_number}", padded);
     const root = resolve(opts.downloadDir);
     await mkdir(root, { recursive: true });
 
+    const skipIfPresent = opts.skipIfPresent !== false;
+    if (skipIfPresent) {
+        const existing = await hasCompleteImmutableTrio(root, opts.chunkNo);
+        if (existing.complete && existing.immutableDir) {
+            log(`  skip chunk ${padded} (trio present)`);
+            return {
+                immutableDir: existing.immutableDir,
+                files: [
+                    `${padded}.chunk`,
+                    `${padded}.primary`,
+                    `${padded}.secondary`,
+                ],
+                skipped: true,
+            };
+        }
+    }
+
+    const url = opts.template.replaceAll("{immutable_file_number}", padded);
     const archivesDir = join(root, ".mithril-archives");
     await mkdir(archivesDir, { recursive: true });
     const zstPath = join(archivesDir, `${padded}.tar.zst`);
@@ -328,19 +370,26 @@ export async function downloadImmutableChunk(opts: {
         );
     }
 
-    return { immutableDir, files: expected };
+    return { immutableDir, files: expected, skipped: false };
 }
 
 /**
  * Download a range of immutable chunks [from, to] inclusive.
+ * Default skipIfPresent=true resumes without re-fetching complete trios.
  */
 export async function downloadImmutableRange(opts: {
     snapshot: MithrilCdbSnapshot;
     downloadDir: string;
     fromChunk: number;
     toChunk: number;
+    /** Skip complete on-disk trios (default true). */
+    skipIfPresent?: boolean;
     log?: (msg: string) => void;
-}): Promise<{ immutableDir: string; downloaded: number[] }> {
+}): Promise<{
+    immutableDir: string;
+    downloaded: number[];
+    skipped: number[];
+}> {
     const template = immutableTemplateFromSnapshot(opts.snapshot);
     const maxBeacon =
         opts.snapshot.beacon?.immutable_file_number ?? opts.toChunk;
@@ -353,18 +402,22 @@ export async function downloadImmutableRange(opts: {
     }
 
     const downloaded: number[] = [];
+    const skipped: number[] = [];
     let immutableDir = "";
+    const skipIfPresent = opts.skipIfPresent !== false;
     for (let n = from; n <= to; n++) {
         const r = await downloadImmutableChunk({
             template,
             chunkNo: n,
             downloadDir: opts.downloadDir,
+            skipIfPresent,
             log: opts.log,
         });
         immutableDir = r.immutableDir;
-        downloaded.push(n);
+        if (r.skipped) skipped.push(n);
+        else downloaded.push(n);
     }
-    return { immutableDir, downloaded };
+    return { immutableDir, downloaded, skipped };
 }
 
 /**

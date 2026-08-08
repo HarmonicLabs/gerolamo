@@ -46,6 +46,7 @@ export {
     FZSTD_MAX_BYTES,
     findAncillaryLedgerDir,
     findImmutableDir,
+    hasCompleteImmutableTrio,
     immutableTemplateFromSnapshot,
     locationTemplate,
     padImmutableNo,

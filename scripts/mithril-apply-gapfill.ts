@@ -193,6 +193,20 @@ async function main(): Promise<void> {
     } catch {
         /* best effort */
     }
+    // Bulk-load tuning (apply-only; safe with WAL). NORMAL keeps one fsync
+    // per commit instead of two; bigger page cache + bounded WAL file keep
+    // the 5GB+ DB from thrashing disk.
+    for (const pragma of [
+        "PRAGMA synchronous = NORMAL",
+        "PRAGMA journal_size_limit = 134217728",
+        "PRAGMA cache_size = -131072",
+    ]) {
+        try {
+            await sql.unsafe(pragma);
+        } catch {
+            /* best effort */
+        }
+    }
 
     const frontier = maxCompleteTrio();
     const applyLimit = Math.max(-1, frontier - MARGIN);

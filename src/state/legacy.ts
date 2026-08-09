@@ -6,6 +6,7 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 
 import { Logger } from "../utils/logger";
+import { sql } from "../sql";
 import { applyBlock } from "../consensus/BlockApplication";
 import {
     getByronTxPayloads,
@@ -161,41 +162,56 @@ export async function processChunk(
     let lastSlot: string | null = null;
     const eras: Record<string, number> = {};
 
-    for (const block of blocks) {
-        let era: number | string = "?";
-        let blockHashHex = "";
-        try {
-            const meb = MultiEraBlock.fromCbor(block.blockCbor);
-            era = meb.era;
-            blockHashHex = toHex(block.blockHash);
+    const applyLoop = async (): Promise<void> => {
+        for (const block of blocks) {
+            let era: number | string = "?";
+            let blockHashHex = "";
+            try {
+                const meb = MultiEraBlock.fromCbor(block.blockCbor);
+                era = meb.era;
+                blockHashHex = toHex(block.blockHash);
 
-            const stats = countBlockBodyStats(meb);
+                const stats = countBlockBodyStats(meb);
 
-            await applyBlock(
-                meb.block,
-                getHeaderSlot(meb.block.header),
-                blake2b_256(meb.block.header.toCborBytes()),
-                client,
-            );
-            appliedCount++;
-            txs += stats.txs;
-            inputs += stats.inputs;
-            outputs += stats.outputs;
-            const eraKey = String(era);
-            eras[eraKey] = (eras[eraKey] ?? 0) + 1;
-            const slotStr = String(block.slotNo);
-            if (firstSlot === null) firstSlot = slotStr;
-            lastSlot = slotStr;
-        } catch (e) {
-            // Honest error surface: this catch is NOT Byron-specific.
-            // (Byron empty-payload blocks return normally in applyBlock and
-            // never reach here.) Log the real error + era for triage.
-            const msg = e instanceof Error ? e.message : String(e);
-            logger.warn(
-                `Chunk ${chunkNo} block apply error (era ${era}, block ${blockHashHex || toHex(block.blockHash)}): ${msg}`,
-            );
-            errorCount++;
+                await applyBlock(
+                    meb.block,
+                    getHeaderSlot(meb.block.header),
+                    blake2b_256(meb.block.header.toCborBytes()),
+                    client,
+                );
+                appliedCount++;
+                txs += stats.txs;
+                inputs += stats.inputs;
+                outputs += stats.outputs;
+                const eraKey = String(era);
+                eras[eraKey] = (eras[eraKey] ?? 0) + 1;
+                const slotStr = String(block.slotNo);
+                if (firstSlot === null) firstSlot = slotStr;
+                lastSlot = slotStr;
+            } catch (e) {
+                // Honest error surface: this catch is NOT Byron-specific.
+                // (Byron empty-payload blocks return normally in applyBlock and
+                // never reach here.) Log the real error + era for triage.
+                // Bun .begin() keeps the transaction alive when the error is
+                // caught here (verified), so the chunk still commits.
+                const msg = e instanceof Error ? e.message : String(e);
+                logger.warn(
+                    `Chunk ${chunkNo} block apply error (era ${era}, block ${blockHashHex || toHex(block.blockHash)}): ${msg}`,
+                );
+                errorCount++;
+            }
         }
+    };
+
+    if (client) {
+        // Caller manages the transaction (batch hydrate) — apply inline.
+        await applyLoop();
+    } else {
+        // Own the connection: ONE transaction per chunk. Without this every
+        // statement was its own implicit tx (fsync each) — ~100k fsyncs per
+        // chunk on busy eras. Chunk-per-commit keeps halt/resume semantics:
+        // a fully failed chunk commits nothing.
+        await (client ?? sql).begin(applyLoop);
     }
 
     return {

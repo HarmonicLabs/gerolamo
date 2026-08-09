@@ -38,7 +38,7 @@ import { dirname, join, resolve } from "node:path";
 import { ensureInitialized } from "../src/db";
 import { processChunk } from "../src/state/legacy";
 import { initSql, getSqlFilename, sql } from "../src/sql";
-import { Logger, LogLevel } from "../src/utils/logger";
+import { Logger, LogLevel, logger as globalLogger } from "../src/utils/logger";
 
 const IMM_DIR = resolve(
     process.env.IMMUTABLE_DIR || "./snapshots/mithril/immutable",
@@ -179,6 +179,12 @@ async function main(): Promise<void> {
         });
     }
 
+    // Quiet apply path: suppress per-tx DEBUG spam from applyBlock/db.
+    // Per-block errors still surface via the processChunk WARN logger.
+    // Set BEFORE ensureInitialized so schema/init chatter is quiet too.
+    globalLogger.setLogLevel(LogLevel.WARN);
+    const logger = new Logger({ logLevel: LogLevel.WARN });
+
     initSql(DB_PATH);
     await ensureInitialized();
     // Defensive: brief tolerance if another writer momentarily holds the DB.
@@ -187,11 +193,13 @@ async function main(): Promise<void> {
     } catch {
         /* best effort */
     }
-    const logger = new Logger({ logLevel: LogLevel.INFO });
 
     const frontier = maxCompleteTrio();
     const applyLimit = Math.max(-1, frontier - MARGIN);
     const state = loadState();
+    // Total complete trios on disk (0..frontier inclusive when frontier>=0).
+    const totalChunks = frontier >= 0 ? frontier + 1 : 0;
+    const alreadyDone = Math.max(0, Math.min(state.lastApplied + 1, totalChunks));
 
     console.log(
         JSON.stringify({
@@ -199,9 +207,12 @@ async function main(): Promise<void> {
             db: getSqlFilename(),
             immDir: IMM_DIR,
             frontierTrio: frontier,
+            totalChunks,
             applyLimit,
             margin: MARGIN,
             lastApplied: state.lastApplied,
+            chunksDone: alreadyDone,
+            chunksLeft: Math.max(0, applyLimit - state.lastApplied),
             applyLimitEnv: APPLY_LIMIT,
             lockPid: process.pid,
         }),
@@ -239,8 +250,13 @@ async function main(): Promise<void> {
                 JSON.stringify({
                     phase: "halt_zero_applied",
                     chunk: n,
-                    ...result,
+                    blocks: result.blocks,
+                    applied: result.applied,
+                    errors: result.errors,
                     lastAppliedKept: state.lastApplied,
+                    chunksDone: Math.max(0, state.lastApplied + 1),
+                    chunksLeft: Math.max(0, applyLimit - state.lastApplied),
+                    totalChunks,
                 }),
             );
             console.log("APPLY_HALTED_ZERO_APPLIED");
@@ -260,18 +276,33 @@ async function main(): Promise<void> {
         );
         saveState(state);
 
-        if (applied % 10 === 0 || n === applyLimit) {
-            console.log(
-                JSON.stringify({
-                    phase: "progress",
-                    chunk: n,
-                    appliedThisRun: applied,
-                    frontier,
-                    applyLimit,
-                    ms: Date.now() - t0,
-                }),
-            );
-        }
+        const chunksDone = n + 1; // 0-indexed chunks → count completed
+        const chunksLeft = Math.max(0, applyLimit - n);
+        const pct = totalChunks > 0
+            ? Number(((chunksDone / totalChunks) * 100).toFixed(2))
+            : 0;
+        // One line per chunk: progress first, then optional body stats.
+        console.log(
+            JSON.stringify({
+                phase: "chunk",
+                chunk: n,
+                chunksDone,
+                chunksLeft,
+                totalChunks,
+                pct,
+                blocks: result.blocks,
+                applied: result.applied,
+                errors: result.errors,
+                txs: result.txs,
+                inputs: result.inputs,
+                outputs: result.outputs,
+                eras: result.eras,
+                firstSlot: result.firstSlot,
+                lastSlot: result.lastSlot,
+                ms: Date.now() - t0,
+                appliedThisRun: applied,
+            }),
+        );
     }
 
     const caughtUp = state.lastApplied >= applyLimit;
@@ -280,6 +311,9 @@ async function main(): Promise<void> {
             phase: "done",
             appliedThisRun: applied,
             lastApplied: state.lastApplied,
+            chunksDone: Math.max(0, state.lastApplied + 1),
+            chunksLeft: Math.max(0, applyLimit - state.lastApplied),
+            totalChunks,
             frontier,
             applyLimit,
             caughtUp,

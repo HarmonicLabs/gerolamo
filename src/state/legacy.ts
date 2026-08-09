@@ -7,7 +7,12 @@ import { blake2b_256 } from "@harmoniclabs/crypto";
 
 import { Logger } from "../utils/logger";
 import { applyBlock } from "../consensus/BlockApplication";
-import { getHeaderSlot } from "../utils/eraAccessors";
+import {
+    getByronTxPayloads,
+    getHeaderSlot,
+    getShelleyTxBodies,
+    isByronBlock,
+} from "../utils/eraAccessors";
 
 interface RawChunkBlock {
     slotNo: bigint;
@@ -18,6 +23,22 @@ interface RawChunkBlock {
     headerSize: number;
     crc: number;
 }
+
+export type ProcessChunkResult = {
+    blocks: number;
+    applied: number;
+    errors: number;
+    /** Shelley+ tx bodies + Byron payloads counted across applied blocks. */
+    txs: number;
+    /** Sum of input counts across applied Shelley txs (best-effort). */
+    inputs: number;
+    /** Sum of output counts across applied Shelley txs (best-effort). */
+    outputs: number;
+    firstSlot: string | null;
+    lastSlot: string | null;
+    /** Era histogram for applied blocks, e.g. { "6": 1000 }. */
+    eras: Record<string, number>;
+};
 
 export function parseChunk(
     primaryDV: DataView,
@@ -60,12 +81,49 @@ export function parseChunk(
         });
 }
 
+function countBlockBodyStats(meb: MultiEraBlock): {
+    txs: number;
+    inputs: number;
+    outputs: number;
+} {
+    try {
+        if (isByronBlock(meb.block as any)) {
+            return {
+                txs: getByronTxPayloads(meb.block as any).length,
+                inputs: 0,
+                outputs: 0,
+            };
+        }
+        const bodies = getShelleyTxBodies(meb.block);
+        let inputs = 0;
+        let outputs = 0;
+        for (const tb of bodies) {
+            try {
+                const ins = (tb as any)?.inputs;
+                if (Array.isArray(ins)) inputs += ins.length;
+            } catch { /* best effort */ }
+            try {
+                const outs = (tb as any)?.outputs;
+                if (Array.isArray(outs)) outputs += outs.length;
+            } catch { /* best effort */ }
+        }
+        return { txs: bodies.length, inputs, outputs };
+    } catch {
+        return { txs: 0, inputs: 0, outputs: 0 };
+    }
+}
+
+/**
+ * Apply one immutable chunk. Logging is quiet by default:
+ * one optional start line (caller), per-block errors only, no per-tx spam.
+ * Callers (gap-fill applier) print progress with applied/left totals.
+ */
 export async function processChunk(
     dir: string,
     chunkNo: number,
     logger: Logger,
     client?: import("../db").SqlClient,
-): Promise<{ blocks: number; applied: number; errors: number }> {
+): Promise<ProcessChunkResult> {
     assert(isAbsolute(dir));
 
     const parsedFNo = chunkNo.toString().padStart(5, "0");
@@ -94,13 +152,16 @@ export async function processChunk(
         chunkDV,
     );
 
-    logger.info(
-        `Chunk ${chunkNo} (padded ${parsedFNo}): ${blocks.length} blocks to apply`,
-    );
-
     let appliedCount = 0;
     let errorCount = 0;
-    for (let block of blocks) {
+    let txs = 0;
+    let inputs = 0;
+    let outputs = 0;
+    let firstSlot: string | null = null;
+    let lastSlot: string | null = null;
+    const eras: Record<string, number> = {};
+
+    for (const block of blocks) {
         let era: number | string = "?";
         let blockHashHex = "";
         try {
@@ -108,9 +169,7 @@ export async function processChunk(
             era = meb.era;
             blockHashHex = toHex(block.blockHash);
 
-            logger.info(
-                `Applying chunk ${chunkNo} era ${meb.era} block: ${blockHashHex}`,
-            );
+            const stats = countBlockBodyStats(meb);
 
             await applyBlock(
                 meb.block,
@@ -119,6 +178,14 @@ export async function processChunk(
                 client,
             );
             appliedCount++;
+            txs += stats.txs;
+            inputs += stats.inputs;
+            outputs += stats.outputs;
+            const eraKey = String(era);
+            eras[eraKey] = (eras[eraKey] ?? 0) + 1;
+            const slotStr = String(block.slotNo);
+            if (firstSlot === null) firstSlot = slotStr;
+            lastSlot = slotStr;
         } catch (e) {
             // Honest error surface: this catch is NOT Byron-specific.
             // (Byron empty-payload blocks return normally in applyBlock and
@@ -131,13 +198,15 @@ export async function processChunk(
         }
     }
 
-    logger.info(
-        `Chunk ${chunkNo} done: applied=${appliedCount} errors=${errorCount}`,
-    );
-
     return {
         blocks: blocks.length,
         applied: appliedCount,
         errors: errorCount,
+        txs,
+        inputs,
+        outputs,
+        firstSlot,
+        lastSlot,
+        eras,
     };
 }

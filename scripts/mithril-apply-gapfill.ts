@@ -39,6 +39,21 @@ import { ensureInitialized } from "../src/db";
 import { processChunk } from "../src/state/legacy";
 import { initSql, getSqlFilename, sql } from "../src/sql";
 import { Logger, LogLevel, logger as globalLogger } from "../src/utils/logger";
+import {
+    calculateCardanoEpoch,
+    calculatePreProdCardanoEpoch,
+} from "../src/utils/epochFromSlotCalculations";
+
+const NETWORK = process.env.NETWORK === "mainnet" ? "mainnet" : "preprod";
+
+/** Absolute slot → network epoch using the existing per-network helpers. */
+function slotToEpoch(slot: string | null): number | null {
+    if (slot === null) return null;
+    const e = NETWORK === "mainnet"
+        ? calculateCardanoEpoch(BigInt(slot))
+        : calculatePreProdCardanoEpoch(BigInt(slot));
+    return Number(e);
+}
 
 const IMM_DIR = resolve(
     process.env.IMMUTABLE_DIR || "./snapshots/mithril/immutable",
@@ -313,6 +328,8 @@ async function main(): Promise<void> {
                 eras: result.eras,
                 firstSlot: result.firstSlot,
                 lastSlot: result.lastSlot,
+                firstEpoch: slotToEpoch(result.firstSlot),
+                lastEpoch: slotToEpoch(result.lastSlot),
                 ms: Date.now() - t0,
                 appliedThisRun: applied,
             }),

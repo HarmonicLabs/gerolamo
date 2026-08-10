@@ -27,7 +27,15 @@ export function getHeaderSlot(h: AnyEraHeader): bigint {
     const any = h as any;
     if (any?.body?.slot != null) return BigInt(any.body.slot);
     if (any?.consensusData?.slotId?.slot != null) {
-        return BigInt(any.consensusData.slotId.slot);
+        // Byron slotId is EPOCH-LOCAL — absolute slot = epoch × 21600 + local.
+        // Verified on preprod: chunk 1 first block has slotId {epoch:1, slot:0}
+        // and secondary index slot 21600; chunk 2 first block {epoch:2, slot:1}
+        // ↔ secondary 43201.
+        const epoch = BigInt(any.consensusData.slotId.epoch ?? 0);
+        return (
+            epoch * BYRON_SLOTS_PER_EPOCH +
+            BigInt(any.consensusData.slotId.slot)
+        );
     }
     if (
         any?.constructor?.name === "ByronEbbHead" ||

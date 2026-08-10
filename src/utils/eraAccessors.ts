@@ -13,12 +13,28 @@ import type {
 } from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
-/** Absolute slot from any era header (Byron uses epoch-local slotId). */
+/** Byron epoch length in slots (mainnet/preprod Byron: 21600 slots × 20s). */
+const BYRON_SLOTS_PER_EPOCH = 21600n;
+
+/**
+ * Absolute slot from any era header (Byron uses epoch-local slotId).
+ * Byron EBBs (Genesis/epoch-boundary, `ByronEbbHead`) carry no slotId —
+ * consensusData is `{epoch, difficulty}` only. Anchor them to their
+ * epoch-start slot (epoch × 21600), which preserves ordering: preprod
+ * chunk 0 epoch-0 EBB = slot 0, epoch 1 starts at slot 21600 (verified).
+ */
 export function getHeaderSlot(h: AnyEraHeader): bigint {
     const any = h as any;
     if (any?.body?.slot != null) return BigInt(any.body.slot);
     if (any?.consensusData?.slotId?.slot != null) {
         return BigInt(any.consensusData.slotId.slot);
+    }
+    if (
+        any?.constructor?.name === "ByronEbbHead" ||
+        (any?.consensusData?.epoch != null &&
+            any?.consensusData?.slotId == null)
+    ) {
+        return BigInt(any.consensusData.epoch) * BYRON_SLOTS_PER_EPOCH;
     }
     throw new Error("getHeaderSlot: unknown header shape");
 }

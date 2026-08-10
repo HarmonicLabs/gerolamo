@@ -55,6 +55,22 @@ function slotToEpoch(slot: string | null): number | null {
     return Number(e);
 }
 
+/** Compact human-readable ETA, e.g. "2d 3h", "1h 42m", "12m 30s". */
+function fmtEta(sec: number): string {
+    if (!Number.isFinite(sec) || sec <= 0) return "0s";
+    const d = Math.floor(sec / 86400);
+    const h = Math.floor((sec % 86400) / 3600);
+    const m = Math.floor((sec % 3600) / 60);
+    const s = Math.floor(sec % 60);
+    if (d > 0) return `${d}d ${h}h`;
+    if (h > 0) return `${h}h ${m}m`;
+    if (m > 0) return `${m}m ${s}s`;
+    return `${s}s`;
+}
+
+/** Window of recent chunk durations (ms) used for the ETA moving average. */
+const ETA_WINDOW = 10;
+
 const IMM_DIR = resolve(
     process.env.IMMUTABLE_DIR || "./snapshots/mithril/immutable",
 );
@@ -254,6 +270,8 @@ async function main(): Promise<void> {
 
     let applied = 0;
     const partialThisRun: number[] = [];
+    // Moving window of recent chunk durations (ms) for ETA estimation.
+    const durWindow: number[] = [];
     for (
         let n = state.lastApplied + 1;
         n <= applyLimit;
@@ -310,6 +328,12 @@ async function main(): Promise<void> {
         const pct = totalChunks > 0
             ? Number(((chunksDone / totalChunks) * 100).toFixed(2))
             : 0;
+        // ETA from moving average of the last ETA_WINDOW chunk durations.
+        const ms = Date.now() - t0;
+        durWindow.push(ms);
+        if (durWindow.length > ETA_WINDOW) durWindow.shift();
+        const avgMs = durWindow.reduce((a, b) => a + b, 0) / durWindow.length;
+        const etaSec = Math.round((chunksLeft * avgMs) / 1000);
         // One line per chunk: progress first, then optional body stats.
         console.log(
             JSON.stringify({
@@ -330,7 +354,9 @@ async function main(): Promise<void> {
                 lastSlot: result.lastSlot,
                 firstEpoch: slotToEpoch(result.firstSlot),
                 lastEpoch: slotToEpoch(result.lastSlot),
-                ms: Date.now() - t0,
+                ms,
+                etaSec,
+                eta: fmtEta(etaSec),
                 appliedThisRun: applied,
             }),
         );

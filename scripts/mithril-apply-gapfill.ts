@@ -227,10 +227,16 @@ async function main(): Promise<void> {
     // Bulk-load tuning (apply-only; safe with WAL). NORMAL keeps one fsync
     // per commit instead of two; bigger page cache + bounded WAL file keep
     // the 5GB+ DB from thrashing disk.
+    //
+    // DROP gc_volatile: AFTER INSERT it does MAX(slot) twice then a no-op
+    // DELETE (prefill blocks are is_valid=TRUE). First-apply profile of
+    // chunk 2000: INSERT INTO blocks was 91.5% of 119s wall. Live node
+    // recreate via ensureInitialized.
     for (const pragma of [
         "PRAGMA synchronous = NORMAL",
         "PRAGMA journal_size_limit = 134217728",
         "PRAGMA cache_size = -131072",
+        "DROP TRIGGER IF EXISTS gc_volatile",
     ]) {
         try {
             await sql.unsafe(pragma);

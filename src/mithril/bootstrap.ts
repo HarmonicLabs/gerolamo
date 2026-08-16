@@ -2,13 +2,12 @@
  * Mithril bootstrap orchestrator.
  *
  * Engine paths:
- *   wasm — list + verify via @mithril-dev/mithril-client-wasm;
- *          download via HTTP + pure-TS fzstd/tar-stream (no system zstd/tar)
- *   bin  — external mithril-client (full multi-GB restore; cert verify inside binary)
- *   auto — prefer wasm; fall back to bin if WASM load fails
- *
- * Density after download: processChunk on immutable/ (same as read-raw-chunks).
- * Ancillary UTxO extract is NOT done here (A2 blocked).
+ *   ts   — production: HTTP list/get + pure-TS cert-chain verify;
+ *          download via HTTP + fzstd/tar-stream
+ *   wasm — debug: list/verify via @mithril-dev/mithril-client-wasm
+ *   both — ts verify required, then WASM compare (debug)
+ *   bin  — external mithril-client (full multi-GB restore)
+ *   auto — ts
  */
 
 import { mkdir, readdir } from "node:fs/promises";
@@ -23,6 +22,8 @@ import {
     networkConfig,
     selectSnapshot,
 } from "./client";
+import { createTsMithrilClient } from "./httpClient";
+import { dualRunCertificateChain } from "./dualRun";
 import { persistMithrilCertificate } from "./certStore";
 import {
     downloadAncillary,
@@ -72,6 +73,218 @@ async function listPresentChunks(immutableDir: string): Promise<number[]> {
         if (Number.isFinite(num) && num >= 0) set.add(num);
     }
     return [...set].sort((a, b) => a - b);
+}
+
+async function runTsBootstrap(
+    opts: MithrilBootstrapOptions,
+    logger: Logger,
+    compareWasm: boolean,
+): Promise<MithrilBootstrapResult> {
+    const cfg = networkConfig(opts.network);
+    const aggregator = opts.aggregator || cfg.aggregator;
+    const engine: MithrilEngine = compareWasm ? "both" : "ts";
+
+    logInfo(logger, `mithril-bootstrap engine=${engine} aggregator=${aggregator}`);
+
+    const client = await createTsMithrilClient({
+        network: opts.network,
+        aggregator,
+        genesisVkey: opts.genesisVkey,
+        genesisVkeyUrl: opts.genesisVkey ? undefined : cfg.genesisVkeyUrl,
+    });
+
+    logInfo(logger, "Listing Cardano DB snapshots (HTTP)…");
+    const list = await client.listCardanoDatabaseV2();
+    const selected = selectSnapshot(list, opts.digest);
+    logInfo(
+        logger,
+        `Selected snapshot hash=${selected.hash} epoch=${selected.beacon.epoch} ` +
+            `immutable_file_number=${selected.beacon.immutable_file_number} ` +
+            `size≈${selected.total_db_size_uncompressed}`,
+    );
+
+    logInfo(
+        logger,
+        `Verifying certificate chain (pure-TS) cert=${selected.certificate_hash}…`,
+    );
+    const { cert, pureTs } = await client.verifyCertificateChain(
+        selected.certificate_hash,
+    );
+    logInfo(
+        logger,
+        `Certificate chain OK (pure-TS) cert.hash=${cert.hash} ` +
+            `epoch=${cert.epoch ?? "?"} reason=${pureTs.reason}`,
+    );
+
+    if (compareWasm) {
+        logInfo(logger, "Debug compare: WASM dual-run…");
+        const wasm = await createMithrilClient({
+            network: opts.network,
+            aggregator,
+            genesisVkey: client.genesisVkey,
+        });
+        try {
+            const dual = await dualRunCertificateChain(
+                wasm,
+                selected.certificate_hash,
+                {
+                    fetcher: (h) => client.fetchCertificate(h),
+                    genesisVkey: client.genesisVkey,
+                    runChainWalk: true,
+                },
+            );
+            logInfo(
+                logger,
+                `WASM compare match=${dual.match} wasmOk=${dual.wasm.ok} ` +
+                    `error=${dual.wasm.error ?? "none"}`,
+            );
+            if (!dual.match) {
+                logWarn(
+                    logger,
+                    "WASM compare diverged — production still accepted the pure-TS result",
+                );
+            }
+        } finally {
+            wasm.free();
+        }
+    }
+
+    try {
+        await persistMithrilCertificate(cert, {
+            network: opts.network,
+            wasmOk: compareWasm ? undefined : false,
+            stagesOk: true,
+            source: "mithril-bootstrap-ts",
+        });
+    } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        logWarn(logger, `Certificate persist failed (non-fatal): ${msg}`);
+    }
+
+    const downloadDir = resolve(opts.downloadDir);
+    await mkdir(downloadDir, { recursive: true });
+
+    let immutableDir: string | null = null;
+    let ancillaryDir: string | null = null;
+    let downloaded: number[] = [];
+    let detail: Awaited<ReturnType<typeof client.getCardanoDatabaseV2>> | null =
+        null;
+
+    const maxBeacon = selected.beacon.immutable_file_number;
+    let from = Math.max(0, opts.fromChunk ?? 0);
+    let to = Math.min(maxBeacon, opts.toChunk ?? maxBeacon);
+    if (opts.limitChunks != null && opts.limitChunks > 0) {
+        to = Math.min(to, from + opts.limitChunks - 1);
+    }
+    if (from > to) {
+        throw new Error(
+            `Invalid chunk range from=${from} to=${to} (beacon max=${maxBeacon})`,
+        );
+    }
+
+    if (opts.skipDownload) {
+        logInfo(logger, `--skip-download; scanning ${downloadDir}`);
+        immutableDir = await findImmutableDir(downloadDir);
+        if (!immutableDir) {
+            throw new Error(
+                `No immutable/ under ${downloadDir}. Drop --skip-download or point --download-dir at a snapshot.`,
+            );
+        }
+        ancillaryDir = await findAncillaryLedgerDir(downloadDir);
+    } else {
+        logInfo(logger, `Fetching snapshot detail for locations…`);
+        detail = await client.getCardanoDatabaseV2(selected.hash);
+        logInfo(
+            logger,
+            `Downloading immutable chunks ${from}..${to} → ${downloadDir}`,
+        );
+        const r = await downloadImmutableRange({
+            snapshot: detail,
+            downloadDir,
+            fromChunk: from,
+            toChunk: to,
+            log: (m) => logInfo(logger, m),
+        });
+        immutableDir = r.immutableDir;
+        downloaded = r.downloaded;
+
+        if (opts.includeAncillary) {
+            logInfo(
+                logger,
+                "Downloading ancillary ledger snapshot (--include-ancillary)…",
+            );
+            try {
+                const anc = await downloadAncillary({
+                    snapshot: detail,
+                    downloadDir,
+                    log: (m) => logInfo(logger, m),
+                });
+                ancillaryDir = anc.ancillaryDir;
+                logInfo(
+                    logger,
+                    `Ancillary landed at ${ancillaryDir} (${(anc.bytes / 1e6).toFixed(1)} MB raw archive)`,
+                );
+            } catch (e) {
+                const msg = e instanceof Error ? e.message : String(e);
+                logWarn(
+                    logger,
+                    `Ancillary download failed (UTxO still A2 blocked): ${msg}`,
+                );
+            }
+        }
+    }
+
+    if (ancillaryDir) {
+        try {
+            const probe = await probeAncillaryLedger(ancillaryDir, {
+                log: (m) => logInfo(logger, m),
+            });
+            logInfo(
+                logger,
+                `Ancillary probe: utxoExtracted=${probe.utxoExtracted} ` +
+                    `state=${probe.stateShape?.kind ?? "?"} ` +
+                    `tvar=${probe.files.tvar.exists}(${probe.files.tvar.size})`,
+            );
+        } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            logWarn(logger, `Ancillary probe failed: ${msg}`);
+        }
+    }
+
+    let applied: number[] = [];
+    if (opts.skipApply) {
+        logInfo(
+            logger,
+            `--skip-apply; immutable ready at ${immutableDir ?? "(none)"}`,
+        );
+    } else if (immutableDir) {
+        const present = await listPresentChunks(immutableDir);
+        const targets = present.filter((n) => n >= from && n <= to);
+        if (targets.length === 0) {
+            throw new Error(
+                `No chunk files in range ${from}..${to} under ${immutableDir}`,
+            );
+        }
+        logInfo(
+            logger,
+            `Applying ${targets.length} chunks from ${immutableDir}…`,
+        );
+        for (const n of targets) {
+            await processChunk(immutableDir, n, logger);
+            applied.push(n);
+        }
+    }
+
+    return {
+        engine,
+        snapshotHash: selected.hash,
+        certificateHash: selected.certificate_hash,
+        immutableDir,
+        ancillaryDir,
+        downloadedChunks: downloaded,
+        appliedChunks: applied,
+        verified: true,
+    };
 }
 
 async function runWasmBootstrap(
@@ -377,24 +590,19 @@ export async function runMithrilBootstrap(
     opts: MithrilBootstrapOptions,
     logger: Logger,
 ): Promise<MithrilBootstrapResult> {
-    const engine: MithrilEngine = opts.engine || "auto";
+    const engine: MithrilEngine = opts.engine || "ts";
     const downloadDir = resolve(opts.downloadDir);
     await mkdir(downloadDir, { recursive: true });
 
     if (engine === "bin") {
         return runBinBootstrap(opts, logger);
     }
-
     if (engine === "wasm") {
         return runWasmBootstrap(opts, logger);
     }
-
-    // auto: prefer WASM, fall back to bin
-    try {
-        return await runWasmBootstrap(opts, logger);
-    } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        logWarn(logger, `WASM engine failed (${msg}); falling back to bin…`);
-        return runBinBootstrap(opts, logger);
+    if (engine === "both") {
+        return runTsBootstrap(opts, logger, true);
     }
+    // ts | auto
+    return runTsBootstrap(opts, logger, false);
 }

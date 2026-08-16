@@ -5,13 +5,10 @@
  * Research: docs/mithril-native-client-research.md
  *
  * Honesty:
- *   - Cert chain verify = IOG @mithril-dev/mithril-client-wasm (not pure-TS crypto SoT)
- *   - Download/extract = TS HTTP + fzstd + tar-stream (no system zstd/tar)
- *   - Full multi-GB restore can still use --engine bin (external mithril-client)
- *   - Ancillary UTxO extract = A2 blocked (probe/download + tvar head scan only)
- *   - Phase 4 pure-TS = Stage 1–5c (shape/cryptoPrep/merkle/root/preliminary/aggregate/chainWalk);
- *     chainOk only when walk reaches genesis + Ed25519; match/implemented stay false
- *     WASM remains SoT for production cert-chain
+ *   - Production cert verify = HTTP aggregator + pure-TS Stages 1–5d (`--engine ts`)
+ *   - WASM / bin are debug or bulk-restore only (`--engine wasm|both|bin`)
+ *   - Download/extract = TS HTTP + fzstd + tar-stream
+ *   - dual-run match still available for debug compare
  */
 
 export type {
@@ -34,6 +31,11 @@ export {
     selectSnapshot,
     type GerolamoMithrilClient,
 } from "./client";
+
+export {
+    createTsMithrilClient,
+    type TsMithrilClient,
+} from "./httpClient";
 
 export {
     ancillaryUrlFromSnapshot,

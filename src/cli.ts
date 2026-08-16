@@ -265,17 +265,17 @@ export function Main() {
         );
 
     /**
-     * Optional Mithril bootstrap (hybrid):
-     *   --engine wasm  — list/verify via @mithril-dev/mithril-client-wasm; download via HTTP+zstd+tar
-     *   --engine bin   — external mithril-client binary (full multi-GB restore)
-     *   --engine auto  — prefer wasm, fall back to bin
+     * Optional Mithril bootstrap:
+     *   --engine ts    — production: HTTP + pure-TS cert verify (default)
+     *   --engine wasm  — debug: IOG WASM verify
+     *   --engine both  — ts verify + WASM compare
+     *   --engine bin   — external mithril-client binary
      * Then optional processChunk apply into Gerolamo SQLite.
-     * Ancillary UTxO extract remains blocked (A2) — see src/state/mithril.ts.
      */
     program
         .command("mithril-bootstrap")
         .description(
-            "Download/verify Mithril Cardano DB (wasm or mithril-client bin), then optionally apply immutable chunks",
+            "Download/verify Mithril Cardano DB (pure-TS default; wasm/bin optional), then optionally apply immutable chunks",
         )
         .option(
             "--network <name>",
@@ -294,8 +294,8 @@ export function Main() {
         )
         .option(
             "--engine <engine>",
-            "wasm | bin | auto (default: auto)",
-            "auto",
+            "ts | wasm | both | bin | auto (default: ts)",
+            "ts",
         )
         .option(
             "--client <path>",
@@ -360,11 +360,15 @@ export function Main() {
                 db?: string;
             }) => {
                 const logger = new Logger({ logLevel: LogLevel.INFO });
-                const engineRaw = (options.engine || "auto").toLowerCase();
+                const engineRaw = (options.engine || "ts").toLowerCase();
                 const engine = (
-                    engineRaw === "wasm" || engineRaw === "bin" || engineRaw === "auto"
+                    engineRaw === "ts" ||
+                        engineRaw === "wasm" ||
+                        engineRaw === "bin" ||
+                        engineRaw === "both" ||
+                        engineRaw === "auto"
                         ? engineRaw
-                        : "auto"
+                        : "ts"
                 ) as MithrilEngine;
 
                 // Apply path needs DB; download-only does not.

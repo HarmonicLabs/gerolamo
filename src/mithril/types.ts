@@ -8,8 +8,8 @@
 
 export type MithrilNetwork = "preprod" | "mainnet";
 
-/** Engine for mithril-bootstrap. */
-export type MithrilEngine = "wasm" | "bin" | "auto";
+/** Engine for mithril-bootstrap. `ts` is production; `wasm`/`both` are debug. */
+export type MithrilEngine = "ts" | "wasm" | "bin" | "both" | "auto";
 
 export type MithrilBeacon = {
     epoch: number;

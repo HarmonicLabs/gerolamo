@@ -11,7 +11,10 @@
         "stream-server": "bun scripts/mithril-stream-server.ts",
         "dashboard": "bun scripts/dashboard-server.ts",
         "dashboard:dev": "cd dashboard && bun x vite",
-        "dashboard:build": "cd dashboard && bun x vite build"
+        "dashboard:build": "cd dashboard && bun x vite build",
+        "ui:dev": "bash desktop/scripts/dev-wait.sh",
+        "ui:typecheck": "bun run --cwd desktop typecheck",
+        "ui:test": "bun test --cwd desktop src"
     },
     "devDependencies": {
         "@harmoniclabs/cddl-tools": "^0.0.4",

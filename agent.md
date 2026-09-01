@@ -7,7 +7,8 @@
 | **Repo** | `/media/bakon/data/Dev/HarmonicLabs/gerolamo` |
 | **Branch for Lab** | `The-Lab` (ignore `mikes-rolling-updates`) |
 | **Package** | `@harmoniclabs/gerolamo` — Bun process, **not** npm `@txpipe/gerolamo` |
-| **Consumer (Lab)** | `/media/bakon/data/Dev/HarmonicLabs/TheLab` |
+|| **Consumer (Lab)** | `/media/bakon/data/Dev/HarmonicLabs/TheLab` — **do not edit from this UI work** |
+|| **Standalone UI** | `desktop/` Electrobun Control Center · `bun run ui:dev` · `docs/standalone-ui.md` |
 
 ---
 

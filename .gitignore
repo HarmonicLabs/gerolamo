@@ -29,6 +29,13 @@ scripts/output/
 # Hermes agent local state
 .hermes/
 
+# Standalone desktop UI (Electrobun)
+desktop/views/
+desktop/build/
+desktop/Resources/
+desktop/*.so
+desktop/dist/
+
 
 # dotenv environment variable files
 .env

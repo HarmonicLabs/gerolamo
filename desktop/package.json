@@ -1,0 +1,24 @@
+{
+  "name": "gerolamo-ui",
+  "version": "0.0.1",
+  "private": true,
+  "description": "Standalone Gerolamo desktop control center (Electrobun). Not The Lab.",
+  "scripts": {
+    "dev": "bash scripts/dev-wait.sh",
+    "typecheck": "tsc --noEmit --pretty false 2>&1 | grep -E '^src/' > /tmp/gerolamo-ui-tsc.txt || true; if [ -s /tmp/gerolamo-ui-tsc.txt ]; then cat /tmp/gerolamo-ui-tsc.txt; exit 1; else echo 'Type check passed'; exit 0; fi",
+    "test": "bun test src"
+  },
+  "dependencies": {
+    "electrobun": "^1.18.1",
+    "marked": "^17.0.3",
+    "solid-js": "^1.9.11"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.3.1",
+    "@types/bun": "latest",
+    "tailwindcss": "^4.3.0",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "vite-plugin-solid": "^2.11.10"
+  }
+}

@@ -15,6 +15,13 @@ export function assertAbsPath(p: string, label = "path"): string {
   return trimmed;
 }
 
+/** Browse returns a folder; SQLite needs a file. Keep *.db / *.sqlite as-is. */
+export function normalizeDbPath(p: string): string {
+  const abs = assertAbsPath(p, "dbPath");
+  if (/\.(db|sqlite|sqlite3)$/i.test(abs)) return abs;
+  return join(abs, "gerolamo.db");
+}
+
 export function instanceDirFor(id: string): string {
   return join(DATA_ROOT, id);
 }

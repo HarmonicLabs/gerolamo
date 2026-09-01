@@ -69,6 +69,8 @@ bun install
 
 ## Start (canonical)
 
+Standalone **Electrobun** control center (not The Lab): `bun run ui:dev` — see `docs/standalone-ui.md`. Instance data under `~/.local/share/gerolamo/`.
+
 ```bash
 # Live node (peers → SQLite)
 NETWORK=preprod bun src/index.ts start-gerolamo

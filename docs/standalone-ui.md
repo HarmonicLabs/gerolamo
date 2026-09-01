@@ -11,7 +11,7 @@ bun run ui:dev
 cd desktop && bun install && bun run dev
 ```
 
-Requires Linux + Bun. First start installs `desktop/node_modules`.
+Linux + Bun. First start uses `desktop/node_modules`.
 
 ## Two planes
 
@@ -20,9 +20,10 @@ Requires Linux + Bun. First start installs `desktop/node_modules`.
 | Control | Electrobun app (`desktop/`) — detect, config, Mithril child, start/stop |
 | Data | `bun src/index.ts start-gerolamo` — MiniBF HTTP, optional N2C |
 
-Instance metadata: `~/.local/share/gerolamo/app.db`  
-Instance dir: `~/.local/share/gerolamo/<id>/`  
-Chain DB: **you pick** (absolute path). Default `<instance>/data/gerolamo.db`.
+- App metadata: `~/.local/share/gerolamo/app.db`
+- Instance dir: `~/.local/share/gerolamo/<id>/`
+- Chain DB: **you pick** (absolute). Default `<instance>/data/gerolamo.db`
+- Snapshot dir: default **repo `snapshots/mithril`** if that tree exists (avoids re-download), else `<instance>/snapshots`
 
 ## Steps in the UI
 
@@ -31,7 +32,7 @@ Chain DB: **you pick** (absolute path). Default `<instance>/data/gerolamo.db`.
 3. Mithril bootstrap (`--engine ts`) **or Skip**
 4. Start node → one ops panel (health / tip / peers / Open `/docs` + `/stats`)
 
-Never two writers on one SQLite file. Never fake Mithril percent.
+Never two writers on one SQLite file. Never fake Mithril percent. Soft ledger ≠ consensus.
 
 ## Tests
 
@@ -39,5 +40,3 @@ Never two writers on one SQLite file. Never fake Mithril percent.
 cd desktop && bun test src
 bun run typecheck
 ```
-
-Do **not** point the first smoke at `.live/test.db` (64G). Use `/tmp/gerolamo-ui-smoke.db`.

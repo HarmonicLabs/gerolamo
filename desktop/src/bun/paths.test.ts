@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { existsSync } from "node:fs";
-import { DATA_ROOT, assertAbsPath, resolveRepoRoot } from "./paths";
+import { DATA_ROOT, assertAbsPath, normalizeDbPath, resolveRepoRoot } from "./paths";
 
 describe("paths", () => {
   test("DATA_ROOT is under ~/.local/share/gerolamo", () => {
@@ -19,6 +19,20 @@ describe("paths", () => {
 
   test("assertAbsPath returns absolute path", () => {
     expect(assertAbsPath("/tmp/gerolamo.db")).toBe("/tmp/gerolamo.db");
+  });
+
+  test("normalizeDbPath keeps .db files", () => {
+    expect(normalizeDbPath("/tmp/chain.db")).toBe("/tmp/chain.db");
+  });
+
+  test("normalizeDbPath appends gerolamo.db to a directory", () => {
+    expect(normalizeDbPath("/home/bakon/.local/share/gerolamo/preprod")).toBe(
+      "/home/bakon/.local/share/gerolamo/preprod/gerolamo.db",
+    );
+  });
+
+  test("normalizeDbPath rejects relative", () => {
+    expect(() => normalizeDbPath("data")).toThrow(/absolute/);
   });
 
   test("resolveRepoRoot finds src/index.ts above desktop/", () => {

@@ -11,7 +11,7 @@ import {
 import { join } from "node:path";
 import { detectInstallation, resolveBunPath } from "./detect";
 import { getAppDb, getInstance, listInstances, saveInstance } from "./database";
-import { assertAbsPath, instanceDirFor, resolveRepoRoot } from "./paths";
+import { assertAbsPath, instanceDirFor, normalizeDbPath, resolveRepoRoot } from "./paths";
 import { buildNodeSpawn } from "./spawnPlan";
 import { writersConflict } from "./mithrilStage";
 import { fetchGerolamoSyncStatus } from "../shared/syncStatus";
@@ -105,8 +105,12 @@ export function writeConfig(input: Partial<InstanceConfig>): {
       }
     }
     const dir = ensureLayout(base.id);
-    const dbPath = assertAbsPath(input.dbPath || join(dir, "data", "gerolamo.db"), "dbPath");
-    const snapshotDir = assertAbsPath(input.snapshotDir || join(dir, "snapshots"), "snapshotDir");
+    const dbPath = normalizeDbPath(input.dbPath || join(dir, "data", "gerolamo.db"));
+    const repoSnap = join(base.repoPath || detect.repoPath, "snapshots", "mithril");
+    const snapshotDir = assertAbsPath(
+      input.snapshotDir || (existsSync(repoSnap) ? repoSnap : join(dir, "snapshots")),
+      "snapshotDir",
+    );
     if (input.n2cSocket) assertAbsPath(input.n2cSocket, "n2cSocket");
     mkdirSync(join(dir, "data"), { recursive: true });
     mkdirSync(snapshotDir, { recursive: true });

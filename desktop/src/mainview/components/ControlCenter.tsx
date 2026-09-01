@@ -171,8 +171,10 @@ const ControlCenter: Component = () => {
   const pick = async (kind: "db" | "snap") => {
     const res = await manager.pickPath();
     if ("cancelled" in res) return;
-    if (kind === "db") setDbPath(res.path);
-    else setSnapshotDir(res.path);
+    if (kind === "db") {
+      const p = res.path;
+      setDbPath(/\.(db|sqlite|sqlite3)$/i.test(p) ? p : `${p.replace(/\/$/, "")}/gerolamo.db`);
+    } else setSnapshotDir(res.path);
   };
 
   const handleWriteConfig = async () => {
@@ -198,16 +200,21 @@ const ControlCenter: Component = () => {
   };
 
   const handleBootstrap = async () => {
-    const id = activeConfig()?.id;
-    if (!id) {
-      setErrorMsg("Write config first");
-      return;
-    }
     setErrorMsg("");
     setBusy(true);
     setBootLogOpen(true);
     setStatusMsg("Starting Mithril bootstrap…");
     try {
+      const written = await manager.writeConfig(buildConfig());
+      if (!written.ok || !written.config) {
+        setErrorMsg(written.error || "Write config first");
+        return;
+      }
+      setActiveConfig(written.config);
+      setConfigWritten(true);
+      if (written.config.dbPath) setDbPath(written.config.dbPath);
+      if (written.config.snapshotDir) setSnapshotDir(written.config.snapshotDir);
+      const id = written.config.id;
       const result = await manager.bootstrapStart(id);
       if (!result.ok) {
         setErrorMsg(result.error || "bootstrap failed");
@@ -552,7 +559,7 @@ const ControlCenter: Component = () => {
                       type="text"
                       value={snapshotDir()}
                       onInput={(e) => setSnapshotDir(e.currentTarget.value)}
-                      placeholder="default: ~/.local/share/gerolamo/<id>/snapshots"
+                      placeholder="default: repo snapshots/mithril if present"
                       class={`${fieldClass} font-mono text-xs`}
                     />
                     <button type="button" class={btnSecondary} onClick={() => void pick("snap")}>

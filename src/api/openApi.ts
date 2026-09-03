@@ -199,6 +199,97 @@ function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
                     },
                 },
             },
+            "/api/v0/blocks": {
+                get: {
+                    tags: ["blocks"],
+                    summary: "Blocks newest first (Gerolamo extension: Blockfrost has no list endpoint)",
+                    operationId: "listBlocks",
+                    parameters: [
+                        { name: "limit", in: "query", schema: { type: "integer", default: 20, maximum: 100 } },
+                        { name: "before", in: "query", schema: { type: "string" }, description: "exclusive cursor: a slot number or a 64-hex block hash" },
+                    ],
+                    responses: { "200": okJson("BlockContent[] with height, time, epoch, epoch_slot, slot_leader, size, tx_count, previous/next_block, confirmations") },
+                },
+            },
+            "/api/v0/blocks/height/{height}": {
+                get: {
+                    tags: ["blocks"],
+                    summary: "Block by chain height (Gerolamo extension; {hash_or_slot} keeps its slot meaning)",
+                    operationId: "getBlockByHeight",
+                    parameters: [{ name: "height", in: "path", required: true, schema: { type: "integer" } }],
+                    responses: { "200": okJson("BlockContent"), "404": okJson("no block at that height") },
+                },
+            },
+            "/api/v0/blocks/{hash_or_slot}/previous": {
+                get: {
+                    tags: ["blocks"],
+                    summary: "Blocks before a block, newest first",
+                    operationId: "getBlockPrevious",
+                    parameters: [
+                        { name: "hash_or_slot", in: "path", required: true, schema: { type: "string" } },
+                        { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 100 } },
+                    ],
+                    responses: { "200": okJson("BlockContent[]") },
+                },
+            },
+            "/api/v0/blocks/{hash_or_slot}/next": {
+                get: {
+                    tags: ["blocks"],
+                    summary: "Blocks after a block, oldest first",
+                    operationId: "getBlockNext",
+                    parameters: [
+                        { name: "hash_or_slot", in: "path", required: true, schema: { type: "string" } },
+                        { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 100 } },
+                    ],
+                    responses: { "200": okJson("BlockContent[]") },
+                },
+            },
+            "/api/v0/epochs/{number}": {
+                get: {
+                    tags: ["epochs"],
+                    summary: "Epoch summary from slot geometry and stored blocks",
+                    operationId: "getEpoch",
+                    parameters: [{ name: "number", in: "path", required: true, schema: { type: "integer" } }],
+                    responses: { "200": okJson("EpochContent + first_block/last_block/first_slot/last_slot/synced") },
+                },
+            },
+            "/api/v0/epochs/{number}/blocks": {
+                get: {
+                    tags: ["epochs"],
+                    summary: "Block hashes of an epoch, oldest first",
+                    operationId: "getEpochBlocks",
+                    parameters: [
+                        { name: "number", in: "path", required: true, schema: { type: "integer" } },
+                        { name: "page", in: "query", schema: { type: "integer", default: 1 } },
+                        { name: "count", in: "query", schema: { type: "integer", default: 100, maximum: 100 } },
+                    ],
+                    responses: { "200": okJson("string[]") },
+                },
+            },
+            "/api/v0/epochs/{number}/parameters": {
+                get: {
+                    tags: ["epochs"],
+                    summary: "Stored protocol parameters of an epoch",
+                    operationId: "getEpochParameters",
+                    parameters: [{ name: "number", in: "path", required: true, schema: { type: "integer" } }],
+                    responses: { "200": okJson("EpochParamContent"), "404": okJson("not stored") },
+                },
+            },
+            "/api/v0/epochs/{number}/next": {
+                get: { tags: ["epochs"], summary: "Following epochs", operationId: "getEpochNext", parameters: [{ name: "number", in: "path", required: true, schema: { type: "integer" } }, { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 20 } }], responses: { "200": okJson("EpochContent[]") } },
+            },
+            "/api/v0/epochs/{number}/previous": {
+                get: { tags: ["epochs"], summary: "Preceding epochs", operationId: "getEpochPrevious", parameters: [{ name: "number", in: "path", required: true, schema: { type: "integer" } }, { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 20 } }], responses: { "200": okJson("EpochContent[]") } },
+            },
+            "/api/v0/search": {
+                get: {
+                    tags: ["explorer"],
+                    summary: "Resolve a search box query: tx hash, block hash, height/slot, address, stake key, pool",
+                    operationId: "search",
+                    parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }],
+                    responses: { "200": okJson("{ kind: tx|block|address|stake|pool|unknown, id, height?, slot? }") },
+                },
+            },
             "/api/v0/blocks/latest": {
                 get: {
                     tags: ["blocks"],
@@ -429,9 +520,21 @@ function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
                         },
                     },
                     responses: {
-                        "202": okJson("accepted / relayed"),
-                        "400": okJson("invalid body"),
-                        "503": okJson("submit path unavailable"),
+                        "202": okJson("accepted into the local mempool: { hash (tx id = body hash), status, mempool: { status, nTxs, availableSpace } }"),
+                        "400": okJson("undecodable CBOR or mempool rejection"),
+                        "503": okJson("no hot peer / submit path unavailable"),
+                    },
+                },
+            },
+            "/api/v0/mempool/{hash}": {
+                get: {
+                    tags: ["mempool"],
+                    summary: "Is a transaction still in the local mempool",
+                    operationId: "getMempoolTx",
+                    parameters: [{ name: "hash", in: "path", required: true, schema: { type: "string" } }],
+                    responses: {
+                        "200": okJson("{ tx_hash, in_mempool: true, size }"),
+                        "404": okJson("not in the local mempool"),
                     },
                 },
             },

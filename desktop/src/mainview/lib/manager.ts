@@ -6,6 +6,7 @@ import type {
   InstanceConfig,
   LogsResult,
   StatusResult,
+  SubmitTxResult,
 } from "../../shared/types";
 
 export const manager = {
@@ -18,6 +19,7 @@ export const manager = {
   status: (id: string): Promise<StatusResult | null> => rpc.request["node.status"]({ id }),
   health: (id: string): Promise<HealthResult> => rpc.request["node.health"]({ id }),
   logs: (id: string, maxLines = 120): Promise<LogsResult> => rpc.request["node.logs"]({ id, maxLines }),
+  submitTx: (id: string, txHex: string): Promise<SubmitTxResult> => rpc.request["node.submitTx"]({ id, txHex }),
   bootstrapStart: (id: string) => rpc.request["bootstrap.start"]({ id }),
   bootstrapStop: () => rpc.request["bootstrap.stop"](),
   bootstrapStatus: (id: string): Promise<BootstrapStatus> => rpc.request["bootstrap.status"]({ id }),

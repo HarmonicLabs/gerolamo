@@ -39,6 +39,8 @@ import { pickChainSyncStart } from "./chainSyncStart";
 export interface RollForwardBatchItem {
     rollForwardCborBytes: Uint8Array;
     tip: bigint;
+    /** ChainSync stream generation the header came from; batches from before a restart are stale. */
+    generation?: number;
 }
 
 /** Accept blob hash (Uint8Array) or hex string from SQLite / config. */
@@ -111,6 +113,36 @@ export class PeerClient implements IPeerClient {
     private keepAliveInterval: NodeJS.Timeout | null;
     private transportSocket?: Socket;
     private terminated = false;
+    /** Bumped on every ChainSync (re)start so headers already queued from the previous stream can be recognised as stale. */
+    private csGeneration = 0;
+    /**
+     * Rejecters of in-flight BlockFetch requests, so they fail at once when the peer is
+     * terminated instead of waiting out their timeout. Entries are removed as soon as a
+     * request settles. (An earlier version raced each request against one never-settling
+     * "terminated" promise; every race left a reaction on that promise that pinned the
+     * settled result — the range's blocks — until termination: one retained block array
+     * per range, 130k blocks after six minutes, and a falling apply rate from GC pressure.)
+     */
+    private inflightRejecters: Set<(err: Error) => void> | null = null;
+
+    /** Resolve/reject with `request`, or reject early on terminate(); nothing outlives the request. */
+    private untilTerminated<T>(request: Promise<T>): Promise<T> {
+        if (this.terminated) return Promise.reject(new Error(`peer ${this.peerId} terminated`));
+        const set = (this.inflightRejecters ??= new Set());
+        return new Promise<T>((resolve, reject) => {
+            set.add(reject);
+            request.then(
+                (v) => {
+                    set.delete(reject);
+                    resolve(v);
+                },
+                (e) => {
+                    set.delete(reject);
+                    reject(e);
+                },
+            );
+        });
+    }
     private syncLoopStarted = false;
     private rollForwardBatcher?: RollForwardBatcher<RollForwardBatchItem>;
     /** Pipelined MsgRequestNext bookkeeping (see ChainSyncPipeline). */
@@ -233,7 +265,15 @@ export class PeerClient implements IPeerClient {
     terminate(reason?: string) {
         if (this.terminated) return;
         this.terminated = true;
-        logger.info(`Terminating connections for peer ${this.peerId}...`);
+        logger.info(`Terminating connections for peer ${this.peerId}${reason ? ` (${reason})` : ""}...`);
+        // A range in flight on this connection would otherwise hold the ordered apply
+        // pipeline until its 55 s timeout (seen as ~5 blocks/s stalls); fail it now so the
+        // scheduler re-issues it to another peer.
+        if (this.inflightRejecters) {
+            const err = new Error(`peer ${this.peerId} terminated${reason ? `: ${reason}` : ""}`);
+            for (const reject of this.inflightRejecters) reject(err);
+            this.inflightRejecters.clear();
+        }
         this.stopSyncLoop();
         try {
             this.transportSocket?.destroy();
@@ -505,6 +545,7 @@ export class PeerClient implements IPeerClient {
                     await this.rollForwardBatcher?.push({
                         rollForwardCborBytes,
                         tip: BigInt(tip),
+                        generation: this.csGeneration,
                     });
                     this.chainSyncTopUp();
                 } catch (err) {
@@ -628,8 +669,17 @@ export class PeerClient implements IPeerClient {
      * outstanding (network-spec §3.7). If the drain does not finish in time
      * the connection is dropped and the governor reconnects it.
      */
+    /** Current ChainSync stream generation (see RollForwardBatchItem.generation). */
+    get chainSyncGeneration(): number {
+        return this.csGeneration;
+    }
+
     async restartChainSync(reason: string): Promise<void> {
         if (this.terminated || !this.isSyncing) return;
+        // Synchronously, before any await: every header batch already queued from the
+        // old stream is now stale (a verifier promoted to primary must not have its
+        // far-ahead verifier headers adopted as primary headers).
+        this.csGeneration++;
         logger.info(`Restarting ChainSync from DB tip for ${this.peerId}: ${reason}`);
         this.csDraining = true;
         this.rollForwardBatcher?.reset();
@@ -686,8 +736,7 @@ export class PeerClient implements IPeerClient {
         const chainPoint = new ChainPoint({
             blockHeader: { slotNumber: slot, hash: blockHash },
         });
-        const blockData = await this.blockFetchClient.request(chainPoint);
-        return blockData;
+        return await this.untilTerminated(this.blockFetchClient.request(chainPoint));
     }
 
     /** Fetch one inclusive contiguous range using its first and last points. */
@@ -700,14 +749,16 @@ export class PeerClient implements IPeerClient {
             Number(this.config?.blockFetchBatch?.rangeTimeoutMs ?? 55_000),
         );
         const label = `BlockFetch range ${this.peerId}`;
-        return await withTimeout(
-            this.blockFetchClient.requestRange(
-                points[0]!,
-                points[points.length - 1]!,
+        return await this.untilTerminated(
+            withTimeout(
+                this.blockFetchClient.requestRange(
+                    points[0]!,
+                    points[points.length - 1]!,
+                ),
+                timeoutMs,
+                label,
+                () => this.terminate(`${label} timed out after ${timeoutMs}ms`),
             ),
-            timeoutMs,
-            label,
-            () => this.terminate(`${label} timed out after ${timeoutMs}ms`),
         );
     }
 

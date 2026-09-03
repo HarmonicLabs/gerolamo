@@ -1,11 +1,11 @@
+import type { SubmitTxResult } from "../shared/types";
 import { spawn, type Subprocess, which } from "bun";
+import { tailFileLines } from "./tailFile";
+import { RotatingLog, pumpStream } from "./rotatingLog";
 import {
   appendFileSync,
-  closeSync,
   existsSync,
   mkdirSync,
-  openSync,
-  readFileSync,
   writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
@@ -59,12 +59,7 @@ function appendLog(logPath: string, chunk: string) {
 }
 
 function tailFile(path: string, maxLines = 200): string[] {
-  if (!existsSync(path)) return [];
-  try {
-    return readFileSync(path, "utf8").split(/\r?\n/).slice(-maxLines);
-  } catch {
-    return [];
-  }
+  return tailFileLines(path, maxLines);
 }
 
 function ensureLayout(id: string): string {
@@ -184,6 +179,12 @@ export async function startNode(input: Partial<InstanceConfig>): Promise<{
     let written = writeConfig(input);
     if (!written.ok || !written.config) return { success: false, error: written.error };
     const config = written.config;
+    intentionalStop.delete(config.id);
+    const pendingRestart = restartTimers.get(config.id);
+    if (pendingRestart) {
+      clearTimeout(pendingRestart);
+      restartTimers.delete(config.id);
+    }
 
     if (config.pid && isPidAlive(config.pid)) {
       return { success: true, pid: config.pid, config };
@@ -218,21 +219,20 @@ export async function startNode(input: Partial<InstanceConfig>): Promise<{
     });
 
     const logPath = join(config.instanceDir, "logs", "daemon.log");
-    writeFileSync(logPath, `[ui] starting ${new Date().toISOString()}\n`, "utf8");
-    const logFd = openSync(logPath, "a");
+    const daemonLog = new RotatingLog(logPath);
+    daemonLog.append(`[ui] starting ${new Date().toISOString()}\n`);
 
+    // Piped, not a shared fd: the desktop writes the node's output through a
+    // size-rotated log (50 MB × 5) instead of one file that grows for the whole sync.
     const child = spawn(plan.argv, {
       cwd: plan.cwd,
       env: { ...process.env, ...plan.env },
-      stdout: logFd,
-      stderr: logFd,
+      stdout: "pipe",
+      stderr: "pipe",
       stdin: "ignore",
     });
-    try {
-      closeSync(logFd);
-    } catch {
-      /* ignore */
-    }
+    void pumpStream(child.stdout as ReadableStream<Uint8Array>, daemonLog);
+    void pumpStream(child.stderr as ReadableStream<Uint8Array>, daemonLog);
 
     const pid = child.pid;
     live.set(config.id, child);
@@ -245,15 +245,38 @@ export async function startNode(input: Partial<InstanceConfig>): Promise<{
     void child.exited.then((code) => {
       live.delete(config.id);
       const row = getInstance(getAppDb(), config.id);
+      const crashed = code !== 0 && !intentionalStop.has(config.id);
+      let restartIn: number | null = null;
+      if (crashed) {
+        const now = Date.now();
+        const times = (crashTimes.get(config.id) ?? []).filter((t) => now - t < RESTART_WINDOW_MS);
+        times.push(now);
+        crashTimes.set(config.id, times);
+        restartIn = restartDelayMs(times, now);
+      }
       if (row) {
         saveInstance(getAppDb(), {
           ...row,
           pid: null,
           runState: code === 0 ? "stopped" : "failed",
-          lastError: code === 0 ? undefined : `process exited ${code}`,
+          lastError: code === 0
+            ? undefined
+            : restartIn != null
+            ? `process exited ${code}; restarting in ${Math.round(restartIn / 1000)} s`
+            : `process exited ${code}; ${RESTART_MAX_IN_WINDOW} crashes in ${RESTART_WINDOW_MS / 60_000} min, not restarting`,
         });
       }
-      appendLog(logPath, `[ui] process exited code=${code} at ${new Date().toISOString()}\n`);
+      appendLog(logPath, `[ui] process exited code=${code} at ${new Date().toISOString()}${restartIn != null ? ` — restarting in ${Math.round(restartIn / 1000)} s` : ""}\n`);
+      if (restartIn != null) {
+        const timer = setTimeout(() => {
+          restartTimers.delete(config.id);
+          if (intentionalStop.has(config.id)) return;
+          void startNode(config).then((r) => {
+            if (!r.success) appendLog(logPath, `[ui] restart failed: ${r.error}\n`);
+          });
+        }, restartIn);
+        restartTimers.set(config.id, timer);
+      }
     });
 
     return { success: true, pid: pid ?? undefined, config };
@@ -262,8 +285,52 @@ export async function startNode(input: Partial<InstanceConfig>): Promise<{
   }
 }
 
+const STOP_GRACE_MS = 30_000;
+
+/**
+ * Crash supervision. A non-zero exit that the user did not ask for is restarted
+ * with backoff: the node resumes at its DB tip and the open range transaction
+ * rolled back, so a crash (ours, or a `ud2` inside the Bun binary on a worker
+ * thread, seen once in the kernel log) costs at most the range in flight.
+ */
+const RESTART_WINDOW_MS = 10 * 60_000;
+const RESTART_MAX_IN_WINDOW = 5;
+const RESTART_BASE_MS = 5_000;
+const RESTART_MAX_MS = 60_000;
+const intentionalStop = new Set<string>();
+const crashTimes = new Map<string, number[]>();
+const restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Delay before the next restart, or null when the crash budget for the window is spent. Pure; exported for tests. */
+export function restartDelayMs(recentCrashes: number[], now: number, opts = { windowMs: RESTART_WINDOW_MS, max: RESTART_MAX_IN_WINDOW, baseMs: RESTART_BASE_MS, maxMs: RESTART_MAX_MS }): number | null {
+  const inWindow = recentCrashes.filter((t) => now - t < opts.windowMs).length; // includes this crash
+  if (inWindow > opts.max) return null;
+  return Math.min(opts.maxMs, opts.baseMs * 2 ** Math.max(0, inWindow - 1));
+}
+
+/** Poll until `alive(pid)` is false or `timeoutMs` passes. Exported for tests. */
+export async function waitForPidExit(
+  pid: number,
+  timeoutMs: number,
+  alive: (pid: number) => boolean,
+  sleep: (ms: number) => Promise<void> = (ms) => Bun.sleep(ms),
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (alive(pid)) {
+    if (Date.now() >= deadline) return false;
+    await sleep(200);
+  }
+  return true;
+}
+
 export async function stopNode(id: string): Promise<{ success: boolean; error?: string }> {
   try {
+    intentionalStop.add(id); // a user stop is never "a crash to restart"
+    const pendingRestart = restartTimers.get(id);
+    if (pendingRestart) {
+      clearTimeout(pendingRestart);
+      restartTimers.delete(id);
+    }
     const row = getInstance(getAppDb(), id);
     const liveProc = live.get(id);
     const pid = row?.pid ?? liveProc?.pid ?? null;
@@ -281,8 +348,11 @@ export async function stopNode(id: string): Promise<{ success: boolean; error?: 
       } catch {
         /* ignore */
       }
-      await Bun.sleep(800);
-      if (isPidAlive(pid)) {
+      // The node finishes the range it is applying (one SQLite transaction), terminates
+      // peers, checkpoints the DB and flushes logs. That takes seconds, not 800 ms;
+      // SIGKILL only if it has not exited within the grace period.
+      const exited = await waitForPidExit(pid, STOP_GRACE_MS, isPidAlive);
+      if (!exited) {
         try {
           process.kill(pid, "SIGKILL");
         } catch {
@@ -297,6 +367,35 @@ export async function stopNode(id: string): Promise<{ success: boolean; error?: 
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err?.message ?? String(err) };
+  }
+}
+
+/** POST a signed transaction (hex CBOR) to the instance's node; returns the node's JSON verbatim. */
+export async function submitTx(id: string, txHex: string): Promise<SubmitTxResult> {
+  const row = getInstance(getAppDb(), id);
+  if (!row) return { ok: false, status: 0, body: null, error: "unknown instance" };
+  const hex = txHex.replace(/\s+/g, "");
+  if (!/^[0-9a-fA-F]+$/.test(hex) || hex.length % 2 !== 0) {
+    return { ok: false, status: 0, body: null, error: "transaction must be hex-encoded CBOR" };
+  }
+  const bytes = Buffer.from(hex, "hex");
+  try {
+    const res = await fetch(gerolamoHttpBase(row.port) + "/api/v0/tx/submit", {
+      method: "POST",
+      headers: { "Content-Type": "application/cbor" },
+      body: bytes,
+      signal: AbortSignal.timeout(15_000),
+    });
+    let body: unknown = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    const msg = (body as { message?: string } | null)?.message;
+    return { ok: res.ok, status: res.status, body, error: res.ok ? undefined : msg ?? `HTTP ${res.status}` };
+  } catch (err: any) {
+    return { ok: false, status: 0, body: null, error: err?.message ?? String(err) };
   }
 }
 

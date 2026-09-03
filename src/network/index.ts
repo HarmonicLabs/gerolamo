@@ -6,15 +6,15 @@ import {
     initPeerManager,
     stopPeerManager,
 } from "./peerManager";
-import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
+import { calculatePreProdCardanoEpoch, setEpochNetwork } from "../utils/epochFromSlotCalculations";
 import { setupKeyboard } from "../tui";
-import { countGenesisUtxoRegistry, ensureInitialized, getMaxSlot, seedGenesisUtxosIfMissing } from "../db";
+import { backfillBlockHeights, countGenesisUtxoRegistry, ensureInitialized, getMaxSlot, seedGenesisUtxosIfMissing } from "../db";
 import { getByronGenesisConfig } from "../utils/paths";
 import { byronGenesisUtxos, countFundedGenesisEntries } from "../consensus/byron/genesisUtxo";
 import { populateEpochState } from "../state/blockfrost";
 import { logger } from "../utils/logger";
 import { startPeerBlockServer } from "./peerBlockServer";
-import { getSqlFilename, initSql } from "../sql";
+import { closeSql, getSqlFilename, initSql } from "../sql";
 import { startN2CServer, type N2CServerHandle } from "./n2c";
 import { startN2NServer, type N2NServerHandle } from "./n2n";
 import { resolveN2NConfig } from "./n2n/config";
@@ -69,6 +69,8 @@ function mergeConfigOverlay(
         "peerGovernor",
         "snapshot",
         "blockFetchBatch",
+        "sync",
+        "validation",
     ] as const;
     const out: Record<string, unknown> = { ...base, ...overlay };
     for (const key of nested) {
@@ -160,8 +162,50 @@ async function loadConfig(network: string): Promise<GerolamoConfig> {
     } as GerolamoConfig;
 }
 
+/**
+ * Bun (like Node ≥ 15) exits the process on an unhandled promise rejection or an
+ * uncaught exception. A long-running node must log and carry on instead: every
+ * subsystem (peers, ranges, workers) has its own recovery, and a stray rejection in
+ * one of them must not take the whole sync down.
+ */
+function installCrashGuards(): void {
+    process.on("unhandledRejection", (reason) => {
+        logger.error("Unhandled promise rejection (node keeps running):", reason);
+    });
+    process.on("uncaughtException", (err) => {
+        logger.error("Uncaught exception (node keeps running):", err);
+    });
+    // SIGUSR2 → heap summary (object count + bytes per class) into GEROLAMO_HEAP_DIR
+    // (default: cwd). Cheap way to find what accumulates during a long sync.
+    process.on("SIGUSR2", () => {
+        try {
+            const snap = Bun.generateHeapSnapshot() as unknown as { nodes: number[]; nodeClassNames: string[] };
+            const agg = new Map<string, { count: number; bytes: number }>();
+            for (let i = 0; i + 3 < snap.nodes.length; i += 4) {
+                const name = snap.nodeClassNames[snap.nodes[i + 2]!] ?? "?";
+                const a = agg.get(name) ?? { count: 0, bytes: 0 };
+                a.count++;
+                a.bytes += snap.nodes[i + 1]!;
+                agg.set(name, a);
+            }
+            const rows = [...agg.entries()].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 60)
+                .map(([name, a]) => ({ name, count: a.count, bytes: a.bytes }));
+            const mem = process.memoryUsage();
+            const out = { at: new Date().toISOString(), rss: mem.rss, heapUsed: mem.heapUsed, external: mem.external, arrayBuffers: mem.arrayBuffers, top: rows };
+            const dir = process.env.GEROLAMO_HEAP_DIR || ".";
+            const file = `${dir}/heap-${Date.now()}.json`;
+            require("node:fs").writeFileSync(file, JSON.stringify(out, null, 1));
+            logger.warn(`Heap summary written to ${file} (rss ${Math.round(mem.rss / 1048576)} MB, heap ${Math.round(mem.heapUsed / 1048576)} MB)`);
+        } catch (err) {
+            logger.error("Heap summary failed:", err);
+        }
+    });
+}
+
 export async function start() {
     const network = process.env.NETWORK ?? "preprod";
+    setEpochNetwork(network); // slot→epoch math for every later caller
+    installCrashGuards();
     console.log(
         `Gerolamo Network Node ${getBuildInfo().label} starting on ${network} network...`,
     );
@@ -193,6 +237,7 @@ export async function start() {
 
     logger.info("Initializing database...");
     await ensureInitialized();
+    await backfillBlockHeights();
     logger.info("Database initialized and ready.");
 
     // From-genesis ledger: the Byron genesis balances are the initial UTxO set.
@@ -286,15 +331,23 @@ export async function start() {
         );
     }
 
+    let shuttingDown = false;
     const shutdown = async (signal: string) => {
+        if (shuttingDown) return; // a second SIGTERM (desktop sends two) must not cut the first short
+        shuttingDown = true;
         logger.info(`Received ${signal}; shutting down...`);
+        // Never hang: a stuck subsystem still gets the process down, with a non-zero code.
+        const deadline = setTimeout(() => {
+            console.error("Shutdown did not complete within 30 s; exiting");
+            process.exit(1);
+        }, 30_000);
         try {
             await n2nHandle?.stop();
         } catch (err) {
             logger.error("N2N shutdown error:", err);
         }
         try {
-            await stopPeerManager();
+            await stopPeerManager(); // stops the applier (finishes its transaction), then peers
         } catch (err) {
             logger.error("PeerManager shutdown error:", err);
         }
@@ -303,10 +356,22 @@ export async function start() {
         } catch (err) {
             logger.error("N2C shutdown error:", err);
         }
+        try {
+            await closeSql(); // checkpoint + close: no -wal left to recover on the next start
+        } catch (err) {
+            logger.error("DB close error:", err);
+        }
+        logger.info("Shutdown complete.");
+        try {
+            await logger.flushAll();
+        } catch {
+            /* ignore */
+        }
+        clearTimeout(deadline);
         process.exit(0);
     };
-    process.once("SIGINT", () => void shutdown("SIGINT"));
-    process.once("SIGTERM", () => void shutdown("SIGTERM"));
+    process.on("SIGINT", () => void shutdown("SIGINT"));
+    process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
     logger.info("Node is now running.");
 }

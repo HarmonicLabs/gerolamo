@@ -74,7 +74,9 @@ export function setupKeyboard() {
     stdin.on("data", (key: string) => {
         if (key === "q" || key === "Q" || key === "\u0003") {
             stdOut.write("\x1b[?25h"); // restore cursor
-            process.exit(0);
+            // Go through the node's shutdown (finish the open range transaction, close
+            // peers and the DB) instead of exiting from under it.
+            process.kill(process.pid, "SIGINT");
         }
     });
 }

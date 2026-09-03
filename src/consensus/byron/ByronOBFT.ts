@@ -130,9 +130,15 @@ export class ByronObftState {
     validateMainHeader(rawHeader: Uint8Array, slot: bigint): ByronObftHeaderCheck {
         const sig = verifyByronBlockSignature(rawHeader, this.protocolMagic);
         if (!sig.ok) return { ok: false, reason: sig.reason ?? "signature invalid" };
-        const issuerKh = sig.issuerKeyHash!;
-        const signerKh = sig.signerKeyHash!;
+        return this.validateSignedMainHeader(slot, sig.issuerKeyHash!, sig.signerKeyHash!);
+    }
 
+    /**
+     * The stateful half of `validateMainHeader` for a header whose block signature
+     * and delegation certificate were already verified (on a validation worker):
+     * genesis key, registered delegation, slot monotonicity, k-window threshold.
+     */
+    validateSignedMainHeader(slot: bigint, issuerKh: string, signerKh: string): ByronObftHeaderCheck {
         if (!this.genesisKeys.has(issuerKh)) {
             return { ok: false, reason: `issuer ${issuerKh} is not a genesis key`, issuerKeyHash: issuerKh, signerKeyHash: signerKh };
         }
@@ -168,7 +174,11 @@ export class ByronObftState {
      */
     noteApplied(rawHeader: Uint8Array, slot: bigint, rawBody?: Uint8Array): void {
         const s = sliceByronMainHeader(rawHeader);
-        const issuerKh = byronKeyHash(s.headerPubKey);
+        this.noteAppliedIssuer(byronKeyHash(s.headerPubKey), slot, rawBody);
+    }
+
+    /** `noteApplied` when the issuer key hash is already known (from the worker's signature check). */
+    noteAppliedIssuer(issuerKh: string, slot: bigint, rawBody?: Uint8Array): void {
         this.window.push(issuerKh);
         if (this.window.length > this.k) this.window.splice(0, this.window.length - this.k);
         this.lastSignedSlot = slot;

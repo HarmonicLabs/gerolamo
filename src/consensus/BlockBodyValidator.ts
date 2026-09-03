@@ -13,16 +13,19 @@ import {
     TxOut,
     Value,
 } from "@harmoniclabs/cardano-ledger-ts";
-import { toHex } from "@harmoniclabs/uint8array-utils";
+import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
 import type { EpochBodyParams } from "./epochParams";
 
-import { getUtxosByRefs, getAllStake, getAllDelegations, countUtxosWithReferenceScript } from "../db";
+import { getUtxosByRefs, getStakeByCredentials, getDelegationsByCredentials, countUtxosWithReferenceScript } from "../db";
 import { resolveValidationPolicy } from "./validationPolicy";
+import { checkCertificateSequence, stakeCredentialsTouched, type CertView } from "./certificateRules";
 
 /** Safe BigInt from DB amount (string | number | null). Null/invalid → 0n. */
+type UtxoAmountMap = Map<string, { utxo_ref: string; amount: bigint }>;
+
 function amountToBigInt(amount: unknown): bigint {
     if (amount == null) return 0n;
     if (typeof amount === "bigint") return amount;
@@ -84,10 +87,6 @@ export class BlockBodyValidator {
         if (actualBlock === null) return null; // Unsupported era
         this.params = params;
 
-        logger.info("Starting block body validation", {
-            era: block.era,
-            slot: actualBlock.header.body.slot.toString(),
-        });
 
         const genesis = await getCachedShelleyGenesis(this.config);
         if (!genesis) return false;
@@ -117,7 +116,11 @@ export class BlockBodyValidator {
             return false;
         }
 
-        const utxoBalanceValid = await this.validateUTxOBalance(actualBlock);
+        // One UTxO lookup per block for every input and collateral input; the balance,
+        // multi-asset and collateral checks read from this map (was three queries).
+        const utxoMap = await this.loadUtxoAmounts(actualBlock);
+
+        const utxoBalanceValid = await this.validateUTxOBalance(actualBlock, utxoMap);
         if (!utxoBalanceValid) {
             logger.warn(`Block body validation failed: UTxO balance invalid`);
             return false;
@@ -142,6 +145,7 @@ export class BlockBodyValidator {
         const multiAssetsValid = await this.validateMultiAssetsBalance(
             actualBlock,
             genesis,
+            utxoMap,
         );
         if (!multiAssetsValid) {
             logger.warn(
@@ -150,7 +154,7 @@ export class BlockBodyValidator {
             return false;
         }
 
-        const collateralValid = await this.validateCollateralValid(actualBlock);
+        const collateralValid = await this.validateCollateralValid(actualBlock, utxoMap);
         if (!collateralValid) {
             logger.warn(`Block body validation failed: collateral invalid`);
             return false;
@@ -177,11 +181,29 @@ export class BlockBodyValidator {
             return false;
         }
 
-        logger.info("Block body validation passed all checks", {
-            era: block.era,
-            slot: actualBlock.header.body.slot.toString(),
-        });
         return true;
+    }
+
+    /** Amounts of every UTxO the block spends or posts as collateral, in one query. */
+    private async loadUtxoAmounts(block: CardanoBlock): Promise<UtxoAmountMap> {
+        const refs = new Set<string>();
+        for (const txBody of block.transactionBodies) {
+            for (const input of txBody.inputs ?? []) {
+                refs.add(`${input.utxoRef.id.toString()}:${input.utxoRef.index}`);
+            }
+            for (const c of ((txBody as any).collateralInputs ?? []) as any[]) {
+                try {
+                    refs.add(`${c.utxoRef.id.toString()}:${c.utxoRef.index}`);
+                } catch {
+                    /* malformed collateral input: the collateral check reports it */
+                }
+            }
+        }
+        const map: UtxoAmountMap = new Map();
+        if (refs.size === 0) return map;
+        const rows = await getUtxosByRefs(Array.from(refs));
+        for (const { utxo_ref, amount } of rows) map.set(utxo_ref, { utxo_ref, amount: amountToBigInt(amount) });
+        return map;
     }
 
     private validateTransactionCountMatch(
@@ -302,31 +324,13 @@ export class BlockBodyValidator {
 
     private async validateUTxOBalance(
         block: CardanoBlock,
+        utxoMap: UtxoAmountMap,
     ): Promise<boolean> {
         // Collect all UTxO references that are inputs to transactions in this block
         if (block.transactionBodies.length === 0) {
             return true; // No inputs to validate
         }
 
-        const inputUtxoRefs = block.transactionBodies.map(
-            (txBody) =>
-                txBody.inputs.map(
-                    (input) =>
-                        `${input.utxoRef.id.toString()}:${input.utxoRef.index}`,
-                ),
-        ).flat();
-
-        // Query only the UTxOs that are inputs to this block with extracted amount
-        const utxoRows = await getUtxosByRefs(inputUtxoRefs);
-
-        // Create a lookup map for efficient access
-        const utxoMap = new Map(
-            utxoRows.map(
-                (
-                    { utxo_ref, amount },
-                ) => [utxo_ref, { utxo_ref, amount: amountToBigInt(amount) }],
-            ),
-        );
 
         for (const txBody of block.transactionBodies) {
             let inputValue = 0n;
@@ -408,6 +412,7 @@ export class BlockBodyValidator {
     private async validateMultiAssetsBalance(
         block: CardanoBlock,
         genesis: ShelleyGenesisConfig,
+        utxoMap: UtxoAmountMap,
     ): Promise<boolean> {
         const keyDeposit = BigInt(genesis.protocolParams.keyDeposit);
         const poolDeposit = BigInt(genesis.protocolParams.poolDeposit);
@@ -416,24 +421,6 @@ export class BlockBodyValidator {
             return true; // No inputs to validate
         }
 
-        // Collect all UTxO references that are inputs to transactions in this block
-        const inputUtxoRefs = block.transactionBodies.map((txBody) =>
-            txBody.inputs.map((input) =>
-                `${input.utxoRef.id.toString()}:${input.utxoRef.index}`
-            )
-        ).flat();
-
-        // Query only the UTxOs that are inputs to this block with extracted amount
-        const utxoRows = await getUtxosByRefs(inputUtxoRefs);
-
-        // Create a lookup map for efficient access
-        const utxoMap = new Map(
-            utxoRows.map(
-                (
-                    { utxo_ref, amount },
-                ) => [utxo_ref, { utxo_ref, amount: amountToBigInt(amount) }],
-            ),
-        );
 
         for (const txBody of block.transactionBodies) {
             // Calculate input value (ADA + native assets)
@@ -509,6 +496,7 @@ export class BlockBodyValidator {
 
     private async validateCollateralValid(
         block: CardanoBlock,
+        utxoMap: UtxoAmountMap,
     ): Promise<boolean> {
         // Per-epoch parameters when known; the historical Alonzo defaults otherwise.
         const collateralPercent = this.params?.collateralPercent ?? 150;
@@ -552,17 +540,6 @@ export class BlockBodyValidator {
             return true; // No collateral to validate
         }
 
-        // Query only the collateral UTxOs with extracted amount
-        const utxoRows = await getUtxosByRefs(collateralUtxoRefs);
-
-        // Create a lookup map for efficient access
-        const utxoMap = new Map(
-            utxoRows.map(
-                (
-                    { utxo_ref, amount },
-                ) => [utxo_ref, { utxo_ref, amount: amountToBigInt(amount) }],
-            ),
-        );
 
         // Re-process transactions for collateral validation
         let collateralIndex = 0;
@@ -614,101 +591,48 @@ export class BlockBodyValidator {
     private async validateCertificatesValid(
         block: CardanoBlock,
     ): Promise<boolean> {
-        // Query current stake distribution and delegations
-        const stakeRows = await getAllStake();
-        const delegationRows = await getAllDelegations();
-
-        // Create lookup maps with string keys for reliable comparison.
-        // Defensive: Bun SQL / Buffer / undefined must not throw toHex.
-        const getKey = (cred: unknown): string => {
-            if (typeof cred === "string") return cred;
-            if (cred instanceof Uint8Array) return toHex(cred);
-            if (typeof Buffer !== "undefined" && Buffer.isBuffer(cred)) {
-                return toHex(new Uint8Array(cred));
-            }
-            return "";
+        const hexOf = (v: unknown): string | null => {
+            const bytes = (v as any)?.toBuffer?.() ?? v;
+            if (bytes instanceof Uint8Array) return toHex(bytes);
+            if (typeof Buffer !== "undefined" && Buffer.isBuffer(bytes)) return toHex(new Uint8Array(bytes));
+            return typeof bytes === "string" && bytes.length > 0 ? bytes : null;
         };
-        const stakeMap = new Map(
-            stakeRows
-                .map(({ stake_credentials, amount }) => [
-                    getKey(stake_credentials),
-                    amount,
-                ] as const)
-                .filter(([k]) => k.length > 0),
-        );
-        const delegationMap = new Map(
-            delegationRows
-                .map(({ stake_credentials, pool_key_hash }) => [
-                    getKey(stake_credentials),
-                    pool_key_hash,
-                ] as const)
-                .filter(([k]) => k.length > 0),
-        );
 
+        const certs: CertView[] = [];
         for (const txBody of block.transactionBodies) {
             if (!txBody.certs) continue;
-
             for (const cert of txBody.certs) {
-                switch (cert.certType) {
-                    case CertificateType.StakeRegistration:
-                        // Check if stake key is not already registered
-                        const stakeKeyReg = toHex(
-                            cert.stakeCredential.hash.toBuffer(),
-                        );
-                        if (stakeMap.has(stakeKeyReg)) {
-                            logger.error(
-                                `Stake key already registered: ${stakeKeyReg}`,
-                            );
-                            return false;
-                        }
-                        break;
-
-                    case CertificateType.StakeDeRegistration:
-                        // Check if stake key is registered
-                        const stakeKeyDereg = toHex(
-                            cert.stakeCredential.hash.toBuffer(),
-                        );
-                        if (!stakeMap.has(stakeKeyDereg)) {
-                            logger.error(
-                                `Stake key not registered: ${stakeKeyDereg}`,
-                            );
-                            return false;
-                        }
-                        break;
-
-                    case CertificateType.StakeDelegation:
-                        // Check if stake key exists (either registered or delegating)
-                        const stakeKeyDel = toHex(
-                            cert.stakeCredential.hash.toBuffer(),
-                        );
-                        if (
-                            !stakeMap.has(stakeKeyDel) &&
-                            !delegationMap.has(stakeKeyDel)
-                        ) {
-                            logger.error(
-                                `Cannot delegate unregistered stake key: ${stakeKeyDel}`,
-                            );
-                            return false;
-                        }
-                        break;
-
-                    case CertificateType.PoolRegistration:
-                        // Pool registration is generally allowed (pool ID uniqueness checked elsewhere)
-                        break;
-
-                    case CertificateType.PoolRetirement:
-                        // Check if pool exists (would need pool data)
-                        break;
-
-                    default:
-                        logger.error(
-                            `Unknown certificate type: ${cert.certType}`,
-                        );
-                        return false;
-                }
+                const c = cert as any;
+                certs.push({
+                    certType: Number(cert.certType),
+                    credHex: hexOf(c.stakeCredential?.hash),
+                    poolHex: hexOf(c.poolKeyHash),
+                });
             }
         }
+        if (certs.length === 0) return true;
 
+        // Look up only the credentials this block touches (indexed, keyed) rather
+        // than scanning the whole stake / delegations tables on every block.
+        const touched = stakeCredentialsTouched(certs).map((h) => fromHex(h));
+        const stakeRows = await getStakeByCredentials(touched);
+        const delegationRows = await getDelegationsByCredentials(touched);
+        const registered = new Set<string>();
+        for (const r of stakeRows) {
+            const k = hexOf(r.stake_credentials);
+            if (k) registered.add(k);
+        }
+        const delegated = new Map<string, string>();
+        for (const r of delegationRows) {
+            const k = hexOf(r.stake_credentials);
+            if (k) delegated.set(k, hexOf(r.pool_key_hash) ?? "");
+        }
+
+        const verdict = checkCertificateSequence(certs, registered, delegated);
+        if (!verdict.ok) {
+            logger.error(verdict.reason);
+            return false;
+        }
         return true;
     }
 

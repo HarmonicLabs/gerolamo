@@ -29,6 +29,8 @@ export type MbTxDelta = {
     blockHash: Uint8Array;
     slot: number;
     txIndex: number;
+    /** Chain height of the containing block. */
+    blockHeight?: number | null;
     fee?: string | null;
     size?: number | null;
     invalidBefore?: string | null;
@@ -51,7 +53,7 @@ export async function applyMbTx(db: MbSql, d: MbTxDelta): Promise<void> {
         await db`
 			INSERT INTO mb_tx (
 				tx_hash, block_hash, slot, tx_index, fee, size,
-				invalid_before, invalid_hereafter
+				invalid_before, invalid_hereafter, block_height
 			) VALUES (
 				${txHash},
 				${d.blockHash},
@@ -60,12 +62,14 @@ export async function applyMbTx(db: MbSql, d: MbTxDelta): Promise<void> {
 				${d.fee ?? null},
 				${d.size ?? null},
 				${d.invalidBefore ?? null},
-				${d.invalidHereafter ?? null}
+				${d.invalidHereafter ?? null},
+				${d.blockHeight ?? null}
 			)
 			ON CONFLICT(tx_hash) DO UPDATE SET
 				block_hash = excluded.block_hash,
 				slot = excluded.slot,
 				tx_index = excluded.tx_index,
+				block_height = excluded.block_height,
 				fee = excluded.fee,
 				size = excluded.size,
 				invalid_before = excluded.invalid_before,

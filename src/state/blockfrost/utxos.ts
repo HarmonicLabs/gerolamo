@@ -1,5 +1,6 @@
 import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
 import { sql } from "../../sql";
+import { BACKFILL_UTXO_COLUMNS_SQL } from "../../db";
 
 export async function populateUTxOs(
     api: BlockFrostAPI,
@@ -66,4 +67,6 @@ export async function populateUTxOs(
         return [utxoRef, txOut, utxo.tx_hash];
     });
     await sql`INSERT OR IGNORE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES ${sql(utxoData)}`;
+    // Indexed side columns (address / lovelace / reference script) beside the JSON.
+    await sql.unsafe(BACKFILL_UTXO_COLUMNS_SQL);
 }

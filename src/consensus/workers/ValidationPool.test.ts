@@ -3,6 +3,10 @@ import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ValidationPool, resolveWorkerCount } from "./ValidationPool";
 import { runHeaderValidationJob } from "./validationJob";
 import fixture from "../__fixtures__/byron-preprod.json";
+import shelleyConway from "../__fixtures__/shelley-conway-preprod.json";
+import { blockFetchHeaderIdentity } from "../blockHeaderParser";
+import { toHex } from "@harmoniclabs/uint8array-utils";
+import { runRangeVerifyJob } from "./validationJob";
 
 type FixtureHeader = { byronType: number; hash: string; rollForwardHex: string };
 const headers = fixture.headers as FixtureHeader[];
@@ -59,5 +63,70 @@ describe("ValidationPool", () => {
         expect(r.ok).toBe(true);
         expect(inlinePool.workerCount).toBe(0);
         inlinePool.close();
+    });
+});
+
+describe("ValidationPool.verifyRange", () => {
+    const blocks = shelleyConway.blocks as Record<string, string>;
+    const bytes = [fromHex(blocks.shelley_86400!), fromHex(blocks.tip!)];
+    const expected = bytes.map((b) => toHex(blockFetchHeaderIdentity(b).hash));
+
+    test("worker result matches inline for honest blocks and returns identities", async () => {
+        const viaWorker = await pool.verifyRange({ kind: "range", blocks: bytes, expectedHashes: expected });
+        const inline = runRangeVerifyJob({ kind: "range", blocks: bytes, expectedHashes: expected });
+        expect(viaWorker.ok).toBe(true);
+        expect(inline.ok).toBe(true);
+        expect(viaWorker.identities.map((i) => i.hashHex)).toEqual(expected);
+        expect(viaWorker.identities.map((i) => i.era)).toEqual(inline.identities.map((i) => i.era));
+        expect(toHex(viaWorker.identities[0]!.rawHeader)).toBe(toHex(blockFetchHeaderIdentity(bytes[0]!).rawHeaderBytes));
+        // The caller's bytes were copied, not detached.
+        expect(bytes[0]!.byteLength).toBeGreaterThan(0);
+    });
+
+    test("a wrong advertised hash is reported with its index", async () => {
+        const r = await pool.verifyRange({ kind: "range", blocks: bytes, expectedHashes: [expected[0]!, "00".repeat(32)] });
+        expect(r.ok).toBe(false);
+        expect(r.index).toBe(1);
+        expect(r.reason).toContain("advertised");
+    });
+
+    test("a tampered body fails the body-hash check", async () => {
+        const tampered = new Uint8Array(bytes[0]!);
+        tampered[tampered.length - 1] ^= 0x01;
+        const r = await pool.verifyRange({ kind: "range", blocks: [tampered], expectedHashes: [expected[0]!] });
+        expect(r.ok).toBe(false);
+        expect(r.index).toBe(0);
+        expect(r.reason).toMatch(/body hash|undecodable/);
+    });
+
+    test("garbage bytes are an undecodable block, not a crash", async () => {
+        const r = await pool.verifyRange({ kind: "range", blocks: [new Uint8Array([0xff, 0x00])], expectedHashes: ["00".repeat(32)] });
+        expect(r.ok).toBe(false);
+        expect(r.reason).toContain("undecodable");
+    });
+});
+
+describe("ValidationPool Byron signatures", () => {
+    test("byronProtocolMagic makes the worker verify Byron main-block signatures and return key hashes", async () => {
+        const mains = headers.filter((h) => h.byronType === 1);
+        expect(mains.length).toBeGreaterThan(0);
+        const results = await pool.validateAll(mains.map((h) => ({ rollForward: fromHex(h.rollForwardHex), nonceHex: "", config, byronProtocolMagic: 1 })));
+        for (const r of results) {
+            expect(r.ok).toBe(true);
+            expect(r.byron?.ok).toBe(true);
+            expect(r.byron?.issuerKeyHash).toMatch(/^[0-9a-f]{56}$/);
+            expect(r.byron?.signerKeyHash).toMatch(/^[0-9a-f]{56}$/);
+        }
+        // EBBs carry no signature: no byron verdict, still ok.
+        const ebbs = headers.filter((h) => h.byronType === 0);
+        for (const h of ebbs) {
+            const r = await pool.validate({ rollForward: fromHex(h.rollForwardHex), nonceHex: "", config, byronProtocolMagic: 1 });
+            expect(r.ok).toBe(true);
+            expect(r.byron).toBeUndefined();
+        }
+        // Wrong protocol magic: the signature domain tag differs, so the check fails closed.
+        const bad = await pool.validate({ rollForward: fromHex(mains[0]!.rollForwardHex), nonceHex: "", config, byronProtocolMagic: 2 });
+        expect(bad.ok).toBe(false);
+        expect(bad.reason).toContain("Byron block signature");
     });
 });

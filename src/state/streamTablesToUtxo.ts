@@ -23,6 +23,7 @@
  */
 
 import { openSync, readSync, closeSync, fstatSync } from "node:fs";
+import { BACKFILL_UTXO_COLUMNS_SQL } from "../db";
 import { Database } from "bun:sqlite";
 import { Address, Script } from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
@@ -346,7 +347,10 @@ export function streamTablesToUtxo(
         `CREATE TABLE IF NOT EXISTS utxo (
             utxo_ref TEXT PRIMARY KEY,
             tx_out TEXT,
-            tx_hash TEXT
+            tx_hash TEXT,
+            address TEXT,
+            lovelace INTEGER,
+            reference_script_hash TEXT
         )`,
     );
     const insertStmt = db.prepare(
@@ -527,6 +531,8 @@ export function streamTablesToUtxo(
         );
     } finally {
         closeSync(fd);
+        // Indexed side columns (address / lovelace / reference script) beside the JSON.
+        db.exec(BACKFILL_UTXO_COLUMNS_SQL);
         db.close();
     }
 

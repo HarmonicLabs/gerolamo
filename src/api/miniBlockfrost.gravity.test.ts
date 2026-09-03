@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { Script } from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { initSql, sql } from "../sql";
-import { ensureInitialized } from "../db";
+import { BACKFILL_UTXO_COLUMNS_SQL, ensureInitialized } from "../db";
 import { handleMiniBlockfrost } from "./miniBlockfrost";
 
 const tempDir = mkdtempSync(join(tmpdir(), "gerolamo-minibf-gravity-"));
@@ -34,6 +34,7 @@ beforeAll(async () => {
     });
     await sql`INSERT INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${"11".repeat(32) + ":0"}, ${withAsset}, ${"11".repeat(32)})`;
     await sql`INSERT INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${"22".repeat(32) + ":1"}, ${withoutAsset}, ${"22".repeat(32)})`;
+    await sql.unsafe(BACKFILL_UTXO_COLUMNS_SQL);
 });
 
 afterAll(() => {

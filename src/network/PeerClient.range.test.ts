@@ -77,3 +77,36 @@ describe("PeerClient BlockFetch ranges", () => {
         expect(terminated).toContain("BlockFetch range slow-peer timed out");
     });
 });
+
+describe("PeerClient BlockFetch fail-fast bookkeeping", () => {
+    const point = (slot: bigint, byte: number) =>
+        new ChainPoint({ blockHeader: { slotNumber: slot, hash: new Uint8Array(32).fill(byte) } });
+
+    test("a settled range leaves nothing registered (no per-range retention)", async () => {
+        const peer = Object.create(PeerClient.prototype) as PeerClient;
+        Object.defineProperty(peer, "blockFetchClient", {
+            value: { requestRange: async () => [new BlockFetchBlock({ blockData: new Uint8Array([0x81, 0x01]) })] },
+        });
+        Object.defineProperty(peer, "peerId", { value: "p" });
+        for (let i = 0; i < 50; i++) await peer.fetchBlockRange([point(1n, 1)]);
+        expect((peer as any).inflightRejecters.size).toBe(0);
+    });
+
+    test("terminate() rejects an in-flight range immediately", async () => {
+        const peer = Object.create(PeerClient.prototype) as PeerClient;
+        Object.defineProperty(peer, "blockFetchClient", {
+            value: { requestRange: () => new Promise(() => {}), done: () => {} },
+        });
+        Object.defineProperty(peer, "chainSyncClient", { value: { done: () => {}, removeAllListeners: () => {} } });
+        Object.defineProperty(peer, "keepAliveClient", { value: { done: () => {} } });
+        Object.defineProperty(peer, "peerSharingClient", { value: { done: () => {} } });
+        Object.defineProperty(peer, "peerId", { value: "p" });
+        Object.defineProperty(peer, "config", { value: { blockFetchBatch: { rangeTimeoutMs: 60_000 } } });
+        const pending = peer.fetchBlockRange([point(1n, 1), point(2n, 2)]);
+        const t0 = Date.now();
+        peer.terminate("test");
+        await expect(pending).rejects.toThrow(/terminated: test/);
+        expect(Date.now() - t0).toBeLessThan(1000);
+        expect((peer as any).inflightRejecters.size).toBe(0);
+    });
+});

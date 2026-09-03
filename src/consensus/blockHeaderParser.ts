@@ -31,7 +31,7 @@ import {
     calculateCardanoEpoch,
     calculatePreProdCardanoEpoch,
 } from "../utils/epochFromSlotCalculations";
-import { getHeaderSlot } from "../utils/eraAccessors";
+import { getHeaderPrevHashHex, getHeaderSlot } from "../utils/eraAccessors";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
 /**
@@ -132,9 +132,22 @@ export interface ParsedHeader {
     isEbb: boolean;
     /** Raw header bytes (the `#6.24` payload). */
     rawHeaderBytes: Uint8Array;
-    /** Byron only: previous block hash from the header. */
+    /** Previous block hash from the header (Byron `prevBlock`, Shelley+ `prev_hash`). */
     prevHashHex: string | null;
+    /**
+     * Byron main blocks only, filled by the validation workers: the block signature
+     * (and delegation certificate) verified, issued by `issuerKeyHash` and signed by
+     * `signerKeyHash`. The OBFT state checks on the main thread build on it.
+     */
+    byronSig?: { issuerKeyHash: string; signerKeyHash: string };
 }
+
+/**
+ * Everything the orchestrator needs from a header, without the decoded
+ * `MultiEraHeader`. Validation workers return exactly these fields, so the
+ * main thread no longer parses every header itself.
+ */
+export type HeaderSummary = Omit<ParsedHeader, "multiEraHeader">;
 
 function readUInt(bytes: Uint8Array, what: string): number {
     const obj = Cbor.parse(bytes);
@@ -198,12 +211,6 @@ function parseByronChainSyncHeader(wrapperBytes: Uint8Array): ParsedHeader {
         ? toHex(prev)
         : null;
 
-    logger.info("Parsed Byron header successfully", {
-        era: byronType,
-        kind: byronType === BYRON_EBB_ERA ? "ebb" : "main",
-        slot: slot.toString(),
-        hash: toHex(blockHeaderHash),
-    });
 
     return {
         slot,
@@ -304,11 +311,6 @@ export async function headerParser(
 
     const blockHeaderHash = blake2b_256(rawHeaderBytes);
 
-    logger.info("Parsed header successfully", {
-        era: blockHeaderBodyEra,
-        slot: slot.toString(),
-        hash: toHex(blockHeaderHash),
-    });
 
     return ({
         slot,
@@ -319,7 +321,7 @@ export async function headerParser(
         isByron: false,
         isEbb: false,
         rawHeaderBytes,
-        prevHashHex: null,
+        prevHashHex: getHeaderPrevHashHex(multiEraHeader.header) || null,
     });
 }
 
@@ -333,22 +335,10 @@ export async function blockParser(
         )
     ) return;
 
-    const lazyBlock = Cbor.parseLazy(newBlock.blockData);
-    if (
-        !(
-            lazyBlock instanceof LazyCborArray
-        )
-    ) {
-        logger.error("Invalid CBOR for block: not LazyCborArray");
-        throw new Error("invalid CBOR for block");
-    }
-
+    // Structure is checked by MultiEraBlock.fromCbor itself; the range was already
+    // identity- and body-hash-verified from these same bytes (no extra lazy parse).
     const newMultiEraBlock = MultiEraBlock.fromCbor(newBlock.blockData);
 
-    logger.debug("Parsed block successfully", {
-        era: newMultiEraBlock.era,
-        slot: getHeaderSlot(newMultiEraBlock.block.header).toString(),
-    });
 
     return newMultiEraBlock;
 }

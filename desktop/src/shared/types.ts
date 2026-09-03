@@ -132,3 +132,12 @@ export function findReusableInstance(
   });
   return sorted[0] ?? null;
 }
+
+/** Result of POST /api/v0/tx/submit through the desktop's bun process. */
+export type SubmitTxResult = {
+  ok: boolean;
+  status: number;
+  /** Parsed JSON body from the node (BF error shape or the accepted shape). */
+  body: unknown;
+  error?: string;
+};

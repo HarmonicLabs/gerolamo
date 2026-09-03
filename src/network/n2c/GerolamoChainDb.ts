@@ -61,7 +61,6 @@ function headerBytesFromRow(row: any): Uint8Array {
     return (
         asBytes(row.rollforward_header_cbor) ??
         asBytes(row.header_data) ??
-        asBytes(row.block_fetch_RawCbor) ??
         asBytes(row.block_data) ??
         new Uint8Array([0xa0]) // empty CBOR map fallback
     );

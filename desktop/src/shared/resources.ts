@@ -88,6 +88,20 @@ export function nodeMemShare(node: NodeResources | null, system: SystemResources
   return Math.min(100, (node.rssBytes / system.totalMemBytes) * 100);
 }
 
+/**
+ * Node CPU as a number of cores kept busy (cpuPercent is "% of one core", so
+ * 1345 means 13.5 cores: the main thread plus the validation workers).
+ */
+export function nodeCoresBusy(node: NodeResources | null): number | null {
+  if (node?.cpuPercent == null || !Number.isFinite(node.cpuPercent)) return null;
+  return Math.max(0, node.cpuPercent / 100);
+}
+
+export function formatCores(cores: number | null | undefined): string {
+  if (cores == null || !Number.isFinite(cores)) return "—";
+  return cores >= 10 ? cores.toFixed(0) : cores.toFixed(1);
+}
+
 /** Node CPU normalised to the whole machine (100 = every core busy). */
 export function nodeCpuShare(node: NodeResources | null, system: SystemResources): number {
   if (node?.cpuPercent == null || system.cpus <= 0) return 0;

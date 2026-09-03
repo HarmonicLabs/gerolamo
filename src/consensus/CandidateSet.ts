@@ -25,6 +25,8 @@ export type PeerRole = "primary" | "verifier";
 export interface CandidatePoint {
     slot: bigint;
     hash: string;
+    /** Byron epoch-boundary block: the same slot also holds the epoch's first main block. */
+    ebb?: boolean;
 }
 
 export type AgreementStatus = "agrees" | "divergent" | "unknown" | "ahead" | "behind";
@@ -195,6 +197,47 @@ export class CandidateSet {
         return best?.key ?? null;
     }
 
+    /**
+     * The verifier that agrees with the primary through the primary's current tip and
+     * has validated the most headers beyond it, when that lead is at least `minLead`.
+     * Header rate is per connection, so such a peer is a faster source of the same chain.
+     */
+    fasterAgreeingVerifier(minLead: number): { key: string; lead: number; primaryTipSlot: bigint } | null {
+        const prim = this.primaryState();
+        const primTip = prim?.fragment.points.at(-1);
+        if (!prim || !primTip) return null;
+        let best: { key: string; lead: number; primaryTipSlot: bigint } | null = null;
+        for (const v of this.peers.values()) {
+            if (v.role !== "verifier" || v.divergence) continue;
+            if (v.agreedAtSlot == null || v.agreedAtSlot < primTip.slot) continue;
+            let lead = 0;
+            for (let i = v.fragment.points.length - 1; i >= 0 && v.fragment.points[i]!.slot > primTip.slot; i--) lead++;
+            if (lead >= minLead && (!best || lead > best.lead)) best = { key: v.key, lead, primaryTipSlot: primTip.slot };
+        }
+        return best;
+    }
+
+    /**
+     * Verifier headers beyond the primary tip wait here until the primary reaches
+     * them. Bounded like the fragments: past `depth` entries the newest are not
+     * recorded (the orchestrator also pauses a verifier's stream well before that),
+     * otherwise a body-bound primary let uncapped verifiers grow this without limit.
+     */
+    private rememberPending(v: PeerState, pt: CandidatePoint): void {
+        if (v.pending.size >= this.depth) return;
+        v.pending.set(pt.slot.toString(), pt.hash);
+    }
+
+    /** Headers of `key` waiting for the primary to reach their slot. */
+    pendingCount(key: string): number {
+        return this.peers.get(key)?.pending.size ?? 0;
+    }
+
+    /** Fragment depth (k): the bound on fragments and on pending verifier headers. */
+    get fragmentDepth(): number {
+        return this.depth;
+    }
+
     private primaryState(): PeerState | null {
         return this.primaryKey ? this.peers.get(this.primaryKey) ?? null : null;
     }
@@ -203,18 +246,26 @@ export class CandidateSet {
         const prim = this.primaryState();
         if (!prim) return { kind: "unknown-peer" };
         const primaryHashes = prim.fragment.bySlot.get(pt.slot.toString());
+        const primTip = prim.fragment.points.at(-1);
         if (primaryHashes) {
             if (primaryHashes.includes(pt.hash)) {
                 if (v.agreedAtSlot == null || pt.slot > v.agreedAtSlot) v.agreedAtSlot = pt.slot;
                 return { kind: "agree", slot: pt.slot };
             }
+            // A Byron epoch-boundary block shares its slot with the epoch's first main
+            // block. While the primary's tip is that EBB it may yet deliver the main block,
+            // so a mismatch there is only a fork once the primary has moved on. Peers
+            // validate concurrently, so a verifier regularly reports the main block first.
+            if (primTip && primTip.slot === pt.slot && primTip.ebb) {
+                this.rememberPending(v, pt);
+                return { kind: "ahead", slot: pt.slot };
+            }
             v.divergence = { slot: pt.slot, peerHash: pt.hash, primaryHashes: [...primaryHashes] };
             return { kind: "divergent", slot: pt.slot, peerHash: pt.hash, primaryHashes: [...primaryHashes] };
         }
-        const primTip = prim.fragment.points.at(-1);
         const primOldest = prim.fragment.points[0];
         if (!primTip || pt.slot > primTip.slot) {
-            v.pending.set(pt.slot.toString(), pt.hash);
+            this.rememberPending(v, pt);
             return { kind: "ahead", slot: pt.slot };
         }
         if (primOldest && pt.slot < primOldest.slot) return { kind: "behind", slot: pt.slot };
@@ -234,13 +285,17 @@ export class CandidateSet {
         fragmentPush(p.fragment, pt, this.depth);
 
         if (p.role === "primary") {
-            // Resolve verifiers that were ahead at this slot.
+            // Resolve verifiers that were ahead at this slot or at any slot the primary has
+            // now passed (a pending second block at an earlier slot is settled either way).
             for (const v of this.peers.values()) {
-                if (v.role !== "verifier") continue;
-                const pending = v.pending.get(slotKey);
-                if (pending == null) continue;
-                v.pending.delete(slotKey);
-                this.compareAgainstPrimary(v, { slot: pt.slot, hash: pending });
+                if (v.role !== "verifier" || v.pending.size === 0) continue;
+                // Deleting during Map iteration is well-defined; no copy of the map per header.
+                for (const [k, hash] of v.pending) {
+                    const slot = BigInt(k);
+                    if (slot > pt.slot) continue;
+                    v.pending.delete(k);
+                    this.compareAgainstPrimary(v, { slot, hash });
+                }
             }
             return { kind: "primary-advance", slot: pt.slot };
         }

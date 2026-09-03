@@ -23,6 +23,50 @@ const verify = (points: Pt[], blocks: Blk[], peer: string) => {
 };
 
 describe("RangeScheduler", () => {
+    test("a range is not abandoned while an untried peer remains, even past retryLimit", async () => {
+        const applied: string[] = [];
+        const failures: string[] = [];
+        const s = new RangeScheduler<Pt, Blk>({
+            maxInFlight: 1,
+            // retryLimit 1: the very first failure is already at the cap, so the range
+            // survives only because an untried peer remains.
+            retryLimit: 1,
+            // Two peers are behind (MsgNoBlocks-style plain errors); the third has the range.
+            pickPeers: () => ["behindA", "behindB", "primary"],
+            fetch: async (peer, points) => {
+                if (peer !== "primary") throw new Error(`peer ${peer} returned MsgNoBlocks`);
+                return points.map((p) => ({ slot: p.slot, hash: p.hash, from: peer }));
+            },
+            verify,
+            onRange: async (_points, blocks) => {
+                applied.push(blocks[0]!.from);
+            },
+            onPeerFailure: (peer, _err, info) => {
+                failures.push(`${peer}:${info.malicious ? "malicious" : "network"}`);
+            },
+        });
+        await s.submit(pts(0, 4)).applied;
+        expect(applied).toEqual(["primary"]);
+        expect(failures.every((f) => f.endsWith(":network"))).toBe(true);
+        expect(failures.length).toBeGreaterThanOrEqual(1);
+        expect(s.stats().retries).toBeGreaterThanOrEqual(1);
+    });
+
+    test("a range is abandoned once every eligible peer has failed it and retryLimit is hit", async () => {
+        const s = new RangeScheduler<Pt, Blk>({
+            maxInFlight: 1,
+            retryLimit: 2,
+            pickPeers: () => ["a", "b"],
+            fetch: async (peer) => {
+                throw new Error(`peer ${peer} returned MsgNoBlocks`);
+            },
+            verify,
+            onRange: async () => {},
+            onFatal: () => {},
+        });
+        await expect(s.submit(pts(0, 2)).applied).rejects.toThrow(/MsgNoBlocks/);
+    });
+
     test("applies ranges strictly in order even when downloads finish out of order", async () => {
         const applied: number[] = [];
         const s = new RangeScheduler<Pt, Blk>({

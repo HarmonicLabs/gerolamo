@@ -3,6 +3,7 @@ import { detectInstallation } from "./detect";
 import {
   getNodeStatus,
   healthCheck,
+  submitTx,
   hydrate,
   listNodes,
   logs,
@@ -73,6 +74,11 @@ const bunRpc = defineElectrobunRPC("bun", {
         const p = asParams(params);
         if (!p.id) return { ok: false, lines: [], error: "id required" };
         return logs(p.id, p.maxLines ?? 120);
+      },
+      async "node.submitTx"(params?: unknown) {
+        const p = asParams(params) as { id?: string; txHex?: string };
+        if (!p.id || !p.txHex) return { ok: false, status: 0, body: null, error: "id and txHex required" };
+        return submitTx(p.id, p.txHex);
       },
       async "bootstrap.start"(params?: unknown) {
         const id = asParams(params).id;

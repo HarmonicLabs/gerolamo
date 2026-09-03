@@ -153,6 +153,15 @@ export async function getEpochBodyParams(
 }
 
 /** Test hook. */
+/** The stored protocol-parameter record for an epoch (Blockfrost-shaped), or null when not imported. */
+export async function getStoredEpochParams(epoch: number): Promise<Record<string, unknown> | null> {
+    try {
+        return (await readDb(epoch)) ?? null;
+    } catch {
+        return null;
+    }
+}
+
 export function _resetEpochParamsCache(): void {
     cache.clear();
 }

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { ByronObftState, type ByronGenesisConfig } from "./ByronOBFT";
+import { verifyByronBlockSignature } from "./ByronCrypto";
 import { splitEraBlock } from "../bodyHash";
 import { Cbor, LazyCborArray } from "@harmoniclabs/cbor";
 import fixture from "../__fixtures__/byron-preprod.json";
@@ -18,6 +19,26 @@ function rawBodyOf(blockHex: string): Uint8Array {
 }
 
 describe("ByronObftState", () => {
+    test("worker-verified path (validateSignedMainHeader + noteAppliedIssuer) equals the full check", () => {
+        const full = new ByronObftState(genesis);
+        const split = new ByronObftState(genesis);
+        mains.forEach((h, i) => {
+            const raw = fromHex(h.headerHex);
+            const sig = verifyByronBlockSignature(raw, genesis.protocolConsts.protocolMagic);
+            expect(sig.ok).toBe(true);
+            const a = full.validateMainHeader(raw, slots[i]!);
+            const b = split.validateSignedMainHeader(slots[i]!, sig.issuerKeyHash!, sig.signerKeyHash!);
+            expect(b).toEqual(a);
+            full.noteApplied(raw, slots[i]!, rawBodyOf((fixture.blocks as string[])[i + 1]!));
+            split.noteAppliedIssuer(sig.issuerKeyHash!, slots[i]!, rawBodyOf((fixture.blocks as string[])[i + 1]!));
+        });
+        expect(split.snapshot()).toEqual(full.snapshot());
+        // A signer that is not the registered delegate is still caught by the state half.
+        const r = split.validateSignedMainHeader(3000n, [...split.genesisKeys][0]!, "00".repeat(28));
+        expect(r.ok).toBe(false);
+        expect(r.reason).toContain("not the registered delegate");
+    });
+
     test("loads preprod genesis: 7 genesis keys, k=2160, threshold 475", () => {
         const st = new ByronObftState(genesis);
         expect(st.genesisKeys.size).toBe(7);

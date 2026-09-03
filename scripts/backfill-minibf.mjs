@@ -370,7 +370,7 @@ function lookupOutAddress(prevTxHash, prevIdx) {
 }
 
 let where =
-  "block_fetch_RawCbor IS NOT NULL AND length(block_fetch_RawCbor) > 32";
+  "block_data IS NOT NULL AND length(block_data) > 32";
 const params = [];
 if (fromSlot != null && Number.isFinite(fromSlot)) {
   where += " AND slot >= ?";
@@ -382,7 +382,7 @@ if (toSlot != null && Number.isFinite(toSlot)) {
 }
 
 const sql = `
-  SELECT slot, hash, block_fetch_RawCbor
+  SELECT slot, hash, block_data
   FROM blocks
   WHERE ${where}
   ORDER BY slot ASC
@@ -546,7 +546,7 @@ for (let i = 0; i < rows.length; i++) {
 
   if (i % BATCH === 0) begin();
   try {
-    const meb = parseBlockBody(row.block_fetch_RawCbor);
+    const meb = parseBlockBody(row.block_data);
     if (!meb) {
       blocksFail++;
     } else {

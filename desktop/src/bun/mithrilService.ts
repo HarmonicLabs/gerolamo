@@ -1,4 +1,5 @@
 import { spawn, type Subprocess } from "bun";
+import { tailFileText } from "./tailFile";
 import {
   appendFileSync,
   closeSync,
@@ -6,7 +7,6 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
-  readFileSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -73,12 +73,7 @@ function immutableCount(snapshotDir: string): number {
 }
 
 function tailFile(path: string, maxLines = 80): string {
-  if (!existsSync(path)) return "";
-  try {
-    return readFileSync(path, "utf8").split(/\r?\n/).slice(-maxLines).join("\n");
-  } catch {
-    return "";
-  }
+  return tailFileText(path, maxLines);
 }
 
 export async function startBootstrap(id: string): Promise<{ ok: boolean; pid?: number; error?: string }> {

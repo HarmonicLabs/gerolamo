@@ -1,4 +1,5 @@
 import color from "picocolors";
+import { rotateIfNeeded } from "./logRotate";
 import * as fs from "fs";
 import fsPromises from "fs/promises";
 import path from "path";
@@ -37,12 +38,19 @@ export interface LoggerConfig {
     bufferedLevels?: string[];
     batchSize?: number;
     flushDelayMs?: number;
+    /** Rotate a level's .jsonl file when it exceeds this many bytes (default 64 MiB; 0 = never). */
+    maxFileBytes?: number;
+    /** Rotated generations to keep (default 5). */
+    keepFiles?: number;
 }
 
 const defaultLoggerConfig: LoggerConfig = {
     logLevel: LogLevel.INFO,
     logDirectory: undefined,
-    logToFile: true,
+    // Off until the node applies its config (setLogConfig from config.json `logs`).
+    // With `true` here every `bun test` run and every script that imported the
+    // logger appended debug output to ./src/store/logs/preprod/ — 100 GB of it.
+    logToFile: false,
     logToConsole: true,
     bufferedLevels: ["debug", "info"],
     batchSize: 1000,
@@ -79,6 +87,7 @@ export class Logger {
     }
 
     private updatePaths() {
+        if (!this.config.logToFile) return; // no directory or empty files unless file logging is on
         const network = process.env.NETWORK ?? "preprod";
         const dir = this.config.logDirectory || `./src/store/logs/${network}/`;
         fs.mkdirSync(dir, { recursive: true });
@@ -143,6 +152,25 @@ export class Logger {
         this.config.logLevel = level;
     }
 
+    /** Bytes written per file since the last stat; rotation decisions do not stat per line. */
+    private fileSizes = new Map<string, number>();
+
+    private rotate(logFilePath: string, addBytes: number): void {
+        const max = this.config.maxFileBytes ?? 64 * 1024 * 1024;
+        if (!(max > 0)) return;
+        const keep = this.config.keepFiles ?? 5;
+        let size = this.fileSizes.get(logFilePath);
+        if (size == null) {
+            try {
+                size = fs.statSync(logFilePath).size;
+            } catch {
+                size = 0;
+            }
+        }
+        if (size > 0 && size + addBytes > max && rotateIfNeeded(logFilePath, 1, keep)) size = 0;
+        this.fileSizes.set(logFilePath, size + addBytes);
+    }
+
     private getQueue(level: string): string[] {
         return this.queues[level] ??= [];
     }
@@ -162,7 +190,9 @@ export class Logger {
             `./src/store/logs/${network}/`;
         const logFilePath = path.join(logDir, `${level.toLowerCase()}.jsonl`);
         try {
-            await fsPromises.appendFile(logFilePath, queue.join(""));
+            const chunk = queue.join("");
+            this.rotate(logFilePath, Buffer.byteLength(chunk));
+            await fsPromises.appendFile(logFilePath, chunk);
             queue.length = 0;
         } catch (err) {
             console.error(`Log flush failed for ${level}:`, err);
@@ -265,6 +295,7 @@ export class Logger {
         const lowerLevel = level.toLowerCase();
         if (!this.bufferedLevels.includes(lowerLevel)) {
             // Use async append for non-buffered levels too (avoid blocking event loop)
+            this.rotate(logFilePath, Buffer.byteLength(line));
             fsPromises.appendFile(logFilePath, line).catch(() => {});
             return;
         }
@@ -414,11 +445,6 @@ export class Logger {
 
 export const logger = new Logger({ logLevel: LogLevel.DEBUG });
 process.on("beforeExit", async () => await logger.flushAll());
-process.on("SIGINT", async () => {
-    await logger.flushAll();
-    process.exit(0);
-});
-process.on("SIGTERM", async () => {
-    await logger.flushAll();
-    process.exit(0);
-});
+// No SIGINT/SIGTERM handlers here: they used to call process.exit(0) right after the
+// flush and cut the node's own shutdown (open range transaction, peers, workers) short.
+// The node's start() owns the signals and flushes the logger last.

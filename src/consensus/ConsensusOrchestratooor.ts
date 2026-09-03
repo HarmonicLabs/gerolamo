@@ -1,9 +1,11 @@
 import { logger } from "../utils/logger";
+import { sql } from "../sql";
+import { SerializedMutationQueue } from "./SerializedMutationQueue";
 import {
     blockFetchHeaderIdentity as headerIdentityOfBlock,
     blockParser,
     headerParser,
-    type ParsedHeader,
+    type HeaderSummary,
 } from "./blockHeaderParser";
 import { validateBlock } from "./BlockBodyValidator";
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
@@ -12,7 +14,7 @@ import {
     ChainPoint,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { prettyBlockValidationLog } from "../tui";
-import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
+import { calculatePreProdCardanoEpoch, epochForSlot, epochLengthSlots } from "../utils/epochFromSlotCalculations";
 import { blockFrostFetchEra } from "../utils/blockFrostFetchEra";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
@@ -28,10 +30,11 @@ import {
     getEpochNonce as dbGetEpochNonce,
     getEpochNonceState,
     getMaxSlot,
+    getMaxBlockNo,
+    setBulkSyncIndexSkip,
     getRecentBlockHeaders,
     getValidBlocksBefore,
     getValidHeadersBefore,
-    insertBlockBatchVolatile,
     insertBlockVolatile,
     insertHeaderBatchVolatile,
     rollbackChainTo,
@@ -51,12 +54,13 @@ import { NonceEvolver } from "../utils/nonceEvolver";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { emitTip } from "../network/liveEvents";
 import { assertBlockRangeMatches } from "./blockRange";
-import { splitEraBlock, verifyBlockBodyHash } from "./bodyHash";
+import { splitEraBlock } from "./bodyHash";
+import { clampMaxRangeBlocks, rangeSizeFor } from "./rangeSizing";
 import { ByronObftState } from "./byron/ByronOBFT";
 import { getByronGenesisConfig } from "../utils/paths";
 import { Cbor, LazyCborArray } from "@harmoniclabs/cbor";
 import { CandidateSet, type PeerAgreement, type PeerRole } from "./CandidateSet";
-import { RangeMismatch, RangeScheduler, SchedulerReset, type RangeSchedulerStats } from "./RangeScheduler";
+import { RangeMismatch, RangeScheduler, type RangeSchedulerStats } from "./RangeScheduler";
 import { ValidationPool, resolveWorkerCount } from "./workers/ValidationPool";
 import { getEpochBodyParams, type EpochBodyParams } from "./epochParams";
 import { ApplyProfile, type ProfileSnapshot } from "./applyProfile";
@@ -76,7 +80,7 @@ interface RangePt {
 /** A validated header waiting for its body. */
 interface PendingHeader {
     item: RollForwardBatchItem;
-    parsedHeader: ParsedHeader;
+    parsedHeader: HeaderSummary;
     /** Epoch η0 hex; empty for Byron. */
     nonce: string;
 }
@@ -122,15 +126,6 @@ interface HeaderInsertData {
     rollforward_header_cbor: Uint8Array;
 }
 
-interface BlockInsertData {
-    slot: bigint;
-    blockHash: string;
-    prevHash: string;
-    headerData: Uint8Array;
-    blockData: Uint8Array;
-    block_fetch_RawCbor: Uint8Array;
-}
-
 interface RollbackPoint {
     blockHeader?: {
         slotNumber: bigint;
@@ -140,7 +135,6 @@ interface RollbackPoint {
 export class ConsensusOrchestrator {
     readonly config: GerolamoConfig;
     readonly peers!: PeerAccessor;
-    private batchBlockRecords: Map<string, BlockInsertData> = new Map();
     private batchHeaderRecords: Map<string, HeaderInsertData> = new Map();
     private volatileDbGcCounter = 0;
     /** Run volatile GC (invalid rows older than k) once per this many applied blocks. */
@@ -184,11 +178,27 @@ export class ConsensusOrchestrator {
     private nonceEvolver: NonceEvolver | null = null;
     private nonceEvolverInit: Promise<void> | null = null;
     /**
-     * Serialize rollForward apply/DB writes on the shared SQLite connection.
-     * PeerClient fires onRollForward without awaiting; concurrent handlers race
-     * sql.begin() → SQLITE "cannot start a transaction within a transaction".
+     * One promise chain per peer keeps that peer's batches in order while letting
+     * peers parse/validate concurrently (verifier work used to sit on the primary's
+     * critical path). Only adoption — candidate compare, outvote, accepting primary
+     * headers — is serialised across peers, through `adoption`.
      */
-    private rollForwardChain: Promise<void> = Promise.resolve();
+    private readonly peerChains = new Map<string, Promise<void>>();
+    private readonly adoption = new SerializedMutationQueue();
+    /** Accepted primary points not yet handed to the scheduler (ranges are cut from here). */
+    private readonly rangeBuffer: RangePt[] = [];
+    private rangeFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Set by stop(): no new ranges are started or accepted; the in-flight range finishes its transaction. */
+    private stopping = false;
+    /** Chain height of the last applied main block (Byron EBBs do not count); loaded from the DB on first use. */
+    private lastBlockNo: number | null = null;
+    /**
+     * Serialises the two DB writers that open their own transaction, `applyRange`
+     * and `rollbackChainTo`: SQLite allows one open transaction per connection.
+     */
+    private readonly dbMutations = new SerializedMutationQueue();
+    /** Header identity computed while verifying a fetched range, reused by the applier (decode once). */
+    private readonly verifiedIdentities = new WeakMap<BlockFetchBlock, ReturnType<typeof headerIdentityOfBlock>>();
 
     constructor(
         config: GerolamoConfig,
@@ -261,6 +271,23 @@ export class ConsensusOrchestrator {
         }
     }
 
+    private nonceSnapshotDue: { eta0Hex: string } | null = null;
+
+    /** Persist the evolver's ηv/ηc once per applied range (inside its transaction). */
+    private async persistNonceSnapshot(): Promise<void> {
+        const due = this.nonceSnapshotDue;
+        if (!due) return;
+        this.nonceSnapshotDue = null;
+        const evolver = this.nonceEvolver;
+        if (!evolver?.isActive()) return;
+        const snap = evolver.snapshot();
+        try {
+            await storeEpochNonce(snap.epoch, due.eta0Hex, "local", snap.etaVHex, snap.etaCHex);
+        } catch {
+            // non-fatal; the next TICKN persists η0 regardless
+        }
+    }
+
     /** Feed one applied Shelley+ block into UPDN; persist any TICKN η0. */
     private async feedNonceEvolver(
         slot: bigint | number,
@@ -300,21 +327,9 @@ export class ConsensusOrchestrator {
                 }
             }
 
-            // Persist evolving/candidate for current epoch (mid-chain resume)
-            if (tickns.length === 0 && evolver.isActive()) {
-                const snap = evolver.snapshot();
-                try {
-                    await storeEpochNonce(
-                        snap.epoch,
-                        eta0Hex,
-                        "local",
-                        snap.etaVHex,
-                        snap.etaCHex,
-                    );
-                } catch {
-                    // non-fatal; next TICKN still persists
-                }
-            }
+            // ηv/ηc for mid-chain resume are persisted once per range (persistNonceSnapshot),
+            // not per block: a range commits atomically, so the two are equivalent.
+            if (tickns.length === 0) this.nonceSnapshotDue = { eta0Hex };
         } catch (err: unknown) {
             logger.warn("NonceEvolver feed failed:", err);
         }
@@ -351,7 +366,6 @@ export class ConsensusOrchestrator {
      */
     private async getEpochNonce(epoch: number): Promise<string | null> {
         if (this.epochNonceCache.has(epoch)) {
-            logger.debug(`Cache hit for epoch nonce ${epoch}`);
             return this.epochNonceCache.get(epoch)!;
         }
 
@@ -436,8 +450,10 @@ export class ConsensusOrchestrator {
 
     /** Pending ranges/headers/fragments are void after the chain moved backwards. */
     private afterRollback(): void {
+        this.lastBlockNo = null; // heights past the rollback point are gone
         this.lastAccepted = null;
         this.pendingHeaders.clear();
+        this.discardRangeBuffer();
         this.lastPrimaryByronHeaderHash = null;
         this.scheduler?.reset("rollback");
         this.candidates.reset();
@@ -488,7 +504,7 @@ export class ConsensusOrchestrator {
      * the configured Byron genesis hash.
      */
     private async assertByronContinuity(
-        parsed: ParsedHeader,
+        parsed: HeaderSummary,
         prevInBatch: string | null,
     ): Promise<void> {
         const prev = parsed.prevHashHex?.toLowerCase();
@@ -563,10 +579,13 @@ export class ConsensusOrchestrator {
         peerId: string,
     ): Promise<void> {
         if (items.length === 0) return;
-        const run = this.rollForwardChain.then(() =>
-            this.processRollForwardBatch(items, peerId)
-        );
-        this.rollForwardChain = run.then(() => undefined, () => undefined);
+        const prev = this.peerChains.get(peerId) ?? Promise.resolve();
+        const run = prev.then(() => this.processRollForwardBatch(items, peerId));
+        const settled = run.then(() => undefined, () => undefined);
+        this.peerChains.set(peerId, settled);
+        void settled.then(() => {
+            if (this.peerChains.get(peerId) === settled) this.peerChains.delete(peerId);
+        });
         return run;
     }
 
@@ -584,7 +603,7 @@ export class ConsensusOrchestrator {
         if (!this.candidates.hasPeer(peerKey)) return;
         const wasPrimary = this.candidates.primary() === peerKey;
         this.candidates.removePeer(peerKey);
-        if (wasPrimary) {
+        if (wasPrimary && !this.stopping) { // during shutdown peers leave in bulk: no successors, no restarts
             const next = this.candidates.bestSuccessor();
             this.lastAccepted = null; // re-anchor the contiguity check on the DB tip
             if (next) {
@@ -604,6 +623,30 @@ export class ConsensusOrchestrator {
 
     roleOf(peerKey: string): PeerRole | null {
         return this.candidates.roleOf(peerKey);
+    }
+
+    /** The peer whose ChainSync drives our chain; the governor must not demote it. */
+    primaryPeerKey(): string | null {
+        return this.candidates.primary();
+    }
+
+    /**
+     * Graceful stop: drop queued/downloading ranges, let the range currently being
+     * applied finish its SQLite transaction (commit or roll back — never a half-applied
+     * range), then close the validation workers. Idempotent.
+     */
+    async stop(): Promise<void> {
+        if (this.stopping) return;
+        this.stopping = true;
+        this.discardRangeBuffer();
+        this.scheduler?.reset("shutdown");
+        try {
+            await this.dbMutations.drain();
+        } catch {
+            /* a failed range already logged itself */
+        }
+        this.pool?.close();
+        this.pool = null;
     }
 
     /** Not configurable: strict whenever the ledger is complete, report-only for tip sync. See validationPolicy.ts. */
@@ -686,6 +729,7 @@ export class ConsensusOrchestrator {
                 const primaryKey = this.candidates.primary();
                 const primary = primaryKey ? this.peerByKey(primaryKey) : null;
                 this.pendingHeaders.clear();
+                this.discardRangeBuffer();
                 this.lastPrimaryByronHeaderHash = null;
                 this.scheduler?.reset("range pipeline failed");
                 primary?.terminate("range pipeline failed");
@@ -694,15 +738,33 @@ export class ConsensusOrchestrator {
         return this.scheduler;
     }
 
-    /** Peers safe to serve bodies for a range ending at `endSlot`: primary + verifiers agreeing through it. */
+    /**
+     * Peers that may serve bodies for a range ending at `endSlot`.
+     *
+     * Any hot peer may serve any range of the primary's validated fragment: every
+     * fetched block is bound to its validated header by the body-hash check in
+     * `verifyFetchedRange`, so a lying peer is caught on its first block and held
+     * as malicious before anything is applied. Agreement (`agreesThrough`) is the
+     * rule for choosing a primary and for outvoting, not for serving bodies; using
+     * it here collapsed `parallelRanges` to one range on the primary's socket
+     * during a genesis catch-up, when verifier streams trail the primary by
+     * thousands of headers. Divergent peers are skipped: they follow another
+     * chain and would mostly answer MsgNoBlocks.
+     *
+     * Ordering: primary and agreeing verifiers first, then the rest. The scheduler
+     * tries untried peers first per range, so a peer that answers MsgNoBlocks
+     * (behind, not lying) costs one retry and the range moves on.
+     */
     private eligibleFetchPeers(endSlot: bigint): string[] {
-        const out: string[] = [];
+        const agreeing: string[] = [];
+        const rest: string[] = [];
         for (const a of this.candidates.snapshot().peers) {
-            if (a.role === "primary" || this.candidates.agreesThrough(a.key, endSlot)) {
-                if (this.peerByKey(a.key)) out.push(a.key);
-            }
+            if (a.divergence) continue;
+            if (!this.peerByKey(a.key)) continue;
+            if (a.role === "primary" || this.candidates.agreesThrough(a.key, endSlot)) agreeing.push(a.key);
+            else rest.push(a.key);
         }
-        return out;
+        return agreeing.concat(rest);
     }
 
     private async fetchRangeFrom(peerKey: string, points: RangePt[]): Promise<BlockFetchBlock[]> {
@@ -718,26 +780,34 @@ export class ConsensusOrchestrator {
         return result;
     }
 
-    /** Identity + body integrity of a fetched range. Throws RangeMismatch when the peer lied. */
-    private verifyFetchedRange(points: RangePt[], blocks: BlockFetchBlock[], peerKey: string): void {
+    /**
+     * Identity + body integrity of a fetched range, on the validation pool (pure over
+     * bytes, so it runs off the main thread). Throws RangeMismatch when the peer lied.
+     * The identities are kept for the applier so each block is decoded once.
+     */
+    private async verifyFetchedRange(points: RangePt[], blocks: BlockFetchBlock[], peerKey: string): Promise<void> {
         if (blocks.length !== points.length) {
             throw new RangeMismatch(`peer ${peerKey} returned ${blocks.length} blocks for ${points.length} points`);
         }
-        for (let i = 0; i < points.length; i++) {
-            const want = points[i]!;
-            const identity = headerIdentityOfBlock(blocks[i]!.blockData);
-            const got = toHex(identity.hash);
-            if (got.toLowerCase() !== want.hash.toLowerCase()) {
-                throw new RangeMismatch(
-                    `peer ${peerKey} block ${i} header hash ${got} ≠ advertised ${want.hash} (slot ${want.slot})`,
-                );
-            }
-            const body = verifyBlockBodyHash(blocks[i]!.blockData);
-            if (!body.ok) {
-                throw new RangeMismatch(
-                    `peer ${peerKey} body hash mismatch at slot ${want.slot} hash=${want.hash}: expected=${body.expected} actual=${body.actual}`,
-                );
-            }
+        const t0 = performance.now();
+        const pool = this.pool;
+        if (!pool) throw new Error("shutting down");
+        const r = await pool.verifyRange({
+            kind: "range",
+            blocks: blocks.map((b) => b.blockData),
+            expectedHashes: points.map((p) => p.hash),
+        });
+        this.profile.add("rng.verify", performance.now() - t0);
+        if (!r.ok) {
+            const i = r.index ?? 0;
+            const want = points[i];
+            throw new RangeMismatch(
+                `peer ${peerKey} block ${i} (slot ${want?.slot} hash=${want?.hash}): ${r.reason ?? "verification failed"}`,
+            );
+        }
+        for (let i = 0; i < blocks.length; i++) {
+            const id = r.identities[i]!;
+            this.verifiedIdentities.set(blocks[i]!, { era: id.era, hash: fromHex(id.hashHex), rawHeaderBytes: id.rawHeader });
         }
     }
 
@@ -747,9 +817,6 @@ export class ConsensusOrchestrator {
         items: RollForwardBatchItem[],
         peerId: string,
     ): Promise<void> {
-        logger.debug(
-            `Processing rollForward batch (${items.length}) from peer ${peerId}...`,
-        );
         try {
             const peer = this.peers.getPeer(peerId);
             if (!peer) {
@@ -761,41 +828,46 @@ export class ConsensusOrchestrator {
             let role = this.candidates.roleOf(peerKey);
             if (!role) role = this.registerHotPeer(peerKey);
 
-            // 1) parse (cheap, main thread) — needed for slot/epoch before nonce lookup
-            const parsed: ParsedHeader[] = [];
+            // 1) epoch range from the first and last header only (two parses per batch instead
+            //    of one per header; the workers parse each header once, for validation).
             const tParse = performance.now();
-            for (const item of items) {
-                const p = await headerParser(item.rollForwardCborBytes);
-                if (!p) throw new Error(`Header parse failed for peer ${peerId}`);
-                parsed.push(p);
-            }
+            const first = await headerParser(items[0]!.rollForwardCborBytes);
+            const last = items.length > 1 ? await headerParser(items[items.length - 1]!.rollForwardCborBytes) : first;
+            if (!first || !last) throw new Error(`Header parse failed for peer ${peerId}`);
             this.profile.add("hdr.parse", performance.now() - tParse);
 
-            // 2) nonces (main thread: DB / network)
-            const nonces: string[] = [];
+            // 2) nonces (main thread: DB / network) — one lookup per epoch the batch spans
             const tNonce = performance.now();
-            for (const p of parsed) {
-                if (p.isByron) {
-                    nonces.push("");
-                    continue;
+            const noncesByEpoch: Record<string, string> = {};
+            const shelleyEpochs = [first, last].filter((p) => !p.isByron).map((p) => p.epoch);
+            if (shelleyEpochs.length > 0) {
+                const lo = Math.min(...shelleyEpochs);
+                const hi = Math.max(...shelleyEpochs);
+                for (let e = lo; e <= hi; e++) {
+                    const eta0 = await this.getEpochNonce(e);
+                    if (!eta0) {
+                        throw new Error(
+                            `Missing epoch nonce for epoch ${e} (headers ${first.slot}..${last.slot} from ${peerId})`,
+                        );
+                    }
+                    noncesByEpoch[String(e)] = eta0;
                 }
-                const eta0 = await this.getEpochNonce(p.epoch);
-                if (!eta0) {
-                    throw new Error(
-                        `Missing epoch nonce for slot ${p.slot.toString()} hash=${toHex(p.blockHeaderHash)}`,
-                    );
-                }
-                nonces.push(eta0);
             }
             this.profile.add("hdr.nonce", performance.now() - tNonce);
 
-            // 3) era validation (KES/VRF/op-cert or Byron structural) — worker pool
-            const pool = this.pool!;
+            // 3) parse + era validation (KES/VRF/op-cert or Byron structural) — worker pool
+            const pool = this.pool;
+            if (!pool) return; // shutting down
             const tVal = performance.now();
+            if (this.stopping) return;
             const results = await pool.validateAll(
-                items.map((item, i) => ({
+                items.map((item) => ({
                     rollForward: item.rollForwardCborBytes,
-                    nonceHex: nonces[i]!,
+                    nonceHex: "",
+                    noncesByEpoch,
+                    // Byron block signatures verify on the workers when OBFT is configured;
+                    // Byron protocolMagic equals the network magic on every Cardano network.
+                    byronProtocolMagic: this.config.byronGenesisFile ? Number(this.config.networkMagic) : undefined,
                     config: {
                         networkMagic: this.config.networkMagic,
                         shelleyGenesisFile: this.config.shelleyGenesisFile,
@@ -804,21 +876,59 @@ export class ConsensusOrchestrator {
                 })),
             );
             this.profile.add("hdr.validate", performance.now() - tVal);
-            for (let i = 0; i < results.length; i++) {
-                const r = results[i]!;
-                if (r.ok) continue;
-                const msg = `Header validation failed at slot ${parsed[i]!.slot} hash=${toHex(parsed[i]!.blockHeaderHash)}: ${r.reason ?? "invalid"}`;
-                if (role === "verifier") this.terminateMalicious(peer, msg);
-                throw new Error(msg);
+            const parsed: HeaderSummary[] = [];
+            const nonces: string[] = [];
+            for (const r of results) {
+                if (!r.ok) {
+                    const msg = `Header validation failed at slot ${r.slot} hash=${r.hashHex}: ${r.reason ?? "invalid"}`;
+                    if (role === "verifier") this.terminateMalicious(peer, msg);
+                    throw new Error(msg);
+                }
+                parsed.push({
+                    slot: BigInt(r.slot),
+                    blockHeaderHash: fromHex(r.hashHex),
+                    era: r.era,
+                    epoch: r.epoch,
+                    isByron: r.isByron,
+                    isEbb: r.isEbb,
+                    rawHeaderBytes: r.rawHeader,
+                    prevHashHex: r.prevHashHex,
+                    ...(r.byron?.ok && r.byron.issuerKeyHash && r.byron.signerKeyHash
+                        ? { byronSig: { issuerKeyHash: r.byron.issuerKeyHash, signerKeyHash: r.byron.signerKeyHash } }
+                        : {}),
+                });
+                nonces.push(r.isByron ? "" : noncesByEpoch[String(r.epoch)] ?? "");
             }
 
-            // 4) role-specific handling
-            if (role === "verifier") {
-                await this.observeVerifierHeaders(peer, parsed);
-                return;
-            }
-            await this.acceptPrimaryHeaders(peer, items, parsed, nonces);
+            // 4) adoption — the only cross-peer critical section. The role is re-read
+            //    under the lock: a primary switch may have happened while validating.
+            const adoptedAsPrimary = await this.adoption.run(async () => {
+                const roleNow = this.candidates.roleOf(peerKey);
+                if (!roleNow) {
+                    logger.debug(`Peer ${peerKey} left before its ${items.length} header(s) were adopted; dropping`);
+                    return false;
+                }
+                const gen = items[0]!.generation;
+                if (gen != null && gen !== peer.chainSyncGeneration) {
+                    logger.debug(`Peer ${peerKey}: ${items.length} header(s) from a restarted ChainSync stream (gen ${gen} ≠ ${peer.chainSyncGeneration}); dropping`);
+                    return false;
+                }
+                if (roleNow === "verifier") {
+                    await this.observeVerifierHeaders(peer, parsed);
+                    return false;
+                }
+                await this.acceptPrimaryHeaders(peer, items, parsed, nonces);
+                return true;
+            });
+            // 5) back-pressure: the primary may run up to `headerLookahead` validated
+            //    headers ahead of the applier (the header fragment, §3 of the sync plan),
+            //    not merely one download slot. Waited outside the lock so verifiers keep
+            //    comparing while the applier catches up. A verifier is paused once it is
+            //    far ahead of the primary: its pending comparisons are what bounds memory.
+            if (adoptedAsPrimary) await this.waitForHeaderRoom(peerKey);
+            else await this.waitForVerifierRoom(peerKey);
         } catch (error: unknown) {
+            if (this.stopping) return; // pool closed / peers terminating: not an error worth a stack trace
             logger.error(
                 `Error processing rollForward batch for peer ${peerId}:`,
                 error,
@@ -828,10 +938,10 @@ export class ConsensusOrchestrator {
     }
 
     /** Verifier headers: compare against the primary; act on divergence. */
-    private async observeVerifierHeaders(peer: PeerClient, parsed: ParsedHeader[]): Promise<void> {
+    private async observeVerifierHeaders(peer: PeerClient, parsed: HeaderSummary[]): Promise<void> {
         const peerKey = peer.peerKey;
         for (const p of parsed) {
-            const verdict = this.candidates.observe(peerKey, { slot: p.slot, hash: toHex(p.blockHeaderHash) });
+            const verdict = this.candidates.observe(peerKey, { slot: p.slot, hash: toHex(p.blockHeaderHash), ebb: p.isEbb });
             if (verdict.kind !== "divergent") continue;
 
             const outvote = this.candidates.primaryOutvoted(this.quorum());
@@ -844,6 +954,46 @@ export class ConsensusOrchestrator {
                 `diverges from primary at slot ${verdict.slot}: peer=${verdict.peerHash} primary=${verdict.primaryHashes.join("|") || "∅"}`,
             );
         }
+        this.maybePromoteFasterVerifier();
+    }
+
+    /** Validated headers a verifier must lead the primary by before it is promoted for throughput. */
+    private static readonly SPEED_PROMOTION_LEAD = 1024;
+    private static readonly SPEED_PROMOTION_COOLDOWN_MS = 60_000;
+    private lastSpeedPromotionAt = 0;
+
+    /**
+     * Header rate is per connection, so the primary's relay caps the whole sync (plan
+     * §3.3). A verifier that agrees with the primary through the primary's tip and has
+     * validated ≥ SPEED_PROMOTION_LEAD headers beyond it is a faster source of the same
+     * chain: make it primary. The old primary stays hot as a verifier. The new primary
+     * re-streams from the DB tip so every header still goes through
+     * acceptPrimaryHeaders (contiguity, Byron OBFT state, range bookkeeping); nothing is
+     * adopted from its verifier fragment directly. Runs under the adoption lock.
+     */
+    private maybePromoteFasterVerifier(): void {
+        if (this.halted) return;
+        // Only when the header side is what starves the applier. A primary blocked on
+        // the header cap (bodies are the bottleneck) is not slow, and verifiers are not
+        // subject to that cap, so any of them would look "ahead" of it.
+        if (this.pendingHeaders.size >= this.headerLookahead() / 2) return;
+        const now = Date.now();
+        if (now - this.lastSpeedPromotionAt < ConsensusOrchestrator.SPEED_PROMOTION_COOLDOWN_MS) return;
+        const oldKey = this.candidates.primary();
+        const pick = this.candidates.fasterAgreeingVerifier(ConsensusOrchestrator.SPEED_PROMOTION_LEAD);
+        if (!oldKey || !pick) return;
+        const next = this.peerByKey(pick.key);
+        if (!next) return;
+        this.lastSpeedPromotionAt = now;
+        logger.warn(
+            `Verifier ${pick.key} agrees with primary ${oldKey} through slot ${pick.primaryTipSlot} and is ${pick.lead} validated headers ahead; promoting it to primary for throughput`,
+        );
+        this.candidates.setPrimary(pick.key);
+        this.lastAccepted = null; // re-anchor the contiguity check on the DB tip
+        this.lastPrimaryByronHeaderHash = null;
+        // Pending headers / queued ranges from the old primary stay valid (same chain);
+        // the new primary's re-stream skips them as duplicates and continues past them.
+        void next.restartChainSync("promoted to primary for throughput; re-anchor on DB tip");
     }
 
     /**
@@ -862,6 +1012,7 @@ export class ConsensusOrchestrator {
             `Primary ${oldKey} outvoted at slot ${slot}: ${by.length} verifiers agree on ${hash}. Switching primary to ${successor}.`,
         );
         this.pendingHeaders.clear();
+        this.discardRangeBuffer();
         this.lastPrimaryByronHeaderHash = null;
         this.lastAccepted = null;
         this.scheduler?.reset("primary outvoted");
@@ -875,9 +1026,9 @@ export class ConsensusOrchestrator {
         const rollbackTo = slot > 0n ? slot - 1n : 0n;
         await this.handleRollBack({ blockHeader: { slotNumber: rollbackTo } });
         const points = this.candidates.fragmentOf(successor).filter((p) => p.slot >= slot);
-        const maxBlocks = Math.max(1, Number(this.config.blockFetchBatch?.maxBlocks ?? 32));
-        for (let i = 0; i < points.length; i += maxBlocks) {
-            const chunk = points.slice(i, i + maxBlocks).map((p) => ({ slot: p.slot, hash: p.hash }));
+        const rangeBlocks = this.maxRangeBlocks();
+        for (let i = 0; i < points.length; i += rangeBlocks) {
+            const chunk = points.slice(i, i + rangeBlocks).map((p) => ({ slot: p.slot, hash: p.hash }));
             // These headers were validated when observed; bodies are verified on fetch.
             this.ensureScheduler().submit(chunk).applied.catch(() => undefined);
         }
@@ -887,7 +1038,7 @@ export class ConsensusOrchestrator {
     private async acceptPrimaryHeaders(
         peer: PeerClient,
         items: RollForwardBatchItem[],
-        parsed: ParsedHeader[],
+        parsed: HeaderSummary[],
         nonces: string[],
     ): Promise<void> {
         const peerKey = peer.peerKey;
@@ -900,7 +1051,7 @@ export class ConsensusOrchestrator {
         for (let i = 0; i < parsed.length; i++) {
             const parsedHeader = parsed[i]!;
             const headerHashHex = toHex(parsedHeader.blockHeaderHash);
-            this.candidates.observe(peerKey, { slot: parsedHeader.slot, hash: headerHashHex });
+            this.candidates.observe(peerKey, { slot: parsedHeader.slot, hash: headerHashHex, ebb: parsedHeader.isEbb });
 
             if (this.pendingHeaders.has(headerHashHex) || await this.isAlreadyApplied(headerHashHex)) {
                 skippedDuplicates++;
@@ -929,16 +1080,36 @@ export class ConsensusOrchestrator {
             expectedPrev = headerHashHex;
 
             if (parsedHeader.isByron) {
-                await this.assertByronContinuity(
-                    parsedHeader,
-                    prevByronHashInBatch ?? this.lastPrimaryByronHeaderHash,
-                );
+                try {
+                    await this.assertByronContinuity(
+                        parsedHeader,
+                        prevByronHashInBatch ?? this.lastPrimaryByronHeaderHash,
+                    );
+                } catch (err) {
+                    // The header extends a block we do not hold: the stream is not contiguous
+                    // with our chain (seen right after a ChainSync restart, when a stale
+                    // pipelined reply slips into the new stream). Same handling as the
+                    // Shelley path: re-anchor on the DB tip. Not a fork, not malicious.
+                    logger.warn(
+                        `Primary ${peerKey} Byron stream not contiguous at slot ${parsedHeader.slot}: ${err instanceof Error ? err.message : String(err)}; restarting its ChainSync from the DB tip`,
+                    );
+                    this.lastAccepted = null;
+                    this.lastPrimaryByronHeaderHash = null;
+                    void peer.restartChainSync("Byron stream not contiguous with DB tip");
+                    return;
+                }
                 prevByronHashInBatch = headerHashHex;
                 this.lastPrimaryByronHeaderHash = headerHashHex;
                 if (!parsedHeader.isEbb) {
                     const obft = await this.ensureByronObft();
                     if (obft) {
-                        const check = this.profile.time("hdr.obft", () => obft.validateMainHeader(parsedHeader.rawHeaderBytes, parsedHeader.slot));
+                        // Signature + certificate were verified on a worker (byronSig); only the
+                        // stateful checks run here. Without a worker verdict, do the full check.
+                        const sig = parsedHeader.byronSig;
+                        const check = this.profile.time("hdr.obft", () =>
+                            sig
+                                ? obft.validateSignedMainHeader(parsedHeader.slot, sig.issuerKeyHash, sig.signerKeyHash)
+                                : obft.validateMainHeader(parsedHeader.rawHeaderBytes, parsedHeader.slot));
                         if (!check.ok) {
                             this.terminateMalicious(
                                 peer,
@@ -959,26 +1130,154 @@ export class ConsensusOrchestrator {
         }
         if (points.length === 0) return;
 
-        const { scheduled, applied } = this.ensureScheduler().submit(points);
-        applied.catch(() => undefined); // surfaced via onFatal
-        try {
-            await scheduled; // back-pressure: at most N ranges downloading
-        } catch (err) {
-            // A rollback / primary switch dropped this range on purpose; the peer
-            // is fine and will resend from the new point. Not a peer failure.
-            if (err instanceof SchedulerReset) {
-                logger.debug(`Range from ${peerKey} dropped: ${err.message}`);
-                return;
-            }
-            throw err;
+        // Ranges are cut from a buffer so their size follows the distance to the tip
+        // (large far behind, single blocks at the tip) instead of the header batch size.
+        const lastItem = items[items.length - 1]!;
+        const lastPoint = points[points.length - 1]!;
+        const lastParsed = parsed[parsed.length - 1]!;
+        this.rangeBuffer.push(...points);
+        this.flushRanges(rangeSizeFor(lastItem.tip, lastPoint.slot, lastParsed.isByron, this.maxRangeBlocks()));
+    }
+
+    private maxRangeBlocks(): number {
+        return clampMaxRangeBlocks(this.config.blockFetchBatch?.maxRangeBlocks);
+    }
+
+    private headerLookahead(): number {
+        const n = Number(this.config.blockFetchBatch?.headerLookahead ?? this.securityParamKSync());
+        return Number.isFinite(n) && n >= 1 ? Math.trunc(n) : 2160;
+    }
+
+    /**
+     * Hand full ranges of `size` points to the scheduler. A partial tail stays buffered
+     * for the next batch; the idle timer flushes it with `size = 1` (a slow header
+     * stream must never leave bodies undownloaded).
+     */
+    private flushRanges(size: number): void {
+        if (this.stopping) return;
+        const n = Math.max(1, size);
+        while (this.rangeBuffer.length >= n) {
+            const chunk = this.rangeBuffer.splice(0, n);
+            this.ensureScheduler().submit(chunk).applied.catch(() => undefined); // surfaced via onFatal
+        }
+        if (this.rangeFlushTimer) clearTimeout(this.rangeFlushTimer);
+        this.rangeFlushTimer = null;
+        if (this.rangeBuffer.length > 0) {
+            // Far behind the tip (large target range) a partial range is only worth
+            // flushing after a real stall; near the tip flush quickly for latency.
+            const flushMs = n >= 16 ? 1000 : Math.max(20, Number(this.config.blockFetchBatch?.flushMs ?? 25) * 8);
+            this.rangeFlushTimer = setTimeout(() => {
+                this.rangeFlushTimer = null;
+                if (this.rangeBuffer.length > 0) this.flushRanges(1);
+            }, flushMs);
+        }
+    }
+
+    private discardRangeBuffer(): void {
+        this.rangeBuffer.length = 0;
+        if (this.rangeFlushTimer) clearTimeout(this.rangeFlushTimer);
+        this.rangeFlushTimer = null;
+    }
+
+    /** Pause a verifier's stream while it has more than ¾·k headers waiting for the primary to catch up. */
+    private async waitForVerifierRoom(peerKey: string): Promise<void> {
+        const cap = Math.floor(this.candidates.fragmentDepth * 0.75);
+        while (this.candidates.pendingCount(peerKey) > cap) {
+            if (this.halted || this.stopping || !this.peerByKey(peerKey) || this.candidates.roleOf(peerKey) !== "verifier") return;
+            await new Promise((r) => setTimeout(r, 50));
+        }
+    }
+
+    /**
+     * Block the primary's header stream while `headerLookahead` validated headers await
+     * bodies. With hysteresis: once the cap is hit, wait until two full ranges of room
+     * exist, otherwise headers trickle in as single ranges apply and every range cut
+     * from the buffer ends up small (seen as ~27-block ranges at a 128 target).
+     */
+    private async waitForHeaderRoom(peerKey: string): Promise<void> {
+        const cap = this.headerLookahead();
+        if (this.pendingHeaders.size < cap) return;
+        const resumeBelow = Math.max(1, cap - 2 * this.maxRangeBlocks());
+        while (this.pendingHeaders.size > resumeBelow) {
+            if (this.halted || this.stopping || this.candidates.primary() !== peerKey || !this.peerByKey(peerKey)) return;
+            await new Promise((r) => setTimeout(r, 25));
         }
     }
 
     // ───────────────────────────── apply stage ─────────────────────────────
 
-    /** Apply one verified range, strictly in chain order. */
+    /**
+     * Apply one verified range, strictly in chain order, as ONE SQLite transaction.
+     *
+     * Every ledger write of the range (UTxO, certificates, indexes, nonces, block and
+     * header rows) commits together: a range is either fully applied or absent from
+     * the DB. The hundreds of implicit autocommits per block were the largest
+     * per-block cost on dense chains. Bun's SQLite adapter runs statements issued on
+     * the shared `sql` handle inside the open transaction, so apply* need no handle
+     * threading; the price is that a second `sql.begin` on that connection throws,
+     * hence `dbMutations` serialises this with `rollbackChainTo`.
+     */
     private async applyRange(points: RangePt[], blocks: BlockFetchBlock[], fetchedFrom: string): Promise<void> {
+        if (this.stopping) return; // shutdown: nothing new is applied
+        await this.dbMutations.run(async () => {
+            if (this.stopping) return;
+            this.batchHeaderRecords.clear();
+            try {
+                await sql.begin(async () => {
+                    await this.applyRangeBlocks(points, blocks, fetchedFrom);
+                    await this.persistNonceSnapshot();
+                    const tIns = performance.now();
+                    await insertHeaderBatchVolatile(Array.from(this.batchHeaderRecords.values()));
+                    this.profile.add("blk.insert", performance.now() - tIns);
+                });
+            } catch (err) {
+                // The transaction rolled back: nothing from this range is in the DB. In-memory
+                // state that advanced with it must follow, exactly as after a chain rollback,
+                // or a retry would skip blocks (dedupe LRU) or evolve the nonce twice.
+                this.afterFailedRange();
+                throw err;
+            } finally {
+                this.batchHeaderRecords.clear();
+            }
+        });
+    }
+
+    /**
+     * sync.skipIndexWhileBehind: keep the MiniBF forward index off the hot path while
+     * more than one epoch (per-network epoch length) behind the primary's tip; back on
+     * near the tip. The db module owns the flag; its setter reports transitions.
+     */
+    private updateIndexSkip(first: RangePt): void {
+        if (!this.config.sync?.skipIndexWhileBehind) return;
+        const tip = this.pendingHeaders.get(first.hash)?.item.tip;
+        if (tip == null) return;
+        const behind = tip > first.slot ? tip - first.slot : 0n;
+        const shouldSkip = behind > epochLengthSlots(epochForSlot(first.slot));
+        if (setBulkSyncIndexSkip(shouldSkip)) {
+            logger.warn(
+                shouldSkip
+                    ? `Forward index (MiniBF) paused: ${behind} slots behind the tip; run scripts/backfill-minibf.mjs after catch-up`
+                    : `Forward index (MiniBF) resumed: ${behind} slots behind the tip`,
+            );
+        }
+    }
+
+    /** Drop in-memory state derived from applied blocks after a range's transaction rolled back. */
+    private afterFailedRange(): void {
+        this.lastBlockNo = null; // re-read from the DB
+        this.nonceSnapshotDue = null;
+        this.nonceEvolver?.reset();
+        this.epochNonceCache.clear();
+        this.lastByronTipHash = null;
+        this.forgetApplied();
+        this.byronObft = null;
+        this.byronObftInit = null;
+    }
+
+    /** The per-block loop of `applyRange`; runs inside the range's transaction. */
+    private async applyRangeBlocks(points: RangePt[], blocks: BlockFetchBlock[], fetchedFrom: string): Promise<void> {
         const bodyPolicy = this.resolveBodyPolicy();
+        this.updateIndexSkip(points[0]!);
         for (let i = 0; i < points.length; i++) {
             const pt = points[i]!;
             const blockMessage = blocks[i]!;
@@ -990,7 +1289,7 @@ export class ConsensusOrchestrator {
                 throw new Error(`Block parse failed at slot ${pt.slot} hash=${pt.hash}`);
             }
             const blockHeader = multiEraBlock.block.header;
-            const identity = headerIdentityOfBlock(blockMessage.blockData);
+            const identity = this.verifiedIdentities.get(blockMessage) ?? headerIdentityOfBlock(blockMessage.blockData);
             this.profile.add("blk.parse", performance.now() - tParse);
             const isByron = identity.era <= 1;
             const isEbb = identity.era === 0;
@@ -1021,11 +1320,14 @@ export class ConsensusOrchestrator {
                 logger.warn(`Block body validation failed at slot ${blockSlot} hash=${blockHash} (soft: applying)`);
             }
 
-            await this.profile.timeAsync("blk.apply", () => applyBlock(multiEraBlock.block as MultiEraBlock["block"], blockSlot, blockHeaderHash));
-            logger.debug(`Applied Block: ${blockHash}${fetchedFrom ? ` (from ${fetchedFrom})` : ""}`);
+            if (this.lastBlockNo == null) this.lastBlockNo = await getMaxBlockNo();
+            const blockNo = isEbb ? null : ++this.lastBlockNo;
+            await this.profile.timeAsync("blk.apply", () => applyBlock(multiEraBlock.block as MultiEraBlock["block"], blockSlot, blockHeaderHash, undefined, blockNo));
             this.rememberApplied(blockHash);
             this.blocksApplied++;
-            this.applyTimestamps.push(Date.now());
+            const nowTs = Date.now();
+            this.applyTimestamps.push(nowTs);
+            while (this.applyTimestamps.length && nowTs - this.applyTimestamps[0]! > 10_000) this.applyTimestamps.shift();
             this.profile.noteBlock();
             if (this.blocksApplied % ConsensusOrchestrator.PROFILE_LOG_EVERY === 0) {
                 logger.info(`Sync profile: ${this.profile.summary()}`);
@@ -1040,7 +1342,12 @@ export class ConsensusOrchestrator {
                 this.lastByronTipHash = blockHash;
                 if (!isEbb && this.byronObft) {
                     try {
-                        this.profile.time("blk.obft", () => this.byronObft!.noteApplied(headerBytes, blockSlot, ConsensusOrchestrator.byronRawBody(blockMessage.blockData)));
+                        const issuerKh = pending?.parsedHeader.byronSig?.issuerKeyHash;
+                        this.profile.time("blk.obft", () => {
+                            const body = ConsensusOrchestrator.byronRawBody(blockMessage.blockData);
+                            if (issuerKh) this.byronObft!.noteAppliedIssuer(issuerKh, blockSlot, body);
+                            else this.byronObft!.noteApplied(headerBytes, blockSlot, body);
+                        });
                     } catch (err: unknown) {
                         logger.warn(`Byron OBFT noteApplied failed at slot ${blockSlot}:`, err);
                     }
@@ -1060,21 +1367,18 @@ export class ConsensusOrchestrator {
                 });
             }
             const tEnc = performance.now();
-            this.batchBlockRecords.set(blockHash, {
+            // One row per block, the bytes as received (`[era, block]`), written inside the
+            // range's transaction so tip queries during the range already see it.
+            await insertBlockVolatile({
                 slot: blockSlot,
                 blockHash,
                 prevHash: getHeaderPrevHashHex(blockHeader),
+                blockNo,
                 headerData: headerBytes,
-                blockData: multiEraBlock.block.toCborBytes(),
-                block_fetch_RawCbor: blockMessage.toCborBytes(),
+                blockData: blockMessage.blockData,
             });
-            this.profile.add("blk.encode", performance.now() - tEnc);
-            const tIns = performance.now();
-            await insertBlockBatchVolatile(Array.from(this.batchBlockRecords.values()));
-            await insertHeaderBatchVolatile(Array.from(this.batchHeaderRecords.values()));
-            this.profile.add("blk.insert", performance.now() - tIns);
-            this.batchBlockRecords.clear();
-            this.batchHeaderRecords.clear();
+            this.profile.add("blk.insert", performance.now() - tEnc);
+            // Header rows are flushed once per range by applyRange (same transaction).
             this.pendingHeaders.delete(pt.hash);
             if (++this.volatileDbGcCounter % ConsensusOrchestrator.VOLATILE_GC_EVERY_BLOCKS === 0) {
                 const gc = await this.profile.timeAsync("blk.gc", () => gcVolatile());
@@ -1097,7 +1401,7 @@ export class ConsensusOrchestrator {
                     Number(blockSlot),
                     Number(pending?.item.tip ?? blockSlot),
                     this.volatileDbGcCounter,
-                    this.batchBlockRecords.size,
+                    points.length,
                 );
             this.profile.add("blk.emit", performance.now() - tEmit);
         }
@@ -1105,14 +1409,27 @@ export class ConsensusOrchestrator {
 
     /** Security parameter k (blocks): a rollback deeper than this is not a fork, it is an attack or a broken peer. */
     private async securityParamK(): Promise<number> {
+        if (this.kCached != null) return this.kCached;
         try {
             const g = await getShelleyGenesisConfig(this.config);
             const k = Number((g as { securityParam?: number } | null)?.securityParam);
-            if (Number.isFinite(k) && k > 0) return k;
+            if (Number.isFinite(k) && k > 0) {
+                this.kCached = k;
+                return k;
+            }
         } catch {
             /* fall through */
         }
+        this.kCached = 2160;
         return 2160;
+    }
+
+    private kCached: number | null = null;
+
+    /** k when already known (the genesis file is read once at startup); 2160 otherwise. */
+    private securityParamKSync(): number {
+        if (this.kCached == null) void this.securityParamK();
+        return this.kCached ?? 2160;
     }
 
     async handleRollBack(
@@ -1163,7 +1480,7 @@ export class ConsensusOrchestrator {
 
                 if (comparison.preferred === "candidate") {
                     const rollbackSlot = point.blockHeader!.slotNumber;
-                    const counts = await rollbackChainTo(rollbackSlot);
+                    const counts = await this.dbMutations.run(() => rollbackChainTo(rollbackSlot));
                     logger.rollback(
                         `Praos-approved rollback to slot ${rollbackSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`,
                     );
@@ -1205,7 +1522,7 @@ export class ConsensusOrchestrator {
                     }
                     return { rolledBack: false };
                 }
-                const counts = await rollbackChainTo(pointSlot);
+                const counts = await this.dbMutations.run(() => rollbackChainTo(pointSlot));
                 logger.rollback(
                     `Unconditional tip rollback to slot ${pointSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`,
                 );

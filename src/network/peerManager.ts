@@ -69,8 +69,18 @@ export interface PeerGovernorConfig {
 }
 
 export interface BlockFetchBatchConfig {
-    /** Inclusive range size while catching up. Clamped to 1..256. */
+    /** ChainSync headers per batch handed to the orchestrator (validation unit). Clamped to 1..256. */
     maxBlocks?: number;
+    /**
+     * Largest BlockFetch range (blocks) while far behind the tip. Ranges shrink as
+     * the applier nears the tip (…64, 16, 4, 1). Default 128, clamped to 1..256.
+     */
+    maxRangeBlocks?: number;
+    /**
+     * Validated headers allowed to wait for their bodies (the header fragment).
+     * Default = the security parameter k (2160 on mainnet / preprod).
+     */
+    headerLookahead?: number;
     /**
      * ChainSync MsgRequestNext kept in flight while behind the peer's tip
      * (protocol pipelining). 1 = one header per round trip. Default 32.
@@ -117,6 +127,10 @@ export interface GerolamoConfig {
         readonly logToFile: boolean;
         readonly logToConsole: boolean;
         readonly logDirectory: string;
+        /** Rotate each level's .jsonl when larger than this (bytes; default 64 MiB, 0 = never). */
+        readonly maxFileBytes?: number;
+        /** Rotated files kept per level (default 5). */
+        readonly keepFiles?: number;
     };
     readonly snapshot: {
         readonly enable: boolean;
@@ -139,6 +153,12 @@ export interface GerolamoConfig {
     };
     /** Multi-peer honesty knobs. */
     readonly sync?: {
+        /**
+         * Skip the MiniBF forward index (tx_index / address_tx / mb_*) while the applier
+         * is more than one epoch behind the primary's tip; run scripts/backfill-minibf.mjs
+         * once caught up. Off by default: the index is then always complete.
+         */
+        readonly skipIndexWhileBehind?: boolean;
         /** Verifiers that must agree on an alternative before the primary is considered wrong. Default 2. */
         readonly quorum?: number;
         /** Cold hold for divergent / lying peers, ms. Default 1h. */
@@ -394,7 +414,7 @@ async function connectWarm(
             config,
             shelleyGenesisConfig,
             (peerId, pKey, reason) => {
-                logger.debug(`Peer terminated ${peerId} key=${pKey}`);
+                logger.info(`Peer terminated ${peerId} key=${pKey}${reason ? ` reason=${reason}` : ""}`);
                 unregisterClient(pKey, peerId);
                 consensus?.unregisterHotPeer(pKey);
                 if (reason?.startsWith("malicious:")) {
@@ -507,6 +527,11 @@ async function promoteToHot(
  * ChainSync stops; socket + keepalive stay. Do NOT markFail (that cold-drops).
  */
 function demoteHotToWarm(rec: PeerRecord, gov: PeerGovernor): void {
+    // Never demote the chain driver. The newest hot peer is demoted first, and a verifier
+    // just promoted to primary for throughput is exactly that peer. One guard, here, so
+    // every demotion path (excess, silent, future ones) is covered.
+    if (rec.key === consensus?.primaryPeerKey()) return;
+    logger.info(`Hot→warm demotion ${rec.key} (${consensus?.roleOf(rec.key) ?? "no-role"})`);
     consensus?.unregisterHotPeer(rec.key);
     const client = clientsByKey.get(rec.key);
     if (client) {
@@ -827,21 +852,22 @@ export function getInboundN2NStatus(): InboundN2NStatus {
 }
 
 export function createHttpPeerManager(): {
-    submitTx: (args: { txCbor: Uint8Array }) => void;
+    submitTx: (args: { txCbor: Uint8Array }) => Promise<{ status: string; nTxs: number; availableSpace: number }>;
     getGovernorSnapshot: () => PeerGovernorSnapshot | null;
     getBestPeerTipSlot: () => string | null;
     getSyncSnapshot: () => SyncSnapshot | null;
     getInboundStatus: () => InboundN2NStatus;
 } {
     return {
-        submitTx({ txCbor }: { txCbor: Uint8Array }) {
+        async submitTx({ txCbor }: { txCbor: Uint8Array }) {
             const peer = getPeerAccessor().pickHotPeer();
             if (!peer) {
                 throw new Error("No hot peer available for tx submit");
             }
-            void peer.submitToSharedMempool(txCbor).catch((err) => {
-                logger.error("submitToSharedMempool failed:", err);
-            });
+            // The mempool is shared by every peer connection; any hot peer's client
+            // appends to it, and every hot peer serves it on TxSubmission requests.
+            const r = await peer.submitToSharedMempool(txCbor);
+            return { status: String(r.status), nTxs: Number(r.nTxs), availableSpace: Number(r.aviableSpace) };
         },
         getGovernorSnapshot: () => getGovernorSnapshot(),
         getBestPeerTipSlot: () => getBestPeerTipSlot(),
@@ -854,6 +880,13 @@ export async function stopPeerManager(): Promise<void> {
     if (monitorInterval) {
         clearInterval(monitorInterval);
         monitorInterval = undefined;
+    }
+    // Applier first: the range being applied finishes its transaction before its
+    // peers go away (their in-flight fetches would otherwise fail fast into the log).
+    try {
+        await consensus?.stop();
+    } catch (err) {
+        logger.error("Consensus stop error:", err);
     }
     for (const c of [...clientsByKey.values()]) {
         try {

@@ -15,7 +15,12 @@ import { handleOpenApiRoutes } from "../api/openApi";
 import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
 import { eraName } from "../utils/eraNames";
 import { Cbor, CborArray, CborBytes, CborTag, CborUInt } from "@harmoniclabs/cbor";
+import { BlockFetchBlock } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "../utils/logger";
+import { resolve as resolvePath } from "node:path";
+
+/** Built dashboard (vite) served at /explorer/; relative to the repo root the node runs from. */
+const EXPLORER_DIST = resolvePath(process.env.GEROLAMO_EXPLORER_DIR || "dashboard/dist");
 import { createResourceSampler } from "../utils/processStats";
 import { resolveNodeRole } from "./nodeRole";
 import { resolveValidationPolicy } from "../consensus/validationPolicy";
@@ -47,10 +52,8 @@ async function tipEra(tipSlot: bigint): Promise<number | null> {
     try {
         const row = await getBlockBySlot(tipSlot);
         if (!row) return null;
-        // getBlockBySlot uses .values(): positional row; 8 = block_fetch_RawCbor, 6 = block_data
-        const raw: unknown = Array.isArray(row)
-            ? (row[8] ?? row[6])
-            : (row.block_fetch_RawCbor ?? row.block_data);
+        // getBlockBySlot uses .values(): positional row; 6 = block_data (`[era, block]` as received)
+        const raw: unknown = Array.isArray(row) ? row[6] : row.block_data;
         if (!(raw instanceof Uint8Array) || raw.length === 0) return null;
         let obj = Cbor.parse(raw);
         if (
@@ -616,7 +619,7 @@ export async function startPeerBlockServer(
     const network = config.network ?? process.env.NETWORK ?? "unknown";
 
     interface BlockRow {
-        block_fetch_RawCbor?: Uint8Array;
+        block_data?: Uint8Array;
     }
 
     const server = Bun.serve({
@@ -651,9 +654,7 @@ export async function startPeerBlockServer(
             const bfResp = await handleMiniBlockfrost(req, url, {
                 network: config.network ?? process.env.NETWORK,
                 submitTx: manager
-                    ? (txCbor: Uint8Array) => {
-                        manager.submitTx({ txCbor });
-                    }
+                    ? (txCbor: Uint8Array) => manager.submitTx({ txCbor })
                     : undefined,
             });
             if (bfResp) return bfResp;
@@ -671,6 +672,25 @@ export async function startPeerBlockServer(
                         headers: { "Content-Type": "application/json" },
                     },
                 );
+            }
+            // Block explorer: the built Solid dashboard (bun run dashboard:build) served
+            // from the node itself, so http://127.0.0.1:<port>/explorer/ needs no extra process.
+            if (url.pathname === "/explorer") {
+                return new Response(null, { status: 302, headers: { Location: "/explorer/#/explorer" } });
+            }
+            if (url.pathname.startsWith("/explorer/")) {
+                const rel = url.pathname.slice("/explorer/".length) || "index.html";
+                if (rel.includes("..")) return new Response("Bad Request", { status: 400 });
+                const file = Bun.file(`${EXPLORER_DIST}/${rel}`);
+                if (await file.exists()) {
+                    return new Response(file, { headers: { "Cache-Control": rel === "index.html" ? "no-store" : "public, max-age=31536000, immutable" } });
+                }
+                const index = Bun.file(`${EXPLORER_DIST}/index.html`);
+                if (await index.exists()) return new Response(index, { headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store" } });
+                return new Response("Explorer not built. Run `bun run dashboard:build` in the repo, then reload.", {
+                    status: 503,
+                    headers: { "Content-Type": "text/plain; charset=utf-8" },
+                });
             }
             // Landing page = live stats dashboard (not the endpoints text dump)
             if (url.pathname === "/" || url.pathname === "/index.html") {
@@ -748,11 +768,19 @@ export async function startPeerBlockServer(
                             req.headers.get("user-agent") || "unknown"
                         }`,
                     );
-                    manager.submitTx({ txCbor });
+                    let verdict: { status: string; nTxs: number; availableSpace: number };
+                    try {
+                        verdict = await manager.submitTx({ txCbor });
+                    } catch (e: any) {
+                        return new Response(JSON.stringify({ error: e?.message ?? String(e) }), {
+                            status: 503,
+                            headers: { "Content-Type": "application/json" },
+                        });
+                    }
                     return new Response(
-                        JSON.stringify({ status: "relayed to hot peers" }),
+                        JSON.stringify({ status: verdict.status === "success" ? "accepted into local mempool" : verdict.status, mempool: verdict }),
                         {
-                            status: 202,
+                            status: verdict.status === "success" ? 202 : 400,
                             headers: { "Content-Type": "application/json" },
                         },
                     );
@@ -833,10 +861,12 @@ export async function startPeerBlockServer(
                 row = (await getBlockByHash(id)) ?? null;
             }
 
-            if (!row?.block_fetch_RawCbor) {
+            const blockData: unknown = Array.isArray(row) ? row[6] : row?.block_data;
+            if (!(blockData instanceof Uint8Array) || blockData.length === 0) {
                 return new Response("Block not found", { status: 404 });
             }
-            return new Response(toHex(row.block_fetch_RawCbor), {
+            // Same payload as before: the BlockFetch message `[4, #6.24([era, block])]`, built on read.
+            return new Response(toHex(new BlockFetchBlock({ blockData }).toCborBytes()), {
                 headers: { "Content-Type": "application/cbor" },
             });
         },

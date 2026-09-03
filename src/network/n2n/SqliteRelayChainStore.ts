@@ -6,7 +6,6 @@ import {
     type CborObj,
 } from "@harmoniclabs/cbor";
 import {
-    BlockFetchBlock,
     ChainPoint,
     ChainSyncRollForward,
     ChainTip,
@@ -26,7 +25,6 @@ type ChainRow = {
     block_hash: unknown;
     prev_hash: unknown;
     block_data: unknown;
-    block_fetch_RawCbor: unknown;
     rollforward_header_cbor: unknown;
     block_no?: bigint | number | string;
     priority?: number;
@@ -120,31 +118,16 @@ function headerData(row: ChainRow): CborObj | undefined {
     ]);
 }
 
+/** `block_data` is the BlockFetch payload `[era, block]` as received: served as-is. */
 function blockData(row: ChainRow): Uint8Array | undefined {
-    const direct = asBytes(row.block_data);
-    if (direct) return direct;
-    const envelope = asBytes(row.block_fetch_RawCbor);
-    if (!envelope) return undefined;
-    try {
-        return BlockFetchBlock.fromCbor(envelope).blockData;
-    } catch {
-        return undefined;
-    }
+    return asBytes(row.block_data);
 }
 
 function parseBlock(row: ChainRow): MultiEraBlock | undefined {
     const direct = asBytes(row.block_data);
-    if (direct) {
-        try {
-            return MultiEraBlock.fromCbor(direct);
-        } catch {
-            /* try the BlockFetch envelope */
-        }
-    }
-    const envelope = asBytes(row.block_fetch_RawCbor);
-    if (!envelope) return undefined;
+    if (!direct) return undefined;
     try {
-        return MultiEraBlock.fromCbor(BlockFetchBlock.fromCbor(envelope).blockData);
+        return MultiEraBlock.fromCbor(direct);
     } catch {
         return undefined;
     }
@@ -175,7 +158,7 @@ export class SqliteRelayChainStore implements RelayChainStore {
         const [volatileRows, immutableRows] = await Promise.all([
             sql`
                 SELECT b.slot, b.hash AS block_hash, b.prev_hash, b.block_data,
-                       b.block_fetch_RawCbor, h.rollforward_header_cbor,
+                       h.rollforward_header_cbor,
                        b.slot AS block_no, 1 AS priority
                 FROM blocks b
                 LEFT JOIN volatile_headers h ON h.slot = b.slot
@@ -184,7 +167,7 @@ export class SqliteRelayChainStore implements RelayChainStore {
             `,
             sql`
                 SELECT slot, block_hash, prev_hash, block_data,
-                       block_fetch_RawCbor, rollforward_header_cbor,
+                       rollforward_header_cbor,
                        slot AS block_no, 0 AS priority
                 FROM immutable_blocks ORDER BY slot DESC LIMIT 1
             `,
@@ -226,7 +209,7 @@ export class SqliteRelayChainStore implements RelayChainStore {
         const [volatileRows, immutableRows] = await Promise.all([
             sql`
                 SELECT b.slot, b.hash AS block_hash, b.prev_hash, b.block_data,
-                       b.block_fetch_RawCbor, h.rollforward_header_cbor,
+                       h.rollforward_header_cbor,
                        b.slot AS block_no, 1 AS priority
                 FROM blocks b
                 LEFT JOIN volatile_headers h ON h.slot = b.slot
@@ -237,7 +220,7 @@ export class SqliteRelayChainStore implements RelayChainStore {
             `,
             sql`
                 SELECT slot, block_hash, prev_hash, block_data,
-                       block_fetch_RawCbor, rollforward_header_cbor,
+                       rollforward_header_cbor,
                        slot AS block_no, 0 AS priority
                 FROM immutable_blocks WHERE slot > ${BigInt(afterSlot)}
                 ORDER BY slot ASC LIMIT 1
@@ -270,7 +253,7 @@ export class SqliteRelayChainStore implements RelayChainStore {
         const [volatileRows, immutableRows] = await Promise.all([
             sql`
                 SELECT b.slot, b.hash AS block_hash, b.prev_hash, b.block_data,
-                       b.block_fetch_RawCbor, h.rollforward_header_cbor,
+                       h.rollforward_header_cbor,
                        b.slot AS block_no, 1 AS priority
                 FROM blocks b
                 LEFT JOIN volatile_headers h ON h.slot = b.slot
@@ -282,7 +265,7 @@ export class SqliteRelayChainStore implements RelayChainStore {
             `,
             sql`
                 SELECT slot, block_hash, prev_hash, block_data,
-                       block_fetch_RawCbor, rollforward_header_cbor,
+                       rollforward_header_cbor,
                        slot AS block_no, 0 AS priority
                 FROM immutable_blocks
                 WHERE slot >= ${BigInt(fromSlot)} AND slot <= ${BigInt(toSlot)}
@@ -333,7 +316,7 @@ export class SqliteRelayChainStore implements RelayChainStore {
     private async rowAtSlot(slot: bigint): Promise<ChainRow | undefined> {
         const volatileRows = await sql`
             SELECT b.slot, b.hash AS block_hash, b.prev_hash, b.block_data,
-                   b.block_fetch_RawCbor, h.rollforward_header_cbor,
+                   h.rollforward_header_cbor,
                    b.slot AS block_no, 1 AS priority
             FROM blocks b
             LEFT JOIN volatile_headers h ON h.slot = b.slot
@@ -346,7 +329,7 @@ export class SqliteRelayChainStore implements RelayChainStore {
         if (volatile) return volatile;
         const immutableRows = await sql`
             SELECT slot, block_hash, prev_hash, block_data,
-                   block_fetch_RawCbor, rollforward_header_cbor,
+                   rollforward_header_cbor,
                    slot AS block_no, 0 AS priority
             FROM immutable_blocks WHERE slot = ${slot} LIMIT 1
         `;

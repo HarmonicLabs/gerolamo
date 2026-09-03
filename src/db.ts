@@ -9,7 +9,8 @@ import {
     ShelleyBlock,
     ShelleyTxBody,
 } from "@harmoniclabs/cardano-ledger-ts";
-import { toHex } from "@harmoniclabs/uint8array-utils";
+import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
+import { certStakeEffect } from "./consensus/certificateRules";
 import {
     ensureMinibfSchema,
     applyMbTx,
@@ -42,7 +43,15 @@ export function applySkipDeltas(): boolean {
     return process.env.APPLY_SKIP_DELTAS === "1";
 }
 export function applySkipIndex(): boolean {
-    return process.env.APPLY_SKIP_INDEX === "1";
+    return bulkSyncSkipIndex || process.env.APPLY_SKIP_INDEX === "1";
+}
+
+let bulkSyncSkipIndex = false;
+/** Runtime equivalent of APPLY_SKIP_INDEX=1, toggled by the orchestrator while far behind the tip (config sync.skipIndexWhileBehind). */
+export function setBulkSyncIndexSkip(on: boolean): boolean {
+    const changed = bulkSyncSkipIndex !== on;
+    bulkSyncSkipIndex = on;
+    return changed;
 }
 
 async function insertUtxoDelta(
@@ -65,9 +74,11 @@ interface BlockInsertData {
     slot: bigint;
     blockHash: string;
     prevHash: string;
+    /** Chain height (Blockfrost `height`): main blocks only, Byron EBBs are null. */
+    blockNo: number | null;
     headerData: Uint8Array;
+    /** BlockFetch payload as received: `[era, block]`. Served as-is and decoded by MultiEraBlock.fromCbor. */
     blockData: Uint8Array;
-    block_fetch_RawCbor: Uint8Array;
 }
 
 interface ImmutableChunk {
@@ -172,6 +183,11 @@ export async function ensureInitialized(): Promise<void> {
 		)
 	`;
 
+    // Keyed lookups by credential (BlockBodyValidator): without these every
+    // certificate check would scan tables that reach millions of rows on mainnet.
+    await sql`CREATE INDEX IF NOT EXISTS idx_stake_credentials ON stake(stake_credentials)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_delegations_credentials ON delegations(stake_credentials)`;
+
     // Rewards table
     await sql`
 		CREATE TABLE IF NOT EXISTS rewards (
@@ -193,19 +209,33 @@ export async function ensureInitialized(): Promise<void> {
     // UTxO table
     await sql`
 		CREATE TABLE IF NOT EXISTS utxo (
-			utxo_ref BLOB,
-			tx_out JSONB,
+			utxo_ref TEXT PRIMARY KEY,
+			tx_out TEXT,
 			tx_hash TEXT,
-			PRIMARY KEY (utxo_ref)
+			address TEXT,
+			lovelace INTEGER,
+			reference_script_hash TEXT
 		)
 	`;
-    await sql`
-        CREATE INDEX IF NOT EXISTS idx_utxo_address
-        ON utxo(json_extract(tx_out, '$.address'))
-    `;
+    // Plain column indexes. The former json_extract() expression indexes were
+    // re-evaluated on every insert and delete of the hottest table on the sync path.
+    // A database created before the side columns existed opens fine (CREATE IF NOT
+    // EXISTS is a no-op) and would then fail on the first insert: add the columns and
+    // backfill them from the JSON once.
+    const utxoCols = new Set(
+        ((await sql`PRAGMA table_info(utxo)`.values()) as unknown[][]).map((r) => String(r[1])),
+    );
+    for (const [col, type] of [["address", "TEXT"], ["lovelace", "INTEGER"], ["reference_script_hash", "TEXT"]] as const) {
+        if (!utxoCols.has(col)) {
+            logger.warn(`utxo table predates the indexed side columns; adding ${col} and backfilling`);
+            await sql.unsafe(`ALTER TABLE utxo ADD COLUMN ${col} ${type}`);
+        }
+    }
+    if (!utxoCols.has("address")) await sql.unsafe(BACKFILL_UTXO_COLUMNS_SQL);
+    await sql`CREATE INDEX IF NOT EXISTS idx_utxo_address ON utxo(address)`;
     await sql`
         CREATE INDEX IF NOT EXISTS idx_utxo_reference_script_hash
-        ON utxo(json_extract(tx_out, '$.reference_script_hash'))
+        ON utxo(reference_script_hash) WHERE reference_script_hash IS NOT NULL
     `;
 
     // Certificate state table
@@ -324,12 +354,12 @@ export async function ensureInitialized(): Promise<void> {
 		CREATE TABLE IF NOT EXISTS immutable_blocks (
 			slot INTEGER PRIMARY KEY,
 			block_hash BLOB NOT NULL,
-			block_data JSONB NOT NULL,
+			block_data BLOB NOT NULL,
 			prev_hash BLOB,
 			header_data BLOB,
 			rollforward_header_cbor BLOB,
-			block_fetch_RawCbor BLOB,
 			chunk_id INTEGER,
+			block_no INTEGER,
 			inserted_at TIMESTAMP DEFAULT (strftime('%s','now')),
 			UNIQUE(block_hash),
 			FOREIGN KEY (chunk_id) REFERENCES immutable_chunks(chunk_id) ON DELETE CASCADE
@@ -355,12 +385,23 @@ export async function ensureInitialized(): Promise<void> {
 			slot INTEGER NOT NULL,
 			header_data BLOB,
 			block_data BLOB,
-			block_fetch_RawCbor BLOB,
 			is_valid BOOLEAN DEFAULT TRUE,
 			prev_hash BLOB,
+			block_no INTEGER,
 			inserted_at TIMESTAMP DEFAULT (strftime('%s','now'))
 		)
 	`;
+    // Height column for databases created before it existed; heights are then
+    // filled by backfillBlockHeights() at startup.
+    for (const table of ["blocks", "immutable_blocks"] as const) {
+        const cols = ((await sql.unsafe(`PRAGMA table_info(${table})`).values()) as unknown[][]).map((r) => String(r[1]));
+        if (!cols.includes("block_no")) {
+            logger.warn(`${table} predates block heights; adding block_no (backfilled at startup)`);
+            await sql.unsafe(`ALTER TABLE ${table} ADD COLUMN block_no INTEGER`);
+        }
+    }
+    await sql`CREATE INDEX IF NOT EXISTS idx_volatile_block_no ON blocks (block_no)`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_immutable_block_no ON immutable_blocks (block_no)`;
 
     // UTxO deltas table
     await sql`
@@ -544,15 +585,20 @@ export async function storeEpochNonce(
 	`;
 }
 
+/**
+ * Positional row (sql`…`.values()): [id, chunk_id, slot, block_hash, prev_hash,
+ * header_data, block_data, rollforward_header_cbor, is_valid, inserted_at, block_no].
+ * `block_data` is the BlockFetch payload `[era, block]` as received.
+ */
 export async function getBlockByHash(hash: string): Promise<any> {
     // `blocks.hash` has been written both as hex TEXT and as a raw BLOB; match either.
     const hex = hash.toLowerCase();
     const blob = /^[0-9a-f]{64}$/.test(hex) ? Buffer.from(hex, "hex") : null;
     const result = await sql`
-			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
+			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, prev_hash, header_data, block_data, NULL as rollforward_header_cbor, is_valid, inserted_at, block_no
 			FROM blocks WHERE hash = ${hex} OR hash = ${blob}
 			UNION
-			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
+			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, NULL as is_valid, inserted_at, block_no
 			FROM immutable_blocks WHERE block_hash = ${hex} OR block_hash = ${blob}
 		`.values();
     return result[0] || null;
@@ -560,10 +606,10 @@ export async function getBlockByHash(hash: string): Promise<any> {
 
 export async function getBlockBySlot(slot: bigint): Promise<any> {
     const result = await sql`
-			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
+			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, prev_hash, header_data, block_data, NULL as rollforward_header_cbor, is_valid, inserted_at, block_no
 			FROM blocks WHERE slot = ${slot}
 			UNION
-			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
+			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, NULL as is_valid, inserted_at, block_no
 			FROM immutable_blocks WHERE slot = ${slot}
 		`.values();
     return result[0] || null;
@@ -582,6 +628,170 @@ function firstScalar(row: unknown): unknown {
         return vals.length ? vals[0] : undefined;
     }
     return row;
+}
+
+// ─── block heights (explorer M1) ───────────────────────────────────────────
+
+/** Newest-first list row for the explorer. */
+export interface BlockListRow {
+    slot: number;
+    hash: string;
+    prevHash: string | null;
+    blockNo: number | null;
+    size: number | null;
+    /** BlockFetch payload `[era, block]` (null when the DB predates it). */
+    blockData: Uint8Array | null;
+    headerData: Uint8Array | null;
+}
+
+function toBlockListRow(r: unknown[]): BlockListRow {
+    return {
+        slot: Number(r[0]),
+        hash: blobToHexLower(r[1]),
+        prevHash: r[2] == null ? null : blobToHexLower(r[2]),
+        blockNo: r[3] == null ? null : Number(r[3]),
+        size: r[4] == null ? null : Number(r[4]),
+        blockData: r[5] instanceof Uint8Array ? r[5] : null,
+        headerData: r[6] instanceof Uint8Array ? r[6] : null,
+    };
+}
+
+function blobToHexLower(v: unknown): string {
+    if (typeof v === "string") return v.toLowerCase();
+    if (v instanceof Uint8Array) return toHex(v);
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer(v)) return toHex(new Uint8Array(v));
+    return String(v ?? "");
+}
+
+const BLOCK_LIST_COLS = "slot, hash, prev_hash, block_no, length(block_data), block_data, header_data";
+
+/**
+ * Blocks newest first. A Byron epoch-boundary block shares its slot with the
+ * epoch's first main block; the main block (block_no set) sorts first.
+ * `before` is an exclusive cursor: `{slot}` (and an optional `ebb` flag telling
+ * whether the cursor block itself was an EBB, so paging can stop between the two
+ * blocks of one slot).
+ */
+export async function listBlocksDesc(opts: { limit: number; beforeSlot?: number; beforeIsEbb?: boolean }): Promise<BlockListRow[]> {
+    const limit = Math.max(1, Math.min(100, Math.trunc(opts.limit)));
+    let rows: unknown[][];
+    if (opts.beforeSlot == null) {
+        rows = (await sql.unsafe(
+            `SELECT ${BLOCK_LIST_COLS} FROM blocks ORDER BY slot DESC, (block_no IS NULL) ASC, block_no DESC LIMIT ${limit}`,
+        ).values()) as unknown[][];
+    } else if (opts.beforeIsEbb) {
+        rows = (await sql.unsafe(
+            `SELECT ${BLOCK_LIST_COLS} FROM blocks WHERE slot < ${Math.trunc(opts.beforeSlot)} ORDER BY slot DESC, (block_no IS NULL) ASC, block_no DESC LIMIT ${limit}`,
+        ).values()) as unknown[][];
+    } else {
+        // cursor was a main block: the EBB of the same slot (if any) comes next
+        rows = (await sql.unsafe(
+            `SELECT ${BLOCK_LIST_COLS} FROM blocks WHERE slot < ${Math.trunc(opts.beforeSlot)} OR (slot = ${Math.trunc(opts.beforeSlot)} AND block_no IS NULL) ORDER BY slot DESC, (block_no IS NULL) ASC, block_no DESC LIMIT ${limit}`,
+        ).values()) as unknown[][];
+    }
+    return rows.map(toBlockListRow);
+}
+
+/** Blocks of one slot range, oldest first (epoch pages). */
+export async function listBlocksInSlotRange(fromSlot: number, toSlotExclusive: number, limit: number, offset = 0): Promise<BlockListRow[]> {
+    const rows = (await sql`
+        SELECT slot, hash, prev_hash, block_no, length(block_data), block_data, header_data FROM blocks
+        WHERE slot >= ${Math.trunc(fromSlot)} AND slot < ${Math.trunc(toSlotExclusive)}
+        ORDER BY slot ASC, (block_no IS NULL) DESC, block_no ASC
+        LIMIT ${Math.max(1, Math.min(100, Math.trunc(limit)))} OFFSET ${Math.max(0, Math.trunc(offset))}
+    `.values()) as unknown[][];
+    return rows.map(toBlockListRow);
+}
+
+export async function countBlocksInSlotRange(fromSlot: number, toSlotExclusive: number): Promise<number> {
+    return countQuery(sql`SELECT COUNT(*) as c FROM blocks WHERE slot >= ${Math.trunc(fromSlot)} AND slot < ${Math.trunc(toSlotExclusive)}`);
+}
+
+export async function getBlockListRowByHash(hashHex: string): Promise<BlockListRow | null> {
+    const hex = hashHex.toLowerCase();
+    const blob = /^[0-9a-f]{64}$/.test(hex) ? Buffer.from(hex, "hex") : null;
+    const rows = (await sql`
+        SELECT slot, hash, prev_hash, block_no, length(block_data), block_data, header_data FROM blocks
+        WHERE hash = ${hex} OR hash = ${blob} LIMIT 1
+    `.values()) as unknown[][];
+    return rows.length ? toBlockListRow(rows[0]!) : null;
+}
+
+export async function getBlockListRowBySlot(slot: number): Promise<BlockListRow | null> {
+    const rows = (await sql`
+        SELECT slot, hash, prev_hash, block_no, length(block_data), block_data, header_data FROM blocks
+        WHERE slot = ${Math.trunc(slot)} ORDER BY (block_no IS NULL) ASC LIMIT 1
+    `.values()) as unknown[][];
+    return rows.length ? toBlockListRow(rows[0]!) : null;
+}
+
+export async function getBlockListRowByHeight(blockNo: number): Promise<BlockListRow | null> {
+    const rows = (await sql`
+        SELECT slot, hash, prev_hash, block_no, length(block_data), block_data, header_data FROM blocks
+        WHERE block_no = ${Math.trunc(blockNo)} LIMIT 1
+    `.values()) as unknown[][];
+    return rows.length ? toBlockListRow(rows[0]!) : null;
+}
+
+export async function getMaxBlockNo(): Promise<number> {
+    const rows = (await sql`SELECT MAX(block_no) FROM blocks`.values()) as unknown[][];
+    const v = rows[0]?.[0];
+    return v == null ? 0 : Number(v);
+}
+
+/** Transactions in a block (mb_block_tx, then the legacy block_tx). */
+export async function countBlockTxs(hashHex: string): Promise<number> {
+    const key = hashHex.toUpperCase();
+    try {
+        const n = await countQuery(sql`SELECT COUNT(*) as c FROM mb_block_tx WHERE hex(block_hash) = ${key}`);
+        if (n > 0) return n;
+    } catch {
+        /* table may not exist */
+    }
+    try {
+        return await countQuery(sql`SELECT COUNT(*) as c FROM block_tx WHERE hex(block_hash) = ${key}`);
+    } catch {
+        return 0;
+    }
+}
+
+/**
+ * Number every block that has no height yet: walk the chain by slot (EBB before
+ * the main block of the same slot), main blocks count, EBBs stay null. Idempotent;
+ * runs at startup only when some block_no is missing (one pass on an old DB).
+ */
+export async function backfillBlockHeights(batch = 5000): Promise<{ numbered: number }> {
+    const missing = await countQuery(sql`SELECT COUNT(*) as c FROM blocks WHERE block_no IS NULL AND hex(substr(block_data, 2, 1)) <> '00'`);
+    if (missing === 0) return { numbered: 0 };
+    logger.warn(`Block heights missing for ${missing} block(s); numbering the chain from the start`);
+    let height = 0;
+    let numbered = 0;
+    let lastSlot = -1;
+    let lastEbb = false;
+    for (;;) {
+        // (slot, ebb-first) order; resume strictly after the last processed (slot, ebb) pair
+        const rows = (await sql.unsafe(
+            `SELECT hash, slot, (hex(substr(block_data, 2, 1)) = '00') AS ebb FROM blocks
+             WHERE slot > ${lastSlot} OR (slot = ${lastSlot} AND ${lastEbb ? 1 : 0} = 1 AND hex(substr(block_data, 2, 1)) <> '00')
+             ORDER BY slot ASC, ebb DESC LIMIT ${batch}`,
+        ).values()) as unknown[][];
+        if (rows.length === 0) break;
+        await sql.begin(async (tx) => {
+            for (const r of rows) {
+                const isEbb = Number(r[2]) === 1;
+                if (!isEbb) {
+                    height++;
+                    await tx`UPDATE blocks SET block_no = ${height} WHERE hash = ${r[0] as string}`;
+                    numbered++;
+                }
+            }
+        });
+        const last = rows[rows.length - 1]!;
+        lastSlot = Number(last[1]);
+        lastEbb = Number(last[2]) === 1;
+    }
+    logger.info(`Block heights: numbered ${numbered} block(s), tip height ${height}`);
+    return { numbered };
 }
 
 export async function getMaxSlot(): Promise<bigint> {
@@ -658,7 +868,7 @@ export async function insertHeaderBatchVolatile(
 			VALUES (${r.slot}, ${r.headerHash}, ${r.rollforward_header_cbor})
 		`;
     }
-    logger.info(
+    logger.debug(
         `Committed ${records.length} headers to volatile_headers (ignored dups)`,
     );
 }
@@ -668,15 +878,15 @@ export async function insertBlockVolatile(
 ): Promise<void> {
     // Volatile store is table `blocks` (not volatile_blocks).
     await sql`
-			INSERT INTO blocks (hash, slot, prev_hash, header_data, block_data, block_fetch_RawCbor, is_valid)
-			VALUES (${block.blockHash}, ${Number(block.slot)}, ${block.prevHash}, ${block.headerData}, ${block.blockData}, ${block.block_fetch_RawCbor}, ${true})
+			INSERT INTO blocks (hash, slot, prev_hash, header_data, block_data, is_valid, block_no)
+			VALUES (${block.blockHash}, ${Number(block.slot)}, ${block.prevHash}, ${block.headerData}, ${block.blockData}, ${true}, ${block.blockNo})
 			ON CONFLICT(hash) DO UPDATE SET
 				slot = excluded.slot,
 				prev_hash = excluded.prev_hash,
 				header_data = excluded.header_data,
 				block_data = excluded.block_data,
-				block_fetch_RawCbor = excluded.block_fetch_RawCbor,
-				is_valid = excluded.is_valid
+				is_valid = excluded.is_valid,
+				block_no = excluded.block_no
 		`;
 }
 
@@ -693,31 +903,9 @@ export async function insertBlockBatchVolatile(
         );
     }
 
-    // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
-    // No sql.begin(): concurrent rollForward must not nest BEGIN on the shared connection.
-    for (const r of records) {
-        // applyBlock writes a metadata stub row first (same hex key); fill it in
-        // rather than dropping the full record as a duplicate.
-        await sql`
-			INSERT INTO blocks
-			(hash, slot, header_data, block_data, block_fetch_RawCbor, is_valid, prev_hash)
-			VALUES (
-				${r.blockHash},
-				${Number(r.slot)},
-				${r.headerData},
-				${r.blockData},
-				${r.block_fetch_RawCbor},
-				${true},
-				${r.prevHash}
-			)
-			ON CONFLICT(hash) DO UPDATE SET
-				header_data = COALESCE(excluded.header_data, blocks.header_data),
-				block_data = COALESCE(excluded.block_data, blocks.block_data),
-				block_fetch_RawCbor = COALESCE(excluded.block_fetch_RawCbor, blocks.block_fetch_RawCbor),
-				prev_hash = COALESCE(excluded.prev_hash, blocks.prev_hash)
-		`;
-    }
-    logger.info(
+    // One row per block (the stub row applyBlock used to write first is gone).
+    for (const r of records) await insertBlockVolatile(r);
+    logger.debug(
         `Committed ${records.length} blocks to volatile_blocks (ignored dups)`,
     );
 }
@@ -737,10 +925,8 @@ export async function insertImmutableBlocks(
 ): Promise<void> {
     for (const block of blocks) {
         await sql`
-				INSERT INTO immutable_blocks (slot, block_hash, block_data, prev_hash, header_data, rollforward_header_cbor, block_fetch_RawCbor, chunk_id)
-				VALUES (${block.slot}, ${block.block_hash}, ${
-            JSON.stringify(block.block_data)
-        }, ${block.prev_hash}, ${block.header_data}, ${block.rollforward_header_cbor}, ${block.block_fetch_RawCbor}, ${chunk_id})
+				INSERT INTO immutable_blocks (slot, block_hash, block_data, prev_hash, header_data, rollforward_header_cbor, chunk_id, block_no)
+				VALUES (${block.slot}, ${block.block_hash}, ${block.block_data}, ${block.prev_hash}, ${block.header_data}, ${block.rollforward_header_cbor}, ${chunk_id}, ${block.block_no ?? null})
 			`;
     }
 }
@@ -836,7 +1022,7 @@ export async function getUtxosByRefs(
     // Bun SQL .values() returns row arrays [[ref, amount], ...], not objects.
     // Callers (BlockBodyValidator) destructure { utxo_ref, amount }.
     const rows = await sql`
-			SELECT utxo_ref, json_extract(tx_out, '$.amount') as amount
+			SELECT utxo_ref, COALESCE(lovelace, json_extract(tx_out, '$.amount')) as amount
 			FROM utxo
 			WHERE utxo_ref IN ${sql(utxoRefs)}
 		`.values() as any[];
@@ -863,7 +1049,7 @@ export async function countUtxosWithReferenceScript(utxoRefs: string[]): Promise
     return countQuery(sql`
         SELECT COUNT(*) as c FROM utxo
         WHERE utxo_ref IN ${sql(utxoRefs)}
-          AND json_extract(tx_out, '$.reference_script_hash') IS NOT NULL
+          AND reference_script_hash IS NOT NULL
     `);
 }
 
@@ -885,7 +1071,7 @@ export async function getUtxosByTxHash(
 
 /**
  * Address-indexed UTxO lookup for Mini-Blockfrost.
- * Filters via json_extract on tx_out.address (O(N) until a materialised index).
+ * Uses the indexed `address` column (kept beside the tx_out JSON on write).
  * Dual-shape row handling for Bun SQL object vs array rows.
  */
 export async function getUtxosByAddress(
@@ -894,7 +1080,7 @@ export async function getUtxosByAddress(
     const rows = await sql`
         SELECT utxo_ref, tx_out, tx_hash
         FROM utxo
-        WHERE json_extract(tx_out, '$.address') = ${address}
+        WHERE address = ${address}
         ORDER BY tx_hash, CAST(substr(utxo_ref, 66) AS INTEGER)
     `;
     const list = Array.isArray(rows) ? rows : [];
@@ -938,7 +1124,7 @@ export async function getReferenceScriptCborByHash(
     const exactRows = await sql`
         SELECT tx_out
         FROM utxo
-        WHERE json_extract(tx_out, '$.reference_script_hash') = ${expected}
+        WHERE reference_script_hash = ${expected}
         LIMIT 1
     `;
     const exactRow = Array.isArray(exactRows) ? exactRows[0] : null;
@@ -1048,17 +1234,72 @@ export async function getAllDelegations(): Promise<
     });
 }
 
-/** Delta payload for spend/create — must carry utxo_ref so rollback can restore. */
+/**
+ * Delta payload. `spend` carries the full tx_out so rollback can restore the
+ * output; `create` carries only the ref (rollback deletes it), so the output
+ * JSON is no longer stored twice.
+ */
 function packUtxoDelta(opts: {
     utxo_ref: string;
-    tx_out: string;
+    tx_out?: string;
     tx_hash?: string;
 }): string {
     return JSON.stringify({
         utxo_ref: opts.utxo_ref,
-        tx_out: opts.tx_out,
+        ...(opts.tx_out != null ? { tx_out: opts.tx_out } : {}),
         ...(opts.tx_hash ? { tx_hash: opts.tx_hash } : {}),
     });
+}
+
+/** Indexed columns kept beside the tx_out JSON. */
+export interface TxOutColumns {
+    address: string | null;
+    /** Decimal string; SQLite stores it as INTEGER. */
+    lovelace: string | null;
+    referenceScriptHash: string | null;
+}
+
+export function txOutColumns(txOut: string | Record<string, unknown> | null | undefined): TxOutColumns {
+    let j: any = txOut;
+    if (typeof txOut === "string") {
+        try {
+            j = JSON.parse(txOut);
+        } catch {
+            j = null;
+        }
+    }
+    const address = typeof j?.address === "string" && j.address.length > 0 ? j.address : null;
+    const amt = j?.amount;
+    const lovelace = amt != null && /^\d+$/.test(String(amt)) ? String(amt) : null;
+    const ref = typeof j?.reference_script_hash === "string" && j.reference_script_hash.length > 0
+        ? j.reference_script_hash.toLowerCase()
+        : null;
+    return { address, lovelace, referenceScriptHash: ref };
+}
+
+/**
+ * Fill the indexed side columns from the JSON for rows written by bulk importers
+ * (Blockfrost snapshot, Mithril stream tables) or tests that insert `tx_out` only.
+ * Keep in step with `txOutColumns`.
+ */
+export const BACKFILL_UTXO_COLUMNS_SQL =
+    "UPDATE utxo SET address = json_extract(tx_out, '$.address'), " +
+    "lovelace = CAST(json_extract(tx_out, '$.amount') AS INTEGER), " +
+    "reference_script_hash = lower(json_extract(tx_out, '$.reference_script_hash')) " +
+    "WHERE address IS NULL";
+
+/** The one writer of `utxo` rows: JSON plus the indexed side columns. */
+async function upsertUtxoRow(
+    db: SqlClient,
+    utxoRef: string,
+    txOut: string,
+    txHash: string | null,
+    cols: TxOutColumns = txOutColumns(txOut),
+): Promise<void> {
+    await db`
+        INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash, address, lovelace, reference_script_hash)
+        VALUES (${utxoRef}, ${txOut}, ${txHash}, ${cols.address}, ${cols.lovelace}, ${cols.referenceScriptHash})
+    `;
 }
 
 function parseUtxoDelta(raw: unknown): {
@@ -1069,12 +1310,14 @@ function parseUtxoDelta(raw: unknown): {
     const s = typeof raw === "string" ? raw : String(raw ?? "");
     try {
         const j = JSON.parse(s);
-        if (j && typeof j === "object" && "tx_out" in j) {
+        if (j && typeof j === "object" && ("utxo_ref" in j || "tx_out" in j)) {
             return {
                 utxo_ref: j.utxo_ref != null ? String(j.utxo_ref) : null,
                 tx_out: typeof j.tx_out === "string"
                     ? j.tx_out
-                    : JSON.stringify(j.tx_out),
+                    : j.tx_out != null
+                    ? JSON.stringify(j.tx_out)
+                    : "",
                 tx_hash: j.tx_hash != null ? String(j.tx_hash) : null,
             };
         }
@@ -1086,9 +1329,70 @@ function parseUtxoDelta(raw: unknown): {
 }
 
 /** Optional Mini-BF forward-index context (slot + in-block tx ordinal). */
+
+function bytesOf(v: unknown): Uint8Array {
+    if (v instanceof Uint8Array) return v;
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer(v)) return new Uint8Array(v);
+    if (v instanceof ArrayBuffer) return new Uint8Array(v);
+    if (ArrayBuffer.isView(v)) return new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+    if (typeof v === "string" && /^[0-9a-fA-F]+$/.test(v) && v.length % 2 === 0) return fromHex(v);
+    return new Uint8Array(0);
+}
+
+/** Distinct credentials, in first-seen order. */
+function distinctCredentials(creds: Uint8Array[]): Uint8Array[] {
+    const seen = new Map<string, Uint8Array>();
+    for (const c of creds) {
+        if (c && c.length > 0) seen.set(toHex(c), c);
+    }
+    return Array.from(seen.values());
+}
+
+/**
+ * Keyed alternative to getAllStake(): only the rows for `creds`.
+ *
+ * Bun's `IN ${sql([...])}` helper reads Uint8Array items as row tuples, so BLOB
+ * keys go through one indexed `=` lookup per distinct credential. A block
+ * touches a handful of credentials; the table grows to millions of rows.
+ */
+export async function getStakeByCredentials(
+    creds: Uint8Array[],
+): Promise<Array<{ stake_credentials: Uint8Array; amount: number }>> {
+    const out: Array<{ stake_credentials: Uint8Array; amount: number }> = [];
+    for (const cred of distinctCredentials(creds)) {
+        const rows = await sql`SELECT stake_credentials, amount FROM stake WHERE stake_credentials = ${cred}`
+            .values() as any[];
+        for (const row of rows) {
+            const c = Array.isArray(row) ? row[0] : row?.stake_credentials;
+            const a = Array.isArray(row) ? row[1] : row?.amount;
+            out.push({ stake_credentials: bytesOf(c), amount: Number(a ?? 0) });
+        }
+    }
+    return out;
+}
+
+/** Keyed alternative to getAllDelegations(): only the rows for `creds`. See getStakeByCredentials. */
+export async function getDelegationsByCredentials(
+    creds: Uint8Array[],
+): Promise<Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>> {
+    const out: Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }> = [];
+    for (const cred of distinctCredentials(creds)) {
+        const rows = await sql`SELECT stake_credentials, pool_key_hash FROM delegations WHERE stake_credentials = ${cred}`
+            .values() as any[];
+        for (const row of rows) {
+            const c = Array.isArray(row) ? row[0] : row?.stake_credentials;
+            const p = Array.isArray(row) ? row[1] : row?.pool_key_hash;
+            out.push({ stake_credentials: bytesOf(c), pool_key_hash: bytesOf(p) });
+        }
+    }
+    return out;
+}
+
 export type TxIndexCtx = {
     slot: number;
     txIndex: number;
+    /** Chain height of the containing block (mb_tx.block_height). */
+    blockHeight?: number | null;
 };
 
 /** Parse address from packed tx_out JSON (best-effort). */
@@ -1114,6 +1418,7 @@ export async function indexTransaction(
         blockHash: Uint8Array;
         slot: number;
         txIndex: number;
+        blockHeight?: number | null;
         fee?: string | null;
         size?: number | null;
         invalidHereafter?: string | null;
@@ -1177,6 +1482,7 @@ export async function indexTransaction(
 
         // mb_* derived projections (full IO when inputs/outputs provided)
         await applyMbTx(db as any, {
+            blockHeight: opts.blockHeight ?? null,
             txHash,
             blockHash: opts.blockHash,
             slot: opts.slot,
@@ -1217,7 +1523,6 @@ export async function applyTransaction(
         `${input.utxoRef.id.toString()}:${input.utxoRef.index}`
     );
 
-    logger.debug(`Input refs: ${inputRefs.length} - ${inputRefs.slice(0, 3).join(', ')}`);
 
     // Collect spend-side addresses BEFORE delete (for address_tx direction=out)
     const addrDirs = new Map<string, "in" | "out" | "both">();
@@ -1244,7 +1549,7 @@ export async function applyTransaction(
     if (inputRefs.length > 0) {
         // Object rows preferred; tolerate array rows from .values()
         const existingUtxos = await db`
-            SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE utxo_ref IN ${db(inputRefs)}
+            SELECT utxo_ref, tx_out, tx_hash, address FROM utxo WHERE utxo_ref IN ${db(inputRefs)}
         ` as any[];
         if (existingUtxos.length > 0) {
             // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
@@ -1258,7 +1563,8 @@ export async function applyTransaction(
                 const tx_hash = Array.isArray(row)
                     ? (row[2] != null ? String(row[2]) : undefined)
                     : (row.tx_hash != null ? String(row.tx_hash) : undefined);
-                const spentAddr = addressFromTxOutJson(tx_out);
+                const addrCol = Array.isArray(row) ? row[3] : row.address;
+                const spentAddr = (addrCol != null && String(addrCol).length > 8 ? String(addrCol) : "") || addressFromTxOutJson(tx_out);
                 if (spentAddr) {
                     const prev = addrDirs.get(spentAddr);
                     addrDirs.set(
@@ -1287,7 +1593,7 @@ export async function applyTransaction(
     }
 
     // Force tuple typing in map return
-    const outputData: [string, string, string][] = txBody.outputs.map(
+    const outputData: [string, string, string, TxOutColumns][] = txBody.outputs.map(
         (output: any, i: number) => {
             const utxoRef = `${txId}:${i}`;
             const assetsObj: Record<string, Record<string, string>> = {};
@@ -1347,20 +1653,27 @@ export async function applyTransaction(
                     ? { reference_script_cbor: metadata.scriptRefCbor }
                     : {}),
             });
-            return [utxoRef, txOutJson, txId] as [string, string, string];
+            // Same mapping as the JSON→columns helper used on restore, so a UTxO written
+            // here and the same UTxO restored by rollbackChainTo index identically.
+            const cols: TxOutColumns = txOutColumns({
+                address: addr,
+                amount: lovelace,
+                reference_script_hash: metadata.scriptRefHash ?? undefined,
+            });
+            return [utxoRef, txOutJson, txId, cols] as [string, string, string, TxOutColumns];
         },
     );
 
     if (outputData.length > 0) {
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
-        for (const [utxoRef, json, txHash] of outputData) {
+        for (const [utxoRef, json, txHash, cols] of outputData) {
             await insertUtxoDelta(
                 db,
                 blockHash,
                 "create",
-                packUtxoDelta({ utxo_ref: utxoRef, tx_out: json, tx_hash: txHash }),
+                packUtxoDelta({ utxo_ref: utxoRef, tx_hash: txHash }),
             );
-            await db`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${json}, ${txHash})`;
+            await upsertUtxoRow(db, utxoRef, json, txHash, cols);
         }
     }
 
@@ -1410,6 +1723,7 @@ export async function applyTransaction(
             blockHash,
             slot: indexCtx.slot,
             txIndex: indexCtx.txIndex,
+            blockHeight: indexCtx.blockHeight ?? null,
             fee,
             size,
             invalidHereafter,
@@ -1452,26 +1766,23 @@ export async function applyCertificates(
         const certAny = cert as any;
         const stakeCred = certAny.stakeCredential?.hash?.toBuffer() ||
             certAny.stakeCredential?.toBuffer();
+        // Stake-credential effects come from the same table the body validator uses
+        // (certificateRules.ts), so validate and apply cannot drift per certificate type.
+        const fx = certStakeEffect(Number(cert.certType));
+        if (stakeCred && fx.registers) {
+            await db`INSERT OR REPLACE INTO stake (stake_credentials, amount) VALUES (${stakeCred}, 0)`;
+        }
+        if (stakeCred && fx.deregisters) {
+            await db`DELETE FROM stake WHERE stake_credentials = ${stakeCred}`;
+            await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred}`;
+        }
+        if (stakeCred && fx.delegatesToPool) {
+            const poolKh = certAny.poolKeyHash?.toBuffer();
+            if (poolKh) {
+                await db`INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash) VALUES (${stakeCred}, ${poolKh})`;
+            }
+        }
         switch (cert.certType) {
-            case 0: // CertificateType.StakeRegistration
-                if (stakeCred) {
-                    await db`INSERT OR REPLACE INTO stake (stake_credentials, amount) VALUES (${stakeCred}, 0)`;
-                }
-                break;
-            case 1: // CertificateType.StakeDeRegistration
-                if (stakeCred) {
-                    await db`DELETE FROM stake WHERE stake_credentials = ${stakeCred}`;
-                    await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred}`;
-                }
-                break;
-            case 2: // CertificateType.StakeDelegation
-                if (stakeCred) {
-                    const poolId = certAny.poolKeyHash?.toBuffer();
-                    if (poolId) {
-                        await db`INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash) VALUES (${stakeCred}, ${poolId})`;
-                    }
-                }
-                break;
             case 3: // CertificateType.PoolRegistration
                 const poolId = certAny.poolParams?.operator?.toBuffer();
                 if (poolId) {
@@ -1610,7 +1921,7 @@ export async function rollbackChainTo(
                 (parsed.utxo_ref.includes(":")
                     ? parsed.utxo_ref.split(":")[0]
                     : "");
-            await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${parsed.utxo_ref}, ${parsed.tx_out}, ${txHash})`;
+            await upsertUtxoRow(sql, parsed.utxo_ref, parsed.tx_out, txHash);
             counts.utxoRestored++;
         }
         // fee / cert / withdrawal: no UTxO table change on reverse (best-effort)
@@ -1645,7 +1956,8 @@ export async function seedGenesisUtxos(
     for (const r of rows) {
         const txOut = JSON.stringify({ address: r.address, amount: r.lovelace.toString(), assets: {} });
         const res = await sql`
-            INSERT OR IGNORE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${r.utxoRef}, ${txOut}, ${r.txId})
+            INSERT OR IGNORE INTO utxo (utxo_ref, tx_out, tx_hash, address, lovelace)
+            VALUES (${r.utxoRef}, ${txOut}, ${r.txId}, ${r.address}, ${r.lovelace.toString()})
         `;
         inserted += Number((res as unknown as { count?: number })?.count ?? 1);
     }
@@ -2043,7 +2355,7 @@ export async function applyByronTxPayload(
 
     if (inputRefs.length > 0) {
         const existingUtxos = await db`
-            SELECT utxo_ref, tx_out, tx_hash FROM utxo WHERE utxo_ref IN ${db(inputRefs)}
+            SELECT utxo_ref, tx_out, tx_hash, address FROM utxo WHERE utxo_ref IN ${db(inputRefs)}
         ` as any[];
         for (const row of existingUtxos) {
             const utxo_ref = Array.isArray(row)
@@ -2092,14 +2404,10 @@ export async function applyByronTxPayload(
             db,
             blockHash,
             "create",
-            packUtxoDelta({ utxo_ref: utxoRef, tx_out: txOutJson, tx_hash: txId }),
+            packUtxoDelta({ utxo_ref: utxoRef, tx_hash: txId }),
         );
-        await db`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${txOutJson}, ${txId})`;
+        await upsertUtxoRow(db, utxoRef, txOutJson, txId, txOutColumns({ address, amount }));
     }
-
-    logger.debug(
-        `Byron tx applied: ${txId.slice(0, 16)}… in=${inputRefs.length} out=${outputs.length}`,
-    );
 }
 
 // Re-export MiniBF projection schema/writer/queries for HTTP handlers

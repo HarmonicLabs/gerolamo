@@ -51,6 +51,15 @@ export function initSql(dbPath?: string): SQL {
     return sql;
 }
 
+/** Close the shared connection (checkpoints the WAL). Queries after this reject with "Connection closed". */
+export async function closeSql(): Promise<void> {
+    try {
+        await (sql as any).close?.();
+    } catch {
+        /* already closed */
+    }
+}
+
 export function getSqlFilename(): string {
     return currentDbPath;
 }

@@ -17,6 +17,7 @@
  *   GET /api/v0/txs/{hash}
  *   GET /api/v0/txs/{hash}/utxos
  *   GET /api/v0/mempool
+ *   GET /api/v0/mempool/{hash}
  *   POST /api/v0/tx/submit  (raw CBOR body)
  *
  * Forward index writes mb_* projections (+ legacy tx_index/address_tx/block_tx).
@@ -39,7 +40,27 @@ import {
     getNetworkSnapshot,
     getMbTxUtxos,
     getReferenceScriptCborByHash,
+    listBlocksDesc,
+    listBlocksInSlotRange,
+    countBlocksInSlotRange,
+    getBlockListRowByHash,
+    getBlockListRowBySlot,
+    getBlockListRowByHeight,
+    getMaxBlockNo,
+    countBlockTxs,
+    type BlockListRow,
 } from "../db";
+import {
+    epochForSlot,
+    epochLengthSlots,
+    firstSlotOfEpoch,
+    normalizeEpochNetwork,
+    slotInEpoch,
+    slotToUnixTime,
+    type EpochNetwork,
+} from "../utils/epochFromSlotCalculations";
+import { slotLeaderOfBlock } from "./blockLeader";
+import { getStoredEpochParams } from "../consensus/epochParams";
 import { ensureLiveProtocolParams } from "./liveProtocolParams";
 import {
     parseStoredTxOut,
@@ -47,7 +68,7 @@ import {
 } from "../db/minibf/txOutMetadata";
 import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import { blake2b_256 } from "@harmoniclabs/crypto";
+import { Tx } from "@harmoniclabs/cardano-ledger-ts";
 import { logger } from "../utils/logger";
 import { GlobalSharedMempool } from "../network/SharedMempool";
 import { mempoolTxHashToString } from "@harmoniclabs/shared-cardano-mempool-ts";
@@ -129,46 +150,94 @@ function rowHashToHex(hash: unknown): string {
     }
 }
 
-function blockRowToBf(row: any, tipSlot?: bigint) {
-    if (!row) return null;
-    // dual-shape: object or array from .values()
-    let slot: bigint | number | string | null = null;
-    let blockHash: unknown = null;
-    if (Array.isArray(row)) {
-        // getBlockBy* SELECT order: id, chunk_id, slot, block_hash, ...
-        slot = row[2];
-        blockHash = row[3];
+/** Blockfrost `BlockContent` for a stored block (explorer M1). */
+async function bfBlock(row: BlockListRow, tipHeight: number, tipSlot: number, network: EpochNetwork) {
+    const epoch = Number(epochForSlot(row.slot, network));
+    const isEbb = row.blockNo == null;
+    let nextBlock: string | null = null;
+    if (isEbb) {
+        // the epoch's first main block shares the EBB's slot
+        const main = await getBlockListRowBySlot(row.slot);
+        nextBlock = main && main.blockNo != null ? main.hash : null;
     } else {
-        slot = row.slot ?? row.Slot ?? null;
-        blockHash = row.block_hash ?? row.hash ?? null;
+        const n = await getBlockListRowByHeight(row.blockNo! + 1);
+        nextBlock = n?.hash ?? null;
     }
-    const slotNum = slot == null ? 0 : Number(slot);
-    const epoch = Number(calculatePreProdCardanoEpoch(slotNum));
-    const hashHex = rowHashToHex(blockHash);
     return {
-        time: 0, // no wall-clock in DB yet
-        height: null as number | null,
-        hash: hashHex,
-        slot: slotNum,
+        time: slotToUnixTime(row.slot, network),
+        height: row.blockNo,
+        hash: row.hash,
+        slot: row.slot,
         epoch,
-        epoch_slot: null as number | null,
-        slot_leader: null as string | null,
-        size: null as number | null,
-        tx_count: null as number | null,
+        epoch_slot: Number(slotInEpoch(row.slot, network)),
+        slot_leader: row.blockData ? slotLeaderOfBlock(row.blockData) : null,
+        size: row.size,
+        tx_count: await countBlockTxs(row.hash),
         output: null as string | null,
         fees: null as string | null,
         block_vrf: null as string | null,
         op_cert: null as string | null,
         op_cert_counter: null as string | null,
-        previous_block: null as string | null,
-        next_block: null as string | null,
-        confirmations: tipSlot != null
-            ? Math.max(0, Number(tipSlot) - slotNum)
-            : null,
+        previous_block: row.prevHash,
+        next_block: nextBlock,
+        confirmations: row.blockNo != null ? Math.max(0, tipHeight - row.blockNo) : Math.max(0, tipSlot - row.slot),
+        // Gerolamo extension: a Byron epoch-boundary block shares its slot with the epoch's first block
+        ebb: isEbb || undefined,
     };
 }
 
-export type MiniBfSubmitTx = (txCbor: Uint8Array) => void | Promise<void>;
+/** `latest`, a slot number, or a 64-hex hash → stored block row. */
+async function resolveBlockRow(id: string): Promise<{ row: BlockListRow | null; error?: Response }> {
+    if (id === "latest") {
+        const tipSlot = await getMaxSlot();
+        if (tipSlot === 0n) return { row: null, error: bfError(404, "Not Found", "No blocks in local DB") };
+        return { row: await getBlockListRowBySlot(Number(tipSlot)) };
+    }
+    // 64 hex chars is always a hash (a slot never has 64 digits), so test it first.
+    if (/^[0-9a-f]{64}$/i.test(id)) return { row: await getBlockListRowByHash(id.toLowerCase()) };
+    if (/^\d+n?$/.test(id)) return { row: await getBlockListRowBySlot(Number(id.replace("n", ""))) };
+    return { row: null, error: bfError(400, "Bad Request", "Block id must be `latest`, a slot number or a 64-hex hash") };
+}
+
+async function bfEpoch(epoch: number, network: EpochNetwork, tipSlot: number) {
+    const from = Number(firstSlotOfEpoch(epoch, network));
+    const len = Number(epochLengthSlots(epoch, network));
+    const to = from + len;
+    const blockCount = await countBlocksInSlotRange(from, to);
+    let first: BlockListRow | null = null;
+    let last: BlockListRow | null = null;
+    if (blockCount > 0) {
+        first = (await listBlocksInSlotRange(from, to, 1))[0] ?? null;
+        last = (await listBlocksInSlotRange(from, to, 1, blockCount - 1))[0] ?? null;
+    }
+    return {
+        epoch,
+        start_time: slotToUnixTime(from, network),
+        end_time: slotToUnixTime(to, network),
+        first_block_time: first ? slotToUnixTime(first.slot, network) : null,
+        last_block_time: last ? slotToUnixTime(last.slot, network) : null,
+        block_count: blockCount,
+        tx_count: null as number | null,
+        output: null as string | null,
+        fees: null as string | null,
+        active_stake: null as string | null,
+        // extensions
+        first_block: first?.hash ?? null,
+        last_block: last?.hash ?? null,
+        first_slot: from,
+        last_slot: to - 1,
+        synced: tipSlot >= to - 1 ? "complete" : tipSlot >= from ? "partial" : "none",
+    };
+}
+
+/** Result of handing a transaction to the local mempool (from which hot peers pull it). */
+export interface MiniBfSubmitResult {
+    /** Mempool verdict from the shared mempool: e.g. "success", "duplicate", "full". */
+    status: string;
+    nTxs: number;
+    availableSpace: number;
+}
+export type MiniBfSubmitTx = (txCbor: Uint8Array, txId: Uint8Array) => Promise<MiniBfSubmitResult>;
 
 export interface MiniBfContext {
     network?: string;
@@ -204,6 +273,7 @@ export async function handleMiniBlockfrost(
     const sub = path === "/api/v0" || path === "/api/v0/"
         ? "/"
         : path.slice("/api/v0".length) || "/";
+    const net: EpochNetwork = normalizeEpochNetwork(ctx.network ?? process.env.NETWORK);
 
     try {
         // GET /api/v0/
@@ -218,9 +288,18 @@ export async function handleMiniBlockfrost(
                     "GET /api/v0/network",
                     "GET /api/v0/epochs/latest",
                     "GET /api/v0/epochs/latest/parameters",
+                    "GET /api/v0/blocks?limit=&before=<slot|hash>",
                     "GET /api/v0/blocks/latest",
                     "GET /api/v0/blocks/{slot|hash}",
+                    "GET /api/v0/blocks/height/{n}",
+                    "GET /api/v0/blocks/{slot|hash}/previous?count=",
+                    "GET /api/v0/blocks/{slot|hash}/next?count=",
                     "GET /api/v0/blocks/{slot|hash}/txs",
+                    "GET /api/v0/epochs/{n}",
+                    "GET /api/v0/epochs/{n}/blocks?page=&count=",
+                    "GET /api/v0/epochs/{n}/parameters",
+                    "GET /api/v0/epochs/{n}/next|previous?count=",
+                    "GET /api/v0/search?q=",
                     "GET /api/v0/addresses/{address}",
                     "GET /api/v0/addresses/{address}/utxos",
                     "GET /api/v0/addresses/{address}/utxos/{asset}",
@@ -330,44 +409,140 @@ export async function handleMiniBlockfrost(
         }
 
         // GET /api/v0/blocks/latest
-        if (req.method === "GET" && sub === "/blocks/latest") {
-            const tipSlot = await getMaxSlot();
-            if (tipSlot === 0n) {
-                return bfError(404, "Not Found", "No blocks in local DB");
+        // GET /api/v0/blocks?limit=&before=<slot|hash>  — newest first (Gerolamo extension; BF has no list)
+        if (req.method === "GET" && sub === "/blocks") {
+            const limit = Math.max(1, Math.min(100, Number(url.searchParams.get("limit") ?? 20) || 20));
+            const before = url.searchParams.get("before");
+            let beforeSlot: number | undefined;
+            let beforeIsEbb: boolean | undefined;
+            if (before) {
+                if (/^[0-9a-f]{64}$/i.test(before)) {
+                    const cur = await getBlockListRowByHash(before.toLowerCase());
+                    if (!cur) return bfError(404, "Not Found", "Cursor block not found");
+                    beforeSlot = cur.slot;
+                    beforeIsEbb = cur.blockNo == null;
+                } else if (/^\d+$/.test(before)) {
+                    beforeSlot = Number(before);
+                    beforeIsEbb = url.searchParams.get("before_ebb") === "1";
+                } else {
+                    return bfError(400, "Bad Request", "`before` must be a slot number or a 64-hex block hash");
+                }
             }
-            const row = await getBlockBySlot(tipSlot);
-            const body = blockRowToBf(row, tipSlot);
-            if (!body?.hash) {
-                return bfError(404, "Not Found", "Tip block not found");
-            }
-            return json(body);
+            const tipSlot = Number(await getMaxSlot());
+            const tipHeight = await getMaxBlockNo();
+            const rows = await listBlocksDesc({ limit, beforeSlot, beforeIsEbb });
+            return json(await Promise.all(rows.map((r) => bfBlock(r, tipHeight, tipSlot, net))));
         }
 
-        // GET /api/v0/blocks/{slot|hash}
+        // GET /api/v0/blocks/height/{n} — by chain height (Gerolamo extension; BF overloads {hash_or_number})
         {
-            const m = sub.match(/^\/blocks\/([^/]+)$/);
+            const m = sub.match(/^\/blocks\/height\/(\d+)$/);
             if (req.method === "GET" && m) {
-                const id = decodeURIComponent(m[1]);
-                const tipSlot = await getMaxSlot();
-                let row: any;
-                if (/^\d+n?$/.test(id)) {
-                    const slot = BigInt(id.replace("n", ""));
-                    row = await getBlockBySlot(slot);
-                } else if (/^[0-9a-f]{64}$/i.test(id)) {
-                    row = await getBlockByHash(id.toLowerCase());
-                } else {
-                    return bfError(
-                        400,
-                        "Bad Request",
-                        "Block id must be slot number or 64-hex hash",
-                    );
-                }
-                const body = blockRowToBf(row, tipSlot);
-                if (!body?.hash) {
-                    return bfError(404, "Not Found", "Block not found");
-                }
-                return json(body);
+                const row = await getBlockListRowByHeight(Number(m[1]));
+                if (!row) return bfError(404, "Not Found", "No block at that height");
+                return json(await bfBlock(row, await getMaxBlockNo(), Number(await getMaxSlot()), net));
             }
+        }
+
+        // GET /api/v0/blocks/{id}/previous?count= and /next?count=
+        {
+            const m = sub.match(/^\/blocks\/([^/]+)\/(previous|next)$/);
+            if (req.method === "GET" && m) {
+                const { row, error } = await resolveBlockRow(decodeURIComponent(m[1]));
+                if (error) return error;
+                if (!row) return bfError(404, "Not Found", "Block not found");
+                const count = Math.max(1, Math.min(100, Number(url.searchParams.get("count") ?? 1) || 1));
+                const tipSlot = Number(await getMaxSlot());
+                const tipHeight = await getMaxBlockNo();
+                let rows: BlockListRow[];
+                if (m[2] === "previous") {
+                    rows = await listBlocksDesc({ limit: count, beforeSlot: row.slot, beforeIsEbb: row.blockNo == null });
+                } else {
+                    rows = [];
+                    let h = row.blockNo;
+                    if (h == null) {
+                        const main = await getBlockListRowBySlot(row.slot);
+                        if (main && main.blockNo != null) {
+                            rows.push(main);
+                            h = main.blockNo;
+                        }
+                    }
+                    while (h != null && rows.length < count) {
+                        const n = await getBlockListRowByHeight(h + 1);
+                        if (!n) break;
+                        rows.push(n);
+                        h = n.blockNo;
+                    }
+                }
+                return json(await Promise.all(rows.map((r) => bfBlock(r, tipHeight, tipSlot, net))));
+            }
+        }
+
+        // GET /api/v0/blocks/latest and /blocks/{slot|hash}
+        {
+            const m = sub === "/blocks/latest" ? ["", "latest"] : sub.match(/^\/blocks\/([^/]+)$/);
+            if (req.method === "GET" && m) {
+                const { row, error } = await resolveBlockRow(decodeURIComponent(m[1]!));
+                if (error) return error;
+                if (!row) return bfError(404, "Not Found", "Block not found (not yet synced?)");
+                return json(await bfBlock(row, await getMaxBlockNo(), Number(await getMaxSlot()), net));
+            }
+        }
+
+        // GET /api/v0/epochs/{n}, /epochs/{n}/blocks, /epochs/{n}/parameters, /epochs/{n}/next|previous
+        {
+            const m = sub.match(/^\/epochs\/(\d+)(?:\/(blocks|parameters|next|previous))?$/);
+            if (req.method === "GET" && m) {
+                const epoch = Number(m[1]);
+                const tipSlot = Number(await getMaxSlot());
+                const what = m[2];
+                if (!what) return json(await bfEpoch(epoch, net, tipSlot));
+                if (what === "parameters") {
+                    const p = await getStoredEpochParams(epoch);
+                    if (!p) return bfError(404, "Not Found", "No protocol parameters stored for that epoch");
+                    return json({ epoch, ...p });
+                }
+                if (what === "blocks") {
+                    const count = Math.max(1, Math.min(100, Number(url.searchParams.get("count") ?? 100) || 100));
+                    const page = Math.max(1, Number(url.searchParams.get("page") ?? 1) || 1);
+                    const from = Number(firstSlotOfEpoch(epoch, net));
+                    const to = from + Number(epochLengthSlots(epoch, net));
+                    const rows = await listBlocksInSlotRange(from, to, count, (page - 1) * count);
+                    return json(rows.map((r) => r.hash)); // BF shape: array of hashes
+                }
+                const count = Math.max(1, Math.min(20, Number(url.searchParams.get("count") ?? 1) || 1));
+                const out: Array<Awaited<ReturnType<typeof bfEpoch>>> = [];
+                for (let i = 1; i <= count; i++) {
+                    const e = what === "next" ? epoch + i : epoch - i;
+                    if (e < 0) break;
+                    out.push(await bfEpoch(e, net, tipSlot));
+                }
+                return json(out);
+            }
+        }
+
+        // GET /api/v0/search?q= — one box for the explorer; the server decides what the query is
+        if (req.method === "GET" && sub === "/search") {
+            const q = (url.searchParams.get("q") ?? "").trim();
+            if (!q) return bfError(400, "Bad Request", "q required");
+            if (/^[0-9a-f]{64}$/i.test(q)) {
+                const hex = q.toLowerCase();
+                if (await getTxByHash(hex)) return json({ kind: "tx", id: hex });
+                if (await getBlockListRowByHash(hex)) return json({ kind: "block", id: hex });
+                return json({ kind: "unknown", id: hex, message: "no block or transaction with that hash" });
+            }
+            if (/^\d+$/.test(q)) {
+                const n = Number(q);
+                const byHeight = await getBlockListRowByHeight(n);
+                if (byHeight) return json({ kind: "block", id: byHeight.hash, height: n });
+                const bySlot = await getBlockListRowBySlot(n);
+                if (bySlot) return json({ kind: "block", id: bySlot.hash, slot: n });
+                return json({ kind: "unknown", id: q, message: "no block at that height or slot" });
+            }
+            if (/^(addr|addr_test|Ae2|DdzFF)/.test(q)) return json({ kind: "address", id: q });
+            if (/^(stake|stake_test)1/.test(q)) return json({ kind: "stake", id: q });
+            if (/^pool1/.test(q)) return json({ kind: "pool", id: q });
+            return json({ kind: "unknown", id: q });
         }
 
         // GET /api/v0/addresses/{address} — summary (UTxO set + address_tx count)
@@ -573,20 +748,35 @@ export async function handleMiniBlockfrost(
                         "Transaction not in mb_tx/tx_index (run backfill or wait for forward index)",
                     );
                 }
+                const blockRow = row.block_hash ? await getBlockListRowByHash(String(row.block_hash)) : null;
+                let outputAmount: Array<{ unit: string; quantity: string }> | null = null;
+                let utxoCount: number | null = null;
+                try {
+                    const io = await getMbTxUtxos(txHash);
+                    utxoCount = io.inputs.length + io.outputs.length;
+                    const totals = new Map<string, bigint>();
+                    for (const o of io.outputs) {
+                        if (o.collateral) continue;
+                        for (const a of o.amount) totals.set(a.unit, (totals.get(a.unit) ?? 0n) + BigInt(a.quantity));
+                    }
+                    outputAmount = [...totals].map(([unit, q]) => ({ unit, quantity: q.toString() }));
+                } catch {
+                    /* IO tables absent on a thin index */
+                }
                 return json({
                     hash: row.tx_hash,
                     block: row.block_hash,
-                    block_height: null,
-                    block_time: null,
+                    block_height: blockRow?.blockNo ?? null,
+                    block_time: blockRow ? slotToUnixTime(blockRow.slot, net) : null,
                     slot: row.slot,
-                    index: null,
-                    output_amount: null,
+                    index: (row as any).tx_index ?? null,
+                    output_amount: outputAmount,
                     fees: row.fee,
                     deposit: null,
                     size: row.size,
                     invalid_before: row.invalid_before,
                     invalid_hereafter: row.invalid_hereafter,
-                    utxo_count: null,
+                    utxo_count: utxoCount,
                     withdrawal_count: null,
                     mir_cert_count: null,
                     delegation_count: null,
@@ -639,8 +829,9 @@ export async function handleMiniBlockfrost(
         {
             const m = sub.match(/^\/blocks\/([^/]+)\/txs$/);
             if (req.method === "GET" && m) {
-                const id = decodeURIComponent(m[1]);
+                let id = decodeURIComponent(m[1]);
                 let row: any;
+                if (id === "latest") id = (await getMaxSlot()).toString();
                 if (/^\d+n?$/.test(id)) {
                     row = await getBlockBySlot(BigInt(id.replace("n", "")));
                 } else if (/^[0-9a-f]{64}$/i.test(id)) {
@@ -670,6 +861,29 @@ export async function handleMiniBlockfrost(
                 );
                 // BF returns array of tx hash strings
                 return json(txs.map((t) => t.tx_hash));
+            }
+        }
+
+        // GET /api/v0/mempool/{hash} — is this tx still in the local mempool?
+        {
+            const m = sub.match(/^\/mempool\/([0-9a-fA-F]{64})$/);
+            if (req.method === "GET" && m) {
+                const want = m[1].toLowerCase();
+                try {
+                    const entries = await GlobalSharedMempool.getTxHashesAndSizes();
+                    for (const e of entries) {
+                        let hex = "";
+                        try {
+                            hex = mempoolTxHashToString(e.hash).toLowerCase();
+                        } catch {
+                            hex = "";
+                        }
+                        if (hex === want) return json({ tx_hash: want, in_mempool: true, size: e.size });
+                    }
+                    return bfError(404, "Not Found", "Transaction is not in the local mempool (relayed, applied, or never seen)");
+                } catch (e: any) {
+                    return bfError(503, "Service Unavailable", e?.message || "mempool unavailable");
+                }
             }
         }
 
@@ -732,15 +946,31 @@ export async function handleMiniBlockfrost(
             if (txCbor.length === 0) {
                 return bfError(400, "Bad Request", "Empty transaction body");
             }
-            // Best-effort body hash (not always equal to ledger tx id for multi-era wrappers)
-            const txHashHex = toHex(blake2b_256(txCbor));
-            await ctx.submitTx(txCbor);
+            // The tx id is the hash of the transaction *body*, not of the whole
+            // envelope; decode first so an undecodable submission is a 400, not a
+            // fire-and-forget "relayed".
+            let txId: Uint8Array;
+            try {
+                const tx = Tx.fromCbor(txCbor);
+                txId = tx.body.hash.toBuffer();
+            } catch (e: any) {
+                return bfError(400, "Bad Request", `Transaction CBOR could not be decoded: ${e?.message ?? String(e)}`);
+            }
+            let result: MiniBfSubmitResult;
+            try {
+                result = await ctx.submitTx(txCbor, txId);
+            } catch (e: any) {
+                return bfError(503, "Service Unavailable", e?.message ?? "submit failed");
+            }
+            if (result.status !== "success") {
+                return bfError(400, "Bad Request", `Mempool rejected the transaction: ${result.status}`);
+            }
             return json(
                 {
-                    hash: txHashHex,
-                    status: "relayed",
-                    message: "Transaction relayed to hot peers",
-                    note: "hash is blake2b_256(raw body); may differ from ledger tx id for some encodings",
+                    hash: toHex(txId),
+                    status: "accepted",
+                    message: "Transaction is in the local mempool; hot peers pull it via TxSubmission",
+                    mempool: { status: result.status, nTxs: result.nTxs, availableSpace: result.availableSpace },
                 },
                 202,
             );

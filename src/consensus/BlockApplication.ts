@@ -15,8 +15,8 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
  *
  * Optional `client` = Bun SQL handle or open transaction (batch hydrate).
  * Default = shared module `sql`. Do not nest sql.begin() inside apply*.
- * Block metadata is best-effort before txs; full CBOR is written separately
- * via insertBlockBatchVolatile after applyBlock returns.
+ * The block row itself is written by the orchestrator (insertBlockVolatile)
+ * in the same transaction; nothing here touches `blocks`.
  * Byron: metadata + best-effort txPayload apply (preprod often empty payloads).
  */
 export async function applyBlock(
@@ -24,20 +24,11 @@ export async function applyBlock(
     slot: bigint,
     blockHash: Uint8Array,
     client?: SqlClient,
+    blockHeight: number | null = null,
 ): Promise<void> {
-    const db = client ?? sql;
-    // Metadata stub so getMaxSlot / tip can advance even if body UTxO apply is partial.
-    // Same key form as insertBlockBatchVolatile (hex TEXT) so lookups by hash hit one row.
-    await db`INSERT OR IGNORE INTO blocks (hash, slot, prev_hash, is_valid) VALUES (${
-        toHex(blockHash)
-    }, ${Number(slot)}, NULL, ${true})`;
-
     if (isByronBlock(block as any)) {
         const payloads = getByronTxPayloads(block as any);
         if (payloads.length === 0) {
-            logger.debug(
-                `Byron block slot=${slot} — empty txPayload (metadata only)`,
-            );
             return;
         }
         for (const entry of payloads) {
@@ -52,17 +43,10 @@ export async function applyBlock(
     const slotNum = Number(slot);
     let txIndex = 0;
     for (const txBody of txBodies) {
-        const hashBuf = typeof (txBody.hash as any)?.toBuffer === "function"
-            ? (txBody.hash as any).toBuffer()
-            : (txBody.hash as any);
-        logger.debug(
-            `Applying transaction: ${
-                hashBuf instanceof Uint8Array ? toHex(hashBuf) : String(txBody.hash)
-            }`,
-        );
         await applyTransaction(txBody, blockHash, client, {
             slot: slotNum,
             txIndex: txIndex++,
+            blockHeight,
         });
     }
 }

@@ -1,3 +1,58 @@
+diff --git a/node_modules/@harmoniclabs/ouroboros-miniprotocols-ts/.bun-tag-fcaeef02baac1ccf b/.bun-tag-fcaeef02baac1ccf
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/multiplexer/Multiplexer.js b/dist/multiplexer/Multiplexer.js
+index a99727d4ca749b6c5c93665527cdf7af0f46de41..5d9f1b57f4a1fc82af28c163d62343b4da4a2caa 100644
+--- a/dist/multiplexer/Multiplexer.js
++++ b/dist/multiplexer/Multiplexer.js
+@@ -156,7 +156,13 @@ var Multiplexer = /** @class */ (function () {
+             else
+                 messages = [];
+             // finally add any other message if present
+-            messages = messages.concat((0, multiplexerMessage_1.unwrapMultiplexerMessages)(chunk));
++            var unwrapped = (0, multiplexerMessage_1.unwrapMultiplexerMessagesRest)(chunk);
++            messages = messages.concat(unwrapped.messages);
++            // Fewer than 8 bytes left over: a segment header split across TCP chunks.
++            // Keep them for the next chunk instead of dropping them (framing would be lost).
++            if (unwrapped.rest.length > 0) {
++                prevBytes = Uint8Array.prototype.slice.call(unwrapped.rest);
++            }
+             try {
+                 for (var messages_1 = __values(messages), messages_1_1 = messages_1.next(); !messages_1_1.done; messages_1_1 = messages_1.next()) {
+                     var _b = messages_1_1.value, header = _b.header, payload = _b.payload;
+diff --git a/dist/multiplexer/multiplexerMessage.js b/dist/multiplexer/multiplexerMessage.js
+index ecf0ddf7b0dd2fee4b7c6fc7e515662633e00aeb..76137d6efc5e324dde1a891b41b50c34113858ca 100644
+--- a/dist/multiplexer/multiplexerMessage.js
++++ b/dist/multiplexer/multiplexerMessage.js
+@@ -60,9 +60,19 @@ function unwrapMultiplexerMessage(message) {
+     };
+ }
+ function unwrapMultiplexerMessages(message) {
++    return unwrapMultiplexerMessagesRest(message).messages;
++}
++/**
++ * Like `unwrapMultiplexerMessages`, but also returns the trailing bytes that are
++ * too short to be a segment header (< 8). A TCP chunk can end in the middle of a
++ * header; dropping those bytes made the next chunk be parsed from mid-header
++ * ("unwrapped Multiplexer header was not a mini protocol").
++ */
++function unwrapMultiplexerMessagesRest(message) {
+     var messages = [];
+     while (message.length >= 8) {
+-        var view = new DataView(message.buffer);
++        // honour byteOffset: `message` may be a subarray of a larger buffer
++        var view = new DataView(message.buffer, message.byteOffset, message.byteLength);
+         // bitwise opeartor (or and shift) implicitly convert to signed int32
+         // but these are 2 bytes long numbers, hence always positive
+         var agencyAndProtocol = message[4] << 8 | message[5];
+@@ -78,5 +88,6 @@ function unwrapMultiplexerMessages(message) {
+         });
+         message = Uint8Array.prototype.slice.call(message, 8 + payloadLen);
+     }
+-    return messages;
++    return { messages: messages, rest: message };
+ }
++exports.unwrapMultiplexerMessagesRest = unwrapMultiplexerMessagesRest;
 diff --git a/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js b/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js
 index eb8d430f559d290004caa89480a5f0d9b2eb5171..7c8bff19a496ac0e697a1932e5868d05758b9e96 100644
 --- a/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js

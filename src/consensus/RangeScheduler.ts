@@ -237,7 +237,13 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
                     if (gen !== this.generation) return;
                     const malicious = err instanceof RangeMismatch;
                     this.opts.onPeerFailure?.(peer, err, { malicious, seq: job.seq });
-                    if (job.attempts >= this.opts.retryLimit) throw err;
+                    // Any hot peer may be asked for bodies, so a peer that is merely behind
+                    // (MsgNoBlocks) is an ordinary failure. Never give up on a range while an
+                    // eligible peer has not been tried yet: the attempt cap only bites once
+                    // every candidate has failed it at least once.
+                    const end = job.points[job.points.length - 1]!.slot;
+                    const untriedLeft = this.opts.pickPeers(end).some((p) => !job.triedPeers.has(p));
+                    if (job.attempts >= this.opts.retryLimit && !untriedLeft) throw err;
                     this.retries++;
                 } finally {
                     if (peer) this.busyPeers.delete(peer);

@@ -146,10 +146,9 @@ db.exec("PRAGMA busy_timeout=5000");
 let sql = `
   SELECT slot,
          block_data,
-         header_data,
-         block_fetch_RawCbor
+         header_data
   FROM blocks
-  WHERE (block_data IS NOT NULL OR header_data IS NOT NULL OR block_fetch_RawCbor IS NOT NULL)
+  WHERE (block_data IS NOT NULL OR header_data IS NOT NULL)
 `;
 const params = [];
 if (fromSlot != null) {
@@ -175,7 +174,6 @@ for (const row of rows) {
   const candidates = [
     row.header_data,
     row.block_data,
-    row.block_fetch_RawCbor,
   ];
   for (const raw of candidates) {
     const u8 = toBytes(raw);

@@ -60,6 +60,40 @@ describe("CandidateSet agreement", () => {
         expect(cs.divergentPeers()).toEqual(["liar"]);
     });
 
+    test("verifier reporting the second block of a shared slot before the primary is not divergent", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("p");
+        cs.addPeer("v", "verifier");
+        cs.observe("p", { slot: 0n, hash: h("ebb"), ebb: true }); // primary has only the EBB so far
+        const early = cs.observe("v", { slot: 0n, hash: h("ebb"), ebb: true });
+        expect(early.kind).toBe("agree");
+        const second = cs.observe("v", { slot: 0n, hash: h("main0") }); // main block 1, same slot, primary not there yet
+        expect(second.kind).toBe("ahead");
+        expect(cs.agreement("v")!.status).not.toBe("divergent");
+        cs.observe("p", { slot: 0n, hash: h("main0") }); // primary catches up
+        expect(cs.agreement("v")!.status).toBe("agrees");
+        expect(cs.agreesThrough("v", 0n)).toBe(true);
+    });
+
+    test("a genuinely different block at a shared slot is a fork once the primary moves past it", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("p");
+        cs.addPeer("v", "verifier");
+        cs.observe("p", { slot: 0n, hash: h("ebb"), ebb: true });
+        expect(cs.observe("v", { slot: 0n, hash: h("other") }).kind).toBe("ahead");
+        cs.observe("p", { slot: 20n, hash: h("b20") }); // primary advanced; slot 0 never got "other"
+        expect(cs.agreement("v")!.status).toBe("divergent");
+        expect(cs.divergentPeers()).toEqual(["v"]);
+    });
+
+    test("a different hash at the primary's tip slot is an immediate fork when that block is not an EBB", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("p");
+        cs.addPeer("v", "verifier");
+        cs.observe("p", { slot: 100n, hash: h("p100") });
+        expect(cs.observe("v", { slot: 100n, hash: h("x100") }).kind).toBe("divergent");
+    });
+
     test("EBB and first main block sharing a slot both count as agreement", () => {
         const cs = new CandidateSet();
         cs.addPeer("p");
@@ -169,5 +203,44 @@ describe("distinct-host quorum", () => {
         const r = c.primaryOutvoted(2);
         expect(r.outvoted).toBe(true);
         expect(r.hash).toBe("bb");
+    });
+});
+
+describe("fasterAgreeingVerifier", () => {
+    test("picks the agreeing verifier with the longest validated lead over the primary", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("p");
+        cs.addPeer("slow", "verifier");
+        cs.addPeer("fast", "verifier");
+        cs.addPeer("liar", "verifier");
+        for (let s = 1; s <= 10; s++) cs.observe("p", { slot: BigInt(s), hash: h(String(s)) });
+        for (let s = 1; s <= 12; s++) cs.observe("slow", { slot: BigInt(s), hash: h(String(s)) });
+        for (let s = 1; s <= 40; s++) cs.observe("fast", { slot: BigInt(s), hash: h(String(s)) });
+        for (let s = 1; s <= 9; s++) cs.observe("liar", { slot: BigInt(s), hash: h(String(s)) });
+        cs.observe("liar", { slot: 10n, hash: h("x") }); // forks at the primary's tip
+        for (let s = 11; s <= 100; s++) cs.observe("liar", { slot: BigInt(s), hash: h("x" + s) });
+        expect(cs.agreement("liar")!.status).toBe("divergent");
+        const pick = cs.fasterAgreeingVerifier(20);
+        expect(pick).toEqual({ key: "fast", lead: 30, primaryTipSlot: 10n });
+        expect(cs.fasterAgreeingVerifier(31)).toBeNull();
+    });
+
+    test("a verifier that has not confirmed the primary's tip is not a candidate", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("p");
+        cs.addPeer("v", "verifier");
+        for (let s = 1; s <= 10; s++) cs.observe("p", { slot: BigInt(s), hash: h(String(s)) });
+        for (let s = 1; s <= 5; s++) cs.observe("v", { slot: BigInt(s), hash: h(String(s)) }); // agrees only through 5
+        for (let s = 11; s <= 50; s++) cs.observe("v", { slot: BigInt(s), hash: h(String(s)) }); // ahead, but slots 6-10 unseen
+        expect(cs.fasterAgreeingVerifier(10)).toBeNull();
+    });
+
+    test("no primary or empty primary fragment yields null", () => {
+        const cs = new CandidateSet();
+        expect(cs.fasterAgreeingVerifier(1)).toBeNull();
+        cs.addPeer("p");
+        cs.addPeer("v", "verifier");
+        cs.observe("v", { slot: 5n, hash: h("5") });
+        expect(cs.fasterAgreeingVerifier(1)).toBeNull();
     });
 });

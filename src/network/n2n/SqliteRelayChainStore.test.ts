@@ -34,15 +34,13 @@ beforeAll(async () => {
             block_hash BLOB NOT NULL,
             prev_hash BLOB,
             block_data BLOB,
-            rollforward_header_cbor BLOB,
-            block_fetch_RawCbor BLOB
+            rollforward_header_cbor BLOB
         );
         CREATE TABLE blocks (
             slot INTEGER NOT NULL,
             hash BLOB PRIMARY KEY,
             prev_hash BLOB,
             block_data BLOB,
-            block_fetch_RawCbor BLOB,
             is_valid BOOLEAN DEFAULT TRUE
         );
         CREATE TABLE volatile_headers (

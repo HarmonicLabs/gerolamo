@@ -28,20 +28,27 @@ It is **HarmonicLabs** software — **not** TxPipe / `@txpipe/gerolamo`.
 ## Quick start
 
 ```bash
-# Bun ≥ 1.0
 git clone https://github.com/HarmonicLabs/gerolamo.git
 cd gerolamo
-bun install
+bun install          # installs the node, the desktop app and the dashboard (one command)
+bun run preflight    # tells you if anything on the machine is missing
 
 # Live preprod node
 NETWORK=preprod bun src/index.ts start-gerolamo
 
-# Standalone desktop Control Center (Electrobun — not The Lab)
+# Desktop Control Center (Electrobun). First launch downloads the Electrobun
+# Linux runtime (~150 MB) from GitHub; after that it starts offline.
 bun run ui:dev
 
 # Mainnet
 NETWORK=mainnet bun src/index.ts start-gerolamo
 ```
+
+Requirements: [Bun](https://bun.sh) ≥ 1.1 and, for the desktop app on Linux,
+WebKitGTK 4.1 + GTK 3 (`bun run preflight` prints the exact `apt`/`dnf`/`pacman`
+line for your distro). Everything else is in the repo: the HarmonicLabs
+libraries that are not on npm yet ship as tarballs in `vendor/`, so no sibling
+checkouts are needed. `bun run test` runs the node and desktop suites.
 
 | Surface | Default |
 |---------|---------|

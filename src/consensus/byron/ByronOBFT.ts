@@ -32,6 +32,10 @@ export interface ByronGenesisConfig {
     protocolConsts: { k: number; protocolMagic: number };
     heavyDelegation: Record<string, { omega: number; issuerPk: string; delegatePk: string; cert: string }>;
     bootStakeholders?: Record<string, number>;
+    /** Funded base58 addresses → lovelace; these are the genesis UTxOs (see genesisUtxo.ts). */
+    nonAvvmBalances?: Record<string, string>;
+    /** Redeem (AVVM) public keys → lovelace; mainnet only. */
+    avvmDistr?: Record<string, string>;
 }
 
 export const DEFAULT_PBFT_SIGNATURE_THRESHOLD = 0.22;

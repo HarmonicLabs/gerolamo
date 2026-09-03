@@ -1,7 +1,8 @@
 # Sync pipeline research: Dolos, Dingo, cardano-node vs Gerolamo
 
-Date: 2026-09-03. Status: research only, nothing implemented yet. Requested by
-Mike before optimising Gerolamo's download/verify/apply pipeline.
+Date: 2026-09-03. Status: research done, first optimisation round implemented
+the same day (see "Round 1 results" at the end). Requested by Mike before
+optimising Gerolamo's download/verify/apply pipeline.
 
 Sources: local Dolos clone (`../dolos`, 174a5de6), Dingo `main` on GitHub,
 IOG `network-design.pdf` / `network-spec.pdf` (cardano-docs), ouroboros-consensus
@@ -107,3 +108,43 @@ held cold 1 h.
 
 Not examined: Gerolamo's own Mithril path; Dolos `max_rollback`; Dingo peergov
 denylisting.
+
+## Round 1 results (2026-09-03, preprod genesis sync, 150 s runs, 3 hot peers)
+
+Measured with the new per-phase profile (`/metrics.sync.profile`, log line
+`Sync profile:` every 256 blocks) and Bun `--cpu-prof`.
+
+| Change | blocks applied in 140 s | blocks/s | Note |
+|---|---|---|---|
+| baseline (master) | 671 | 4.4 | main thread mostly idle; 200 ms/header in "validation" |
+| WAL + synchronous=NORMAL | 675 | 4.2 | SQLite was never the bottleneck |
+| fast ed25519 (noble port inside @harmoniclabs/crypto) | 923 | 6.6 | validation 190 → 14 ms/header, CPU 127 % → 24 % |
+| pipelined ChainSync RequestNext (depth 32) | 14 564 | 40–137 | one header per RTT was the real cap; throughput then decayed |
+| drop `gc_volatile` AFTER INSERT trigger | 26 897 | ~200 sustained | trigger scanned the table on every insert (15 ms at 14k rows, growing) |
+| pipeline depth 128, 64-block ranges | 24 753 | ~200 | no gain, +500 MB RSS: the relay serves ~200 headers/s per connection |
+
+What each fix was:
+
+1. `verifyEd25519Signature_sync` in @harmoniclabs/crypto is a textbook BigInt
+   implementation (~30 ms/verify). The same package bundles the noble-curves
+   port (~1 ms). Two verifies per header (op-cert, KES leaf). Gerolamo now uses
+   the noble one (`src/consensus/fastEd25519.ts`) and injects it into kes-ts via
+   the new `setEd25519Verify` (kes-ts 0.1.0-dev1). Still 100 % pure TS, ours.
+2. ChainSync was strictly `await requestNext()` per header. The protocol allows
+   pipelining; `ChainSyncPipeline` keeps `blockFetchBatch.pipelineDepth`
+   (default 32) requests in flight until the server answers `MsgAwaitReply`.
+3. `gc_volatile` trigger → periodic `gcVolatile()` every 2048 blocks over
+   partial `WHERE is_valid = FALSE` indexes.
+
+Also landed in the same round: Byron genesis UTxO seeding (nonAvvm + AVVM via
+`ByronAddress.fromRedeemPublicKey`, ledger-ts 0.5.5; verified against mainnet),
+rollback bound at k with the offending peer held as malicious, and distinct-host
+quorum for the primary outvote.
+
+Remaining cap: ~200 headers/s from one public preprod relay regardless of
+pipeline depth (batches never fill). Options if more is wanted: measure against
+a relay we run, or split header streams across peers (needs known intersection
+points, i.e. a header-hash index ahead of the tip, which ChainSync cannot give).
+Main-thread CPU is ~25 %; the visible hot spots are hex/string conversions in
+ledger-ts parsing and CBOR, not SQLite.
+

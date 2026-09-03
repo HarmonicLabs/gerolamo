@@ -8,6 +8,7 @@ import {
     getMaxSlot,
     getUtxoCount,
     getEpochNonce,
+    getGenesisUtxoStats,
 } from "../db";
 import { handleMiniBlockfrost } from "../api/miniBlockfrost";
 import { handleOpenApiRoutes } from "../api/openApi";
@@ -96,10 +97,13 @@ async function buildMetricsPayload(
             ? manager.getGovernorSnapshot()
             : null;
     const resources = sampleResources();
+    const genesisUtxos = await getGenesisUtxoStats().catch(() => ({ total: 0, unspent: 0, avvm: 0 }));
     return {
         network: config.network ?? process.env.NETWORK ?? "unknown",
         tipSlot: tipSlot.toString(),
         utxoCount,
+        /** Genesis outputs seeded from the Byron genesis file: how many exist and how many are still unspent (included in utxoCount). */
+        genesisUtxos,
         epoch: Number.isFinite(epoch) ? epoch : null,
         era,
         eraName: eraName(era),

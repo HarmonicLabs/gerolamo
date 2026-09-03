@@ -14,7 +14,11 @@
         "dashboard:build": "cd dashboard && bun x vite build",
         "ui:dev": "bash desktop/scripts/dev-wait.sh",
         "ui:typecheck": "bun run --cwd desktop typecheck",
-        "ui:test": "bun test --cwd desktop src"
+        "ui:test": "bun test --cwd desktop src",
+        "postinstall": "bun install --cwd desktop && bun install --cwd dashboard",
+        "preflight": "bun scripts/preflight.ts",
+        "setup": "bun install && bun run preflight",
+        "test": "bun test ./src && bun test --cwd desktop src"
     },
     "devDependencies": {
         "@harmoniclabs/cddl-tools": "^0.0.4",
@@ -26,11 +30,11 @@
     "dependencies": {
         "@blockfrost/blockfrost-js": "^6.1.0",
         "@harmoniclabs/buildooor": "^0.1.21",
-        "@harmoniclabs/cardano-ledger-ts": "file:vendor/harmoniclabs-cardano-ledger-ts-0.5.4.tgz",
+        "@harmoniclabs/cardano-ledger-ts": "file:vendor/harmoniclabs-cardano-ledger-ts-0.5.5.tgz",
         "@harmoniclabs/cardano-math-ts": "^0.0.5",
         "@harmoniclabs/cbor": "^1.6.6",
         "@harmoniclabs/crypto": "^0.3.0",
-        "@harmoniclabs/kes": "file:vendor/harmoniclabs-kes-0.1.0-dev0.tgz",
+        "@harmoniclabs/kes": "file:vendor/harmoniclabs-kes-0.1.0-dev1.tgz",
         "@harmoniclabs/obj-utils": "^1.0.0",
         "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.5-dev7",
         "@harmoniclabs/shared-cardano-mempool-ts": "file:vendor/harmoniclabs-shared-cardano-mempool-ts-0.0.0.tgz",
@@ -42,5 +46,11 @@
         "picocolors": "^1.1.1",
         "tar-stream": "^3.2.0",
         "typescript-language-server": "^5.1.3"
+    },
+    "engines": {
+        "bun": ">=1.1.0"
+    },
+    "patchedDependencies": {
+        "@harmoniclabs/ouroboros-miniprotocols-ts@0.0.5-dev7": "patches/@harmoniclabs%2Fouroboros-miniprotocols-ts@0.0.5-dev7.patch"
     }
 }

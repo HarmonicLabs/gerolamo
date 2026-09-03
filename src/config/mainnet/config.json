@@ -30,6 +30,7 @@
     "idleTimeoutMs": 120000
   },
   "blockFetchBatch": {
+    "pipelineDepth": 32,
     "maxBlocks": 32,
     "flushMs": 25,
     "rangeTimeoutMs": 55000,
@@ -40,7 +41,7 @@
   "role": "data",
   "blockfrostUrl": "https://blockfrost-mainnet.onchainapps.io/",
   "dbPath": "./src/store/db/mainnet/Gerolamo.db",
-  "tuiEnabled": true,
+  "tuiEnabled": false,
   "logs": {
     "logToFile": true,
     "logToConsole": false,

@@ -1,0 +1,33 @@
+diff --git a/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js b/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js
+index eb8d430f559d290004caa89480a5f0d9b2eb5171..7c8bff19a496ac0e697a1932e5868d05758b9e96 100644
+--- a/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js
++++ b/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js
+@@ -8,8 +8,8 @@ var isWord16_1 = require("../../utils/isWord16.js");
+ var isWord32_1 = require("../../utils/isWord32.js");
+ var obj_utils_1 = require("@harmoniclabs/obj-utils");
+ function isRawIPv6(stuff) {
+-    if (!Array.isArray(stuff) &&
+-        stuff.length >= 4)
++    // upstream had `!Array.isArray(stuff) && stuff.length >= 4` (never true for a non-array)
++    if (!Array.isArray(stuff) || stuff.length < 4)
+         return false;
+     return ((0, isWord32_1.isWord32)(stuff[0]) &&
+         (0, isWord32_1.isWord32)(stuff[1]) &&
+@@ -17,13 +17,11 @@ function isRawIPv6(stuff) {
+         (0, isWord32_1.isWord32)(stuff[3]));
+ }
+ function isIPeerAddressIPv6(peerAddress) {
++    // N2N ≥ v13 encodes IPv6 as [1, w32 ×4, port] (no flowInfo/scopeId); fromCborObj
++    // then passes `flowInfo: undefined`, which upstream rejected via hasOwn().
+     return (isRawIPv6(peerAddress.address) &&
+-        ((0, obj_utils_1.hasOwn)(peerAddress, "flowInfo") ?
+-            (0, isWord32_1.isWord32)(peerAddress.flowInfo) :
+-            peerAddress.flowInfo === undefined) &&
+-        ((0, obj_utils_1.hasOwn)(peerAddress, "scopeId") ?
+-            (0, isWord32_1.isWord32)(peerAddress.scopeId) :
+-            peerAddress.scopeId === undefined) &&
++        (peerAddress.flowInfo === undefined || (0, isWord32_1.isWord32)(peerAddress.flowInfo)) &&
++        (peerAddress.scopeId === undefined || (0, isWord32_1.isWord32)(peerAddress.scopeId)) &&
+         (0, isWord16_1.isWord16)(peerAddress.portNumber));
+ }
+ var PeerAddressIPv6 = /** @class */ (function () {

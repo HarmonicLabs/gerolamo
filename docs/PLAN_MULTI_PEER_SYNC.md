@@ -28,6 +28,12 @@ activation delay is modelled as 2k slots (pending certs are accepted for
 authorisation either way); the primary-switch path after an outvote is unit
 tested on `CandidateSet` but has not been exercised against a real fork.
 
+2026-09-03 follow-up (see `SYNC_PIPELINE_RESEARCH.md`, "Round 1"): ChainSync
+RequestNext is pipelined (`blockFetchBatch.pipelineDepth`), header crypto uses
+the fast pure-TS ed25519, rollbacks deeper than k are refused and the peer is
+held as malicious, the outvote quorum counts distinct remote hosts, and the
+Byron genesis UTxO set is seeded on a fresh from-genesis DB.
+
 References: `cardano-docs/network-design.pdf` §5.1.2 (block/body splitting),
 §5.2 (consensus components: ChainSync candidates → BlockFetch → chain
 selection), `cardano-docs/network-spec.pdf` (ChainSync §3.7, BlockFetch §3.8).

@@ -150,9 +150,9 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
         if (this.poisoned) throw this.poisoned;
     }
 
-    /** Forget everything (after a rollback / primary switch). Pending promises reject. */
+    /** Forget everything (after a rollback / primary switch). Pending promises reject with SchedulerReset. */
     reset(reason = "scheduler reset"): void {
-        const err = new Error(reason);
+        const err = new SchedulerReset(reason);
         for (const j of this.jobs.values()) {
             j.scheduled.reject(err);
             j.applied.reject(err);
@@ -296,6 +296,14 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
 }
 
 /** Thrown by `verify` (or internally) when a peer's blocks do not match the advertised range. */
+/** Pending work was dropped on purpose (rollback / primary switch) — not a failure of the peer. */
+export class SchedulerReset extends Error {
+    constructor(reason: string) {
+        super(reason);
+        this.name = "SchedulerReset";
+    }
+}
+
 export class RangeMismatch extends Error {
     constructor(message: string) {
         super(message);

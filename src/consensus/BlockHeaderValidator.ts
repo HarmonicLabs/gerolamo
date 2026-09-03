@@ -37,7 +37,12 @@ import {
 import { PoolOperationalCert } from "@harmoniclabs/cardano-ledger-ts";
 import { BigDecimal, expCmp, ExpOrd } from "@harmoniclabs/cardano-math-ts";
 import { Cbor } from "@harmoniclabs/cbor";
-import { verify as tsKesVerify } from "@harmoniclabs/kes";
+import { setEd25519Verify, verify as tsKesVerify } from "@harmoniclabs/kes";
+import { ed25519Verify, verifyEd25519Fast } from "./fastEd25519";
+
+// KES leaf verification is one raw ed25519 verify; give kes-ts the fast pure-TS
+// implementation (module-level so the worker threads get it too).
+setEd25519Verify(ed25519Verify());
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
@@ -149,7 +154,7 @@ export class ValidatePostBabbageHeader {
         cert: PoolOperationalCert,
         issuer: PublicKey,
     ): boolean {
-        return verifyEd25519Signature_sync(
+        return verifyEd25519Fast(
             cert.signature,
             concatUint8Array(
                 cert.kesPubKey,
@@ -366,7 +371,7 @@ export class ValidatePreBabbageHeader {
         cert: PoolOperationalCert,
         issuer: PublicKey,
     ): boolean {
-        return verifyEd25519Signature_sync(
+        return verifyEd25519Fast(
             cert.signature,
             concatUint8Array(
                 cert.kesPubKey,

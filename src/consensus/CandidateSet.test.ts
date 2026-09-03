@@ -144,3 +144,30 @@ describe("CandidateSet quorum", () => {
         expect(cs.agreement("v2")!.agreedAtSlot).toBeNull();
     });
 });
+
+import { distinctHosts, hostOfPeerKey } from "./CandidateSet";
+
+describe("distinct-host quorum", () => {
+    test("hostOfPeerKey strips the port and IPv6 brackets", () => {
+        expect(hostOfPeerKey("3.1.2.3:3001")).toBe("3.1.2.3");
+        expect(hostOfPeerKey("relay.example:30000")).toBe("relay.example");
+        expect(hostOfPeerKey("[2a05::1]:3001")).toBe("2a05::1");
+        expect(distinctHosts(["3.1.2.3:3001", "3.1.2.3:30000", "3.9.9.9:3001"])).toBe(2);
+    });
+
+    test("two connections to the same host cannot outvote the primary alone", () => {
+        const c = new CandidateSet({ depth: 64 });
+        c.addPeer("p:3001", "primary");
+        c.addPeer("v:3001", "verifier");
+        c.addPeer("v:3002", "verifier");
+        c.observe("p:3001", { slot: 10n, hash: "aa" });
+        c.observe("v:3001", { slot: 10n, hash: "bb" });
+        c.observe("v:3002", { slot: 10n, hash: "bb" });
+        expect(c.primaryOutvoted(2).outvoted).toBe(false);
+        c.addPeer("w:3001", "verifier");
+        c.observe("w:3001", { slot: 10n, hash: "bb" });
+        const r = c.primaryOutvoted(2);
+        expect(r.outvoted).toBe(true);
+        expect(r.hash).toBe("bb");
+    });
+});

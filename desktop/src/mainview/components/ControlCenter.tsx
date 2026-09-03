@@ -55,6 +55,39 @@ const ControlCenter: Component = () => {
   const [errorMsg, setErrorMsg] = createSignal("");
   const [docsHtml, setDocsHtml] = createSignal("");
   const [confirm, setConfirm] = createSignal<"db" | "snap" | null>(null);
+  /** Mithril bootstrap process alive → it owns the DB (one writer). */
+  const bootAlive = () => !!boot()?.processAlive;
+  /** Why an action is blocked right now, or null when it is allowed. */
+  const blockedBecause = (action: "bootstrap" | "skip" | "stopBootstrap" | "wipeSnap" | "startNode" | "wipeDb"): string | null => {
+    switch (action) {
+      case "bootstrap":
+        if (nodeRunning()) return "Stop the node first: bootstrap and the node cannot both write the chain DB.";
+        if (bootAlive()) return "Bootstrap is already running.";
+        if (!hasRuntime()) return "Bun or the repo was not detected (Node page).";
+        return null;
+      case "skip":
+        if (!activeConfig()?.id) return "Save the node config first.";
+        if (bootAlive()) return "Bootstrap is running; stop it before skipping.";
+        if (bootstrapReady()) return "Already marked ready/skipped.";
+        return null;
+      case "stopBootstrap":
+        return bootAlive() ? null : "No bootstrap process is running.";
+      case "wipeSnap":
+        if (!activeConfig()?.id) return "Save the node config first.";
+        if (bootAlive()) return "Bootstrap is running and using the snapshots.";
+        return null;
+      case "startNode":
+        if (nodeRunning()) return "The node is already running.";
+        if (bootAlive()) return "Mithril bootstrap holds the chain DB; stop it or wait for it to finish.";
+        if (!hasRuntime()) return "Bun or the repo was not detected.";
+        return null;
+      case "wipeDb":
+        if (!activeConfig()?.id) return "Save the node config first.";
+        if (nodeRunning()) return "Stop the node first.";
+        if (bootAlive()) return "Stop Mithril bootstrap first.";
+        return null;
+    }
+  };
 
   let healthTimer: ReturnType<typeof setInterval> | null = null;
   let bootTimer: ReturnType<typeof setInterval> | null = null;
@@ -439,6 +472,19 @@ const ControlCenter: Component = () => {
 
             <Show when={page() === "overview"}>
               <div class="flex flex-col gap-6">
+                <Show when={sync()?.multiPeer?.halted}>
+                  {(h) => (
+                    <div class="rounded-[10px] border border-red/30 bg-red-dim p-4 text-[12px]" title={h().reason}>
+                      <div class="font-semibold text-red">Sync halted at slot {Number(h().slot).toLocaleString("en-US")}</div>
+                      <div class="mt-1 text-text-secondary">
+                        A block every peer agrees on failed our ledger rules. That means the local ledger is inconsistent
+                        (missing or extra UTxOs), not that a peer lied. Nothing more is applied until the database is
+                        repaired: stop the node, use <span class="font-mono">Wipe DB</span> on the Node page, and start again.
+                      </div>
+                      <div class="mt-1 truncate font-mono text-[11px] text-text-dim">{h().reason}</div>
+                    </div>
+                  )}
+                </Show>
                 <div class="glass-card-accent p-6">
                   <div class="flex items-center justify-between mb-6">
                     <div class="flex items-center gap-3">
@@ -547,10 +593,22 @@ const ControlCenter: Component = () => {
                     </div>
                     <div
                       class="flex flex-col items-center text-center rounded-[8px] bg-bg-sunken/50 py-3 px-2 min-h-[72px]"
-                      title="Unspent transaction outputs held in this node's local ledger (utxo table). Grows as blocks with transactions are applied; 0 means no ledger yet."
+                      title={
+                        "Unspent transaction outputs in this node's local ledger, genesis outputs included. " +
+                        (sync()?.genesisUtxos && sync()!.genesisUtxos!.total > 0
+                          ? `Genesis: ${sync()!.genesisUtxos!.total} output${sync()!.genesisUtxos!.total === 1 ? "" : "s"} seeded from the Byron genesis file` +
+                            (sync()!.genesisUtxos!.avvm > 0 ? ` (${sync()!.genesisUtxos!.avvm} AVVM redeem)` : "") +
+                            `, ${sync()!.genesisUtxos!.unspent} still unspent.`
+                          : "No genesis outputs recorded in this database (it was created before genesis seeding existed, or is not a from-genesis sync).")
+                      }
                     >
                       <span class="text-[10px] uppercase tracking-wider text-text-dim font-medium mb-1">UTxOs</span>
                       <span class="font-mono text-[18px] font-bold tabular-nums text-text">{formatMetric(sync()?.utxoCount)}</span>
+                      <Show when={sync()?.genesisUtxos && sync()!.genesisUtxos!.total > 0}>
+                        <span class="font-mono text-[10px] text-text-muted">
+                          genesis {sync()!.genesisUtxos!.unspent}/{sync()!.genesisUtxos!.total} unspent
+                        </span>
+                      </Show>
                     </div>
                     <div
                       class="flex flex-col items-center text-center rounded-[8px] bg-bg-sunken/50 py-3 px-2 min-h-[72px]"
@@ -807,16 +865,20 @@ const ControlCenter: Component = () => {
                     Spawns <code class="text-text">bun src/index.ts start-gerolamo</code> with NETWORK / GEROLAMO_DB_PATH. Overlay at ~/.local/share/gerolamo.
                   </p>
                   <div class="flex flex-wrap gap-2">
-                    <button onClick={() => void handleStart()} disabled={busy() || nodeRunning() || !hasRuntime()} class={btnPrimary}>
-                      Start
-                    </button>
-                    <button onClick={() => void handleStop()} disabled={busy() || !activeConfig()?.id} class={btnDanger}>
-                      Stop
-                    </button>
+                    <span data-tooltip={blockedBecause("startNode") ?? "Spawn the node for this instance."}>
+                      <button onClick={() => void handleStart()} disabled={busy() || !!blockedBecause("startNode")} class={btnPrimary}>
+                        Start
+                      </button>
+                    </span>
+                    <span data-tooltip={nodeRunning() ? "Stop the node (SIGTERM, then SIGKILL after 800 ms)." : "The node is not running."}>
+                      <button onClick={() => void handleStop()} disabled={busy() || !activeConfig()?.id || !nodeRunning()} class={btnDanger}>
+                        Stop
+                      </button>
+                    </span>
                     <button
                       class={btnDanger}
-                      disabled={busy() || !activeConfig()?.id || nodeRunning()}
-                      data-tooltip={"Delete the SQLite chain DB (+ WAL).\nStop the node first. Start fresh from tip or Mithril."}
+                      disabled={busy() || !!blockedBecause("wipeDb")}
+                      data-tooltip={blockedBecause("wipeDb") ?? "Delete the SQLite chain DB (+ WAL). Start fresh from genesis, tip or Mithril."}
                       onClick={() => setConfirm("db")}
                     >
                       Delete chain DB
@@ -905,27 +967,39 @@ const ControlCenter: Component = () => {
                     </div>
                   </Show>
                   <div class="flex flex-wrap gap-2">
-                    <button onClick={() => void handleBootstrap()} disabled={busy() || !hasRuntime()} class={btnPrimary}>
-                      Start bootstrap
-                    </button>
-                    <button onClick={() => void handleSkipBootstrap()} disabled={busy() || !activeConfig()?.id} class={btnSecondary}>
-                      Skip (use existing DB)
-                    </button>
-                    <button onClick={() => void manager.bootstrapStop()} disabled={busy()} class={btnDanger}>
-                      Stop bootstrap
-                    </button>
-                    <button
-                      class={btnDanger}
-                      disabled={busy() || !activeConfig()?.id}
-                      data-tooltip={"Delete files in the Mithril snapshot dir.\nStop bootstrap first. Keeps the empty folder."}
-                      onClick={() => setConfirm("snap")}
-                    >
-                      Delete Mithril snapshots
-                    </button>
+                    <span data-tooltip={blockedBecause("bootstrap") ?? "Download the latest Mithril snapshot, verify its certificate chain (pure TS) and import it into the chain DB."}>
+                      <button onClick={() => void handleBootstrap()} disabled={busy() || !!blockedBecause("bootstrap")} class={btnPrimary}>
+                        Start bootstrap
+                      </button>
+                    </span>
+                    <span data-tooltip={blockedBecause("skip") ?? "Mark bootstrap as done and keep whatever the chain DB already holds."}>
+                      <button onClick={() => void handleSkipBootstrap()} disabled={busy() || !!blockedBecause("skip")} class={btnSecondary}>
+                        Skip (use existing DB)
+                      </button>
+                    </span>
+                    <span data-tooltip={blockedBecause("stopBootstrap") ?? "Stop the running bootstrap process."}>
+                      <button onClick={() => void manager.bootstrapStop()} disabled={busy() || !!blockedBecause("stopBootstrap")} class={btnDanger}>
+                        Stop bootstrap
+                      </button>
+                    </span>
+                    <span data-tooltip={blockedBecause("wipeSnap") ?? "Delete files in the Mithril snapshot dir. Keeps the empty folder."}>
+                      <button
+                        class={btnDanger}
+                        disabled={busy() || !!blockedBecause("wipeSnap")}
+                        onClick={() => setConfirm("snap")}
+                      >
+                        Delete Mithril snapshots
+                      </button>
+                    </span>
                     <button onClick={() => setBootLogOpen(!bootLogOpen())} class={btnSecondary}>
                       {bootLogOpen() ? "Hide log" : "Show log"}
                     </button>
                   </div>
+                  <Show when={nodeRunning()}>
+                    <p class="text-[11px] text-amber">
+                      Node is running and owns the chain DB, so bootstrap is unavailable. Stop the node on the Node page to bootstrap from Mithril.
+                    </p>
+                  </Show>
                   <Show when={bootLogOpen()}>
                     <LogFollowPre lines={bootLogLines()} empty="No bootstrap.log yet." />
                   </Show>

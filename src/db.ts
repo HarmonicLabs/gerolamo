@@ -88,7 +88,24 @@ type TxBody =
 
 // Top-level functions for database operations
 
+/**
+ * SQLite tuning. WAL lets readers (MiniBF, /metrics) run while the applier
+ * writes, and `synchronous=NORMAL` skips the per-statement fsync of the
+ * rollback journal (WAL is still fsynced at checkpoints; a power cut can lose
+ * the last transactions, never corrupt the file — the node re-syncs them).
+ */
+export async function applySqlitePragmas(): Promise<{ journalMode: string; synchronous: number }> {
+    await sql`PRAGMA journal_mode = WAL`;
+    await sql`PRAGMA synchronous = NORMAL`;
+    await sql`PRAGMA temp_store = MEMORY`;
+    await sql`PRAGMA cache_size = -65536`; // 64 MiB page cache
+    const jm = (await sql`PRAGMA journal_mode`.values()) as unknown[][];
+    const sy = (await sql`PRAGMA synchronous`.values()) as unknown[][];
+    return { journalMode: String(jm[0]?.[0] ?? "?"), synchronous: Number(sy[0]?.[0] ?? -1) };
+}
+
 export async function ensureInitialized(): Promise<void> {
+    const pragmas = await applySqlitePragmas();
     // Volatile headers table
     await sql`
 		CREATE TABLE IF NOT EXISTS volatile_headers (
@@ -381,14 +398,24 @@ export async function ensureInitialized(): Promise<void> {
 		CREATE INDEX IF NOT EXISTS idx_utxo_tx_hash ON utxo(tx_hash)
 	`;
 
-    // Trigger GC (delete invalid old blocks; customize k=2160)
+    // The old `gc_volatile` AFTER INSERT trigger ran two DELETEs with an
+    // un-indexed `is_valid = FALSE` predicate on *every* block insert: O(rows)
+    // per block (15 ms at 14k blocks, growing linearly). GC now runs from the
+    // applier every VOLATILE_GC_EVERY_BLOCKS blocks (`gcVolatile`) over
+    // partial indexes that only contain invalid rows.
+    // Registry of genesis UTxO refs (spent or not) so the UI can report
+    // "N of M genesis outputs unspent" with one indexed join.
     await sql`
-		CREATE TRIGGER IF NOT EXISTS gc_volatile AFTER INSERT ON blocks
-		BEGIN
-			DELETE FROM blocks WHERE slot < (SELECT MAX(slot) - 2160 FROM blocks) AND is_valid = FALSE;
-			DELETE FROM volatile_headers WHERE slot < (SELECT MAX(slot) - 2160 FROM volatile_headers) AND is_valid = FALSE;
-		END
-	`;
+        CREATE TABLE IF NOT EXISTS genesis_utxo (
+            utxo_ref TEXT PRIMARY KEY,
+            address TEXT NOT NULL,
+            lovelace TEXT NOT NULL,
+            kind TEXT NOT NULL CHECK(kind IN ('nonavvm','avvm'))
+        )
+    `;
+    await sql`DROP TRIGGER IF EXISTS gc_volatile`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_blocks_invalid ON blocks(slot) WHERE is_valid = FALSE`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_volatile_headers_invalid ON volatile_headers(slot) WHERE is_valid = FALSE`;
 
     // Epoch nonces (η0) — local TICKN/UPDN store; external bootstrap fills mid-chain starts
     await sql`
@@ -441,7 +468,7 @@ export async function ensureInitialized(): Promise<void> {
     // MiniBF derived projections (mb_*) — never poison ledger tables
     await ensureMinibfSchema(sql);
 
-    logger.info("DB initialized with WAL mode for concurrency");
+    logger.info(`DB initialized (journal_mode=${pragmas.journalMode}, synchronous=${pragmas.synchronous})`);
 }
 
 /** Local epoch η0 (hex). Null if not yet stored. */
@@ -1501,6 +1528,11 @@ async function countQuery(q: Promise<any>): Promise<number> {
  * Creates are deleted; spends are re-inserted from packed delta JSON.
  * Legacy deltas without utxo_ref are skipped (logged).
  */
+/** Blocks strictly after `slot` (what a rollback to `slot` would discard). */
+export async function countBlocksAfterSlot(slot: bigint): Promise<number> {
+    return countQuery(sql`SELECT COUNT(*) as c FROM blocks WHERE slot > ${slot}`);
+}
+
 export async function rollbackChainTo(
     slot: bigint,
 ): Promise<
@@ -1591,6 +1623,98 @@ export async function rollbackChainTo(
 }
 
 /** UTxO set size (object-row safe). */
+/**
+ * Insert the Byron genesis UTxOs on a fresh from-genesis database so the
+ * ledger is complete from slot 0 (the first Byron/Shelley transactions spend
+ * them). Idempotent; no utxo_deltas row because genesis is never rolled back.
+ */
+export async function seedGenesisUtxos(
+    rows: Array<{ utxoRef: string; txId: string; address: string; lovelace: bigint }>,
+): Promise<number> {
+    let inserted = 0;
+    for (const r of rows) {
+        const txOut = JSON.stringify({ address: r.address, amount: r.lovelace.toString(), assets: {} });
+        const res = await sql`
+            INSERT OR IGNORE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${r.utxoRef}, ${txOut}, ${r.txId})
+        `;
+        inserted += Number((res as unknown as { count?: number })?.count ?? 1);
+    }
+    return inserted;
+}
+
+/** Security parameter k: invalid rows older than this many slots behind the tip are garbage. */
+export const VOLATILE_GC_K = 2160;
+
+/**
+ * Remove invalidated blocks/headers that are more than k slots behind the tip.
+ * Cheap thanks to the partial `WHERE is_valid = FALSE` indexes; called by the
+ * applier every few thousand blocks instead of per insert.
+ */
+export async function gcVolatile(k: number = VOLATILE_GC_K): Promise<{ blocks: number; headers: number }> {
+    const b = await sql`DELETE FROM blocks WHERE is_valid = FALSE AND slot < (SELECT MAX(slot) - ${k} FROM blocks)`;
+    const h = await sql`DELETE FROM volatile_headers WHERE is_valid = FALSE AND slot < (SELECT MAX(slot) - ${k} FROM volatile_headers)`;
+    const n = (r: unknown) => Number((r as { count?: number })?.count ?? 0);
+    return { blocks: n(b), headers: n(h) };
+}
+
+export interface GenesisSeedResult {
+    /** Newly inserted this run. */
+    inserted: number;
+    /** Already in the utxo table. */
+    present: number;
+    /** Not in utxo and already consumed by an applied transaction (mb_tx_in), so correctly absent. */
+    spent: number;
+}
+
+/**
+ * Retroactive, idempotent genesis seeding: insert every genesis UTxO that is
+ * neither in the utxo table nor recorded as spent by an applied transaction.
+ * Safe on a database that synced before seeding existed: spends are known
+ * from `mb_tx_in`, which is written even when the input UTxO was missing.
+ */
+export async function seedGenesisUtxosIfMissing(
+    rows: Array<{ utxoRef: string; txId: string; address: string; lovelace: bigint; kind?: "nonavvm" | "avvm" }>,
+): Promise<GenesisSeedResult> {
+    const res: GenesisSeedResult = { inserted: 0, present: 0, spent: 0 };
+    const CHUNK = 400;
+    for (let i = 0; i < rows.length; i += CHUNK) {
+        const chunk = rows.slice(i, i + CHUNK);
+        for (const r of chunk) {
+            await sql`INSERT OR IGNORE INTO genesis_utxo (utxo_ref, address, lovelace, kind) VALUES (${r.utxoRef}, ${r.address}, ${r.lovelace.toString()}, ${r.kind ?? "nonavvm"})`;
+        }
+        const refs = chunk.map((r) => r.utxoRef);
+        const txIds = chunk.map((r) => r.txId);
+        const presentRows = await sql`SELECT utxo_ref FROM utxo WHERE utxo_ref IN ${sql(refs)}`.values() as unknown[][];
+        const present = new Set(presentRows.map((r) => String(r[0])));
+        const spentRows = await sql`
+            SELECT prev_tx_hash FROM mb_tx_in WHERE prev_output_index = 0 AND prev_tx_hash IN ${sql(txIds)}
+        `.values() as unknown[][];
+        const spent = new Set(spentRows.map((r) => String(r[0]).toLowerCase()));
+        const missing = chunk.filter((r) => {
+            if (present.has(r.utxoRef)) {
+                res.present++;
+                return false;
+            }
+            if (spent.has(r.txId.toLowerCase())) {
+                res.spent++;
+                return false;
+            }
+            return true;
+        });
+        res.inserted += await seedGenesisUtxos(missing);
+    }
+    return res;
+}
+
+/** Genesis outputs known vs still unspent (indexed join, cheap enough for /metrics). */
+export async function getGenesisUtxoStats(): Promise<{ total: number; unspent: number; avvm: number }> {
+    const total = await countQuery(sql`SELECT COUNT(*) as c FROM genesis_utxo`);
+    if (total === 0) return { total: 0, unspent: 0, avvm: 0 };
+    const unspent = await countQuery(sql`SELECT COUNT(*) as c FROM utxo u JOIN genesis_utxo g ON g.utxo_ref = u.utxo_ref`);
+    const avvm = await countQuery(sql`SELECT COUNT(*) as c FROM genesis_utxo WHERE kind = 'avvm'`);
+    return { total, unspent, avvm };
+}
+
 export async function getUtxoCount(): Promise<number> {
     return countQuery(sql`SELECT COUNT(*) as c FROM utxo`);
 }

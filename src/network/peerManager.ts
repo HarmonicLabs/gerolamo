@@ -71,6 +71,11 @@ export interface PeerGovernorConfig {
 export interface BlockFetchBatchConfig {
     /** Inclusive range size while catching up. Clamped to 1..256. */
     maxBlocks?: number;
+    /**
+     * ChainSync MsgRequestNext kept in flight while behind the peer's tip
+     * (protocol pipelining). 1 = one header per round trip. Default 32.
+     */
+    pipelineDepth?: number;
     /** Flush a partial live-tail header batch after this many ms. */
     flushMs?: number;
     /** Abort and terminate a contaminated range connection before spec 60s. */
@@ -177,14 +182,15 @@ function govEnabled(config: GerolamoConfig): boolean {
 
 function targetsFromConfig(config: GerolamoConfig): Partial<PeerGovernorTargets> {
     const g = config.peerGovernor ?? {};
-    return {
-        targetHot: g.targetHot,
-        targetWarm: g.targetWarm,
-        targetCold: g.targetCold,
-        maxHot: g.maxHot,
-        maxWarm: g.maxWarm,
-        maxCold: g.maxCold,
-    };
+    // Only pass keys the config actually sets: `{...DEFAULTS, ...{targetHot: undefined}}`
+    // would erase the default and leave the governor with NaN targets (mainnet
+    // config had no peerGovernor block → 1 hot peer forever).
+    const out: Partial<PeerGovernorTargets> = {};
+    for (const k of ["targetHot", "targetWarm", "targetCold", "maxHot", "maxWarm", "maxCold"] as const) {
+        const v = g[k];
+        if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+    }
+    return out;
 }
 
 function getPeerAccessor(): PeerAccessor {
@@ -224,7 +230,7 @@ function wirePeerConsensus(peer: PeerClient): void {
         return orch.handleRollForwardBatch(items, peerId);
     };
     peer.onRollBack = async (peerId, point) => {
-        await orch.handleRollBack(point).catch((err) => {
+        await orch.handleRollBack(point, undefined, peerId).catch((err) => {
             logger.error(`handleRollBack failed for ${peerId}:`, err);
             throw err;
         });

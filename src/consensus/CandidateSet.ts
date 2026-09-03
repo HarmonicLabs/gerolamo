@@ -93,6 +93,18 @@ function fragmentPush(f: Fragment, p: CandidatePoint, depth: number): void {
     }
 }
 
+/** `host:port` → `host` (IPv6 literals keep their brackets). */
+export function hostOfPeerKey(key: string): string {
+    const i = key.lastIndexOf(":");
+    if (i < 0) return key;
+    const host = key.slice(0, i);
+    return host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+}
+
+export function distinctHosts(keys: readonly string[]): number {
+    return new Set(keys.map(hostOfPeerKey)).size;
+}
+
 export class CandidateSet {
     private readonly depth: number;
     private readonly peers = new Map<string, PeerState>();
@@ -261,7 +273,9 @@ export class CandidateSet {
             groups.set(g, [...(groups.get(g) ?? []), p.key]);
         }
         for (const [g, keys] of groups) {
-            if (keys.length >= quorum) {
+            // Quorum counts distinct remote hosts, not connections: one operator
+            // answering on several ports (or one relay reached twice) is one vote.
+            if (distinctHosts(keys) >= quorum) {
                 const [slot, hash] = g.split(":");
                 return { outvoted: true, slot: BigInt(slot!), hash, by: keys };
             }

@@ -143,3 +143,11 @@ describe("epoch progress", () => {
     expect(deriveGerolamoSyncStatus({ tipSlot: "0", utxoCount: 0 }, "preprod").epochProgress).toBeNull();
   });
 });
+
+describe("genesis UTxO stats", () => {
+  test("parsed when present, null when the node predates them", () => {
+    const s = deriveGerolamoSyncStatus({ tipSlot: "100", utxoCount: 4, genesisUtxos: { total: 1, unspent: 0, avvm: 0 } }, "preprod");
+    expect(s.genesisUtxos).toEqual({ total: 1, unspent: 0, avvm: 0 });
+    expect(deriveGerolamoSyncStatus({ tipSlot: "100", utxoCount: 4 }, "preprod").genesisUtxos).toBeNull();
+  });
+});

@@ -6,6 +6,7 @@ export type MetricsPayload = {
   era?: unknown;
   eraName?: unknown;
   utxoCount?: unknown;
+  genesisUtxos?: unknown;
   uptimeSec?: unknown;
   peers?: { hot?: unknown; warm?: unknown; cold?: unknown; total?: unknown } | null;
   governor?: {
@@ -40,7 +41,11 @@ export type GerolamoPeerAgreement = {
 
 export type GerolamoMaliciousPeer = { key: string; reason: string; until: number };
 
+export type GerolamoSyncHalt = { slot: string; hash: string; reason: string; since: number };
+
 export type GerolamoMultiPeerSync = {
+  /** Strict validation stopped the applier; the DB needs a repair/resync. */
+  halted: GerolamoSyncHalt | null;
   mode: "genesis" | "tip" | "point" | "resume" | null;
   bodyValidation: "soft" | "strict" | null;
   primary: string | null;
@@ -92,6 +97,8 @@ export type GerolamoSyncStatus = {
   era: number | null;
   eraName: string | null;
   utxoCount: number | null;
+  /** Genesis outputs from the Byron genesis file: total seeded and how many remain unspent. */
+  genesisUtxos: { total: number; unspent: number; avvm: number } | null;
   uptimeSec: number | null;
   hotPeers: number | null;
   peers: {
@@ -233,7 +240,11 @@ export function deriveMultiPeerSync(value: unknown): GerolamoMultiPeerSync | nul
     : [];
   const mode = v.mode === "genesis" || v.mode === "tip" || v.mode === "point" || v.mode === "resume" ? v.mode : null;
   const bodyValidation = v.bodyValidation === "strict" || v.bodyValidation === "soft" ? v.bodyValidation : null;
+  const h = v.halted && typeof v.halted === "object" ? (v.halted as Record<string, unknown>) : null;
   return {
+    halted: h && typeof h.reason === "string"
+      ? { slot: String(h.slot ?? ""), hash: String(h.hash ?? ""), reason: h.reason, since: finiteNumber(h.since) ?? 0 }
+      : null,
     mode,
     bodyValidation,
     primary: typeof v.primary === "string" ? v.primary : null,
@@ -309,6 +320,12 @@ export function deriveGerolamoSyncStatus(
       ? metrics.eraName
       : null,
     utxoCount,
+    genesisUtxos: (() => {
+      const g = metrics.genesisUtxos && typeof metrics.genesisUtxos === "object" ? (metrics.genesisUtxos as Record<string, unknown>) : null;
+      if (!g) return null;
+      const total = finiteNumber(g.total) ?? 0;
+      return { total, unspent: finiteNumber(g.unspent) ?? 0, avvm: finiteNumber(g.avvm) ?? 0 };
+    })(),
     uptimeSec: finiteNumber(metrics.uptimeSec),
     hotPeers: finiteNumber(metrics.peers?.hot),
     peers: {

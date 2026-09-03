@@ -8,7 +8,9 @@ import {
 } from "./peerManager";
 import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
 import { setupKeyboard } from "../tui";
-import { ensureInitialized, getMaxSlot } from "../db";
+import { ensureInitialized, getMaxSlot, seedGenesisUtxosIfMissing } from "../db";
+import { getByronGenesisConfig } from "../utils/paths";
+import { byronGenesisUtxos } from "../consensus/byron/genesisUtxo";
 import { populateEpochState } from "../state/blockfrost";
 import { logger } from "../utils/logger";
 import { startPeerBlockServer } from "./peerBlockServer";
@@ -190,6 +192,22 @@ export async function start() {
     logger.info("Initializing database...");
     await ensureInitialized();
     logger.info("Database initialized and ready.");
+
+    // From-genesis ledger: the Byron genesis balances are the initial UTxO set.
+    // Retroactive and idempotent — a DB that synced before seeding existed gets
+    // the still-unspent genesis outputs added; spent ones are left absent.
+    if (config.syncFromGenesis) {
+        const byronGenesis = await getByronGenesisConfig(config);
+        if (byronGenesis) {
+            const { utxos, nonAvvm, avvm } = byronGenesisUtxos(byronGenesis);
+            const r = await seedGenesisUtxosIfMissing(utxos);
+            logger.info(
+                `Genesis UTxOs: ${utxos.length} (${nonAvvm} funded address(es), ${avvm} AVVM) — ${r.inserted} added, ${r.present} present, ${r.spent} already spent on chain (tip slot ${await getMaxSlot()})`,
+            );
+        } else {
+            logger.warn("syncFromGenesis but no byronGenesisFile configured: genesis UTxOs not seeded");
+        }
+    }
 
     // Run snapshot population if enabled
     if (config.snapshot.enable) {

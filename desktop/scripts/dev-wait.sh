@@ -2,6 +2,17 @@
 set -e
 cd "$(dirname "$0")/.."
 
+# Fresh clone: install this package's deps if the root `bun install` did not
+# (its postinstall normally does), then verify system libraries.
+if [ ! -x node_modules/.bin/electrobun ] || [ ! -x node_modules/.bin/vite ]; then
+  echo "[Gerolamo UI] desktop dependencies missing — running bun install"
+  bun install
+fi
+bun ../scripts/preflight.ts || { echo "[Gerolamo UI] preflight failed — fix the items above and rerun"; exit 1; }
+if [ ! -d node_modules/electrobun/dist-linux-x64 ]; then
+  echo "[Gerolamo UI] First run: Electrobun downloads its Linux runtime (~150 MB) now…"
+fi
+
 export GDK_BACKEND=x11
 export WEBKIT_DISABLE_DMABUF_RENDERER=1
 export WEBKIT_FORCE_SOFTWARE_OPENGL=1

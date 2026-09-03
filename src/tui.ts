@@ -65,6 +65,9 @@ const LAB_HEADER = [
 ];
 
 export function setupKeyboard() {
+    // Only meaningful on an interactive terminal. When spawned by the desktop
+    // app (stdin ignored) or with stdin redirected, raw mode does not exist.
+    if (!stdin.isTTY || typeof stdin.setRawMode !== "function") return;
     stdin.setRawMode(true);
     stdin.resume();
     stdin.setEncoding("utf8");

@@ -23,6 +23,7 @@ import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { initiatorOnly, peerSharingAdvertised } from "./nodeRole";
+import { ChainSyncPipeline } from "./ChainSyncPipeline";
 
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { GlobalSharedMempool, type GerolamoMempool } from "./SharedMempool";
@@ -112,6 +113,12 @@ export class PeerClient implements IPeerClient {
     private terminated = false;
     private syncLoopStarted = false;
     private rollForwardBatcher?: RollForwardBatcher<RollForwardBatchItem>;
+    /** Pipelined MsgRequestNext bookkeeping (see ChainSyncPipeline). */
+    private csPipeline: ChainSyncPipeline | null = null;
+    /** Intersection point from the last FindIntersect, until the first RollForward arrives. */
+    private csIntersect: { slot: bigint; hash: string } | null = null;
+    /** While true, replies are counted but their content is dropped (pre-restart drain). */
+    private csDraining = false;
     isSyncing = false;
     /** ms epoch of last ChainSync rollForward (hot liveness for PeerGovernor). */
     lastRollForwardAt?: number;
@@ -392,10 +399,13 @@ export class PeerClient implements IPeerClient {
         ]);
         this.notePeerTip(intersectResult.tip.point);
         if (intersectResult instanceof ChainSyncIntersectFound) {
+            const bh = intersectResult.point.blockHeader;
+            this.csIntersect = bh ? { slot: BigInt(bh.slotNumber), hash: toHex(bh.hash) } : null;
             logger.debug(
                 `Intersect found at slot ${intersectResult.point.blockHeader?.slotNumber} for peer ${this.peerId}`,
             );
         } else {
+            this.csIntersect = null;
             logger.warn(
                 `No intersect found for peer ${this.peerId}, proceeding with producer tip`,
             );
@@ -439,6 +449,9 @@ export class PeerClient implements IPeerClient {
             0,
             Number.isFinite(configuredFlushMs) ? configuredFlushMs : 25,
         );
+        this.csPipeline = new ChainSyncPipeline({
+            maxDepth: Number(this.config.blockFetchBatch?.pipelineDepth ?? 32),
+        });
         this.rollForwardBatcher = new RollForwardBatcher({
             maxItems,
             flushMs,
@@ -472,13 +485,18 @@ export class PeerClient implements IPeerClient {
                 this.notePeerTip(rollForward.tip.point);
                 const tip =
                     rollForward.tip.point.blockHeader?.slotNumber ?? 0n;
+                this.csPipeline?.noteReply();
+                if (this.csDraining) return; // stale reply from before a restart
                 const rollForwardCborBytes = rollForward.toCborBytes();
+                this.csIntersect = null; // positioned: later rollbacks are real
                 try {
+                    // Back-pressure: resolves late only when the header batch is full
+                    // and consensus is still busy with the previous one.
                     await this.rollForwardBatcher?.push({
                         rollForwardCborBytes,
                         tip: BigInt(tip),
                     });
-                    await this.chainSyncClient.requestNext();
+                    this.chainSyncTopUp();
                 } catch (err) {
                     logger.error(
                         `rollForward/requestNext failed for ${this.peerId}:`,
@@ -488,6 +506,12 @@ export class PeerClient implements IPeerClient {
                 }
             },
         );
+
+        // MsgAwaitReply: the server has nothing newer — we are at its tip, so
+        // stop stacking requests (depth 1) until it pulls ahead again.
+        this.chainSyncClient.on("awaitReply", () => {
+            this.csPipeline?.noteAwaitReply();
+        });
 
         this.chainSyncClient.on(
             "rollBackwards",
@@ -501,10 +525,11 @@ export class PeerClient implements IPeerClient {
                         `rollBack to origin for peer ${this.peerId} (genesis boot)`,
                     );
                     this.notePeerTip(rollBack.tip.point);
+                    this.csPipeline?.noteReply();
                     try {
                         this.rollForwardBatcher?.reset();
                         await this.rollForwardBatcher?.drain();
-                        await this.chainSyncClient.requestNext();
+                        this.chainSyncTopUp();
                     } catch (err) {
                         logger.error(
                             `requestNext (origin rollback) failed for ${this.peerId}:`,
@@ -520,11 +545,27 @@ export class PeerClient implements IPeerClient {
                     tip.blockHeader?.slotNumber,
                 );
 
+                this.csPipeline?.noteReply();
+                if (this.csDraining) return;
+                // Spec §3.7: the first reply after FindIntersect is MsgRollBackward to the
+                // intersection itself. That positions this peer's read pointer; it says
+                // nothing about our chain and must not trigger a local rollback.
+                const bh = rollBack.point.blockHeader;
+                if (
+                    this.csIntersect && bh &&
+                    BigInt(bh.slotNumber) === this.csIntersect.slot &&
+                    toHex(bh.hash) === this.csIntersect.hash
+                ) {
+                    this.csIntersect = null;
+                    logger.debug(`Initial positioning rollback to intersection slot ${bh.slotNumber} for ${this.peerId} (ignored)`);
+                    this.chainSyncTopUp();
+                    return;
+                }
                 try {
                     this.rollForwardBatcher?.reset();
                     await this.rollForwardBatcher?.drain();
                     await this.onRollBack?.(this.peerId, rollBack.point);
-                    await this.chainSyncClient.requestNext();
+                    this.chainSyncTopUp();
                 } catch (err) {
                     logger.error(
                         `requestNext (rollback) failed for ${this.peerId}:`,
@@ -542,7 +583,68 @@ export class PeerClient implements IPeerClient {
         });
 
         await this.syncToTip();
-        await this.chainSyncClient.requestNext();
+        this.chainSyncTopUp();
+    }
+
+    /**
+     * Send as many MsgRequestNext as the pipeline allows (network-spec §3.7
+     * permits pipelining; replies arrive in order and are handled by the
+     * `rollForward` / `rollBackwards` listeners above). The per-call promise
+     * from the library is intentionally not awaited — it resolves on the next
+     * reply regardless of which request it answers.
+     */
+    private chainSyncTopUp(): void {
+        if (!this.isSyncing || this.terminated || !this.csPipeline) return;
+        const n = this.csPipeline.toSend();
+        for (let i = 0; i < n; i++) {
+            try {
+                void this.chainSyncClient.requestNext();
+                this.csPipeline.noteSent(1);
+            } catch (err) {
+                logger.error(`requestNext failed for ${this.peerId}:`, err);
+                this.terminate("requestNext failed");
+                return;
+            }
+        }
+    }
+
+    /**
+     * Re-run FindIntersect from our DB tip on this connection, e.g. when a
+     * verifier is promoted to primary (its stream is ahead of what we applied)
+     * or when its headers stop chaining onto our tip.
+     *
+     * Pipelined RequestNext replies still owed by the server are drained first:
+     * the client only has agency to send FindIntersect when nothing is
+     * outstanding (network-spec §3.7). If the drain does not finish in time
+     * the connection is dropped and the governor reconnects it.
+     */
+    async restartChainSync(reason: string): Promise<void> {
+        if (this.terminated || !this.isSyncing) return;
+        logger.info(`Restarting ChainSync from DB tip for ${this.peerId}: ${reason}`);
+        this.csDraining = true;
+        this.rollForwardBatcher?.reset();
+        const deadline = Date.now() + 30_000;
+        while ((this.csPipeline?.inFlight ?? 0) > 0 && Date.now() < deadline && !this.terminated) {
+            await new Promise((r) => setTimeout(r, 25));
+        }
+        if (this.terminated) return;
+        if ((this.csPipeline?.inFlight ?? 0) > 0) {
+            this.terminate("chainsync restart: drain timed out");
+            return;
+        }
+        this.csDraining = false;
+        this.stopSyncLoop();
+        try {
+            await this.startSyncLoop();
+        } catch (err) {
+            logger.error(`ChainSync restart failed for ${this.peerId}:`, err);
+            this.terminate("chainsync restart failed");
+        }
+    }
+
+    /** Pipelined ChainSync requests currently in flight (for /metrics). */
+    get chainSyncInFlight(): number {
+        return this.csPipeline?.inFlight ?? 0;
     }
 
     /**
@@ -555,7 +657,11 @@ export class PeerClient implements IPeerClient {
         this.syncLoopStarted = false;
         this.rollForwardBatcher?.dispose();
         this.rollForwardBatcher = undefined;
+        this.csPipeline?.reset();
+        this.csPipeline = null;
+        this.csDraining = false;
         try {
+            this.chainSyncClient.removeAllListeners("awaitReply");
             this.chainSyncClient.removeAllListeners("rollForward");
             this.chainSyncClient.removeAllListeners("rollBackwards");
         } catch {

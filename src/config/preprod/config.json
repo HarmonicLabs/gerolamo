@@ -30,6 +30,7 @@
     "idleTimeoutMs": 120000
   },
   "blockFetchBatch": {
+    "pipelineDepth": 32,
     "maxBlocks": 32,
     "flushMs": 25,
     "rangeTimeoutMs": 55000,

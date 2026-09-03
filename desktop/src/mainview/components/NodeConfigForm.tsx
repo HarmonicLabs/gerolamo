@@ -40,7 +40,7 @@ export const NodeConfigForm: Component<Props> = (props) => {
         <div>
           <TipLabel
             text="network"
-            tip={"config.json → network\npreprod = testnet magic 1 (default).\nmainnet is deferred. preview is experimental."}
+            tip={"config.json → network\npreprod = testnet, magic 1 (default).\nmainnet = magic 764824073.\npreview = testnet, magic 2."}
           />
           <select
             value={props.network}
@@ -48,7 +48,7 @@ export const NodeConfigForm: Component<Props> = (props) => {
             class={fieldClass}
           >
             <option value="preprod">preprod</option>
-            <option value="mainnet">mainnet (deferred)</option>
+            <option value="mainnet">mainnet</option>
             <option value="preview">preview</option>
           </select>
         </div>

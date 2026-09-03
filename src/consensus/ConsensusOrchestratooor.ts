@@ -938,7 +938,7 @@ export class ConsensusOrchestrator {
                 if (!parsedHeader.isEbb) {
                     const obft = await this.ensureByronObft();
                     if (obft) {
-                        const check = obft.validateMainHeader(parsedHeader.rawHeaderBytes, parsedHeader.slot);
+                        const check = this.profile.time("hdr.obft", () => obft.validateMainHeader(parsedHeader.rawHeaderBytes, parsedHeader.slot));
                         if (!check.ok) {
                             this.terminateMalicious(
                                 peer,
@@ -1040,7 +1040,7 @@ export class ConsensusOrchestrator {
                 this.lastByronTipHash = blockHash;
                 if (!isEbb && this.byronObft) {
                     try {
-                        this.byronObft.noteApplied(headerBytes, blockSlot, ConsensusOrchestrator.byronRawBody(blockMessage.blockData));
+                        this.profile.time("blk.obft", () => this.byronObft!.noteApplied(headerBytes, blockSlot, ConsensusOrchestrator.byronRawBody(blockMessage.blockData)));
                     } catch (err: unknown) {
                         logger.warn(`Byron OBFT noteApplied failed at slot ${blockSlot}:`, err);
                     }

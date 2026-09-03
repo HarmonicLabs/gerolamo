@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import { Cbor, CborArray, CborBytes, CborUInt, LazyCborArray } from "@harmoniclabs/cbor";
-import { blake2b_224, verifyEd25519Signature_sync } from "@harmoniclabs/crypto";
+import { blake2b_224, sha3 } from "@harmoniclabs/crypto";
+import { verifyEd25519Fast } from "../fastEd25519";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
 /**
@@ -45,8 +45,9 @@ export function concatBytes(...parts: Uint8Array[]): Uint8Array {
     return out;
 }
 
+/** SHA3-256 from our own crypto package (pure TS; verified against the NIST empty-string vector). */
 function sha3_256(bytes: Uint8Array): Uint8Array {
-    return new Uint8Array(createHash("sha3-256").update(bytes).digest());
+    return new Uint8Array(sha3(bytes));
 }
 
 function cborUInt(n: bigint | number): Uint8Array {
@@ -88,7 +89,7 @@ export function verifyByronDelegationCert(
     }
     const payload = cborBytes(concatBytes(ASCII_00, cert.delegateXPub, cborUInt(cert.epoch)));
     const message = concatBytes(signTagCertificate(protocolMagic), payload);
-    return verifyEd25519Signature_sync(cert.signature, message, cert.issuerXPub.slice(0, 32));
+    return verifyEd25519Fast(cert.signature, message, cert.issuerXPub.slice(0, 32));
 }
 
 export interface ByronMainHeaderSlices {
@@ -199,7 +200,7 @@ export function verifyByronBlockSignature(
             return { ok: false, reason: "certificate issuer is not the header pubkey" };
         }
         const message = concatBytes(signTagBlock(protocolMagic, cert.issuerXPub), toSign);
-        const ok = verifyEd25519Signature_sync(s.blockSig.signature, message, cert.delegateXPub.slice(0, 32));
+        const ok = verifyEd25519Fast(s.blockSig.signature, message, cert.delegateXPub.slice(0, 32));
         return {
             ok,
             reason: ok ? undefined : "block signature invalid",
@@ -209,7 +210,7 @@ export function verifyByronBlockSignature(
     }
     if (s.blockSig.type === 0) {
         const message = concatBytes(signTagBlock(protocolMagic, s.headerPubKey), toSign);
-        const ok = verifyEd25519Signature_sync(s.blockSig.signature, message, s.headerPubKey.slice(0, 32));
+        const ok = verifyEd25519Fast(s.blockSig.signature, message, s.headerPubKey.slice(0, 32));
         const kh = byronKeyHash(s.headerPubKey);
         return { ok, reason: ok ? undefined : "block signature invalid", issuerKeyHash: kh, signerKeyHash: kh };
     }

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { pushSample, series, spanLabel, type ResourceSample } from "./history";
+import { HISTORY_MAX_SAMPLES, indexAtFraction, pushSample, series, spanLabel, windowSamples, type ResourceSample } from "./history";
 
 const s = (t: number, cores: number | null): ResourceSample => ({ t, nodeCores: cores, nodeRss: null, nodeHeap: null, sysCpu: null, sysMem: null, bps: null });
 
@@ -24,5 +24,28 @@ describe("history", () => {
     expect(spanLabel([])).toBe("—");
     expect(spanLabel([s(0, 0), s(30_000, 0)])).toBe("30 s");
     expect(spanLabel([s(0, 0), s(12 * 60_000, 0)])).toBe("12 min");
+  });
+});
+
+describe("indexAtFraction", () => {
+  test("maps the hovered x fraction to the nearest sample", () => {
+    expect(indexAtFraction(0, 10)).toBe(0);
+    expect(indexAtFraction(1, 10)).toBe(9);
+    expect(indexAtFraction(0.5, 11)).toBe(5);
+    expect(indexAtFraction(-3, 10)).toBe(0);
+    expect(indexAtFraction(7, 10)).toBe(9);
+    expect(indexAtFraction(0.3, 1)).toBe(0);
+  });
+});
+
+describe("windowSamples", () => {
+  test("keeps only the last N minutes and the stored maximum is 10 minutes at 2 s per sample", () => {
+    expect(HISTORY_MAX_SAMPLES).toBe(300);
+    const now = 10_000_000;
+    const h = Array.from({ length: 300 }, (_, i) => s(now - (299 - i) * 2000, i));
+    expect(windowSamples(h, 5, now).length).toBe(151); // 5 min = 150 intervals + the sample at the boundary
+    expect(windowSamples(h, 10, now).length).toBe(300);
+    expect(windowSamples(h, 5, now)[0]!.t).toBe(now - 300_000);
+    expect(windowSamples([], 5, now)).toEqual([]);
   });
 });

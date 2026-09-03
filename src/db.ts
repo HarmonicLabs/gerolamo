@@ -756,42 +756,32 @@ export async function countBlockTxs(hashHex: string): Promise<number> {
 }
 
 /**
- * Number every block that has no height yet: walk the chain by slot (EBB before
- * the main block of the same slot), main blocks count, EBBs stay null. Idempotent;
- * runs at startup only when some block_no is missing (one pass on an old DB).
+ * Number every block that has no height yet. One main block per slot, so the
+ * height of a main block is its rank among main blocks ordered by slot; EBBs
+ * (era byte 0) stay null. Set-based: a temp table with ROW_NUMBER() and an
+ * index, then one UPDATE — seconds for millions of rows. Runs at startup only
+ * when heights are missing (an old database), before the servers start.
  */
-export async function backfillBlockHeights(batch = 5000): Promise<{ numbered: number }> {
+export async function backfillBlockHeights(): Promise<{ numbered: number }> {
     const missing = await countQuery(sql`SELECT COUNT(*) as c FROM blocks WHERE block_no IS NULL AND hex(substr(block_data, 2, 1)) <> '00'`);
     if (missing === 0) return { numbered: 0 };
-    logger.warn(`Block heights missing for ${missing} block(s); numbering the chain from the start`);
-    let height = 0;
-    let numbered = 0;
-    let lastSlot = -1;
-    let lastEbb = false;
-    for (;;) {
-        // (slot, ebb-first) order; resume strictly after the last processed (slot, ebb) pair
-        const rows = (await sql.unsafe(
-            `SELECT hash, slot, (hex(substr(block_data, 2, 1)) = '00') AS ebb FROM blocks
-             WHERE slot > ${lastSlot} OR (slot = ${lastSlot} AND ${lastEbb ? 1 : 0} = 1 AND hex(substr(block_data, 2, 1)) <> '00')
-             ORDER BY slot ASC, ebb DESC LIMIT ${batch}`,
-        ).values()) as unknown[][];
-        if (rows.length === 0) break;
-        await sql.begin(async (tx) => {
-            for (const r of rows) {
-                const isEbb = Number(r[2]) === 1;
-                if (!isEbb) {
-                    height++;
-                    await tx`UPDATE blocks SET block_no = ${height} WHERE hash = ${r[0] as string}`;
-                    numbered++;
-                }
-            }
-        });
-        const last = rows[rows.length - 1]!;
-        lastSlot = Number(last[1]);
-        lastEbb = Number(last[2]) === 1;
-    }
-    logger.info(`Block heights: numbered ${numbered} block(s), tip height ${height}`);
-    return { numbered };
+    logger.warn(`Block heights missing for ${missing} block(s); numbering the chain (set-based, one pass)`);
+    const t0 = performance.now();
+    await sql.unsafe(`DROP TABLE IF EXISTS temp.block_heights`);
+    await sql.unsafe(
+        `CREATE TEMP TABLE block_heights AS
+         SELECT hash, ROW_NUMBER() OVER (ORDER BY slot ASC) AS rn
+         FROM blocks WHERE hex(substr(block_data, 2, 1)) <> '00'`,
+    );
+    await sql.unsafe(`CREATE INDEX temp.idx_block_heights_hash ON block_heights(hash)`);
+    await sql.unsafe(
+        `UPDATE blocks SET block_no = (SELECT rn FROM temp.block_heights bh WHERE bh.hash = blocks.hash)
+         WHERE block_no IS NULL AND hex(substr(block_data, 2, 1)) <> '00'`,
+    );
+    await sql.unsafe(`DROP TABLE IF EXISTS temp.block_heights`);
+    const height = await getMaxBlockNo();
+    logger.info(`Block heights: numbered ${missing} block(s) in ${Math.round(performance.now() - t0)} ms, tip height ${height}`);
+    return { numbered: missing };
 }
 
 export async function getMaxSlot(): Promise<bigint> {

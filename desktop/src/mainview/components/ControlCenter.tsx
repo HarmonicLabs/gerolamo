@@ -2,7 +2,8 @@ import { Component, For, Show, createEffect, createResource, createSignal, onCle
 import { manager } from "../lib/manager";
 import { gerolamoHttpBase, type BootstrapStatus, type HealthResult, type InstanceConfig, type StatusResult } from "../../shared/types";
 import { formatBytes, formatCores, formatPercent, nodeCoresBusy, nodeCpuShare, nodeMemShare, type ResourceSnapshot } from "../../shared/resources";
-import { pushSample, series, spanLabel, type ResourceSample } from "../../shared/history";
+import { DEFAULT_WINDOW_MIN, HISTORY_WINDOWS_MIN, pushSample, series, spanLabel, windowSamples, type ResourceSample } from "../../shared/history";
+import type { MempoolSnapshot } from "../../shared/types";
 import { TimeSeries } from "./ui/TimeSeries";
 import { DEFAULT_NODE_SETTINGS, type NodeSettings } from "../../shared/nodeSettings";
 import { NodeConfigForm } from "./NodeConfigForm";
@@ -19,13 +20,14 @@ import {
   ConfirmDialog,
 } from "./nodeUI";
 
-type PageId = "overview" | "node" | "mithril" | "explorer" | "logs" | "docs";
+type PageId = "overview" | "node" | "mithril" | "explorer" | "transactions" | "logs" | "docs";
 
 const NAV: { id: PageId; label: string }[] = [
-  { id: "overview", label: "Overview" },
-  { id: "node", label: "Node" },
+  { id: "overview", label: "Node" },
+  { id: "node", label: "Config" },
   { id: "mithril", label: "Mithril" },
   { id: "explorer", label: "Explorer" },
+  { id: "transactions", label: "Transactions" },
   { id: "logs", label: "Logs" },
   { id: "docs", label: "Docs" },
 ];
@@ -66,7 +68,7 @@ const ControlCenter: Component = () => {
       case "bootstrap":
         if (nodeRunning()) return "Stop the node first: bootstrap and the node cannot both write the chain DB.";
         if (bootAlive()) return "Bootstrap is already running.";
-        if (!hasRuntime()) return "Bun or the repo was not detected (Node page).";
+        if (!hasRuntime()) return "Bun or the repo was not detected (Config page).";
         return null;
       case "skip":
         if (!activeConfig()?.id) return "Save the node config first.";
@@ -94,11 +96,30 @@ const ControlCenter: Component = () => {
 
   let healthTimer: ReturnType<typeof setInterval> | null = null;
   let bootTimer: ReturnType<typeof setInterval> | null = null;
-  /** One sample per status poll (2 s); 900 = the last 30 minutes. */
+  /** One sample per status poll (2 s); the store holds the 10-minute maximum window. */
   const [history, setHistory] = createSignal<ResourceSample[]>([]);
+  const [windowMin, setWindowMin] = createSignal<number>(DEFAULT_WINDOW_MIN);
+  /** The samples shown in the graphs: the last `windowMin` minutes. */
+  const shown = () => windowSamples(history(), windowMin());
   const [txHex, setTxHex] = createSignal("");
   const [txBusy, setTxBusy] = createSignal(false);
   const [txResult, setTxResult] = createSignal<{ ok: boolean; text: string } | null>(null);
+  const [mempoolSnap, setMempoolSnap] = createSignal<MempoolSnapshot | null>(null);
+  const refreshMempool = async () => {
+    const id = activeConfig()?.id;
+    if (!id || !nodeRunning()) return setMempoolSnap(null);
+    try {
+      setMempoolSnap(await manager.mempool(id));
+    } catch (e: any) {
+      setMempoolSnap({ ok: false, count: 0, txs: [], error: e?.message ?? String(e) });
+    }
+  };
+  createEffect(() => {
+    if (page() !== "transactions") return;
+    void refreshMempool();
+    const t = setInterval(() => void refreshMempool(), 3000);
+    onCleanup(() => clearInterval(t));
+  });
   const submitTx = async () => {
     const id = activeConfig()?.id;
     const hex = txHex().replace(/\s+/g, "");
@@ -111,6 +132,7 @@ const ControlCenter: Component = () => {
         const m = r.body as { hash?: string; mempool?: { nTxs?: number; status?: string } };
         setTxResult({ ok: true, text: `accepted · tx ${m.hash ?? "?"} · mempool ${m.mempool?.status ?? "?"} (${m.mempool?.nTxs ?? "?"} tx)` });
         setTxHex("");
+        void refreshMempool();
       } else {
         setTxResult({ ok: false, text: r.error ?? `HTTP ${r.status}` });
       }
@@ -411,7 +433,6 @@ const ControlCenter: Component = () => {
         setConfigWritten(true);
       }
       setNodeRunning(true);
-      setPage("logs");
       setStatusMsg(`Started · pid ${result.pid ?? "?"}`);
       const id = result.config?.id || activeConfig()?.id;
       if (id) startNodePolls(id);
@@ -552,6 +573,20 @@ const ControlCenter: Component = () => {
         <header class="relative z-40 flex items-center h-12 shrink-0 border-b border-border bg-bg-card/90 px-5">
           <div class="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/20 to-transparent" />
           <h1 class="text-[15px] font-semibold text-text tracking-tight">{pageTitle()}</h1>
+          <Show when={page() === "overview"}>
+            <div class="ml-4 flex items-center gap-2">
+              <span data-tooltip={blockedBecause("startNode") ?? "Spawn the node for this instance."}>
+                <button onClick={() => void handleStart()} disabled={busy() || nodeRunning() || !!blockedBecause("startNode")} class={btnPrimary}>
+                  {busy() && !nodeRunning() ? "Starting…" : "Start"}
+                </button>
+              </span>
+              <span data-tooltip={nodeRunning() ? "Stop the node cleanly (SIGTERM; SIGKILL only after 30 s)." : "The node is not running."}>
+                <button onClick={() => void handleStop()} disabled={busy() || !activeConfig()?.id || !nodeRunning()} class={btnDanger}>
+                  {busy() && nodeRunning() ? "Stopping…" : "Stop"}
+                </button>
+              </span>
+            </div>
+          </Show>
           <div class="ml-auto flex items-center gap-4">
             <div class="flex items-center gap-2">
               <div
@@ -596,7 +631,7 @@ const ControlCenter: Component = () => {
                       <div class="mt-1 text-text-secondary">
                         A block every peer agrees on failed our ledger rules. That means the local ledger is inconsistent
                         (missing or extra UTxOs), not that a peer lied. Nothing more is applied until the database is
-                        repaired: stop the node, use <span class="font-mono">Wipe DB</span> on the Node page, and start again.
+                        repaired: stop the node, use <span class="font-mono">Wipe DB</span> on the Config page, and start again.
                       </div>
                       <div class="mt-1 truncate font-mono text-[11px] text-text-dim">{h().reason}</div>
                     </div>
@@ -763,161 +798,93 @@ const ControlCenter: Component = () => {
                     const sys = () => res().system;
                     const node = () => res().node;
                     const sysMemPct = () => (sys().totalMemBytes > 0 ? (sys().usedMemBytes / sys().totalMemBytes) * 100 : 0);
-                    const barVariant = (p: number) => (p >= 90 ? "accent" : p >= 70 ? "orange" : "green");
+                    const times = () => shown().map((h) => h.t);
+                    const ago = () => `${spanLabel(shown())} ago`;
                     return (
-                      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
-                        <div class="glass-card p-4">
-                          <div class="mb-3 flex items-center justify-between">
-                            <div class="text-[11px] font-semibold text-text-secondary">System</div>
-                            <span class="truncate font-mono text-[11px] text-text-dim" title={sys().cpuModel ?? ""}>
-                              {sys().cpus} cores · {sys().platform}/{sys().arch}
-                            </span>
-                          </div>
-                          <div class="space-y-3">
-                            <div>
-                              <div class="mb-1 flex items-center justify-between text-[11px]">
-                                <span class="text-text-dim">CPU</span>
-                                <span class="font-mono tabular-nums text-text">
-                                  {formatPercent(sys().cpuPercent)} · load {sys().loadAvg[0]} / {sys().loadAvg[1]} / {sys().loadAvg[2]}
-                                </span>
-                              </div>
-                              <ProgressBar value={sys().cpuPercent ?? 0} variant={barVariant(sys().cpuPercent ?? 0)} />
-                            </div>
-                            <div>
-                              <div class="mb-1 flex items-center justify-between text-[11px]">
-                                <span class="text-text-dim">Memory</span>
-                                <span class="font-mono tabular-nums text-text">
-                                  {formatBytes(sys().usedMemBytes)} / {formatBytes(sys().totalMemBytes)} · {formatPercent(sysMemPct())}
-                                </span>
-                              </div>
-                              <ProgressBar value={sysMemPct()} variant={barVariant(sysMemPct())} />
-                            </div>
-                            <Show when={sys().cpuModel}>
-                              <div class="truncate text-[11px] text-text-muted">{sys().cpuModel}</div>
-                            </Show>
-                          </div>
+                      <div class="glass-card p-4">
+                        <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+                          <div class="text-[11px] font-semibold text-text-secondary">Resources</div>
+                          <span class="truncate font-mono text-[11px] text-text-dim" title={sys().cpuModel ?? ""}>
+                            {node()?.pid ? `pid ${node()!.pid}` : "not running"}
+                            {node()?.threads != null ? ` · ${node()!.threads} threads` : ""}
+                            {sync()?.multiPeer ? ` · ${sync()!.multiPeer!.validationWorkers} workers` : ""}
+                            {` · ${sys().cpus} cores · ${sys().platform}/${sys().arch}`}
+                          </span>
                         </div>
-
-                        <div class="glass-card p-4">
-                          <div class="mb-3 flex items-center justify-between">
-                            <div class="text-[11px] font-semibold text-text-secondary">Gerolamo</div>
-                            <span class="font-mono text-[11px] text-text-dim">
-                              {node()?.pid ? `pid ${node()!.pid}` : "not running"}
-                              {node()?.threads != null ? ` · ${node()!.threads} threads` : ""}
-                              {sync()?.multiPeer ? ` · ${sync()!.multiPeer!.validationWorkers} workers` : ""}
-                            </span>
-                          </div>
-                          <Show
-                            when={node() && node()!.source !== "none"}
-                            fallback={
-                              <div class="space-y-3">
-                                <div class="text-[11px] text-text-muted">
-                                  {nodeRunning() ? "Waiting for the node's /metrics…" : "Start the node to see its CPU and memory."}
-                                </div>
-                                <Show when={node()?.dbBytes != null}>
-                                  <div class="flex items-center justify-between text-[11px]">
-                                    <span class="text-text-dim">Chain DB on disk</span>
-                                    <span class="font-mono tabular-nums text-text">{formatBytes(node()!.dbBytes)}</span>
-                                  </div>
-                                </Show>
-                              </div>
-                            }
-                          >
-                            <div class="space-y-3">
-                              <div>
-                                <div class="mb-1 flex items-center justify-between text-[11px]">
-                                  <span class="text-text-dim">CPU</span>
-                                  <span class="font-mono tabular-nums text-text">
-                                    {formatCores(nodeCoresBusy(node()))} of {sys().cpus} cores busy · {formatPercent(nodeCpuShare(node(), sys()), 1)} of machine
-                                  </span>
-                                </div>
-                                <ProgressBar value={nodeCpuShare(node(), sys())} variant="cyan" />
-                              </div>
-                              <div>
-                                <div class="mb-1 flex items-center justify-between text-[11px]">
-                                  <span class="text-text-dim">Memory (RSS)</span>
-                                  <span class="font-mono tabular-nums text-text">
-                                    {formatBytes(node()!.rssBytes)} · {formatPercent(nodeMemShare(node(), sys()), 1)} of machine
-                                  </span>
-                                </div>
-                                <ProgressBar value={nodeMemShare(node(), sys())} variant="cyan" />
-                              </div>
-                              <div class="grid grid-cols-3 gap-2 pt-1">
-                                <Stat
-                                  label="JS heap" title="Memory used by JavaScript objects in the node process, out of what the engine has reserved."
-                                  value={node()!.heapUsedBytes != null ? `${formatBytes(node()!.heapUsedBytes)} / ${formatBytes(node()!.heapTotalBytes)}` : "—"}
-                                  size="sm"
-                                />
-                                <Stat label="Native / buffers" title="Memory held outside the JS heap: CBOR buffers, SQLite, crypto." value={formatBytes(node()!.externalBytes)} size="sm" />
-                                <Stat label="Chain DB on disk" title="Size of the SQLite chain database plus its WAL and SHM sidecar files." value={formatBytes(node()!.dbBytes)} size="sm" />
-                              </div>
+                        <div class="mb-3 flex items-center gap-2 text-[10px]">
+                          <span class="text-text-dim">window</span>
+                          <For each={[...HISTORY_WINDOWS_MIN]}>
+                            {(m) => (
+                              <button
+                                class={cn("rounded-[4px] border px-2 py-0.5 font-mono", windowMin() === m ? "border-accent/30 bg-accent-dim text-accent" : "border-border text-text-secondary hover:text-text")}
+                                onClick={() => setWindowMin(m)}
+                              >
+                                {m} min
+                              </button>
+                            )}
+                          </For>
+                          <span class="text-text-dim">· showing {spanLabel(shown())} · one sample per 2 s</span>
+                        </div>
+                        <Show when={node() && node()!.source === "none" && nodeRunning()}>
+                          <div class="mb-3 text-[11px] text-text-muted">Waiting for the node's /metrics…</div>
+                        </Show>
+                        <div class="grid grid-cols-1 gap-5 lg:grid-cols-3">
+                          <div class="flex flex-col gap-2">
+                            <TimeSeries
+                              title="CPU"
+                              headline={`node ${formatCores(nodeCoresBusy(node()))} of ${sys().cpus} cores · host ${formatPercent(sys().cpuPercent)}`}
+                              leftLabel={ago()}
+                              times={times()}
+                              minMax={2}
+                              lines={[
+                                { name: "node cores", color: "#00b3ff", values: series(shown(), "nodeCores"), format: (v) => `${v.toFixed(2)} cores` },
+                                { name: "host", color: "#ff8a00", values: series(shown(), "sysCpu").map((v) => (Number.isFinite(v) ? (v / 100) * sys().cpus : v)), format: (v) => `${((v / Math.max(1, sys().cpus)) * 100).toFixed(0)}% (${v.toFixed(1)} cores)` },
+                              ]}
+                            />
+                            <div class="flex items-center justify-between text-[10px] text-text-dim">
+                              <span>node share of machine</span>
+                              <span class="font-mono">{formatPercent(nodeCpuShare(node(), sys()), 1)} · load {sys().loadAvg[0]} / {sys().loadAvg[1]} / {sys().loadAvg[2]}</span>
                             </div>
-                          </Show>
+                            <ProgressBar value={nodeCpuShare(node(), sys())} variant="cyan" />
+                          </div>
+                          <div class="flex flex-col gap-2">
+                            <TimeSeries
+                              title="Memory"
+                              headline={`node ${formatBytes(node()?.rssBytes)} · host ${formatBytes(sys().usedMemBytes)} / ${formatBytes(sys().totalMemBytes)}`}
+                              leftLabel={ago()}
+                              times={times()}
+                              minMax={512 * 1048576}
+                              lines={[
+                                { name: "node RSS", color: "#00e676", values: series(shown(), "nodeRss"), format: (v) => formatBytes(v) },
+                                { name: "JS heap", color: "#9b59b6", values: series(shown(), "nodeHeap"), format: (v) => formatBytes(v) },
+                              ]}
+                            />
+                            <div class="flex items-center justify-between text-[10px] text-text-dim">
+                              <span>node share of machine · host {formatPercent(sysMemPct())} used</span>
+                              <span class="font-mono">{formatPercent(nodeMemShare(node(), sys()), 1)}</span>
+                            </div>
+                            <ProgressBar value={nodeMemShare(node(), sys())} variant="cyan" />
+                            <div class="grid grid-cols-3 gap-2 pt-1">
+                              <Stat label="JS heap" title="Memory used by JavaScript objects in the node process, out of what the engine has reserved." value={node()?.heapUsedBytes != null ? `${formatBytes(node()!.heapUsedBytes)} / ${formatBytes(node()!.heapTotalBytes)}` : "—"} size="sm" />
+                              <Stat label="Native / buffers" title="Memory held outside the JS heap: CBOR buffers, SQLite, crypto." value={formatBytes(node()?.externalBytes)} size="sm" />
+                              <Stat label="Chain DB on disk" title="Size of the SQLite chain database plus its WAL and SHM sidecar files." value={formatBytes(node()?.dbBytes)} size="sm" />
+                            </div>
+                          </div>
+                          <div class="flex flex-col gap-2">
+                            <TimeSeries
+                              title="Blocks / s"
+                              headline={sync()?.multiPeer ? `${sync()!.multiPeer!.blocksPerSec.toFixed(0)} blocks/s · ${sync()!.multiPeer!.pendingHeaders} headers waiting` : "—"}
+                              leftLabel={ago()}
+                              times={times()}
+                              minMax={10}
+                              lines={[{ name: "applied", color: "#ff2d55", values: series(shown(), "bps"), format: (v) => `${v.toFixed(0)} blocks/s` }]}
+                            />
+                          </div>
                         </div>
                       </div>
                     );
                   }}
                 </Show>
-
-                <Show when={history().length > 1}>
-                  <div class="glass-card p-4">
-                    <div class="mb-3 flex items-center justify-between">
-                      <div class="text-[11px] font-semibold text-text-secondary">Over time</div>
-                      <span class="font-mono text-[11px] text-text-dim">last {spanLabel(history())} · one sample per 2 s</span>
-                    </div>
-                    <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                      <TimeSeries
-                        title="CPU"
-                        leftLabel={`${spanLabel(history())} ago`}
-                        minMax={2}
-                        lines={[
-                          { name: "node cores", color: "#00b3ff", values: series(history(), "nodeCores"), format: (v) => `${v.toFixed(1)} cores` },
-                          { name: "host %", color: "#ff8a00", values: series(history(), "sysCpu").map((v) => (Number.isFinite(v) ? (v / 100) * (resources()?.system.cpus ?? 1) : v)), format: (v) => `${((v / Math.max(1, resources()?.system.cpus ?? 1)) * 100).toFixed(0)}%` },
-                        ]}
-                      />
-                      <TimeSeries
-                        title="Memory"
-                        leftLabel={`${spanLabel(history())} ago`}
-                        minMax={512 * 1048576}
-                        lines={[
-                          { name: "node RSS", color: "#00e676", values: series(history(), "nodeRss"), format: (v) => formatBytes(v) },
-                          { name: "JS heap", color: "#9b59b6", values: series(history(), "nodeHeap"), format: (v) => formatBytes(v) },
-                        ]}
-                      />
-                      <TimeSeries
-                        title="Blocks / s"
-                        leftLabel={`${spanLabel(history())} ago`}
-                        minMax={10}
-                        lines={[{ name: "applied", color: "#ff2d55", values: series(history(), "bps"), format: (v) => v.toFixed(0) }]}
-                      />
-                    </div>
-                  </div>
-                </Show>
-
-                <div class="glass-card p-4">
-                  <div class="mb-2 flex items-center justify-between">
-                    <div class="text-[11px] font-semibold text-text-secondary">Submit transaction</div>
-                    <span class="text-[11px] text-text-dim">signed tx CBOR (hex) → POST /api/v0/tx/submit → relayed to hot peers</span>
-                  </div>
-                  <textarea
-                    class="w-full h-[72px] rounded-[6px] border border-border bg-bg-input px-3 py-2 font-mono text-[11px] text-text outline-none focus:border-accent/30"
-                    placeholder="84a4..."
-                    value={txHex()}
-                    onInput={(e) => setTxHex(e.currentTarget.value)}
-                    disabled={!nodeRunning()}
-                  />
-                  <div class="mt-2 flex items-center gap-3">
-                    <button class={btnPrimary} disabled={!nodeRunning() || txBusy() || !txHex().trim()} onClick={() => void submitTx()}>
-                      {txBusy() ? "Submitting…" : "Submit"}
-                    </button>
-                    <Show when={txResult()}>
-                      <span class={cn("font-mono text-[11px] break-all", txResult()!.ok ? "text-green" : "text-red")}>{txResult()!.text}</span>
-                    </Show>
-                    <Show when={!nodeRunning()}>
-                      <span class="text-[11px] text-text-muted">Start the node to submit.</span>
-                    </Show>
-                  </div>
-                </div>
 
                 <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
                   <div class="glass-card p-3">
@@ -931,7 +898,7 @@ const ControlCenter: Component = () => {
                                 class={cn(
                                   "inline-block h-[6px] w-[6px] rounded-full",
                                   p.role === "primary"
-                                    ? "bg-accent"
+                                    ? "bg-blue"
                                     : p.status === "agrees"
                                     ? "bg-green"
                                     : p.status === "divergent"
@@ -942,7 +909,7 @@ const ControlCenter: Component = () => {
                               <span class="truncate">{p.key}</span>
                               <span class="text-text-dim">
                                 {p.role === "primary"
-                                  ? "primary"
+                                  ? "primary · drives the chain"
                                   : p.status === "agrees"
                                   ? `✓ agrees @${p.agreedAtSlot ?? "?"}`
                                   : p.status === "divergent"
@@ -954,12 +921,14 @@ const ControlCenter: Component = () => {
                         </For>
                       </div>
                     </Show>
-                    <div class="max-h-36 min-h-[40px] space-y-1 overflow-y-auto font-mono text-[11px] text-text-secondary">
-                      <For each={peers().hotKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
-                      <Show when={peers().hotKeys.length === 0}>
-                        <div class="text-text-muted">{nodeRunning() ? "Connecting to peers…" : "Node stopped"}</div>
-                      </Show>
-                    </div>
+                    <Show when={(mp()?.peers.length ?? 0) === 0}>
+                      <div class="max-h-36 min-h-[40px] space-y-1 overflow-y-auto font-mono text-[11px] text-text-secondary">
+                        <For each={peers().hotKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
+                        <Show when={peers().hotKeys.length === 0}>
+                          <div class="text-text-muted">{nodeRunning() ? "Connecting to peers…" : "Node stopped"}</div>
+                        </Show>
+                      </div>
+                    </Show>
                   </div>
                   <div class="glass-card p-3">
                     <div class="mb-2 text-[11px] font-semibold text-amber">Warm · standby ({peers().warm})</div>
@@ -1036,7 +1005,7 @@ const ControlCenter: Component = () => {
               <div class="space-y-4">
                 <div class="glass-card-accent p-5 space-y-3">
                   <div class="flex items-center justify-between gap-3">
-                    <h2 class="text-h2">Node</h2>
+                    <h2 class="text-h2">Config</h2>
                     <Badge variant={nodeRunning() ? "success" : "muted"}>{nodeRunning() ? `pid ${activeConfig()?.pid ?? "live"}` : "stopped"}</Badge>
                   </div>
                   <p class="text-[12px] text-text-dim">
@@ -1048,7 +1017,7 @@ const ControlCenter: Component = () => {
                         Start
                       </button>
                     </span>
-                    <span data-tooltip={nodeRunning() ? "Stop the node (SIGTERM, then SIGKILL after 800 ms)." : "The node is not running."}>
+                    <span data-tooltip={nodeRunning() ? "Stop the node cleanly (SIGTERM; SIGKILL only after 30 s)." : "The node is not running."}>
                       <button onClick={() => void handleStop()} disabled={busy() || !activeConfig()?.id || !nodeRunning()} class={btnDanger}>
                         Stop
                       </button>
@@ -1175,7 +1144,7 @@ const ControlCenter: Component = () => {
                   </div>
                   <Show when={nodeRunning()}>
                     <p class="text-[11px] text-amber">
-                      Node is running and owns the chain DB, so bootstrap is unavailable. Stop the node on the Node page to bootstrap from Mithril.
+                      Node is running and owns the chain DB, so bootstrap is unavailable. Stop the node (Node page) to bootstrap from Mithril.
                     </p>
                   </Show>
                   <Show when={bootLogOpen()}>
@@ -1195,6 +1164,53 @@ const ControlCenter: Component = () => {
               </div>
             </Show>
 
+            <Show when={page() === "transactions"}>
+              <div class="flex flex-col gap-4">
+                <div class="glass-card p-5">
+                  <div class="mb-2 flex items-center justify-between">
+                    <div class="text-[13px] font-semibold text-text">Submit a transaction</div>
+                    <span class="text-[11px] text-text-dim">signed tx CBOR (hex) → POST /api/v0/tx/submit → local mempool → hot peers pull it</span>
+                  </div>
+                  <textarea
+                    class="w-full h-[140px] rounded-[6px] border border-border bg-bg-input px-3 py-2 font-mono text-[11px] text-text outline-none focus:border-accent/30"
+                    placeholder="Paste the hex-encoded signed transaction (starts with 84…)"
+                    value={txHex()}
+                    onInput={(e) => setTxHex(e.currentTarget.value)}
+                    disabled={!nodeRunning()}
+                  />
+                  <div class="mt-3 flex flex-wrap items-center gap-3">
+                    <button class={btnPrimary} disabled={!nodeRunning() || txBusy() || !txHex().trim()} onClick={() => void submitTx()}>
+                      {txBusy() ? "Submitting…" : "Submit"}
+                    </button>
+                    <button class={btnSecondary} disabled={!txHex()} onClick={() => { setTxHex(""); setTxResult(null); }}>Clear</button>
+                    <Show when={txResult()}>
+                      <span class={cn("font-mono text-[11px] break-all", txResult()!.ok ? "text-green" : "text-red")}>{txResult()!.text}</span>
+                    </Show>
+                    <Show when={!nodeRunning()}>
+                      <span class="text-[11px] text-text-muted">Start the node to submit.</span>
+                    </Show>
+                  </div>
+                </div>
+                <div class="glass-card p-5">
+                  <div class="mb-2 flex items-center justify-between">
+                    <div class="text-[13px] font-semibold text-text">Local mempool</div>
+                    <span class="font-mono text-[11px] text-text-dim">{mempoolSnap()?.ok ? `${mempoolSnap()!.count} tx` : mempoolSnap()?.error ?? (nodeRunning() ? "…" : "node stopped")}</span>
+                  </div>
+                  <Show when={mempoolSnap()?.ok && mempoolSnap()!.txs.length > 0} fallback={<div class="text-[11px] text-text-muted">Nothing queued. Submitted transactions appear here until a hot peer pulls them.</div>}>
+                    <div class="flex flex-col gap-1 font-mono text-[11px]">
+                      <For each={mempoolSnap()!.txs}>
+                        {(t) => (
+                          <div class="flex items-center justify-between gap-3">
+                            <span class="truncate text-text">{t.tx_hash}</span>
+                            <span class="text-text-dim">{t.size} B</span>
+                          </div>
+                        )}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
+              </div>
+            </Show>
             <Show when={page() === "explorer"}>
               <Show
                 when={nodeRunning()}

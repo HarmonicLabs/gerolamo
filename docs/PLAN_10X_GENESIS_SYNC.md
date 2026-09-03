@@ -948,5 +948,19 @@ GC, `BlockFetchBlock` retained: 912 (the in-flight/awaiting ranges), rate
   still queued. The desktop Node page has a "Submit transaction" card (hex
   CBOR → node → tx id + mempool state). Tested with a synthetic decodable tx.
 
+### 2026-09-03 — two regressions from the review batch, found on the live run
+
+- **Infinite loop in `CandidateSet.observe`.** The review's "no per-header
+  copy" change iterated a verifier's `pending` Map while `compareAgainstPrimary`
+  could re-insert the same entry (the EBB deferral). A Map for-of visits
+  entries added during iteration, so at mainnet slot 0 (EBB + block 1 share
+  the slot) the primary-advance drain never ended: main thread pegged, HTTP
+  listen queue full, no blocks applied. Fixed by snapshotting the due entries
+  first; regression test reproduces the exact genesis sequence.
+- **Startup height backfill too slow.** One `UPDATE` per row (3.4 M rows on
+  the mainnet DB) before the servers started: an hour with the node unusable.
+  Replaced by a set-based pass (temp table with `ROW_NUMBER() OVER (ORDER BY
+  slot)` + index + one `UPDATE`).
+
 Next: a from-genesis mainnet run into Shelley/Alonzo with `Sync profile:`
 lines kept, then §6.3 → §5 against those numbers.

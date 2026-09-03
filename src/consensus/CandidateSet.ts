@@ -289,12 +289,14 @@ export class CandidateSet {
             // now passed (a pending second block at an earlier slot is settled either way).
             for (const v of this.peers.values()) {
                 if (v.role !== "verifier" || v.pending.size === 0) continue;
-                // Deleting during Map iteration is well-defined; no copy of the map per header.
-                for (const [k, hash] of v.pending) {
-                    const slot = BigInt(k);
-                    if (slot > pt.slot) continue;
+                // Snapshot the due entries first: compareAgainstPrimary may re-add an entry
+                // (the EBB deferral), and a Map for-of visits entries added during iteration —
+                // that was an infinite loop at mainnet slot 0 (EBB + block 1 share the slot).
+                const due: Array<[string, string]> = [];
+                for (const [k, hash] of v.pending) if (BigInt(k) <= pt.slot) due.push([k, hash]);
+                for (const [k, hash] of due) {
                     v.pending.delete(k);
-                    this.compareAgainstPrimary(v, { slot, hash });
+                    this.compareAgainstPrimary(v, { slot: BigInt(k), hash });
                 }
             }
             return { kind: "primary-advance", slot: pt.slot };

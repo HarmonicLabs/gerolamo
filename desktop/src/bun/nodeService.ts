@@ -1,4 +1,4 @@
-import type { SubmitTxResult } from "../shared/types";
+import type { SubmitTxResult, MempoolSnapshot } from "../shared/types";
 import { spawn, type Subprocess, which } from "bun";
 import { tailFileLines } from "./tailFile";
 import { RotatingLog, pumpStream } from "./rotatingLog";
@@ -396,6 +396,20 @@ export async function submitTx(id: string, txHex: string): Promise<SubmitTxResul
     return { ok: res.ok, status: res.status, body, error: res.ok ? undefined : msg ?? `HTTP ${res.status}` };
   } catch (err: any) {
     return { ok: false, status: 0, body: null, error: err?.message ?? String(err) };
+  }
+}
+
+/** Local mempool snapshot from the node (GET /api/v0/mempool). */
+export async function mempool(id: string): Promise<MempoolSnapshot> {
+  const row = getInstance(getAppDb(), id);
+  if (!row) return { ok: false, count: 0, txs: [], error: "unknown instance" };
+  try {
+    const res = await fetch(gerolamoHttpBase(row.port) + "/api/v0/mempool", { signal: AbortSignal.timeout(4000) });
+    if (!res.ok) return { ok: false, count: 0, txs: [], error: `HTTP ${res.status}` };
+    const j = (await res.json()) as { count?: number; txs?: Array<{ tx_hash: string; size: number }> };
+    return { ok: true, count: j.count ?? 0, txs: j.txs ?? [] };
+  } catch (err: any) {
+    return { ok: false, count: 0, txs: [], error: err?.message ?? String(err) };
   }
 }
 

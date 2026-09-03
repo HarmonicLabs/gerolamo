@@ -4,6 +4,7 @@ import {
   getNodeStatus,
   healthCheck,
   submitTx,
+  mempool,
   hydrate,
   listNodes,
   logs,
@@ -74,6 +75,11 @@ const bunRpc = defineElectrobunRPC("bun", {
         const p = asParams(params);
         if (!p.id) return { ok: false, lines: [], error: "id required" };
         return logs(p.id, p.maxLines ?? 120);
+      },
+      async "node.mempool"(params?: unknown) {
+        const id = asParams(params).id;
+        if (!id) return { ok: false, count: 0, txs: [], error: "id required" };
+        return mempool(id);
       },
       async "node.submitTx"(params?: unknown) {
         const p = asParams(params) as { id?: string; txHex?: string };

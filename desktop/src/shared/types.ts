@@ -141,3 +141,5 @@ export type SubmitTxResult = {
   body: unknown;
   error?: string;
 };
+
+export type MempoolSnapshot = { ok: boolean; count: number; txs: Array<{ tx_hash: string; size: number }>; error?: string };

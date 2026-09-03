@@ -75,6 +75,22 @@ describe("CandidateSet agreement", () => {
         expect(cs.agreesThrough("v", 0n)).toBe(true);
     });
 
+    test("primary observing the EBB while a verifier is pending on the same slot's main block terminates and keeps the entry", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("p");
+        cs.addPeer("v", "verifier");
+        // verifier first: EBB then main block of slot 0, both ahead of a primary with no fragment yet
+        expect(cs.observe("v", { slot: 0n, hash: h("ebb"), ebb: true }).kind).toBe("ahead");
+        expect(cs.observe("v", { slot: 0n, hash: h("main0") }).kind).toBe("ahead");
+        // primary now delivers the EBB: the main-block entry must be deferred, not spin forever
+        expect(cs.observe("p", { slot: 0n, hash: h("ebb"), ebb: true }).kind).toBe("primary-advance");
+        expect(cs.pendingCount("v")).toBe(1);
+        expect(cs.agreement("v")!.status).not.toBe("divergent");
+        cs.observe("p", { slot: 0n, hash: h("main0") });
+        expect(cs.pendingCount("v")).toBe(0);
+        expect(cs.agreement("v")!.status).toBe("agrees");
+    });
+
     test("a genuinely different block at a shared slot is a fork once the primary moves past it", () => {
         const cs = new CandidateSet();
         cs.addPeer("p");

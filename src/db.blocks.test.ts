@@ -36,7 +36,7 @@ describe("block heights and explorer listing", () => {
     });
 
     test("backfill numbers main blocks from 1 and leaves EBBs null; idempotent", async () => {
-        const r = await backfillBlockHeights(4); // small batches to exercise the cursor
+        const r = await backfillBlockHeights();
         expect(r.numbered).toBe(7);
         expect(await getMaxBlockNo()).toBe(7);
         expect((await getBlockListRowByHeight(1))!.hash).toBe(h(2)); // first main block at slot 0

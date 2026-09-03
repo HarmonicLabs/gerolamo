@@ -1,6 +1,7 @@
 /**
  * Fixed-length sample history for the resource graphs (one sample per status
- * poll, 2 s apart; 900 samples = 30 minutes). Pure so it can be unit-tested.
+ * poll, 2 s apart; 300 samples = the 10-minute maximum window). Pure so it can
+ * be unit-tested.
  */
 export type ResourceSample = {
   /** ms since epoch */
@@ -19,7 +20,20 @@ export type ResourceSample = {
   bps: number | null;
 };
 
-export const HISTORY_MAX_SAMPLES = 900;
+export const SAMPLE_INTERVAL_MS = 2000;
+/** Longest window the graphs offer (10 min); the default view is 5 min. */
+export const HISTORY_MAX_MINUTES = 10;
+export const HISTORY_MAX_SAMPLES = (HISTORY_MAX_MINUTES * 60_000) / SAMPLE_INTERVAL_MS;
+export const HISTORY_WINDOWS_MIN = [5, 10] as const;
+export const DEFAULT_WINDOW_MIN: (typeof HISTORY_WINDOWS_MIN)[number] = 5;
+
+/** The samples inside the last `minutes` (by timestamp), oldest first. */
+export function windowSamples(history: readonly ResourceSample[], minutes: number, now = Date.now()): ResourceSample[] {
+  const from = now - minutes * 60_000;
+  let i = 0;
+  while (i < history.length && history[i]!.t < from) i++;
+  return history.slice(i);
+}
 
 /** Append a sample, dropping the oldest beyond `max`. Returns a new array (Solid signals compare by reference). */
 export function pushSample<T>(history: readonly T[], sample: T, max = HISTORY_MAX_SAMPLES): T[] {
@@ -43,4 +57,11 @@ export function spanLabel(history: readonly ResourceSample[]): string {
   const min = Math.round(ms / 60_000);
   if (min < 1) return `${Math.round(ms / 1000)} s`;
   return `${min} min`;
+}
+
+/** Sample index under a horizontal fraction (0..1) of a chart with `n` evenly spaced samples. */
+export function indexAtFraction(fraction: number, n: number): number {
+  if (n <= 1) return 0;
+  const f = Math.min(1, Math.max(0, fraction));
+  return Math.round(f * (n - 1));
 }

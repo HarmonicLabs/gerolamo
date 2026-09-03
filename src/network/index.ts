@@ -20,6 +20,7 @@ import { startN2NServer, type N2NServerHandle } from "./n2n";
 import { resolveN2NConfig } from "./n2n/config";
 import { setInboundN2NStatusProvider } from "./peerManager";
 import { resolveNodeRole } from "./nodeRole";
+import { ignoredValidationKeys, resolveValidationPolicy } from "../consensus/validationPolicy";
 
 async function runSnapShotPopulation(config: GerolamoConfig) {
     console.log(
@@ -214,6 +215,12 @@ export async function start() {
         await runSnapShotPopulation(config);
     }
 
+    {
+        const vp = resolveValidationPolicy(config);
+        (vp.ledgerComplete ? logger.info : logger.warn).call(logger, `Validation: ${vp.note}`);
+        const ignored = ignoredValidationKeys(config);
+        if (ignored.length) logger.warn(`config keys ignored (validation is not configurable): ${ignored.join(", ")}`);
+    }
     logger.info(`Node role: ${resolveNodeRole(config)}${config.n2n ? ` (inbound N2N on ${config.n2n.host}:${config.n2n.port})` : " (no inbound N2N)"}`);
     logger.info("Starting peer manager...");
 

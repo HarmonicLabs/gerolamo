@@ -124,19 +124,9 @@ export interface GerolamoConfig {
     };
     readonly tuiEnabled?: boolean;
     readonly blockfrostUrl?: string;
-    /**
-     * Body validation policy.
-     * - auto (default): strict when syncing from genesis (ledger complete), soft otherwise
-     * - soft: log failures but still apply (mid-chain tolerance)
-     * - strict: reject invalid bodies — no apply / no nonce feed / no insert
-     */
+    /** @deprecated ignored — validation is derived from the sync mode (see consensus/validationPolicy.ts). */
     readonly bodyValidation?: "auto" | "soft" | "strict";
-    /**
-     * Plutus/native script validation.
-     * - off (default): skip
-     * - log: run checks, log failures, still accept
-     * - strict: reject on script failure
-     */
+    /** @deprecated ignored — validation is derived from the sync mode (see consensus/validationPolicy.ts). */
     readonly scriptValidation?: "off" | "log" | "strict";
     /** Cold/warm/hot governor knobs (network-design v1). */
     readonly peerGovernor?: PeerGovernorConfig;

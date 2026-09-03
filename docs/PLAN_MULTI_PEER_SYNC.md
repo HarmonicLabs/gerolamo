@@ -85,7 +85,9 @@ cost:
    (run chain selection) or a liar (demote it). Needs at least 3 hot peers so
    one liar is outvoted.
 
-Body validation (`bodyValidation`) and script validation are ledger-rule
+Body validation and script validation are not configurable since 2026-09-03: strict
+whenever the ledger is complete (genesis / Mithril), report-only on tip sync where no
+UTxO state exists (`src/consensus/validationPolicy.ts`). They are ledger-rule
 checks and are covered separately; they do not make a peer honest, they make
 *our ledger* honest.
 

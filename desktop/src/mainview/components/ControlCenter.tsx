@@ -125,7 +125,8 @@ const ControlCenter: Component = () => {
       try {
         const st = await manager.status(id);
         setNodeRunning(!!st?.running);
-        setSync(st?.sync ?? null);
+        // A single failed /metrics poll while the node runs must not blank the panels.
+        if (st?.sync || !st?.running) setSync(st?.sync ?? null);
         setResources(st?.resources ?? null);
         if (st?.health) setHealth(st.health);
         const logs = await manager.logs(id, 120);
@@ -157,6 +158,71 @@ const ControlCenter: Component = () => {
 
   onCleanup(() => stopPolls());
 
+  /** Load a saved instance into the form and start following it. */
+  const loadInstance = async (target: InstanceConfig) => {
+    setActiveConfig(target);
+    setNetwork(target.network);
+    if (target.name) setName(target.name);
+    if (target.port) setPort(target.port);
+    setDbPath(target.dbPath ?? "");
+    setSnapshotDir(target.snapshotDir ?? "");
+    setN2cSocket(target.n2cSocket ?? "");
+    setSkipApply(!!target.skipApply);
+    setSettings({ ...DEFAULT_NODE_SETTINGS, ...(target.nodeSettings ?? {}) });
+    setConfigWritten(!!target.instanceDir);
+    setBootstrapReady(target.bootstrapState === "ready");
+    setSync(null);
+    setResources(null);
+    setHealth(null);
+    const st = await manager.status(target.id);
+    if (st?.running) {
+      setNodeRunning(true);
+      setStatusMsg(`Resumed running · ${target.id}`);
+      startNodePolls(target.id);
+    } else {
+      setNodeRunning(false);
+      if (target.instanceDir) setStatusMsg(`Resumed instance · ${target.id}`);
+    }
+  };
+
+  /**
+   * The network dropdown selects an instance, it never retargets one: each
+   * network has its own id, folder and chain DB under ~/.local/share/gerolamo.
+   * Existing instance for that network → load it; none → a fresh, unsaved form
+   * whose paths are computed on save.
+   */
+  const switchNetwork = async (net: "preprod" | "mainnet" | "preview") => {
+    if (net === network() && activeConfig()?.network === net) return;
+    stopPolls();
+    setErrorMsg("");
+    try {
+      const nodes = await manager.list();
+      const same = nodes.filter((n) => n.network === net);
+      const target = same.find((n) => n.runState === "running") ?? same[0];
+      if (target) {
+        await loadInstance(target);
+        return;
+      }
+    } catch (e) {
+      console.error("[ControlCenter] switchNetwork list failed", e);
+    }
+    // No instance yet for this network: start from a clean form.
+    setActiveConfig(null);
+    setNetwork(net);
+    setDbPath("");
+    setSnapshotDir("");
+    setN2cSocket("");
+    setSkipApply(false);
+    setSettings({ ...DEFAULT_NODE_SETTINGS });
+    setConfigWritten(false);
+    setBootstrapReady(false);
+    setNodeRunning(false);
+    setSync(null);
+    setResources(null);
+    setHealth(null);
+    setStatusMsg(`New ${net} instance — save config.json to create it (DB and snapshot paths default under ~/.local/share/gerolamo/gerolamo-${net}-<id>/)`);
+  };
+
   onMount(() => {
     void (async () => {
       try {
@@ -164,25 +230,7 @@ const ControlCenter: Component = () => {
         const same = nodes.filter((n) => n.network === network());
         const target = same.find((n) => n.runState === "running") ?? same[0];
         if (!target) return;
-        setActiveConfig(target);
-        setNetwork(target.network);
-        if (target.name) setName(target.name);
-        if (target.port) setPort(target.port);
-        if (target.dbPath) setDbPath(target.dbPath);
-        if (target.snapshotDir) setSnapshotDir(target.snapshotDir);
-        if (target.n2cSocket) setN2cSocket(target.n2cSocket);
-        setSkipApply(!!target.skipApply);
-        if (target.nodeSettings) setSettings({ ...DEFAULT_NODE_SETTINGS, ...target.nodeSettings });
-        setConfigWritten(!!target.instanceDir);
-        setBootstrapReady(target.bootstrapState === "ready");
-        const st = await manager.status(target.id);
-        if (st?.running) {
-          setNodeRunning(true);
-          setStatusMsg(`Resumed running · ${target.id}`);
-          startNodePolls(target.id);
-        } else if (target.instanceDir) {
-          setStatusMsg(`Resumed instance · ${target.id}`);
-        }
+        await loadInstance(target);
       } catch (e) {
         console.error("[ControlCenter] hydrate failed", e);
       }
@@ -383,6 +431,10 @@ const ControlCenter: Component = () => {
     }
   };
 
+  const EMPTY_PEERS = { hot: 0, warm: 0, cold: 0, total: 0, hotKeys: [] as string[], warmKeys: [] as string[], coldSample: [] as string[], failedPeers: 0, recentErrors: [] as { key: string; error: string; failCount: number }[], maliciousPeers: [] as { key: string; reason: string; until: number }[] };
+  /** Peer tiers, always defined so the panels never unmount. */
+  const peers = () => sync()?.peers ?? EMPTY_PEERS;
+  const mp = () => sync()?.multiPeer ?? null;
   const pct = () => {
     const s = sync();
     return s ? Math.max(0, Math.min(100, s.syncPercent)) : 0;
@@ -515,8 +567,15 @@ const ControlCenter: Component = () => {
                         </Badge>
                       </Show>
                       <Show when={sync()?.multiPeer?.bodyValidation}>
-                        <Badge variant={sync()!.multiPeer!.bodyValidation === "strict" ? "success" : "default"}>
-                          body {sync()!.multiPeer!.bodyValidation}
+                        <Badge
+                          variant={sync()!.multiPeer!.bodyValidation === "strict" ? "success" : "warning"}
+                          title={
+                            sync()!.multiPeer!.bodyValidation === "strict"
+                              ? "Full validation: headers, body hashes, peer agreement and transaction rules are enforced. A failing block halts sync."
+                              : "Tip sync: no ledger state behind the tip, so transaction rules and scripts are report-only. Headers, body hashes and peer agreement are still enforced."
+                          }
+                        >
+                          {sync()!.multiPeer!.bodyValidation === "strict" ? "validation full" : "validation partial · tip"}
                         </Badge>
                       </Show>
                     </div>
@@ -739,108 +798,106 @@ const ControlCenter: Component = () => {
                   }}
                 </Show>
 
-                <Show when={sync()}>
-                  <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
-                    <div class="glass-card p-3">
-                      <div class="mb-2 text-[11px] font-semibold text-green">Hot · ChainSync ({sync()!.peers.hot})</div>
-                      <Show when={sync()!.multiPeer && sync()!.multiPeer!.peers.length > 0}>
-                        <div class="mb-2 flex flex-col gap-1 font-mono text-[11px]">
-                          <For each={sync()!.multiPeer!.peers}>
-                            {(p) => (
-                              <div class="flex items-center gap-2 truncate">
-                                <span
-                                  class={cn(
-                                    "inline-block h-[6px] w-[6px] rounded-full",
-                                    p.role === "primary"
-                                      ? "bg-accent"
-                                      : p.status === "agrees"
-                                      ? "bg-green"
-                                      : p.status === "divergent"
-                                      ? "bg-red"
-                                      : "bg-text-muted",
-                                  )}
-                                />
-                                <span class="truncate">{p.key}</span>
-                                <span class="text-text-dim">
-                                  {p.role === "primary"
-                                    ? "primary"
+                <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                  <div class="glass-card p-3">
+                    <div class="mb-2 text-[11px] font-semibold text-green">Hot · ChainSync ({peers().hot})</div>
+                    <Show when={(mp()?.peers.length ?? 0) > 0}>
+                      <div class="mb-2 flex flex-col gap-1 font-mono text-[11px]">
+                        <For each={mp()!.peers}>
+                          {(p) => (
+                            <div class="flex items-center gap-2 truncate">
+                              <span
+                                class={cn(
+                                  "inline-block h-[6px] w-[6px] rounded-full",
+                                  p.role === "primary"
+                                    ? "bg-accent"
                                     : p.status === "agrees"
-                                    ? `✓ agrees @${p.agreedAtSlot ?? "?"}`
+                                    ? "bg-green"
                                     : p.status === "divergent"
-                                    ? `✗ divergent @${p.divergenceSlot ?? "?"}`
-                                    : p.status}
-                                </span>
-                              </div>
-                            )}
-                          </For>
-                        </div>
+                                    ? "bg-red"
+                                    : "bg-text-muted",
+                                )}
+                              />
+                              <span class="truncate">{p.key}</span>
+                              <span class="text-text-dim">
+                                {p.role === "primary"
+                                  ? "primary"
+                                  : p.status === "agrees"
+                                  ? `✓ agrees @${p.agreedAtSlot ?? "?"}`
+                                  : p.status === "divergent"
+                                  ? `✗ divergent @${p.divergenceSlot ?? "?"}`
+                                  : p.status}
+                              </span>
+                            </div>
+                          )}
+                        </For>
+                      </div>
+                    </Show>
+                    <div class="max-h-36 min-h-[40px] space-y-1 overflow-y-auto font-mono text-[11px] text-text-secondary">
+                      <For each={peers().hotKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
+                      <Show when={peers().hotKeys.length === 0}>
+                        <div class="text-text-muted">{nodeRunning() ? "Connecting to peers…" : "Node stopped"}</div>
                       </Show>
-                      <div class="max-h-36 space-y-1 overflow-y-auto font-mono text-[11px] text-text-secondary">
-                        <For each={sync()!.peers.hotKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
-                        <Show when={sync()!.peers.hotKeys.length === 0}><div class="text-text-muted">No hot peers</div></Show>
-                      </div>
-                    </div>
-                    <div class="glass-card p-3">
-                      <div class="mb-2 text-[11px] font-semibold text-amber">Warm · standby ({sync()!.peers.warm})</div>
-                      <div class="max-h-36 space-y-1 overflow-y-auto font-mono text-[11px] text-text-secondary">
-                        <For each={sync()!.peers.warmKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
-                        <Show when={sync()!.peers.warmKeys.length === 0}><div class="text-text-muted">No warm peers</div></Show>
-                      </div>
-                    </div>
-                    <div class="glass-card p-3">
-                      <div class="mb-2 text-[11px] font-semibold text-blue">Cold · known ({sync()!.peers.cold})</div>
-                      <div class="max-h-36 space-y-1 overflow-y-auto font-mono text-[11px] text-text-muted">
-                        <For each={sync()!.peers.coldSample}>{(peer) => <div class="truncate">{peer}</div>}</For>
-                        <Show when={sync()!.peers.coldSample.length === 0}><div class="text-text-muted">No cold peers</div></Show>
-                      </div>
                     </div>
                   </div>
-                </Show>
+                  <div class="glass-card p-3">
+                    <div class="mb-2 text-[11px] font-semibold text-amber">Warm · standby ({peers().warm})</div>
+                    <div class="max-h-36 min-h-[40px] space-y-1 overflow-y-auto font-mono text-[11px] text-text-secondary">
+                      <For each={peers().warmKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
+                      <Show when={peers().warmKeys.length === 0}><div class="text-text-muted">No warm peers</div></Show>
+                    </div>
+                  </div>
+                  <div class="glass-card p-3">
+                    <div class="mb-2 text-[11px] font-semibold text-blue">Cold · known ({peers().cold})</div>
+                    <div class="max-h-36 min-h-[40px] space-y-1 overflow-y-auto font-mono text-[11px] text-text-muted">
+                      <For each={peers().coldSample}>{(peer) => <div class="truncate">{peer}</div>}</For>
+                      <Show when={peers().coldSample.length === 0}><div class="text-text-muted">No cold peers</div></Show>
+                    </div>
+                  </div>
+                </div>
 
-                <Show when={sync()?.multiPeer}>
-                  <div class="glass-card p-4">
-                    <div class="mb-3 flex items-center justify-between">
-                      <div class="text-[11px] font-semibold text-text-secondary">Multi-peer sync · honesty & pipeline</div>
-                      <span class="font-mono text-[11px] text-text-dim">
-                        quorum {sync()!.multiPeer!.quorum} · {sync()!.multiPeer!.validationWorkers} validation worker{sync()!.multiPeer!.validationWorkers === 1 ? "" : "s"}
-                      </span>
-                    </div>
-                    <div class="grid grid-cols-2 gap-3 md:grid-cols-5">
-                      <Stat label="Primary"  title="Hot peer whose headers drive block download and apply. Others only verify." value={sync()!.multiPeer!.primary ?? "—"} size="sm" />
-                      <Stat
-                        label="Verifiers agreeing" title="Verifier peers whose header hashes match the primary at the same slots."
-                        value={`${sync()!.multiPeer!.agreeing} / ${Math.max(0, sync()!.multiPeer!.peers.length - 1)}`}
-                        accent
-                        glow
-                        glowColor={sync()!.multiPeer!.divergent > 0 ? "orange" : "green"}
-                        size="sm"
-                      />
-                      <Stat label="Divergent"  title="Peers that served a different header for a slot the primary already delivered. Held cold for an hour." value={sync()!.multiPeer!.divergent} size="sm" />
-                      <Stat
-                        label="Ranges" title="BlockFetch ranges: downloading now, downloaded but waiting to apply in order, and re-issued after a failed or lying peer."
-                        value={`${sync()!.multiPeer!.rangesInFlight} ↓ · ${sync()!.multiPeer!.rangesAwaitingApply} wait · ${sync()!.multiPeer!.rangeRetries} retry`}
-                        size="sm"
-                      />
-                      <Stat label="Blocks / s"  title="Blocks applied to the local ledger per second, recent average." value={sync()!.multiPeer!.blocksPerSec.toFixed(1)} accent glow size="sm" />
-                    </div>
-                    <Show when={sync()!.peers.maliciousPeers.length > 0}>
-                      <div class="mt-3 text-[11px] font-semibold text-red">Held cold for bad data</div>
-                      <div class="mt-1 flex flex-col gap-1 font-mono text-[11px] text-text-dim">
-                        <For each={sync()!.peers.maliciousPeers}>
-                          {(m) => <div class="truncate">{m.key} — {m.reason.replace(/^malicious:\s*/, "")}</div>}
-                        </For>
-                      </div>
-                    </Show>
-                    <Show when={sync()!.peers.recentErrors.length > 0}>
-                      <div class="mt-3 text-[11px] font-semibold text-text-secondary">Recent peer errors</div>
-                      <div class="mt-1 flex flex-col gap-1 font-mono text-[11px] text-text-dim">
-                        <For each={sync()!.peers.recentErrors.slice(0, 4)}>
-                          {(e) => <div class="truncate">{e.key} ×{e.failCount} — {e.error}</div>}
-                        </For>
-                      </div>
-                    </Show>
+                <div class="glass-card p-4">
+                  <div class="mb-3 flex items-center justify-between">
+                    <div class="text-[11px] font-semibold text-text-secondary">Multi-peer sync · honesty & pipeline</div>
+                    <span class="font-mono text-[11px] text-text-dim">
+                      quorum {mp()?.quorum ?? "—"} · {mp()?.validationWorkers ?? "—"} validation worker{(mp()?.validationWorkers ?? 0) === 1 ? "" : "s"}
+                    </span>
                   </div>
-                </Show>
+                  <div class="grid grid-cols-2 gap-3 md:grid-cols-5">
+                    <Stat label="Primary" title="Hot peer whose headers drive block download and apply. Others only verify." value={mp()?.primary ?? "—"} size="sm" />
+                    <Stat
+                      label="Verifiers agreeing" title="Verifier peers whose header hashes match the primary at the same slots."
+                      value={mp() ? `${mp()!.agreeing} / ${Math.max(0, mp()!.peers.length - 1)}` : "—"}
+                      accent
+                      glow
+                      glowColor={(mp()?.divergent ?? 0) > 0 ? "orange" : "green"}
+                      size="sm"
+                    />
+                    <Stat label="Divergent" title="Peers that served a different header for a slot the primary already delivered. Held cold for an hour." value={mp()?.divergent ?? "—"} size="sm" />
+                    <Stat
+                      label="Ranges" title="BlockFetch ranges: downloading now, downloaded but waiting to apply in order, and re-issued after a failed or lying peer."
+                      value={mp() ? `${mp()!.rangesInFlight} ↓ · ${mp()!.rangesAwaitingApply} wait · ${mp()!.rangeRetries} retry` : "—"}
+                      size="sm"
+                    />
+                    <Stat label="Blocks / s" title="Blocks applied to the local ledger per second, recent average." value={mp() ? mp()!.blocksPerSec.toFixed(1) : "—"} accent glow size="sm" />
+                  </div>
+                  <Show when={peers().maliciousPeers.length > 0}>
+                    <div class="mt-3 text-[11px] font-semibold text-red">Held cold for bad data</div>
+                    <div class="mt-1 flex flex-col gap-1 font-mono text-[11px] text-text-dim">
+                      <For each={peers().maliciousPeers}>
+                        {(m) => <div class="truncate">{m.key} — {m.reason.replace(/^malicious:\s*/, "")}</div>}
+                      </For>
+                    </div>
+                  </Show>
+                  <Show when={peers().recentErrors.length > 0}>
+                    <div class="mt-3 text-[11px] font-semibold text-text-secondary">Recent peer errors</div>
+                    <div class="mt-1 flex flex-col gap-1 font-mono text-[11px] text-text-dim">
+                      <For each={peers().recentErrors.slice(0, 4)}>
+                        {(e) => <div class="truncate">{e.key} ×{e.failCount} — {e.error}</div>}
+                      </For>
+                    </div>
+                  </Show>
+                </div>
                 <div class="flex flex-wrap gap-2">
                   <button onClick={() => void manager.openExternal(`${base()}/docs`)} disabled={!health()?.healthy} class={btnPrimary}>
                     Open MiniBF /docs
@@ -894,7 +951,7 @@ const ControlCenter: Component = () => {
                     name={name()}
                     setName={setName}
                     network={network()}
-                    setNetwork={setNetwork}
+                    setNetwork={(v) => void switchNetwork(v)}
                     port={port()}
                     setPort={setPort}
                     dbPath={dbPath()}

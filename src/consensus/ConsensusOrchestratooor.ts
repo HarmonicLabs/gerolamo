@@ -60,6 +60,7 @@ import { RangeMismatch, RangeScheduler, SchedulerReset, type RangeSchedulerStats
 import { ValidationPool, resolveWorkerCount } from "./workers/ValidationPool";
 import { getEpochBodyParams, type EpochBodyParams } from "./epochParams";
 import { ApplyProfile, type ProfileSnapshot } from "./applyProfile";
+import { resolveValidationPolicy } from "./validationPolicy";
 
 export interface PeerAccessor {
     getPeer(peerId: string): PeerClient | null;
@@ -605,10 +606,9 @@ export class ConsensusOrchestrator {
         return this.candidates.roleOf(peerKey);
     }
 
+    /** Not configurable: strict whenever the ledger is complete, report-only for tip sync. See validationPolicy.ts. */
     resolveBodyPolicy(): BodyValidationPolicy {
-        const v = this.config.bodyValidation;
-        if (v === "strict" || v === "soft") return v;
-        return this.config.syncFromGenesis ? "strict" : "soft";
+        return resolveValidationPolicy(this.config).body;
     }
 
     syncSnapshot(): SyncSnapshot {

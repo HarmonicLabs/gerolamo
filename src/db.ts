@@ -857,6 +857,16 @@ export async function getUtxosByRefs(
     });
 }
 
+/** How many of these UTxOs carry a reference script (Babbage+ script lookup source). */
+export async function countUtxosWithReferenceScript(utxoRefs: string[]): Promise<number> {
+    if (utxoRefs.length === 0) return 0;
+    return countQuery(sql`
+        SELECT COUNT(*) as c FROM utxo
+        WHERE utxo_ref IN ${sql(utxoRefs)}
+          AND json_extract(tx_out, '$.reference_script_hash') IS NOT NULL
+    `);
+}
+
 export async function getUtxoByRef(
     utxoRef: string,
 ): Promise<{ utxo_ref: string; tx_out: string } | null> {

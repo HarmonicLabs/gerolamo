@@ -47,8 +47,6 @@
   },
   "tuiEnabled": false,
   "blockfrostUrl": "https://cardano-preprod.blockfrost.io/api/v0",
-  "bodyValidation": "auto",
-  "scriptValidation": "off",
   "peerGovernor": {
     "enabled": true,
     "targetHot": 3,

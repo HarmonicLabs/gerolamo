@@ -18,6 +18,7 @@ import { Cbor, CborArray, CborBytes, CborTag, CborUInt } from "@harmoniclabs/cbo
 import { logger } from "../utils/logger";
 import { createResourceSampler } from "../utils/processStats";
 import { resolveNodeRole } from "./nodeRole";
+import { resolveValidationPolicy } from "../consensus/validationPolicy";
 
 import type { GerolamoConfig } from "./peerManager";
 import {
@@ -97,6 +98,7 @@ async function buildMetricsPayload(
             ? manager.getGovernorSnapshot()
             : null;
     const resources = sampleResources();
+    const validation = resolveValidationPolicy(config);
     const genesisUtxos = await getGenesisUtxoStats().catch(() => ({ total: 0, unspent: 0, avvm: 0 }));
     return {
         network: config.network ?? process.env.NETWORK ?? "unknown",
@@ -108,8 +110,11 @@ async function buildMetricsPayload(
         era,
         eraName: eraName(era),
         epochNonce,
-        bodyValidation: config.bodyValidation ?? "soft",
-        scriptValidation: config.scriptValidation ?? "off",
+        bodyValidation: validation.body,
+        scriptValidation: validation.script,
+        /** False on tip sync: no ledger state behind the tip, tx rules are report-only. */
+        ledgerComplete: validation.ledgerComplete,
+        validationNote: validation.note,
         uptimeSec: Math.round(process.uptime()),
         node: "gerolamo",
         /** "data" (outbound only) or "relay" (accepts inbound N2N). */

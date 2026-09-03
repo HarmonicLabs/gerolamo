@@ -98,7 +98,18 @@ export function writeConfig(input: Partial<InstanceConfig>): {
       repoPath: input.repoPath || detect.repoPath,
       bunPath: bunPath || input.bunPath,
     });
-    if (!input.id) {
+    if (input.id) {
+      // An instance is bound to one network for life: its id, folder and DB carry
+      // that network's chain. Switching the dropdown must select/create the other
+      // network's instance, never retarget this one.
+      const existing = getInstance(getAppDb(), input.id);
+      if (existing && existing.network !== base.network) {
+        return {
+          ok: false,
+          error: `Instance ${input.id} is a ${existing.network} instance; pick or create a ${base.network} instance instead of retargeting it`,
+        };
+      }
+    } else {
       const reused = findReusableInstance(listNodes(), base.network);
       if (reused) {
         base.id = reused.id;

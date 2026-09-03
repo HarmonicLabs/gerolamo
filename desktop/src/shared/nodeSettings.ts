@@ -2,8 +2,6 @@
 
 export type SyncMode = "tip" | "genesis" | "point";
 export type LogLevel = "debug" | "info" | "warn" | "error";
-export type BodyValidation = "auto" | "soft" | "strict";
-export type ScriptValidation = "off" | "log" | "strict";
 /** data = outbound only (default). relay = also accept inbound node-to-node peers. */
 export type NodeRole = "data" | "relay";
 
@@ -14,8 +12,6 @@ export type NodeSettings = {
   logLevel: LogLevel;
   logToFile: boolean;
   logToConsole: boolean;
-  bodyValidation: BodyValidation;
-  scriptValidation: ScriptValidation;
   tuiEnabled: boolean;
   unixSocket: boolean;
   role: NodeRole;
@@ -39,8 +35,6 @@ export const DEFAULT_NODE_SETTINGS: NodeSettings = {
   logLevel: "info",
   logToFile: false,
   logToConsole: true,
-  bodyValidation: "auto",
-  scriptValidation: "off",
   tuiEnabled: false,
   unixSocket: false,
   role: "data",
@@ -82,8 +76,6 @@ export function buildConfigOverlay(input: {
     unixSocket: s.unixSocket,
     role,
     tuiEnabled: s.tuiEnabled,
-    bodyValidation: s.bodyValidation,
-    scriptValidation: s.scriptValidation,
     syncFromTip,
     syncFromGenesis,
     syncFromPoint,

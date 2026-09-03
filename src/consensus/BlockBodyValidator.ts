@@ -19,7 +19,8 @@ import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
 import type { EpochBodyParams } from "./epochParams";
 
-import { getUtxosByRefs, getAllStake, getAllDelegations } from "../db";
+import { getUtxosByRefs, getAllStake, getAllDelegations, countUtxosWithReferenceScript } from "../db";
+import { resolveValidationPolicy } from "./validationPolicy";
 
 /** Safe BigInt from DB amount (string | number | null). Null/invalid → 0n. */
 function amountToBigInt(amount: unknown): bigint {
@@ -211,13 +212,8 @@ export class BlockBodyValidator {
     private async runScriptValidationPolicy(
         block: CardanoBlock,
     ): Promise<boolean> {
-        const mode: "off" | "log" | "strict" =
-            this.config?.scriptValidation === "strict"
-                ? "strict"
-                : this.config?.scriptValidation === "log"
-                ? "log"
-                : "off";
-        if (mode === "off") return true;
+        // Not configurable: strict when the ledger is complete, report-only on tip sync.
+        const mode: "log" | "strict" = resolveValidationPolicy(this.config).script;
 
         const issues: string[] = [];
         const bodies = block.transactionBodies ?? [];
@@ -241,9 +237,25 @@ export class BlockBodyValidator {
                 : [];
 
             if (scriptList.length === 0) {
-                issues.push(
-                    `tx[${i}]: redeemers present but no plutus scripts in witness`,
-                );
+                // Babbage+ : scripts may come from reference inputs or from the spent
+                // UTxOs' reference scripts instead of the witness set.
+                const refIns: any[] = Array.isArray(body?.referenceInputs) ? body.referenceInputs : [];
+                const ins: any[] = Array.isArray(body?.inputs) ? body.inputs : [];
+                const refs = [...refIns, ...ins]
+                    .map((inp: any) => {
+                        try {
+                            return `${inp.utxoRef.id.toString()}:${inp.utxoRef.index}`;
+                        } catch {
+                            return null;
+                        }
+                    })
+                    .filter((r): r is string => !!r);
+                const referenced = refs.length > 0 ? await countUtxosWithReferenceScript(refs) : 0;
+                if (referenced === 0) {
+                    issues.push(
+                        `tx[${i}]: redeemers present but no plutus scripts in witness set and no reference scripts among ${refs.length} referenced/spent UTxO(s)`,
+                    );
+                }
                 continue;
             }
 

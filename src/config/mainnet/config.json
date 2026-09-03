@@ -65,7 +65,6 @@
     "maxSize": 262144,
     "txExpirySeconds": 3600
   },
-  "bodyValidation": "auto",
   "peerGovernor": {
     "targetHot": 3
   },

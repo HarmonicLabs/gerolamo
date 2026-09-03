@@ -79,6 +79,13 @@ export const NodeConfigForm: Component<Props> = (props) => {
             <option value="point">point (slot + hash)</option>
           </select>
         </div>
+        <Show when={s().syncMode === "tip"}>
+          <div class="md:col-span-2 rounded-md border border-amber/30 bg-amber-dim px-3 py-2 text-[11px] text-amber">
+            Tip sync has no ledger state behind the tip, so transaction rules and scripts cannot be enforced; they run in
+            report-only mode. Headers, body hashes and peer agreement are still verified. For a fully validated ledger
+            sync from genesis (or bootstrap with Mithril). Validation is not a setting.
+          </div>
+        </Show>
         <Show when={s().syncMode === "point"}>
           <div>
             <TipLabel text="syncFromPointSlot" tip="config.json → syncFromPointSlot\nDecimal slot to intersect." />
@@ -110,40 +117,6 @@ export const NodeConfigForm: Component<Props> = (props) => {
             <option value="info">info</option>
             <option value="warn">warn</option>
             <option value="error">error</option>
-          </select>
-        </div>
-        <div>
-          <TipLabel
-            text="bodyValidation"
-            tip={"config.json → bodyValidation\nauto = strict when syncing from genesis, soft otherwise.\nsoft = log failures, still apply (mid-chain).\nstrict = reject invalid bodies."}
-          />
-          <select
-            value={s().bodyValidation}
-            onChange={(e) =>
-              props.patchSettings({ bodyValidation: e.currentTarget.value as NodeSettings["bodyValidation"] })
-            }
-            class={fieldClass}
-          >
-            <option value="auto">auto (strict from genesis, soft otherwise)</option>
-            <option value="soft">soft (log, still apply)</option>
-            <option value="strict">strict (reject)</option>
-          </select>
-        </div>
-        <div>
-          <TipLabel
-            text="scriptValidation"
-            tip={"config.json → scriptValidation\noff = skip Plutus/native scripts.\nlog = check + log, still accept.\nstrict = reject on script failure."}
-          />
-          <select
-            value={s().scriptValidation}
-            onChange={(e) =>
-              props.patchSettings({ scriptValidation: e.currentTarget.value as NodeSettings["scriptValidation"] })
-            }
-            class={fieldClass}
-          >
-            <option value="off">off</option>
-            <option value="log">log</option>
-            <option value="strict">strict</option>
           </select>
         </div>
         <div class="md:col-span-2">

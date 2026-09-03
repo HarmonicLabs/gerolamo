@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { createInstanceDb, getInstance, listInstances, saveInstance } from "./database";
+import { createInstanceDb, getInstance, listInstances, saveInstance, getPref, setPref } from "./database";
 import type { InstanceConfig } from "../shared/types";
 
 function sample(over: Partial<InstanceConfig> = {}): InstanceConfig {
@@ -36,5 +36,18 @@ describe("instances db", () => {
     expect(listInstances(db)).toHaveLength(1);
     expect(getInstance(db, "gerolamo-preprod-1")?.port).toBe(3040);
     expect(getInstance(db, "gerolamo-preprod-1")?.name).toBe("updated");
+  });
+});
+
+describe("prefs", () => {
+  test("set/get/delete round-trip and upsert", () => {
+    const db = createInstanceDb(":memory:");
+    expect(getPref(db, "lastInstanceId")).toBeNull();
+    setPref(db, "lastInstanceId", "gerolamo-preprod-1");
+    expect(getPref(db, "lastInstanceId")).toBe("gerolamo-preprod-1");
+    setPref(db, "lastInstanceId", "gerolamo-mainnet-2");
+    expect(getPref(db, "lastInstanceId")).toBe("gerolamo-mainnet-2");
+    setPref(db, "lastInstanceId", null);
+    expect(getPref(db, "lastInstanceId")).toBeNull();
   });
 });

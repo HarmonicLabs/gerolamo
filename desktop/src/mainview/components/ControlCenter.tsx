@@ -1,4 +1,4 @@
-import { Component, For, Show, createResource, createSignal, onCleanup, onMount } from "solid-js";
+import { Component, For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { manager } from "../lib/manager";
 import { gerolamoHttpBase, type BootstrapStatus, type HealthResult, type InstanceConfig, type StatusResult } from "../../shared/types";
 import { formatBytes, formatPercent, nodeCpuShare, nodeMemShare, type ResourceSnapshot } from "../../shared/resources";
@@ -223,12 +223,25 @@ const ControlCenter: Component = () => {
     setStatusMsg(`New ${net} instance — save config.json to create it (DB and snapshot paths default under ~/.local/share/gerolamo/gerolamo-${net}-<id>/)`);
   };
 
+  // Remember the selected instance across app restarts (stored in the app DB, not the browser).
+  const LAST_INSTANCE_PREF = "lastInstanceId";
+  createEffect(() => {
+    const id = activeConfig()?.id;
+    if (id) void manager.setPref(LAST_INSTANCE_PREF, id).catch(() => undefined);
+  });
+
   onMount(() => {
     void (async () => {
       try {
         const nodes = await manager.list();
-        const same = nodes.filter((n) => n.network === network());
-        const target = same.find((n) => n.runState === "running") ?? same[0];
+        const last = (await manager.getPref(LAST_INSTANCE_PREF).catch(() => ({ value: null }))).value;
+        const remembered = last ? nodes.find((n) => n.id === last) : undefined;
+        // Prefer: the instance the user last selected → a running one → any for the default network.
+        const target =
+          remembered ??
+          nodes.find((n) => n.runState === "running") ??
+          nodes.filter((n) => n.network === network())[0] ??
+          nodes[0];
         if (!target) return;
         await loadInstance(target);
       } catch (e) {

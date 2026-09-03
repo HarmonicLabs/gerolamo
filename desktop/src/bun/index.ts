@@ -15,6 +15,7 @@ import {
   writeConfig,
 } from "./nodeService";
 import { applyWindowIcon } from "./windowIcon";
+import { getAppDb, getPref, setPref } from "./database";
 import {
   bootstrapLogs,
   bootstrapStatus,
@@ -29,7 +30,7 @@ if (!process.env.WEBKIT_FORCE_SOFTWARE_OPENGL) {
   process.env.WEBKIT_FORCE_SOFTWARE_OPENGL = "1";
 }
 
-type IdParams = { id?: string; maxLines?: number; config?: any; url?: string };
+type IdParams = { id?: string; maxLines?: number; config?: any; url?: string; key?: string; value?: string | null };
 
 function asParams(params?: unknown): IdParams {
   return params && typeof params === "object" ? (params as IdParams) : {};
@@ -117,6 +118,17 @@ const bunRpc = defineElectrobunRPC("bun", {
         const id = asParams(params).id;
         if (!id) return { ok: false, error: "id required" };
         return wipeChainDb(id);
+      },
+      async "pref.get"(params?: unknown) {
+        const key = asParams(params).key;
+        if (!key) return { value: null };
+        return { value: getPref(getAppDb(), key) };
+      },
+      async "pref.set"(params?: unknown) {
+        const p = asParams(params);
+        if (!p.key) return { ok: false, error: "key required" };
+        setPref(getAppDb(), p.key, p.value ?? null);
+        return { ok: true };
       },
       async "wipe.snapshots"(params?: unknown) {
         const id = asParams(params).id;

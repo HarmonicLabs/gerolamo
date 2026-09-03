@@ -26,4 +26,6 @@ export const manager = {
   openExternal: (url: string) => rpc.request.openExternal({ url }),
   wipeDb: (id: string) => rpc.request["wipe.db"]({ id }),
   wipeSnapshots: (id: string) => rpc.request["wipe.snapshots"]({ id }),
+  getPref: (key: string): Promise<{ value: string | null }> => rpc.request["pref.get"]({ key }),
+  setPref: (key: string, value: string | null) => rpc.request["pref.set"]({ key, value }),
 };

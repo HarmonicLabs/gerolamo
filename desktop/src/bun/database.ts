@@ -25,6 +25,11 @@ CREATE TABLE IF NOT EXISTS instances (
   config_json TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS prefs (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL,
+  updated_at INTEGER NOT NULL
+);
 `;
 
 export function createInstanceDb(filename = ":memory:"): Database {
@@ -117,4 +122,20 @@ export function listInstances(db: Database): InstanceConfig[] {
 export function getInstance(db: Database, id: string): InstanceConfig | null {
   const row = db.query("SELECT * FROM instances WHERE id = ?").get(id) as Record<string, unknown> | null;
   return row ? rowToConfig(row) : null;
+}
+
+/** Small key/value store for UI preferences (e.g. the last selected instance). */
+export function getPref(db: Database, key: string): string | null {
+  const row = db.query("SELECT value FROM prefs WHERE key = ?").get(key) as { value: string } | null;
+  return row?.value ?? null;
+}
+
+export function setPref(db: Database, key: string, value: string | null): void {
+  if (value == null) {
+    db.query("DELETE FROM prefs WHERE key = ?").run(key);
+    return;
+  }
+  db.query(
+    "INSERT INTO prefs (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+  ).run(key, value, Date.now());
 }

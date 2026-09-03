@@ -5,7 +5,7 @@ Electrobun + SolidJS control center for **this repo**. Not The Lab. Not TxPipe.
 ## Run
 
 ```bash
-cd /media/bakon/data/Dev/HarmonicLabs/gerolamo
+cd path/to/gerolamo   # your checkout of this repo
 bun run ui:dev
 # or:
 cd desktop && bun install && bun run dev

@@ -24,4 +24,6 @@ export const manager = {
   bootstrapLogs: (id: string, maxLines = 120) => rpc.request["bootstrap.logs"]({ id, maxLines }),
   bootstrapSkip: (id: string) => rpc.request["bootstrap.skip"]({ id }),
   openExternal: (url: string) => rpc.request.openExternal({ url }),
+  wipeDb: (id: string) => rpc.request["wipe.db"]({ id }),
+  wipeSnapshots: (id: string) => rpc.request["wipe.snapshots"]({ id }),
 };

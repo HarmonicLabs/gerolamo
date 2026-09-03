@@ -10,8 +10,11 @@ import {
   pickDirectory,
   startNode,
   stopNode,
+  wipeChainDb,
+  wipeSnapshots,
   writeConfig,
 } from "./nodeService";
+import { applyWindowIcon } from "./windowIcon";
 import {
   bootstrapLogs,
   bootstrapStatus,
@@ -110,17 +113,36 @@ const bunRpc = defineElectrobunRPC("bun", {
         if (!url) return { ok: false, error: "url required" };
         return openExternal(url);
       },
+      async "wipe.db"(params?: unknown) {
+        const id = asParams(params).id;
+        if (!id) return { ok: false, error: "id required" };
+        return wipeChainDb(id);
+      },
+      async "wipe.snapshots"(params?: unknown) {
+        const id = asParams(params).id;
+        if (!id) return { ok: false, error: "id required" };
+        return wipeSnapshots(id);
+      },
     },
   },
 });
 
-new BrowserWindow({
+const mainWindow = new BrowserWindow({
   title: "Gerolamo",
   url: "views://mainview/index.html",
   rpc: bunRpc,
   renderer: "native",
   frame: { width: 1280, height: 900, x: 80, y: 40 },
 });
+
+// Taskbar / window icon on Linux (dev builds show a generic icon otherwise).
+setTimeout(() => {
+  try {
+    applyWindowIcon((mainWindow as any).ptr);
+  } catch (e) {
+    console.warn("[icon]", e);
+  }
+}, 250);
 
 setTimeout(() => {
   try {

@@ -14,7 +14,8 @@ import { getAppDb, getInstance, listInstances, saveInstance } from "./database";
 import { assertAbsPath, instanceDirFor, normalizeDbPath, resolveRepoRoot } from "./paths";
 import { buildNodeSpawn } from "./spawnPlan";
 import { writersConflict } from "./mithrilStage";
-import { fetchGerolamoSyncStatus } from "../shared/syncStatus";
+import { deriveGerolamoSyncStatus, fetchGerolamoMetrics } from "../shared/syncStatus";
+import { resourceSnapshot } from "./resources";
 import {
   createDefaultInstance,
   findReusableInstance,
@@ -24,7 +25,9 @@ import {
   type LogsResult,
   type StatusResult,
 } from "../shared/types";
+import { buildConfigOverlay, DEFAULT_NODE_SETTINGS } from "../shared/nodeSettings";
 import { bootstrapAlive, bootstrapDbPath } from "./mithrilService";
+import { dbSidecars, wipeDirContents, wipeFiles } from "./wipe";
 
 const live = new Map<string, Subprocess>();
 
@@ -122,8 +125,21 @@ export function writeConfig(input: Partial<InstanceConfig>): {
       snapshotDir,
       bunPath: bunPath || base.bunPath,
       repoPath: base.repoPath,
+      nodeSettings: {
+        ...DEFAULT_NODE_SETTINGS,
+        ...(base.nodeSettings ?? {}),
+        ...(input.nodeSettings ?? {}),
+      },
     };
 
+    const overlay = buildConfigOverlay({
+      network: config.network,
+      port: config.port,
+      dbPath: config.dbPath,
+      n2cSocket: config.n2cSocket,
+      settings: config.nodeSettings ?? DEFAULT_NODE_SETTINGS,
+    });
+    writeFileSync(join(dir, "config.json"), JSON.stringify(overlay, null, 2), "utf8");
     writeFileSync(join(dir, "instance.json"), JSON.stringify(config, null, 2), "utf8");
     writeFileSync(
       join(dir, "README.txt"),
@@ -187,6 +203,7 @@ export async function startNode(input: Partial<InstanceConfig>): Promise<{
       port: config.port,
       dbPath: config.dbPath,
       n2cSocket: config.n2cSocket,
+      configPath: join(config.instanceDir, "config.json"),
     });
 
     const logPath = join(config.instanceDir, "logs", "daemon.log");
@@ -303,10 +320,18 @@ export async function getNodeStatus(id: string): Promise<StatusResult | null> {
   const running = isPidAlive(pid) || live.has(id);
   let health: HealthResult | null = null;
   let sync = null;
+  let metrics = null;
   if (running) {
     health = await healthCheck(row);
-    sync = await fetchGerolamoSyncStatus(gerolamoHttpBase(row.port), row.network);
+    metrics = await fetchGerolamoMetrics(gerolamoHttpBase(row.port));
+    sync = metrics ? deriveGerolamoSyncStatus(metrics, row.network) : null;
   }
+  const resources = resourceSnapshot({
+    running,
+    pid,
+    dbPath: row.dbPath,
+    metricsProcess: metrics?.process,
+  });
   return {
     id,
     running,
@@ -318,6 +343,7 @@ export async function getNodeStatus(id: string): Promise<StatusResult | null> {
     lastError: row.lastError,
     health,
     sync,
+    resources,
     n2c: row.n2cSocket || "off",
   };
 }
@@ -354,6 +380,34 @@ export function openExternal(url: string): { ok: boolean; error?: string } {
   try {
     spawn(["xdg-open", url], { stdout: "ignore", stderr: "ignore", stdin: "ignore" });
     return { ok: true };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? String(err) };
+  }
+}
+
+export function wipeChainDb(id: string): { ok: boolean; error?: string; path?: string; removed?: string[] } {
+  const row = getInstance(getAppDb(), id);
+  if (!row) return { ok: false, error: "Unknown instance — save config first" };
+  if (live.has(id) || isPidAlive(row.pid)) return { ok: false, error: "Stop the node first (one writer)" };
+  if (bootstrapAlive()) return { ok: false, error: "Stop Mithril bootstrap first (one writer)" };
+  try {
+    const path = assertAbsPath(row.dbPath, "dbPath");
+    const { removed } = wipeFiles(dbSidecars(path));
+    return { ok: true, path, removed };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? String(err) };
+  }
+}
+
+export function wipeSnapshots(id: string): { ok: boolean; error?: string; path?: string; removed?: number } {
+  const row = getInstance(getAppDb(), id);
+  if (!row) return { ok: false, error: "Unknown instance — save config first" };
+  if (live.has(id) || isPidAlive(row.pid)) return { ok: false, error: "Stop the node first" };
+  if (bootstrapAlive()) return { ok: false, error: "Stop Mithril bootstrap first" };
+  try {
+    const r = wipeDirContents(row.snapshotDir);
+    if (!r.ok) return { ok: false, error: r.error, path: r.path };
+    return { ok: true, path: r.path, removed: r.removed };
   } catch (err: any) {
     return { ok: false, error: err?.message ?? String(err) };
   }

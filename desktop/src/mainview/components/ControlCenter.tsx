@@ -1,18 +1,34 @@
 import { Component, For, Show, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { manager } from "../lib/manager";
 import { gerolamoHttpBase, type BootstrapStatus, type HealthResult, type InstanceConfig, type StatusResult } from "../../shared/types";
+import { formatBytes, formatPercent, nodeCpuShare, nodeMemShare, type ResourceSnapshot } from "../../shared/resources";
+import { DEFAULT_NODE_SETTINGS, type NodeSettings } from "../../shared/nodeSettings";
+import { NodeConfigForm } from "./NodeConfigForm";
+import { cn } from "../lib/cn";
+import { Badge } from "./ui/Badge";
+import { ProgressBar } from "./ui/ProgressBar";
+import { ProgressRing } from "./ui/ProgressRing";
+import { Stat } from "./ui/Stat";
 import {
-  ProgressiveNodePanel,
-  StepCard,
-  fieldClass,
-  labelClass,
   btnPrimary,
   btnSecondary,
   btnDanger,
+  LogFollowPre,
+  ConfirmDialog,
 } from "./nodeUI";
 
+type PageId = "overview" | "node" | "mithril" | "logs" | "docs";
+
+const NAV: { id: PageId; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "node", label: "Node" },
+  { id: "mithril", label: "Mithril" },
+  { id: "logs", label: "Logs" },
+  { id: "docs", label: "Docs" },
+];
+
 const ControlCenter: Component = () => {
-  const [activeTab, setActiveTab] = createSignal<"control" | "docs">("control");
+  const [page, setPage] = createSignal<PageId>("overview");
   const [name, setName] = createSignal("");
   const [network, setNetwork] = createSignal<"preprod" | "mainnet" | "preview">("preprod");
   const [port, setPort] = createSignal(3030);
@@ -20,6 +36,8 @@ const ControlCenter: Component = () => {
   const [snapshotDir, setSnapshotDir] = createSignal("");
   const [n2cSocket, setN2cSocket] = createSignal("");
   const [skipApply, setSkipApply] = createSignal(false);
+  const [settings, setSettings] = createSignal<NodeSettings>({ ...DEFAULT_NODE_SETTINGS });
+  const patchSettings = (p: Partial<NodeSettings>) => setSettings({ ...settings(), ...p });
 
   const [activeConfig, setActiveConfig] = createSignal<InstanceConfig | null>(null);
   const [configWritten, setConfigWritten] = createSignal(false);
@@ -27,15 +45,16 @@ const ControlCenter: Component = () => {
   const [bootstrapReady, setBootstrapReady] = createSignal(false);
   const [health, setHealth] = createSignal<HealthResult | null>(null);
   const [sync, setSync] = createSignal<StatusResult["sync"]>(null);
+  const [resources, setResources] = createSignal<ResourceSnapshot | null>(null);
   const [boot, setBoot] = createSignal<BootstrapStatus | null>(null);
   const [logLines, setLogLines] = createSignal<string[]>([]);
   const [bootLogLines, setBootLogLines] = createSignal<string[]>([]);
-  const [logOpen, setLogOpen] = createSignal(false);
   const [bootLogOpen, setBootLogOpen] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
   const [statusMsg, setStatusMsg] = createSignal("");
   const [errorMsg, setErrorMsg] = createSignal("");
   const [docsHtml, setDocsHtml] = createSignal("");
+  const [confirm, setConfirm] = createSignal<"db" | "snap" | null>(null);
 
   let healthTimer: ReturnType<typeof setInterval> | null = null;
   let bootTimer: ReturnType<typeof setInterval> | null = null;
@@ -74,6 +93,7 @@ const ControlCenter: Component = () => {
         const st = await manager.status(id);
         setNodeRunning(!!st?.running);
         setSync(st?.sync ?? null);
+        setResources(st?.resources ?? null);
         if (st?.health) setHealth(st.health);
         const logs = await manager.logs(id, 120);
         if (logs.ok) setLogLines(logs.lines);
@@ -119,12 +139,12 @@ const ControlCenter: Component = () => {
         if (target.snapshotDir) setSnapshotDir(target.snapshotDir);
         if (target.n2cSocket) setN2cSocket(target.n2cSocket);
         setSkipApply(!!target.skipApply);
+        if (target.nodeSettings) setSettings({ ...DEFAULT_NODE_SETTINGS, ...target.nodeSettings });
         setConfigWritten(!!target.instanceDir);
         setBootstrapReady(target.bootstrapState === "ready");
         const st = await manager.status(target.id);
         if (st?.running) {
           setNodeRunning(true);
-          setLogOpen(true);
           setStatusMsg(`Resumed running · ${target.id}`);
           startNodePolls(target.id);
         } else if (target.instanceDir) {
@@ -156,16 +176,10 @@ const ControlCenter: Component = () => {
       snapshotDir: snapshotDir().trim() || undefined,
       n2cSocket: n2cSocket().trim() || null,
       skipApply: skipApply(),
+      nodeSettings: settings(),
       pid: prev?.pid,
       runState: prev?.runState,
     };
-  };
-
-  const currentStep = () => {
-    if (!hasRuntime()) return 1;
-    if (!configWritten()) return 2;
-    if (!bootstrapReady()) return 3;
-    return 4;
   };
 
   const pick = async (kind: "db" | "snap") => {
@@ -259,7 +273,7 @@ const ControlCenter: Component = () => {
         setConfigWritten(true);
       }
       setNodeRunning(true);
-      setLogOpen(true);
+      setPage("logs");
       setStatusMsg(`Started · pid ${result.pid ?? "?"}`);
       const id = result.config?.id || activeConfig()?.id;
       if (id) startNodePolls(id);
@@ -290,148 +304,39 @@ const ControlCenter: Component = () => {
     }
   };
 
+  const handleWipe = async (kind: "db" | "snap") => {
+    const id = activeConfig()?.id;
+    if (!id) return;
+    setConfirm(null);
+    setBusy(true);
+    setErrorMsg("");
+    try {
+      const result = kind === "db" ? await manager.wipeDb(id) : await manager.wipeSnapshots(id);
+      if (!result.ok) {
+        setErrorMsg(result.error || "Wipe failed");
+        return;
+      }
+      setStatusMsg(
+        kind === "db"
+          ? `Deleted chain DB · ${result.path || ""}`
+          : `Deleted Mithril snapshots · ${result.removed ?? 0} entries in ${result.path || ""}`,
+      );
+    } catch (e: any) {
+      setErrorMsg(e?.message || "wipe failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const formatMetric = (value: string | number | null | undefined) => {
     if (value == null) return "—";
     const numeric = Number(value);
     return Number.isFinite(numeric) ? numeric.toLocaleString("en-US") : String(value);
   };
 
-  const headerRight = () => {
-    if (busy()) return "Working…";
-    const s = sync();
-    if (nodeRunning() && s) return `${s.syncPercent.toFixed(2)}% synced · slot ${Number(s.tipSlot).toLocaleString("en-US")}`;
-    if (nodeRunning()) return "Node running · reading tip…";
-    if (bootstrapReady()) return "Bootstrap ready · next: Start";
-    if (configWritten()) return "Config ready · next: Mithril or Skip";
-    if (hasRuntime()) return "Runtime OK · next: Configure";
-    return `Step ${currentStep()} of 4`;
-  };
-
-  const operationalStatusPanel = () => {
-    if (!nodeRunning()) return null;
-    const s = sync();
-    const pct = s ? Math.max(0, Math.min(100, s.syncPercent)) : 0;
-    const base = gerolamoHttpBase(port());
-    return (
-      <div class="rounded-lg border border-emerald-800/50 bg-emerald-950/20 p-3 space-y-2">
-        <div class="flex items-center justify-between gap-2 text-[11px]">
-          <span class="font-semibold text-emerald-300">Health, sync & peers</span>
-          <span class="font-mono text-zinc-400">{s ? `${s.syncPercent.toFixed(2)}% synced` : "Reading chain tip…"}</span>
-        </div>
-        <div class="grid grid-cols-2 md:grid-cols-5 gap-2 text-[11px]">
-          <div class="rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1.5">
-            <div class="text-zinc-500">Process</div>
-            <div class={nodeRunning() ? "text-emerald-400 font-medium" : "text-zinc-400"}>
-              {nodeRunning() ? "alive" : "stopped"}
-            </div>
-          </div>
-          <div class="rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1.5">
-            <div class="text-zinc-500">HTTP</div>
-            <div class={health()?.healthy ? "text-emerald-400 font-medium" : "text-zinc-400"}>
-              {health() ? (health()!.healthy ? `ok · ${health()!.latencyMs ?? "?"}ms` : "down") : "—"}
-            </div>
-          </div>
-          <div class="rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1.5">
-            <div class="text-zinc-500">Port</div>
-            <div class="text-zinc-200 font-mono">{port()}</div>
-          </div>
-          <div class="rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1.5">
-            <div class="text-zinc-500">N2C</div>
-            <div class="text-zinc-200 font-mono truncate">{n2cSocket() || "off"}</div>
-          </div>
-          <div class="rounded-md border border-zinc-800 bg-zinc-950/50 px-2 py-1.5">
-            <div class="text-zinc-500">MiniBF</div>
-            <div class="text-zinc-200 font-mono truncate">/api/v0</div>
-          </div>
-        </div>
-        <Show when={s}>
-          <div class="space-y-2">
-            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 text-[11px]">
-              <div class="min-w-0">
-                <div class="text-zinc-500">Chain tip</div>
-                <div class="font-mono text-zinc-100 whitespace-nowrap overflow-hidden text-ellipsis">
-                  {formatMetric(s!.tipSlot)}
-                </div>
-              </div>
-              <div class="min-w-0">
-                <div class="text-zinc-500">Network tip</div>
-                <div class="font-mono text-zinc-100 whitespace-nowrap overflow-hidden text-ellipsis">
-                  {formatMetric(s!.networkTipSlot)}
-                </div>
-              </div>
-              <div class="min-w-0">
-                <div class="text-zinc-500">Synced</div>
-                <div class="font-mono text-emerald-400 font-semibold whitespace-nowrap overflow-hidden text-ellipsis">
-                  {s!.syncPercent.toFixed(2)}%
-                </div>
-              </div>
-              <div class="min-w-0">
-                <div class="text-zinc-500">UTxOs</div>
-                <div class="font-mono text-zinc-100 whitespace-nowrap overflow-hidden text-ellipsis">
-                  {formatMetric(s!.utxoCount)}
-                </div>
-              </div>
-            </div>
-            <div class="h-2 overflow-hidden rounded-full bg-zinc-800">
-              <div class="h-full rounded-full bg-emerald-500 transition-[width] duration-500" style={{ width: `${pct}%` }} />
-            </div>
-            <div class="grid grid-cols-1 lg:grid-cols-3 gap-2">
-              <div class="min-w-0 rounded-md border border-emerald-900/60 bg-emerald-950/20 p-2">
-                <div class="mb-1 text-[10px] font-semibold text-emerald-400">Hot · ChainSync ({s!.peers.hot})</div>
-                <div class="max-h-28 space-y-1 overflow-y-auto font-mono text-[10px] text-zinc-300">
-                  <For each={s!.peers.hotKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
-                  <Show when={s!.peers.hotKeys.length === 0}>
-                    <div class="text-zinc-600">No hot peers</div>
-                  </Show>
-                </div>
-              </div>
-              <div class="min-w-0 rounded-md border border-sky-900/60 bg-sky-950/20 p-2">
-                <div class="mb-1 text-[10px] font-semibold text-sky-400">Warm · standby ({s!.peers.warm})</div>
-                <div class="max-h-28 space-y-1 overflow-y-auto font-mono text-[10px] text-zinc-300">
-                  <For each={s!.peers.warmKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
-                  <Show when={s!.peers.warmKeys.length === 0}>
-                    <div class="text-zinc-600">No warm peers</div>
-                  </Show>
-                </div>
-              </div>
-              <div class="min-w-0 rounded-md border border-zinc-700 bg-zinc-900/30 p-2">
-                <div class="mb-1 text-[10px] font-semibold text-zinc-400">Cold · known ({s!.peers.cold})</div>
-                <div class="max-h-28 space-y-1 overflow-y-auto font-mono text-[10px] text-zinc-500">
-                  <For each={s!.peers.coldSample}>{(peer) => <div class="truncate">{peer}</div>}</For>
-                  <Show when={s!.peers.coldSample.length === 0}>
-                    <div class="text-zinc-600">No cold peers</div>
-                  </Show>
-                </div>
-              </div>
-            </div>
-          </div>
-        </Show>
-        <div class="flex flex-wrap gap-2 border-t border-emerald-900/40 pt-2">
-          <button
-            onClick={() => void manager.openExternal(`${base}/docs`)}
-            disabled={!health()?.healthy}
-            class={btnPrimary}
-          >
-            Open MiniBF /docs
-          </button>
-          <button
-            onClick={() => void manager.openExternal(`${base}/stats`)}
-            disabled={!health()?.healthy}
-            class={btnSecondary}
-          >
-            Open /stats
-          </button>
-          <button onClick={() => setLogOpen(!logOpen())} class={btnSecondary}>
-            {logOpen() ? "Hide log" : "Show log"}
-          </button>
-        </div>
-        <Show when={logOpen()}>
-          <pre class="p-2 bg-black/40 rounded border border-zinc-800 text-[10px] font-mono text-zinc-400 max-h-48 overflow-y-auto whitespace-pre-wrap break-all">
-            {logLines().length ? logLines().join("\n") : "No daemon.log yet."}
-          </pre>
-        </Show>
-      </div>
-    );
+  const go = (id: PageId) => {
+    setPage(id);
+    if (id === "docs") void loadDocs();
   };
 
   const loadDocs = async () => {
@@ -445,267 +350,623 @@ const ControlCenter: Component = () => {
     }
   };
 
+  const pct = () => {
+    const s = sync();
+    return s ? Math.max(0, Math.min(100, s.syncPercent)) : 0;
+  };
+
+  const pageTitle = () => NAV.find((n) => n.id === page())?.label ?? "Overview";
+  const base = () => gerolamoHttpBase(port());
+
   return (
-    <div class="space-y-6">
-      <div class="flex items-center justify-between">
-        <div>
-          <h2 class="text-2xl font-bold text-white">Gerolamo</h2>
-          <p class="text-xs text-zinc-500 mt-1">
-            Standalone TS node/relay · Bun · MiniBF subset · not The Lab · not TxPipe
+    <div class="flex h-screen bg-mesh bg-grid-subtle text-text">
+      <aside class="flex flex-col h-screen border-r border-border bg-bg-raised/95 shrink-0 w-56 overflow-hidden">
+        <div class="flex items-center h-14 px-4 border-b border-border gap-2">
+          <img src="./gerolamo-logo.svg" alt="" class="h-8 w-8 rounded-md bg-white object-contain p-0.5" />
+          <span class="font-mono text-[16px] font-bold tracking-wider text-accent text-glow-strong select-none">
+            GEROLAMO
+          </span>
+        </div>
+        <nav class="flex-1 flex flex-col gap-0.5 py-2 px-2 overflow-y-auto">
+          <For each={NAV}>
+            {(item) => (
+              <button
+                type="button"
+                onClick={() => go(item.id)}
+                class={cn(
+                  "relative flex items-center h-10 px-3 rounded-[8px] text-[13px] font-medium transition-colors",
+                  page() === item.id
+                    ? "bg-accent-dim text-accent"
+                    : "text-text-secondary hover:text-text hover:bg-bg-overlay",
+                )}
+                aria-current={page() === item.id ? "page" : undefined}
+              >
+                <Show when={page() === item.id}>
+                  <div class="absolute left-0 top-1.5 bottom-1.5 w-[3px] rounded-r-full bg-accent" />
+                </Show>
+                {item.label}
+              </button>
+            )}
+          </For>
+        </nav>
+        <div class="shrink-0 border-t border-border px-4 py-3">
+          <p class="text-[10px] text-text-muted leading-tight">
+            Harmonic Labs
+            <br />
+            <span class="text-text-dim">Standalone TS node/relay</span>
           </p>
         </div>
-        <div class="flex gap-2 border-b border-zinc-800">
-          <button
-            onClick={() => setActiveTab("control")}
-            class={`px-4 py-2 text-sm font-medium rounded-t-lg ${activeTab() === "control" ? "bg-harmonic-600 text-white border-b-2 border-harmonic-400" : "text-gray-400 hover:text-white"}`}
-          >
-            Control Center
-          </button>
-          <button
-            onClick={() => {
-              setActiveTab("docs");
-              void loadDocs();
-            }}
-            class={`px-4 py-2 text-sm font-medium rounded-t-lg ${activeTab() === "docs" ? "bg-harmonic-600 text-white border-b-2 border-harmonic-400" : "text-gray-400 hover:text-white"}`}
-          >
-            Knowledge Base
-          </button>
-        </div>
-      </div>
+      </aside>
 
-      <Show when={activeTab() === "control"}>
-        <ProgressiveNodePanel
-          title="Gerolamo node"
-          network={network()}
-          headerRight={headerRight()}
-          running={nodeRunning()}
-          runningLabel={sync() ? `${sync()!.syncPercent.toFixed(1)}% synced` : "Running"}
-          banner={operationalStatusPanel()}
-          bannerPlacement="after-steps"
-          identity={
-            activeConfig()
-              ? {
-                  id: activeConfig()!.id,
-                  dir: activeConfig()!.instanceDir,
-                  extra: <span class="truncate">HTTP: {gerolamoHttpBase(activeConfig()!.port)}</span>,
-                }
-              : null
-          }
-          configSummary={
-            <span>
-              Configuration
-              <span class="ml-2 text-[11px] font-normal text-zinc-500">
-                {network()} · port {port()}
+      <div class="flex flex-1 flex-col min-w-0">
+        <header class="relative z-40 flex items-center h-12 shrink-0 border-b border-border bg-bg-card/90 px-5">
+          <div class="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-accent/20 to-transparent" />
+          <h1 class="text-[15px] font-semibold text-text tracking-tight">{pageTitle()}</h1>
+          <div class="ml-auto flex items-center gap-4">
+            <div class="flex items-center gap-2">
+              <div
+                class={cn(
+                  "h-[7px] w-[7px] rounded-full",
+                  nodeRunning() ? "bg-green pulse-live-green" : "bg-red pulse-live",
+                )}
+              />
+              <span class="text-[11px] font-medium text-text-secondary">
+                {nodeRunning() ? "Online" : "Offline"}
               </span>
-            </span>
-          }
-          config={
-            <div class="space-y-4">
-              <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
-                <div>
-                  <label class={labelClass}>Name (optional)</label>
-                  <input type="text" value={name()} onInput={(e) => setName(e.currentTarget.value)} class={fieldClass} />
-                </div>
-                <div>
-                  <label class={labelClass}>Network</label>
-                  <select
-                    value={network()}
-                    onChange={(e) => setNetwork(e.currentTarget.value as "preprod" | "mainnet" | "preview")}
-                    class={fieldClass}
-                  >
-                    <option value="preprod">Preprod</option>
-                    <option value="mainnet">Mainnet (deferred)</option>
-                    <option value="preview">Preview</option>
-                  </select>
-                </div>
-                <div>
-                  <label class={labelClass}>HTTP port</label>
-                  <input
-                    type="number"
-                    value={port()}
-                    onInput={(e) => setPort(Number(e.currentTarget.value) || 3030)}
-                    class={`${fieldClass} font-mono`}
-                  />
-                </div>
-                <div>
-                  <label class={labelClass}>N2C socket (optional)</label>
-                  <input
-                    type="text"
-                    value={n2cSocket()}
-                    onInput={(e) => setN2cSocket(e.currentTarget.value)}
-                    placeholder="off — absolute path to enable"
-                    class={`${fieldClass} font-mono text-xs`}
-                  />
-                </div>
-                <div class="md:col-span-2">
-                  <label class={labelClass}>Chain DB path (absolute)</label>
-                  <div class="flex gap-2">
-                    <input
-                      type="text"
-                      value={dbPath()}
-                      onInput={(e) => setDbPath(e.currentTarget.value)}
-                      placeholder="default: ~/.local/share/gerolamo/<id>/data/gerolamo.db"
-                      class={`${fieldClass} font-mono text-xs`}
-                    />
-                    <button type="button" class={btnSecondary} onClick={() => void pick("db")}>
-                      Browse
-                    </button>
-                  </div>
-                </div>
-                <div class="md:col-span-2">
-                  <label class={labelClass}>Mithril snapshot dir (absolute)</label>
-                  <div class="flex gap-2">
-                    <input
-                      type="text"
-                      value={snapshotDir()}
-                      onInput={(e) => setSnapshotDir(e.currentTarget.value)}
-                      placeholder="default: repo snapshots/mithril if present"
-                      class={`${fieldClass} font-mono text-xs`}
-                    />
-                    <button type="button" class={btnSecondary} onClick={() => void pick("snap")}>
-                      Browse
-                    </button>
-                  </div>
-                </div>
-              </div>
-              <label class="flex items-center gap-2 text-xs text-zinc-400">
-                <input type="checkbox" checked={skipApply()} onChange={(e) => setSkipApply(e.currentTarget.checked)} />
-                Download only (--skip-apply)
-              </label>
-              <button onClick={() => void refetchDetect()} disabled={busy()} class={btnSecondary}>
-                Re-detect runtime
-              </button>
             </div>
-          }
-          steps={
-            <>
-              <StepCard
-                n={1}
-                title="Runtime (Bun + this repo)"
-                done={hasRuntime()}
-                active={currentStep() === 1}
-                open={currentStep() === 1 || !hasRuntime()}
-                doneHint={detectInfo()?.repoVersion ? `v${detectInfo()!.repoVersion} · bun ${detectInfo()!.bunVersion || "?"}` : undefined}
-              >
-                <Show when={detectInfo()}>
-                  <div class="text-[11px] font-mono text-zinc-400 space-y-1">
-                    <div>
-                      bun: <span class={detectInfo()!.bunPath ? "text-emerald-400" : "text-red-400"}>{detectInfo()!.bunPath || "missing"}</span>
+            <Show when={sync()}>
+              <span class={cn("text-[11px] font-mono font-semibold tabular-nums", pct() >= 99.9 ? "text-green" : "text-amber")}>
+                {pct().toFixed(2)}%
+              </span>
+            </Show>
+            <Show when={sync()?.tipSlot && sync()!.tipSlot !== "0"}>
+              <span class="text-[11px] font-mono text-text-dim tabular-nums">
+                Slot {Number(sync()!.tipSlot).toLocaleString("en-US")}
+              </span>
+            </Show>
+            <Badge variant="neon">{network().toUpperCase()}</Badge>
+          </div>
+        </header>
+
+        <main class="flex-1 min-h-0 overflow-y-auto">
+          <div class="mx-auto max-w-[1400px] px-6 py-6 space-y-6">
+            <Show when={errorMsg()}>
+              <div class="glass-card-accent p-3 text-sm text-accent">{errorMsg()}</div>
+            </Show>
+            <Show when={statusMsg()}>
+              <div class="text-sm text-green">{statusMsg()}</div>
+            </Show>
+
+            <Show when={page() === "overview"}>
+              <div class="flex flex-col gap-6">
+                <div class="glass-card-accent p-6">
+                  <div class="flex items-center justify-between mb-6">
+                    <div class="flex items-center gap-3">
+                      <div class="flex items-center gap-2">
+                        <div class={cn("h-[8px] w-[8px] rounded-full", nodeRunning() ? "bg-green pulse-live-green" : "bg-text-muted")} />
+                        <span class="text-[13px] font-medium text-text">{nodeRunning() ? "Online" : "Offline"}</span>
+                      </div>
+                      <Badge variant="neon">{network().toUpperCase()}</Badge>
+                      <Show when={sync()?.eraName}>
+                        <Badge variant="muted">{sync()!.eraName}</Badge>
+                      </Show>
+                      <Show when={sync()?.epoch != null}>
+                        <Badge variant="muted">Epoch {sync()!.epoch}</Badge>
+                      </Show>
+                      <Show when={sync()?.multiPeer?.mode}>
+                        <Badge variant="muted">{sync()!.multiPeer!.mode} sync</Badge>
+                      </Show>
+                      <Show when={sync()?.role}>
+                        <Badge
+                          variant={sync()!.role === "relay" ? "cyan" : "muted"}
+                          title={
+                            sync()!.role === "relay"
+                              ? `Relay: accepting inbound node-to-node peers on ${sync()!.inbound?.host ?? "?"}:${sync()!.inbound?.port ?? "?"} · ${sync()!.inbound?.clients ?? 0} connected`
+                              : "Data node: outbound only, no inbound peers. Switch to relay in Node › config (role)."
+                          }
+                        >
+                          {sync()!.role === "relay" ? `relay · ${sync()!.inbound?.clients ?? 0} in` : "data node"}
+                        </Badge>
+                      </Show>
+                      <Show when={sync()?.multiPeer?.bodyValidation}>
+                        <Badge variant={sync()!.multiPeer!.bodyValidation === "strict" ? "success" : "default"}>
+                          body {sync()!.multiPeer!.bodyValidation}
+                        </Badge>
+                      </Show>
                     </div>
-                    <div>
-                      repo: <span class={detectInfo()!.repoPath ? "text-emerald-400" : "text-red-400"}>{detectInfo()!.repoPath || "missing"}</span>
-                    </div>
-                    <Show when={detectInfo()!.error}>
-                      <div class="text-red-400">{detectInfo()!.error}</div>
-                    </Show>
+                    <span class="text-[12px] font-mono text-text-dim">
+                      {sync()?.uptimeSec != null ? `Uptime ${sync()!.uptimeSec}s` : "Start the node to live-tail tip"}
+                    </span>
                   </div>
+                  <div class="flex items-center gap-6 mb-5">
+                    <ProgressRing
+                      value={pct()}
+                      size={100}
+                      strokeWidth={7}
+                      variant={pct() >= 99.9 ? "green" : "accent"}
+                    />
+                    <div class="flex flex-col flex-1 gap-3">
+                      <div class="flex items-end gap-3">
+                        <span class="font-mono text-[42px] font-bold leading-none tabular-nums text-text text-glow-strong">
+                          {pct().toFixed(2)}
+                        </span>
+                        <span class="text-[18px] font-semibold text-text-secondary mb-1">%</span>
+                      </div>
+                      <div class="relative">
+                        <ProgressBar value={pct()} variant={pct() >= 99.9 ? "green" : "accent"} />
+                        <div class="shimmer-bar absolute inset-0 rounded-full pointer-events-none" />
+                      </div>
+                      <Show when={sync()?.epochProgress}>
+                        {(ep) => (
+                          <div
+                            class="flex flex-col gap-1"
+                            title={
+                              ep().live
+                                ? `Epoch ${ep().epoch} is the live epoch. ${ep().slotsLeft.toLocaleString("en-US")} slots between the node's tip and the network clock.`
+                                : `The node is applying epoch ${ep().epoch}. ${ep().slotsLeft.toLocaleString("en-US")} of ${ep().lengthSlots.toLocaleString("en-US")} slots remain in it, then ${ep().epochsBehind - 1} more epoch${ep().epochsBehind - 1 === 1 ? "" : "s"} before the live epoch ${ep().clockEpoch}.`
+                            }
+                          >
+                            <div class="flex items-center justify-between text-[11px]">
+                              <span class="text-text-dim">
+                                Epoch <span class="font-mono text-text">{ep().epoch}</span>
+                                <Show when={!ep().live}>
+                                  <span class="text-text-muted"> of {ep().clockEpoch} · {ep().epochsBehind} behind</span>
+                                </Show>
+                                <Show when={ep().live}>
+                                  <span class="text-green"> · live</span>
+                                </Show>
+                              </span>
+                              <span class="font-mono tabular-nums text-text">
+                                {ep().percent.toFixed(1)}% · {ep().slotsLeft.toLocaleString("en-US")} slots left
+                              </span>
+                            </div>
+                            <ProgressBar value={ep().percent} variant={ep().live ? "green" : "cyan"} />
+                          </div>
+                        )}
+                      </Show>
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                    <div
+                      class="flex flex-col items-center text-center rounded-[8px] bg-bg-sunken/50 py-3 px-2 min-h-[72px]"
+                      title="Slot of the last block this node has applied to its local chain."
+                    >
+                      <span class="text-[10px] uppercase tracking-wider text-text-dim font-medium mb-1">Chain tip</span>
+                      <span class="font-mono text-[18px] font-bold tabular-nums text-accent text-glow">
+                        {formatMetric(sync()?.tipSlot)}
+                      </span>
+                    </div>
+                    <div
+                      class="flex flex-col items-center text-center rounded-[8px] bg-bg-sunken/50 py-3 px-2 min-h-[72px]"
+                      title="Slot the network clock says it is right now. The gap to Chain tip is how far behind the node is."
+                    >
+                      <span class="text-[10px] uppercase tracking-wider text-text-dim font-medium mb-1">Network tip</span>
+                      <span class="font-mono text-[18px] font-bold tabular-nums text-text">
+                        {formatMetric(sync()?.networkTipSlot)}
+                      </span>
+                    </div>
+                    <div
+                      class="flex flex-col items-center text-center rounded-[8px] bg-bg-sunken/50 py-3 px-2 min-h-[72px]"
+                      title="Unspent transaction outputs held in this node's local ledger (utxo table). Grows as blocks with transactions are applied; 0 means no ledger yet."
+                    >
+                      <span class="text-[10px] uppercase tracking-wider text-text-dim font-medium mb-1">UTxOs</span>
+                      <span class="font-mono text-[18px] font-bold tabular-nums text-text">{formatMetric(sync()?.utxoCount)}</span>
+                    </div>
+                    <div
+                      class="flex flex-col items-center text-center rounded-[8px] bg-bg-sunken/50 py-3 px-2 min-h-[72px]"
+                      title="Peers with an active ChainSync connection. One is primary, the others cross-check its headers."
+                    >
+                      <span class="text-[10px] uppercase tracking-wider text-text-dim font-medium mb-1">Hot peers</span>
+                      <span class="font-mono text-[18px] font-bold tabular-nums text-text">{formatMetric(sync()?.peers.hot ?? sync()?.hotPeers)}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div class="stagger grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                  <div class="glass-card-accent p-5">
+                    <Stat label="Process" title="Whether the gerolamo bun process spawned by this app is alive." value={nodeRunning() ? "alive" : "stopped"} accent glow size="md" />
+                  </div>
+                  <div class="glass-card-accent p-5">
+                    <Stat label="HTTP" title="Health of the node's local HTTP API (MiniBF, /metrics) and its response time." value={health()?.healthy ? `ok · ${health()!.latencyMs ?? "?"}ms` : "down"} size="md" />
+                  </div>
+                  <div class="glass-card-accent p-5">
+                    <Stat label="Port" title="Local port the node's HTTP API listens on." value={port()} size="md" />
+                  </div>
+                  <div class="glass-card-accent p-5">
+                    <Stat label="Warm" title="Connected standby peers. Promoted to hot when a hot peer drops or misbehaves." value={sync()?.peers.warm ?? 0} accent glow glowColor="orange" size="md" />
+                  </div>
+                  <div class="glass-card-accent p-5">
+                    <Stat label="Cold" title="Known peer addresses not currently connected, from topology and peer sharing." value={sync()?.peers.cold ?? 0} accent glow glowColor="cyan" size="md" />
+                  </div>
+                </div>
+
+                <Show when={resources()}>
+                  {(res) => {
+                    const sys = () => res().system;
+                    const node = () => res().node;
+                    const sysMemPct = () => (sys().totalMemBytes > 0 ? (sys().usedMemBytes / sys().totalMemBytes) * 100 : 0);
+                    const barVariant = (p: number) => (p >= 90 ? "accent" : p >= 70 ? "orange" : "green");
+                    return (
+                      <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                        <div class="glass-card p-4">
+                          <div class="mb-3 flex items-center justify-between">
+                            <div class="text-[11px] font-semibold text-text-secondary">System</div>
+                            <span class="truncate font-mono text-[11px] text-text-dim" title={sys().cpuModel ?? ""}>
+                              {sys().cpus} cores · {sys().platform}/{sys().arch}
+                            </span>
+                          </div>
+                          <div class="space-y-3">
+                            <div>
+                              <div class="mb-1 flex items-center justify-between text-[11px]">
+                                <span class="text-text-dim">CPU</span>
+                                <span class="font-mono tabular-nums text-text">
+                                  {formatPercent(sys().cpuPercent)} · load {sys().loadAvg[0]} / {sys().loadAvg[1]} / {sys().loadAvg[2]}
+                                </span>
+                              </div>
+                              <ProgressBar value={sys().cpuPercent ?? 0} variant={barVariant(sys().cpuPercent ?? 0)} />
+                            </div>
+                            <div>
+                              <div class="mb-1 flex items-center justify-between text-[11px]">
+                                <span class="text-text-dim">Memory</span>
+                                <span class="font-mono tabular-nums text-text">
+                                  {formatBytes(sys().usedMemBytes)} / {formatBytes(sys().totalMemBytes)} · {formatPercent(sysMemPct())}
+                                </span>
+                              </div>
+                              <ProgressBar value={sysMemPct()} variant={barVariant(sysMemPct())} />
+                            </div>
+                            <Show when={sys().cpuModel}>
+                              <div class="truncate text-[11px] text-text-muted">{sys().cpuModel}</div>
+                            </Show>
+                          </div>
+                        </div>
+
+                        <div class="glass-card p-4">
+                          <div class="mb-3 flex items-center justify-between">
+                            <div class="text-[11px] font-semibold text-text-secondary">Gerolamo</div>
+                            <span class="font-mono text-[11px] text-text-dim">
+                              {node()?.pid ? `pid ${node()!.pid}` : "not running"}
+                              {node()?.threads != null ? ` · ${node()!.threads} threads` : ""}
+                              {sync()?.multiPeer ? ` · ${sync()!.multiPeer!.validationWorkers} workers` : ""}
+                            </span>
+                          </div>
+                          <Show
+                            when={node() && node()!.source !== "none"}
+                            fallback={
+                              <div class="space-y-3">
+                                <div class="text-[11px] text-text-muted">
+                                  {nodeRunning() ? "Waiting for the node's /metrics…" : "Start the node to see its CPU and memory."}
+                                </div>
+                                <Show when={node()?.dbBytes != null}>
+                                  <div class="flex items-center justify-between text-[11px]">
+                                    <span class="text-text-dim">Chain DB on disk</span>
+                                    <span class="font-mono tabular-nums text-text">{formatBytes(node()!.dbBytes)}</span>
+                                  </div>
+                                </Show>
+                              </div>
+                            }
+                          >
+                            <div class="space-y-3">
+                              <div>
+                                <div class="mb-1 flex items-center justify-between text-[11px]">
+                                  <span class="text-text-dim">CPU</span>
+                                  <span class="font-mono tabular-nums text-text">
+                                    {formatPercent(node()!.cpuPercent)} of 1 core · {formatPercent(nodeCpuShare(node(), sys()), 1)} of machine
+                                  </span>
+                                </div>
+                                <ProgressBar value={nodeCpuShare(node(), sys())} variant="cyan" />
+                              </div>
+                              <div>
+                                <div class="mb-1 flex items-center justify-between text-[11px]">
+                                  <span class="text-text-dim">Memory (RSS)</span>
+                                  <span class="font-mono tabular-nums text-text">
+                                    {formatBytes(node()!.rssBytes)} · {formatPercent(nodeMemShare(node(), sys()), 1)} of machine
+                                  </span>
+                                </div>
+                                <ProgressBar value={nodeMemShare(node(), sys())} variant="cyan" />
+                              </div>
+                              <div class="grid grid-cols-3 gap-2 pt-1">
+                                <Stat
+                                  label="JS heap" title="Memory used by JavaScript objects in the node process, out of what the engine has reserved."
+                                  value={node()!.heapUsedBytes != null ? `${formatBytes(node()!.heapUsedBytes)} / ${formatBytes(node()!.heapTotalBytes)}` : "—"}
+                                  size="sm"
+                                />
+                                <Stat label="Native / buffers" title="Memory held outside the JS heap: CBOR buffers, SQLite, crypto." value={formatBytes(node()!.externalBytes)} size="sm" />
+                                <Stat label="Chain DB on disk" title="Size of the SQLite chain database plus its WAL and SHM sidecar files." value={formatBytes(node()!.dbBytes)} size="sm" />
+                              </div>
+                            </div>
+                          </Show>
+                        </div>
+                      </div>
+                    );
+                  }}
                 </Show>
-              </StepCard>
-              <StepCard
-                n={2}
-                title="Write instance config"
-                done={configWritten()}
-                active={currentStep() === 2}
-                open={currentStep() === 2 || !configWritten()}
-                doneHint={activeConfig()?.id}
-              >
-                <p class="text-[11px] text-zinc-500">
-                  Creates <code class="text-zinc-400">~/.local/share/gerolamo/&lt;id&gt;/</code>. DB path must be absolute.
-                </p>
-                <button onClick={() => void handleWriteConfig()} disabled={busy() || !hasRuntime()} class={btnPrimary}>
-                  Write config
-                </button>
-              </StepCard>
-              <StepCard
-                n={3}
-                title="Mithril bootstrap"
-                done={bootstrapReady()}
-                active={currentStep() === 3}
-                open={currentStep() === 3 || bootLogOpen()}
-                doneHint={boot()?.stage === "ready" ? "ready" : bootstrapReady() ? "skipped" : undefined}
-              >
-                <p class="text-[11px] text-zinc-500">
-                  <code class="text-zinc-300">mithril-bootstrap --engine ts</code> · no fake percent · one writer on the DB.
-                  Preprod first. Skip if you already have a dense SQLite file.
-                </p>
-                <Show when={boot()}>
-                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
-                    <div class="rounded-md border border-zinc-800 px-2 py-1">
-                      Snapshot
-                      <div class="font-mono text-zinc-200">{boot()!.snapshotHuman ?? "—"}</div>
+
+                <Show when={sync()}>
+                  <div class="grid grid-cols-1 lg:grid-cols-3 gap-3">
+                    <div class="glass-card p-3">
+                      <div class="mb-2 text-[11px] font-semibold text-green">Hot · ChainSync ({sync()!.peers.hot})</div>
+                      <Show when={sync()!.multiPeer && sync()!.multiPeer!.peers.length > 0}>
+                        <div class="mb-2 flex flex-col gap-1 font-mono text-[11px]">
+                          <For each={sync()!.multiPeer!.peers}>
+                            {(p) => (
+                              <div class="flex items-center gap-2 truncate">
+                                <span
+                                  class={cn(
+                                    "inline-block h-[6px] w-[6px] rounded-full",
+                                    p.role === "primary"
+                                      ? "bg-accent"
+                                      : p.status === "agrees"
+                                      ? "bg-green"
+                                      : p.status === "divergent"
+                                      ? "bg-red"
+                                      : "bg-text-muted",
+                                  )}
+                                />
+                                <span class="truncate">{p.key}</span>
+                                <span class="text-text-dim">
+                                  {p.role === "primary"
+                                    ? "primary"
+                                    : p.status === "agrees"
+                                    ? `✓ agrees @${p.agreedAtSlot ?? "?"}`
+                                    : p.status === "divergent"
+                                    ? `✗ divergent @${p.divergenceSlot ?? "?"}`
+                                    : p.status}
+                                </span>
+                              </div>
+                            )}
+                          </For>
+                        </div>
+                      </Show>
+                      <div class="max-h-36 space-y-1 overflow-y-auto font-mono text-[11px] text-text-secondary">
+                        <For each={sync()!.peers.hotKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
+                        <Show when={sync()!.peers.hotKeys.length === 0}><div class="text-text-muted">No hot peers</div></Show>
+                      </div>
                     </div>
-                    <div class="rounded-md border border-zinc-800 px-2 py-1">
-                      Data
-                      <div class="font-mono text-zinc-200">{boot()!.dataHuman ?? "—"}</div>
+                    <div class="glass-card p-3">
+                      <div class="mb-2 text-[11px] font-semibold text-amber">Warm · standby ({sync()!.peers.warm})</div>
+                      <div class="max-h-36 space-y-1 overflow-y-auto font-mono text-[11px] text-text-secondary">
+                        <For each={sync()!.peers.warmKeys}>{(peer) => <div class="truncate">{peer}</div>}</For>
+                        <Show when={sync()!.peers.warmKeys.length === 0}><div class="text-text-muted">No warm peers</div></Show>
+                      </div>
                     </div>
-                    <div class="rounded-md border border-zinc-800 px-2 py-1">
-                      Immutable
-                      <div class="font-mono text-zinc-200">{boot()!.immutableCount ?? "—"}</div>
-                    </div>
-                    <div class="rounded-md border border-zinc-800 px-2 py-1">
-                      Process
-                      <div class={boot()!.processAlive ? "text-emerald-400" : "text-zinc-400"}>
-                        {boot()!.processAlive ? "alive" : "stopped"}
+                    <div class="glass-card p-3">
+                      <div class="mb-2 text-[11px] font-semibold text-blue">Cold · known ({sync()!.peers.cold})</div>
+                      <div class="max-h-36 space-y-1 overflow-y-auto font-mono text-[11px] text-text-muted">
+                        <For each={sync()!.peers.coldSample}>{(peer) => <div class="truncate">{peer}</div>}</For>
+                        <Show when={sync()!.peers.coldSample.length === 0}><div class="text-text-muted">No cold peers</div></Show>
                       </div>
                     </div>
                   </div>
-                  <Show when={boot()!.stageLabel}>
-                    <div class="text-[11px] text-amber-300">{boot()!.stageLabel}</div>
-                  </Show>
+                </Show>
+
+                <Show when={sync()?.multiPeer}>
+                  <div class="glass-card p-4">
+                    <div class="mb-3 flex items-center justify-between">
+                      <div class="text-[11px] font-semibold text-text-secondary">Multi-peer sync · honesty & pipeline</div>
+                      <span class="font-mono text-[11px] text-text-dim">
+                        quorum {sync()!.multiPeer!.quorum} · {sync()!.multiPeer!.validationWorkers} validation worker{sync()!.multiPeer!.validationWorkers === 1 ? "" : "s"}
+                      </span>
+                    </div>
+                    <div class="grid grid-cols-2 gap-3 md:grid-cols-5">
+                      <Stat label="Primary"  title="Hot peer whose headers drive block download and apply. Others only verify." value={sync()!.multiPeer!.primary ?? "—"} size="sm" />
+                      <Stat
+                        label="Verifiers agreeing" title="Verifier peers whose header hashes match the primary at the same slots."
+                        value={`${sync()!.multiPeer!.agreeing} / ${Math.max(0, sync()!.multiPeer!.peers.length - 1)}`}
+                        accent
+                        glow
+                        glowColor={sync()!.multiPeer!.divergent > 0 ? "orange" : "green"}
+                        size="sm"
+                      />
+                      <Stat label="Divergent"  title="Peers that served a different header for a slot the primary already delivered. Held cold for an hour." value={sync()!.multiPeer!.divergent} size="sm" />
+                      <Stat
+                        label="Ranges" title="BlockFetch ranges: downloading now, downloaded but waiting to apply in order, and re-issued after a failed or lying peer."
+                        value={`${sync()!.multiPeer!.rangesInFlight} ↓ · ${sync()!.multiPeer!.rangesAwaitingApply} wait · ${sync()!.multiPeer!.rangeRetries} retry`}
+                        size="sm"
+                      />
+                      <Stat label="Blocks / s"  title="Blocks applied to the local ledger per second, recent average." value={sync()!.multiPeer!.blocksPerSec.toFixed(1)} accent glow size="sm" />
+                    </div>
+                    <Show when={sync()!.peers.maliciousPeers.length > 0}>
+                      <div class="mt-3 text-[11px] font-semibold text-red">Held cold for bad data</div>
+                      <div class="mt-1 flex flex-col gap-1 font-mono text-[11px] text-text-dim">
+                        <For each={sync()!.peers.maliciousPeers}>
+                          {(m) => <div class="truncate">{m.key} — {m.reason.replace(/^malicious:\s*/, "")}</div>}
+                        </For>
+                      </div>
+                    </Show>
+                    <Show when={sync()!.peers.recentErrors.length > 0}>
+                      <div class="mt-3 text-[11px] font-semibold text-text-secondary">Recent peer errors</div>
+                      <div class="mt-1 flex flex-col gap-1 font-mono text-[11px] text-text-dim">
+                        <For each={sync()!.peers.recentErrors.slice(0, 4)}>
+                          {(e) => <div class="truncate">{e.key} ×{e.failCount} — {e.error}</div>}
+                        </For>
+                      </div>
+                    </Show>
+                  </div>
                 </Show>
                 <div class="flex flex-wrap gap-2">
-                  <button onClick={() => void handleBootstrap()} disabled={busy() || !configWritten()} class={btnPrimary}>
-                    Start bootstrap
+                  <button onClick={() => void manager.openExternal(`${base()}/docs`)} disabled={!health()?.healthy} class={btnPrimary}>
+                    Open MiniBF /docs
                   </button>
-                  <button onClick={() => void handleSkipBootstrap()} disabled={busy() || !configWritten()} class={btnSecondary}>
-                    Skip (use existing DB)
+                  <button onClick={() => void manager.openExternal(`${base()}/stats`)} disabled={!health()?.healthy} class={btnSecondary}>
+                    Open /stats
                   </button>
+                  <button onClick={() => go("node")} class={btnSecondary}>Node controls</button>
+                  <button onClick={() => go("mithril")} class={btnSecondary}>Mithril</button>
+                </div>
+              </div>
+            </Show>
+
+            <Show when={page() === "node"}>
+              <div class="space-y-4">
+                <div class="glass-card-accent p-5 space-y-3">
+                  <div class="flex items-center justify-between gap-3">
+                    <h2 class="text-h2">Node</h2>
+                    <Badge variant={nodeRunning() ? "success" : "muted"}>{nodeRunning() ? `pid ${activeConfig()?.pid ?? "live"}` : "stopped"}</Badge>
+                  </div>
+                  <p class="text-[12px] text-text-dim">
+                    Spawns <code class="text-text">bun src/index.ts start-gerolamo</code> with NETWORK / GEROLAMO_DB_PATH. Overlay at ~/.local/share/gerolamo.
+                  </p>
+                  <div class="flex flex-wrap gap-2">
+                    <button onClick={() => void handleStart()} disabled={busy() || nodeRunning() || !hasRuntime()} class={btnPrimary}>
+                      Start
+                    </button>
+                    <button onClick={() => void handleStop()} disabled={busy() || !activeConfig()?.id} class={btnDanger}>
+                      Stop
+                    </button>
+                    <button
+                      class={btnDanger}
+                      disabled={busy() || !activeConfig()?.id || nodeRunning()}
+                      data-tooltip={"Delete the SQLite chain DB (+ WAL).\nStop the node first. Start fresh from tip or Mithril."}
+                      onClick={() => setConfirm("db")}
+                    >
+                      Delete chain DB
+                    </button>
+                  </div>
+                </div>
+                <div class="glass-card p-5 space-y-3">
+                  <div class="flex items-center justify-between">
+                    <h3 class="text-[14px] font-semibold">config.json</h3>
+                    <Badge variant={configWritten() ? "success" : "warning"}>{configWritten() ? "saved" : "not saved"}</Badge>
+                  </div>
+                  <NodeConfigForm
+                    name={name()}
+                    setName={setName}
+                    network={network()}
+                    setNetwork={setNetwork}
+                    port={port()}
+                    setPort={setPort}
+                    dbPath={dbPath()}
+                    setDbPath={setDbPath}
+                    snapshotDir={snapshotDir()}
+                    setSnapshotDir={setSnapshotDir}
+                    n2cSocket={n2cSocket()}
+                    setN2cSocket={setN2cSocket}
+                    skipApply={skipApply()}
+                    setSkipApply={setSkipApply}
+                    settings={settings()}
+                    patchSettings={patchSettings}
+                    onPickDb={() => void pick("db")}
+                    onPickSnap={() => void pick("snap")}
+                  />
                   <button
-                    onClick={() => void manager.bootstrapStop()}
-                    disabled={busy()}
-                    class={btnDanger}
+                    onClick={() => void handleWriteConfig()}
+                    disabled={busy() || !hasRuntime()}
+                    class={btnPrimary}
+                    data-tooltip={"Writes ~/.local/share/gerolamo/<id>/config.json\nOverlay on src/config/{network}/config.json\nDoes not edit the repo file."}
                   >
-                    Stop bootstrap
+                    Save config.json
                   </button>
-                  <button onClick={() => setBootLogOpen(!bootLogOpen())} class={btnSecondary}>
-                    {bootLogOpen() ? "Hide log" : "Show log"}
-                  </button>
+                  <Show when={detectInfo()}>
+                    <div class="text-[11px] font-mono text-text-dim space-y-1">
+                      <div>bun: {detectInfo()!.bunPath || "missing"} · {detectInfo()!.bunVersion || "?"}</div>
+                      <div>repo: {detectInfo()!.repoPath || "missing"}</div>
+                      <Show when={detectInfo()!.error}>
+                        <div class="text-accent">{detectInfo()!.error}</div>
+                      </Show>
+                      <button onClick={() => void refetchDetect()} disabled={busy()} class={btnSecondary}>
+                        Re-detect runtime
+                      </button>
+                    </div>
+                  </Show>
                 </div>
-                <Show when={bootLogOpen()}>
-                  <pre class="p-2 bg-black/40 rounded border border-zinc-800 text-[10px] font-mono text-zinc-400 max-h-40 overflow-y-auto whitespace-pre-wrap break-all">
-                    {bootLogLines().length ? bootLogLines().join("\n") : "No bootstrap.log yet."}
-                  </pre>
-                </Show>
-              </StepCard>
-              <StepCard
-                n={4}
-                title="Start node"
-                done={nodeRunning()}
-                active={currentStep() === 4}
-                open={currentStep() === 4 || nodeRunning() || logOpen()}
-                doneHint={activeConfig()?.pid ? `pid ${activeConfig()!.pid}` : undefined}
-              >
-                <p class="text-[11px] text-zinc-500">
-                  Spawns <code class="text-zinc-300">bun src/index.ts start-gerolamo</code> with NETWORK / GEROLAMO_DB_PATH.
-                </p>
-                <div class="flex flex-wrap gap-2">
-                  <button onClick={() => void handleStart()} disabled={busy() || nodeRunning() || !hasRuntime()} class={btnPrimary}>
-                    Start
-                  </button>
-                  <button onClick={() => void handleStop()} disabled={busy() || !activeConfig()?.id} class={btnDanger}>
-                    Stop
-                  </button>
+              </div>
+            </Show>
+
+            <Show when={page() === "mithril"}>
+              <div class="space-y-4">
+                <div class="glass-card-accent p-5 space-y-3">
+                  <div class="flex items-center justify-between gap-3">
+                    <h2 class="text-h2">Mithril bootstrap</h2>
+                    <Badge variant={bootstrapReady() ? "success" : boot()?.stage === "failed" ? "danger" : "warning"}>
+                      {boot()?.stage === "ready" ? "ready" : bootstrapReady() ? "skipped" : boot()?.stage || "idle"}
+                    </Badge>
+                  </div>
+                  <p class="text-[12px] text-text-dim">
+                    <code class="text-text">mithril-bootstrap --engine ts</code> · no fake percent · one writer on the DB. Preprod first. Skip if you already have a dense SQLite file.
+                  </p>
+                  <Show when={boot()}>
+                    <div class="grid grid-cols-2 md:grid-cols-4 gap-2 text-[11px]">
+                      <div class="rounded-md border border-border px-2 py-1 bg-bg-sunken/50">
+                        Snapshot
+                        <div class="font-mono text-text">{boot()!.snapshotHuman ?? "—"}</div>
+                      </div>
+                      <div class="rounded-md border border-border px-2 py-1 bg-bg-sunken/50">
+                        Data
+                        <div class="font-mono text-text">{boot()!.dataHuman ?? "—"}</div>
+                      </div>
+                      <div class="rounded-md border border-border px-2 py-1 bg-bg-sunken/50">
+                        Immutable
+                        <div class="font-mono text-text">{boot()!.immutableCount ?? "—"}</div>
+                      </div>
+                      <div class="rounded-md border border-border px-2 py-1 bg-bg-sunken/50">
+                        Process
+                        <div class="font-mono text-text">{boot()!.processAlive ? "alive" : "stopped"}</div>
+                      </div>
+                    </div>
+                  </Show>
+                  <div class="flex flex-wrap gap-2">
+                    <button onClick={() => void handleBootstrap()} disabled={busy() || !hasRuntime()} class={btnPrimary}>
+                      Start bootstrap
+                    </button>
+                    <button onClick={() => void handleSkipBootstrap()} disabled={busy() || !activeConfig()?.id} class={btnSecondary}>
+                      Skip (use existing DB)
+                    </button>
+                    <button onClick={() => void manager.bootstrapStop()} disabled={busy()} class={btnDanger}>
+                      Stop bootstrap
+                    </button>
+                    <button
+                      class={btnDanger}
+                      disabled={busy() || !activeConfig()?.id}
+                      data-tooltip={"Delete files in the Mithril snapshot dir.\nStop bootstrap first. Keeps the empty folder."}
+                      onClick={() => setConfirm("snap")}
+                    >
+                      Delete Mithril snapshots
+                    </button>
+                    <button onClick={() => setBootLogOpen(!bootLogOpen())} class={btnSecondary}>
+                      {bootLogOpen() ? "Hide log" : "Show log"}
+                    </button>
+                  </div>
+                  <Show when={bootLogOpen()}>
+                    <LogFollowPre lines={bootLogLines()} empty="No bootstrap.log yet." />
+                  </Show>
                 </div>
-              </StepCard>
-            </>
-          }
-          statusMsg={statusMsg()}
-          errorMsg={errorMsg()}
+              </div>
+            </Show>
+
+            <Show when={page() === "logs"}>
+              <div class="glass-card-accent p-5 space-y-3">
+                <div class="flex items-center justify-between">
+                  <h2 class="text-h2">daemon.log</h2>
+                  <span class="text-[11px] text-text-dim">Follows newest line</span>
+                </div>
+                <LogFollowPre lines={logLines()} empty="No daemon.log yet. Start the node from Node." />
+              </div>
+            </Show>
+
+            <Show when={page() === "docs"}>
+              <div class="kb-prose glass-card p-5" innerHTML={docsHtml() || "<p>Loading…</p>"} />
+            </Show>
+          </div>
+        </main>
+      </div>
+
+      <Show when={confirm() === "db"}>
+        <ConfirmDialog
+          title="Delete chain DB?"
+          body={`This removes the SQLite file (and WAL/SHM):\n${activeConfig()?.dbPath || ""}\n\nStop the node first. You can then sync from tip or re-run Mithril.`}
+          confirmLabel="Delete DB"
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => void handleWipe("db")}
         />
       </Show>
-
-      <Show when={activeTab() === "docs"}>
-        <div class="kb-prose rounded-xl border border-zinc-800 bg-zinc-900 p-4" innerHTML={docsHtml() || "<p>Loading…</p>"} />
+      <Show when={confirm() === "snap"}>
+        <ConfirmDialog
+          title="Delete Mithril snapshots?"
+          body={`This deletes files inside:\n${activeConfig()?.snapshotDir || ""}\n\nThe folder stays. Stop bootstrap first. Re-download if you need density again.`}
+          confirmLabel="Delete snapshots"
+          onCancel={() => setConfirm(null)}
+          onConfirm={() => void handleWipe("snap")}
+        />
       </Show>
     </div>
   );

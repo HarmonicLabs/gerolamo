@@ -1,6 +1,9 @@
 {
   "network": "testnet",
   "networkMagic": 1,
+  "role": "data",
+  "byronGenesisFile": "./src/config/preprod/byron-genesis.json",
+  "byronGenesisHash": "d4b8de7a11d929a323373cbab6c1a9bdc931beffff11db111cf9d57356ee1937",
   "topologyFile": "./src/config/preprod/topology.json",
   "syncFromTip": true,
   "syncFromGenesis": false,
@@ -17,6 +20,21 @@
     "enabled": false,
     "socketPath": "./ledger/node.socket"
   },
+  "n2n": {
+    "enabled": false,
+    "host": "0.0.0.0",
+    "port": 3001,
+    "maxConnections": 64,
+    "maxRangeBlocks": 256,
+    "handshakeTimeoutMs": 10000,
+    "idleTimeoutMs": 120000
+  },
+  "blockFetchBatch": {
+    "maxBlocks": 32,
+    "flushMs": 25,
+    "rangeTimeoutMs": 55000,
+    "parallelRanges": 3
+  },
   "logs": {
     "logToFile": false,
     "logToConsole": true,
@@ -28,11 +46,11 @@
   },
   "tuiEnabled": false,
   "blockfrostUrl": "https://cardano-preprod.blockfrost.io/api/v0",
-  "bodyValidation": "soft",
+  "bodyValidation": "auto",
   "scriptValidation": "off",
   "peerGovernor": {
     "enabled": true,
-    "targetHot": 2,
+    "targetHot": 3,
     "targetWarm": 6,
     "targetCold": 64,
     "maxHot": 8,
@@ -41,5 +59,12 @@
     "tickMs": 15000,
     "shareBatch": 10,
     "shareEveryTicks": 2
+  },
+  "validation": {
+    "workers": "auto"
+  },
+  "sync": {
+    "quorum": 2,
+    "maliciousHoldMs": 3600000
   }
 }

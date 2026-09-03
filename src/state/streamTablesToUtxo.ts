@@ -24,7 +24,8 @@
 
 import { openSync, readSync, closeSync, fstatSync } from "node:fs";
 import { Database } from "bun:sqlite";
-import { Address } from "@harmoniclabs/cardano-ledger-ts";
+import { Address, Script } from "@harmoniclabs/cardano-ledger-ts";
+import { toHex } from "@harmoniclabs/uint8array-utils";
 import {
     decodeUtxoEntry,
     type CompactValueDecoded,
@@ -152,6 +153,8 @@ export type TxOutJson = {
     script_language?: number;
     script_bytes_hex?: string;
     script_bytes_len?: number;
+    reference_script_hash?: string;
+    reference_script_cbor?: string;
 };
 
 function assetsFromTriples(
@@ -234,6 +237,21 @@ export function txOutToDbRow(
                 "hex",
             );
             meta.script_bytes_len = txOut.script.bytes.length;
+            const script = txOut.script.kind === "native"
+                ? new Script("NativeScript", txOut.script.bytes)
+                : txOut.script.language === 0
+                    ? Script.plutusV1(txOut.script.bytes)
+                    : txOut.script.language === 1
+                        ? Script.plutusV2(txOut.script.bytes)
+                        : txOut.script.language === 2
+                            ? Script.plutusV3(txOut.script.bytes)
+                            : txOut.script.language === 3
+                                ? Script.plutusV4(txOut.script.bytes)
+                                : null;
+            if (script) {
+                meta.reference_script_hash = script.hash.toString();
+                meta.reference_script_cbor = toHex(script.cbor);
+            }
         }
     } else if (
         (txOut.tag === 2 || txOut.tag === 3) &&

@@ -31,8 +31,8 @@ export type SupportedMempoolSize =
 
 /**
  * Adapter around SharedMempool that satisfies ouroboros TxSubmitClient's
- * IMempool (getAvailableSpace / availableSpace) while the package itself
- * only exposes the misspelled getAviableSpace / aviableSpace.
+ * IMempool. Both published packages spell the free-space field
+ * `aviableSpace` (sic); keep that name so the typings line up.
  */
 export class GerolamoMempoolAdapter implements IMempool {
     private readonly inner: SharedMempool;
@@ -75,13 +75,14 @@ export class GerolamoMempoolAdapter implements IMempool {
         tx: Uint8Array,
     ): Promise<Awaited<ReturnType<IMempool["append"]>>> {
         const res = await this.inner.append(hash, tx);
-        // Ouroboros IMempool expects availableSpace; package returns aviableSpace.
+        // Both ouroboros-miniprotocols-ts IMempool and shared-cardano-mempool-ts
+        // spell the field `aviableSpace` (sic) in their published typings.
         return {
             status: res.status as Awaited<
                 ReturnType<IMempool["append"]>
             >["status"],
             nTxs: res.nTxs,
-            availableSpace: res.aviableSpace,
+            aviableSpace: res.aviableSpace,
         };
     }
 

@@ -26,8 +26,8 @@ describe("paths", () => {
   });
 
   test("normalizeDbPath appends gerolamo.db to a directory", () => {
-    expect(normalizeDbPath("/home/bakon/.local/share/gerolamo/preprod")).toBe(
-      "/home/bakon/.local/share/gerolamo/preprod/gerolamo.db",
+    expect(normalizeDbPath("/var/lib/gerolamo/preprod")).toBe(
+      "/var/lib/gerolamo/preprod/gerolamo.db",
     );
   });
 

@@ -12,7 +12,7 @@ export default {
       "dist/": "views/mainview/",
     },
     mac: { bundleCEF: false },
-    linux: { bundleCEF: false },
-    win: { bundleCEF: false },
+    linux: { bundleCEF: false, icon: "assets/icon.png" },
+    win: { bundleCEF: false, icon: "assets/icon.png" },
   },
 } as any;

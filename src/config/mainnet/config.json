@@ -1,47 +1,78 @@
 {
-    "byronGenesisFile": "./src/config/mainnet/byron-genesis.json",
-    "byronGenesisHash": "5f20df933584822601f9e3f8c024eb5eb252fe8cefb24d1317dc3d432e940ebb",
-    "shelleyGenesisFile": "./src/config/mainnet/shelley-genesis.json",
-    "shelleyGenesisHash": "1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81",
-    "alonzoGenesisFile": "./src/config/mainnet/alonzo-genesis.json",
-    "alonzoGenesisHash": "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
-    "conwayGenesisFile": "./src/config/mainnet/conway-genesis.json",
-    "conwayGenesisHash": "15a199f895e461ec0ffc6dd4e4028af28a492ab4e806d39cb674c88f7643ef62",
-    "p2p": "enabled",
-    "topologyFile": "./src/config/mainnet/topology.json",
-    "syncFromTip": false,
-    "syncFromPoint": true,
-    "syncFromPointSlot": 72316796,
-    "syncFromPointBlockHash": "c58a24ba8203e7629422a24d9dc68ce2ed495420bf40d9dab124373655161a20",
+  "byronGenesisFile": "./src/config/mainnet/byron-genesis.json",
+  "byronGenesisHash": "5f20df933584822601f9e3f8c024eb5eb252fe8cefb24d1317dc3d432e940ebb",
+  "shelleyGenesisFile": "./src/config/mainnet/shelley-genesis.json",
+  "shelleyGenesisHash": "1a3be38bcbb7911969283716ad7aa550250226b76a61fc51cc9a9a35d9276d81",
+  "alonzoGenesisFile": "./src/config/mainnet/alonzo-genesis.json",
+  "alonzoGenesisHash": "7e94a15f55d1e82d10f09203fa1d40f8eede58fd8066542cf6566008068ed874",
+  "conwayGenesisFile": "./src/config/mainnet/conway-genesis.json",
+  "conwayGenesisHash": "15a199f895e461ec0ffc6dd4e4028af28a492ab4e806d39cb674c88f7643ef62",
+  "p2p": "enabled",
+  "topologyFile": "./src/config/mainnet/topology.json",
+  "syncFromTip": false,
+  "syncFromPoint": true,
+  "syncFromPointSlot": 72316796,
+  "syncFromPointBlockHash": "c58a24ba8203e7629422a24d9dc68ce2ed495420bf40d9dab124373655161a20",
+  "host": "0.0.0.0",
+  "port": 3030,
+  "unixSocket": false,
+  "n2c": {
+    "enabled": false,
+    "socketPath": "./src/store/db/mainnet/node.socket"
+  },
+  "n2n": {
+    "enabled": false,
     "host": "0.0.0.0",
-    "port": 3030,
-    "unixSocket": false,
-    "n2c": {
-        "enabled": false,
-        "socketPath": "./src/store/db/mainnet/node.socket"
-    },
-    "network": "mainnet",
-    "networkMagic": 764824073,
-    "blockfrostUrl": "https://blockfrost-mainnet.onchainapps.io/",
-    "dbPath": "./src/store/db/mainnet/Gerolamo.db",
-    "tuiEnabled": true,
-    "logs": {
-        "logToFile": true,
-        "logToConsole": false,
-        "logDirectory": "./src/store/logs/mainnet/",
-        "logLevel": "DEBUG",
-        "bufferedLevels": ["debug", "info", "rollback"],
-        "batchSize": 50,
-        "flushDelayMs": 1000
-    },
-    "snapshot": {
-        "enable": false,
-        "source": "blockfrost",
-        "fromEpoch": 208
-    },
-    "mempool": {
-        "enabled": true,
-        "maxSize": 262144,
-        "txExpirySeconds": 3600
-    }
+    "port": 3001,
+    "maxConnections": 64,
+    "maxRangeBlocks": 256,
+    "handshakeTimeoutMs": 10000,
+    "idleTimeoutMs": 120000
+  },
+  "blockFetchBatch": {
+    "maxBlocks": 32,
+    "flushMs": 25,
+    "rangeTimeoutMs": 55000,
+    "parallelRanges": 3
+  },
+  "network": "mainnet",
+  "networkMagic": 764824073,
+  "role": "data",
+  "blockfrostUrl": "https://blockfrost-mainnet.onchainapps.io/",
+  "dbPath": "./src/store/db/mainnet/Gerolamo.db",
+  "tuiEnabled": true,
+  "logs": {
+    "logToFile": true,
+    "logToConsole": false,
+    "logDirectory": "./src/store/logs/mainnet/",
+    "logLevel": "DEBUG",
+    "bufferedLevels": [
+      "debug",
+      "info",
+      "rollback"
+    ],
+    "batchSize": 50,
+    "flushDelayMs": 1000
+  },
+  "snapshot": {
+    "enable": false,
+    "source": "blockfrost",
+    "fromEpoch": 208
+  },
+  "mempool": {
+    "enabled": true,
+    "maxSize": 262144,
+    "txExpirySeconds": 3600
+  },
+  "bodyValidation": "auto",
+  "peerGovernor": {
+    "targetHot": 3
+  },
+  "validation": {
+    "workers": "auto"
+  },
+  "sync": {
+    "quorum": 2,
+    "maliciousHoldMs": 3600000
+  }
 }

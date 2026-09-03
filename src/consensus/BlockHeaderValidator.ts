@@ -19,7 +19,10 @@ import {
     ShelleyHeader,
     VrfCert,
 } from "@harmoniclabs/cardano-ledger-ts";
+import { isByronEra } from "./blockHeaderParser";
+import { validateByronHeader } from "./ByronHeaderValidator";
 import {
+    blake2b_224,
     blake2b_256,
     verifyEd25519Signature_sync,
     VrfProof03,
@@ -56,6 +59,28 @@ function verifyKesCrypto(
 
 let genesisCache: ShelleyGenesisConfig | null = null;
 
+/**
+ * True when the header issuer is one of the Shelley genesis delegates.
+ * genDelegs maps genesisKeyHash → { delegate: blake2b-224(delegate cold vkey), vrf }.
+ * The header carries the delegate's 32-byte cold vkey, so hash it and compare
+ * against the `delegate` values (not the map keys).
+ */
+function isGenesisDelegateIssuer(
+    issuerPubKey: PoolKeyHash,
+    genesis: ShelleyGenesisConfig,
+): boolean {
+    const vkey = issuerPubKey.toBuffer();
+    if (!(vkey instanceof Uint8Array) || vkey.length !== 32) return false;
+    const issuerKeyHash = toHex(blake2b_224(vkey));
+    for (const entry of Object.values(genesis.genDelegs ?? {})) {
+        const delegate = (entry as { delegate?: unknown })?.delegate;
+        if (typeof delegate === "string" && delegate.toLowerCase() === issuerKeyHash) {
+            return true;
+        }
+    }
+    return false;
+}
+
 const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
     "1157920892373161954235709850086879078532699846656405640394575840079131296399360000000000000000000000000000000000",
 );
@@ -84,10 +109,7 @@ export class ValidatePostBabbageHeader {
         issuerPubKey: PoolKeyHash,
         genesis: ShelleyGenesisConfig,
     ): boolean {
-        const issuerHex = toHex(issuerPubKey.toCborBytes());
-        // logger.debug("Issuer hex:", issuerHex);
-        // logger.debug("Genesis genDelegs keys:", Object.keys(genesis.genDelegs));
-        return issuerHex in genesis.genDelegs;
+        return isGenesisDelegateIssuer(issuerPubKey, genesis);
     }
 
     private verifyLeaderEligibility(
@@ -304,10 +326,7 @@ export class ValidatePreBabbageHeader {
         issuerPubKey: PoolKeyHash,
         genesis: ShelleyGenesisConfig,
     ): boolean {
-        const issuerHex = toHex(issuerPubKey.toCborBytes());
-        // logger.debug("Issuer hex:", issuerHex);
-        // logger.debug("Genesis genDelegs keys:", Object.keys(genesis.genDelegs));
-        return issuerHex in genesis.genDelegs;
+        return isGenesisDelegateIssuer(issuerPubKey, genesis);
     }
 
     private verifyLeaderEligibility(
@@ -512,7 +531,7 @@ export class ValidatePreBabbageHeader {
         );
 
         const issuerHex = toHex(issuer.toCborBytes());
-        const passed = isKnownLeader && correctProof && verifyLeaderStake &&
+        const passed = correctProof && verifyLeaderStake &&
             verifyOpCertValidity && verifyKES;
         logger.info(
             `Header validation ${
@@ -529,8 +548,11 @@ export class ValidatePreBabbageHeader {
             },
         );
 
+        // Genesis delegates only produced every block while d = 1; as soon as
+        // decentralisation kicked in, registered SPOs issue Shelley…Alonzo
+        // headers too, so (like post-Babbage) a known-leader hit is logged,
+        // not required.
         return (
-            isKnownLeader &&
             correctProof &&
             verifyLeaderStake &&
             verifyOpCertValidity &&
@@ -545,6 +567,8 @@ export async function validateHeader(
     nonce: Uint8Array,
     config: any,
 ): Promise<boolean> {
+    // Byron (0 = EBB, 1 = main) has no VRF/KES; structural checks only.
+    if (isByronEra(h.era)) return validateByronHeader(h, config);
     const validator = h.era >= 6
         ? new ValidatePostBabbageHeader()
         : new ValidatePreBabbageHeader();

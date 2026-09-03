@@ -1,6 +1,9 @@
 import type { GerolamoNetwork, GerolamoSyncStatus } from "./syncStatus";
+import type { NodeSettings } from "./nodeSettings";
+import type { ResourceSnapshot } from "./resources";
 
-export type { GerolamoNetwork, GerolamoSyncStatus };
+export type { GerolamoNetwork, GerolamoSyncStatus, NodeSettings, ResourceSnapshot };
+export { DEFAULT_NODE_SETTINGS } from "./nodeSettings";
 
 export type RunState = "never" | "running" | "stopped" | "failed";
 
@@ -16,6 +19,8 @@ export type InstanceConfig = {
   snapshotDir: string;
   n2cSocket?: string | null;
   skipApply?: boolean;
+  /** Fillable src/config/{network}/config.json knobs for this instance. */
+  nodeSettings?: NodeSettings;
   runState: RunState;
   lastError?: string;
   pid?: number | null;
@@ -51,6 +56,8 @@ export type StatusResult = {
   lastError?: string;
   health?: HealthResult | null;
   sync?: GerolamoSyncStatus | null;
+  /** Host CPU/memory plus the node's own CPU, RSS, heap and DB-on-disk usage. */
+  resources?: ResourceSnapshot | null;
   n2c?: "off" | string;
 };
 
@@ -99,6 +106,7 @@ export function createDefaultInstance(
     snapshotDir: partial.snapshotDir,
     n2cSocket: partial.n2cSocket ?? null,
     skipApply: partial.skipApply ?? false,
+    nodeSettings: partial.nodeSettings,
     runState: partial.runState || "never",
     lastError: partial.lastError,
     pid: partial.pid ?? null,

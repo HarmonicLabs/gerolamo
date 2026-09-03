@@ -1,4 +1,4 @@
-import { Component, JSX, Show } from "solid-js";
+import { Component, JSX, Show, createEffect } from "solid-js";
 
 export type NodeNetwork = "mainnet" | "preprod" | "preview";
 
@@ -155,11 +155,60 @@ export const ProgressiveNodePanel: Component<{
 );
 
 export const fieldClass =
-  "w-full px-3 py-2 bg-zinc-950 border border-zinc-700 rounded-lg text-sm text-zinc-100 placeholder:text-zinc-500";
-export const labelClass = "block text-xs text-zinc-400 mb-1";
+  "w-full px-3 py-2 bg-bg-input border border-border-bright rounded-lg text-sm text-text placeholder:text-text-muted";
+export const labelClass = "block text-xs text-text-dim mb-1";
+export const TipLabel: Component<{ text: string; tip: string; class?: string }> = (props) => (
+  <label class={`${labelClass} ${props.class ?? ""}`} data-tooltip={props.tip}>
+    {props.text}
+  </label>
+);
 export const btnSecondary =
-  "px-3 py-1.5 text-xs bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 rounded-lg text-white";
+  "px-3 py-1.5 text-xs bg-bg-overlay hover:bg-bg-card-hover disabled:opacity-50 rounded-lg text-text border border-border";
 export const btnPrimary =
-  "px-3 py-1.5 text-xs bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 rounded-lg text-white font-medium";
+  "px-3 py-1.5 text-xs bg-accent hover:bg-accent-bright disabled:opacity-50 rounded-lg text-white font-medium";
 export const btnDanger =
-  "px-3 py-1.5 text-xs bg-red-900 hover:bg-red-800 disabled:opacity-50 rounded-lg text-red-100";
+  "px-3 py-1.5 text-xs bg-red-dim hover:bg-accent/20 disabled:opacity-50 rounded-lg text-accent border border-accent/30";
+
+export const LogFollowPre: Component<{ lines: string[]; empty: string }> = (props) => {
+  let el: HTMLPreElement | undefined;
+  createEffect(() => {
+    props.lines.length;
+    props.lines[props.lines.length - 1];
+    queueMicrotask(() => {
+      if (el) el.scrollTop = el.scrollHeight;
+    });
+  });
+  return (
+    <pre
+      ref={(n) => {
+        el = n;
+      }}
+      class="p-3 bg-bg-sunken rounded-lg border border-border text-[11px] font-mono text-text-secondary max-h-[60vh] overflow-y-auto whitespace-pre-wrap break-all"
+    >
+      {props.lines.length ? props.lines.join("\n") : props.empty}
+    </pre>
+  );
+};
+
+export const ConfirmDialog: Component<{
+  title: string;
+  body: string;
+  confirmLabel?: string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}> = (props) => (
+  <div class="fixed inset-0 z-[100] flex items-center justify-center bg-black/60 p-4">
+    <div class="max-w-md w-full glass-card-accent p-4 space-y-3">
+      <div class="text-sm font-semibold text-text">{props.title}</div>
+      <p class="text-xs text-text-secondary whitespace-pre-line">{props.body}</p>
+      <div class="flex justify-end gap-2">
+        <button type="button" class={btnSecondary} onClick={() => props.onCancel()}>
+          Cancel
+        </button>
+        <button type="button" class={btnDanger} onClick={() => props.onConfirm()}>
+          {props.confirmLabel || "Delete"}
+        </button>
+      </div>
+    </div>
+  </div>
+);

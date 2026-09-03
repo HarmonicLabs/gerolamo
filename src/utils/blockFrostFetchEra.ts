@@ -15,10 +15,14 @@ function defaultOnchainappsBase(network?: string): string {
  * auth. Never send a hardcoded mainnet token against preprod.
  * Order: config/env URL → onchainapps fallback.
  */
-export async function blockFrostFetchEra(
+/**
+ * Fetch the full Blockfrost-shaped `/epochs/{epoch}/parameters` record.
+ * Order: config/env URL → onchainapps fallback.
+ */
+export async function blockFrostFetchEpochParams(
     configOrBaseUrl: GerolamoConfig | string,
     epoch: number,
-): Promise<string> {
+): Promise<Record<string, unknown>> {
     const network =
         typeof configOrBaseUrl === "string"
             ? undefined
@@ -54,18 +58,31 @@ export async function blockFrostFetchEra(
                 logger.warn(lastErr.message);
                 continue;
             }
-            const data: any = await response.json();
-            if (!data?.nonce || typeof data.nonce !== "string") {
-                lastErr = new Error(`No nonce field in epoch ${epoch} response from ${url}`);
+            const data = await response.json();
+            if (!data || typeof data !== "object" || Array.isArray(data)) {
+                lastErr = new Error(`Malformed epoch ${epoch} parameters from ${url}`);
                 logger.warn(lastErr.message);
                 continue;
             }
-            return data.nonce as string;
+            return data as Record<string, unknown>;
         } catch (err) {
             lastErr = err instanceof Error ? err : new Error(String(err));
-            logger.warn(`Epoch nonce fetch error for ${url}:`, lastErr.message);
+            logger.warn(`Epoch parameters fetch error for ${url}:`, lastErr.message);
         }
     }
 
-    throw lastErr ?? new Error(`Failed to fetch epoch ${epoch} nonce from all sources`);
+    throw lastErr ?? new Error(`Failed to fetch epoch ${epoch} parameters from all sources`);
+}
+
+/** Epoch η0 nonce (hex) from the epoch parameters record. */
+export async function blockFrostFetchEra(
+    configOrBaseUrl: GerolamoConfig | string,
+    epoch: number,
+): Promise<string> {
+    const data = await blockFrostFetchEpochParams(configOrBaseUrl, epoch);
+    const nonce = data.nonce;
+    if (typeof nonce !== "string" || nonce.length === 0) {
+        throw new Error(`No nonce field in epoch ${epoch} parameters`);
+    }
+    return nonce;
 }

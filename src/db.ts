@@ -1,4 +1,4 @@
-import { sql } from "./sql";
+import { getSqlFilename, sql } from "./sql";
 import { logger } from "./utils/logger";
 import {
     AllegraTxBody,
@@ -10,9 +10,50 @@ import {
     ShelleyTxBody,
 } from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
+import {
+    ensureMinibfSchema,
+    applyMbTx,
+    rollbackMbToSlot,
+    getMbCursor,
+    getMbTxByHash,
+    getMbTxUtxos,
+    getMbAddressTxs,
+    getMbBlockTxHashes,
+    countMbAddressTxs,
+    getMbIndexStats,
+    type MbTxIn,
+    type MbTxOut,
+} from "./db/minibf";
+import {
+    extractLedgerTxOutMetadata,
+    parseStoredTxOut,
+} from "./db/minibf/txOutMetadata";
 
 /** Optional Bun SQL client / transaction handle for batch hydrate. */
 export type SqlClient = typeof sql;
+
+/**
+ * Density-prefill knobs (env, process-wide). Default OFF so live/tip apply
+ * still writes the rollback diary + MiniBF forward index.
+ *   APPLY_SKIP_DELTAS=1 — skip utxo_deltas inserts (no rollback-from-log)
+ *   APPLY_SKIP_INDEX=1  — skip tx_index / address_tx / mb_* forward index
+ */
+export function applySkipDeltas(): boolean {
+    return process.env.APPLY_SKIP_DELTAS === "1";
+}
+export function applySkipIndex(): boolean {
+    return process.env.APPLY_SKIP_INDEX === "1";
+}
+
+async function insertUtxoDelta(
+    db: SqlClient,
+    blockHash: Uint8Array,
+    action: string,
+    utxo: string,
+): Promise<void> {
+    if (applySkipDeltas()) return;
+    await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${action}, ${utxo})`;
+}
 
 interface HeaderInsertData {
     slot: bigint;
@@ -141,6 +182,14 @@ export async function ensureInitialized(): Promise<void> {
 			PRIMARY KEY (utxo_ref)
 		)
 	`;
+    await sql`
+        CREATE INDEX IF NOT EXISTS idx_utxo_address
+        ON utxo(json_extract(tx_out, '$.address'))
+    `;
+    await sql`
+        CREATE INDEX IF NOT EXISTS idx_utxo_reference_script_hash
+        ON utxo(json_extract(tx_out, '$.reference_script_hash'))
+    `;
 
     // Certificate state table
     await sql`
@@ -353,6 +402,45 @@ export async function ensureInitialized(): Promise<void> {
 		)
 	`;
 
+
+    // Mini-BF query indexes (empty until backfill / forward apply — not soak hot path)
+    await sql`
+		CREATE TABLE IF NOT EXISTS tx_index (
+			tx_hash TEXT PRIMARY KEY,
+			block_hash BLOB,
+			slot INTEGER NOT NULL,
+			fee TEXT,
+			size INTEGER,
+			invalid_hereafter TEXT,
+			invalid_before TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		)
+	`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_tx_index_slot ON tx_index(slot)`;
+
+    await sql`
+		CREATE TABLE IF NOT EXISTS address_tx (
+			address TEXT NOT NULL,
+			tx_hash TEXT NOT NULL,
+			slot INTEGER NOT NULL,
+			direction TEXT CHECK(direction IN ('in','out','both')),
+			PRIMARY KEY (address, tx_hash)
+		)
+	`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_address_tx_addr_slot ON address_tx(address, slot DESC)`;
+
+    await sql`
+		CREATE TABLE IF NOT EXISTS block_tx (
+			block_hash BLOB NOT NULL,
+			tx_hash TEXT NOT NULL,
+			tx_index INTEGER NOT NULL,
+			PRIMARY KEY (block_hash, tx_hash)
+		)
+	`;
+
+    // MiniBF derived projections (mb_*) — never poison ledger tables
+    await ensureMinibfSchema(sql);
+
     logger.info("DB initialized with WAL mode for concurrency");
 }
 
@@ -430,12 +518,15 @@ export async function storeEpochNonce(
 }
 
 export async function getBlockByHash(hash: string): Promise<any> {
+    // `blocks.hash` has been written both as hex TEXT and as a raw BLOB; match either.
+    const hex = hash.toLowerCase();
+    const blob = /^[0-9a-f]{64}$/.test(hex) ? Buffer.from(hex, "hex") : null;
     const result = await sql`
 			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, NULL as prev_hash, header_data, block_data, NULL as rollforward_header_cbor, block_fetch_RawCbor, is_valid, inserted_at
-			FROM blocks WHERE hash = ${hash}
+			FROM blocks WHERE hash = ${hex} OR hash = ${blob}
 			UNION
 			SELECT NULL as id, chunk_id, slot, block_hash as block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, block_fetch_RawCbor, NULL as is_valid, inserted_at
-			FROM immutable_blocks WHERE block_hash = ${hash}
+			FROM immutable_blocks WHERE block_hash = ${hex} OR block_hash = ${blob}
 		`.values();
     return result[0] || null;
 }
@@ -472,6 +563,24 @@ export async function getMaxSlot(): Promise<bigint> {
     const raw = firstScalar(Array.isArray(result) ? result[0] : result);
     if (raw == null) return 0n;
     return BigInt(raw as string | number | bigint);
+}
+
+/**
+ * Most recent applied block headers (raw `header_data`), newest first.
+ * Used to seed Byron OBFT signature-window state after a restart.
+ */
+export async function getRecentBlockHeaders(
+    limit: number,
+): Promise<Array<{ slot: bigint; header_data: Uint8Array }>> {
+    const n = Math.max(1, Math.min(100_000, Math.trunc(limit)));
+    const rows = await sql`SELECT slot, header_data FROM blocks WHERE header_data IS NOT NULL AND is_valid = TRUE ORDER BY slot DESC LIMIT ${n}`;
+    const out: Array<{ slot: bigint; header_data: Uint8Array }> = [];
+    for (const row of rows as any[]) {
+        const slot = Array.isArray(row) ? row[0] : row.slot;
+        const hd = Array.isArray(row) ? row[1] : row.header_data;
+        if (hd instanceof Uint8Array && slot != null) out.push({ slot: BigInt(slot), header_data: hd });
+    }
+    return out;
 }
 
 export async function getValidHeadersBefore(
@@ -513,16 +622,15 @@ export async function insertHeaderBatchVolatile(
         );
     }
 
-    // Bun SQLite rejects multi-row VALUES ${sql([...])} — insert row-by-row.
-    await sql.begin(async (tx) => {
-        for (const r of records) {
-            await tx`
-				INSERT OR IGNORE INTO volatile_headers
-				(slot, header_hash, rollforward_header_cbor)
-				VALUES (${r.slot}, ${r.headerHash}, ${r.rollforward_header_cbor})
-			`;
-        }
-    });
+    // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
+    // No sql.begin(): concurrent rollForward must not nest BEGIN on the shared connection.
+    for (const r of records) {
+        await sql`
+			INSERT OR IGNORE INTO volatile_headers
+			(slot, header_hash, rollforward_header_cbor)
+			VALUES (${r.slot}, ${r.headerHash}, ${r.rollforward_header_cbor})
+		`;
+    }
     logger.info(
         `Committed ${records.length} headers to volatile_headers (ignored dups)`,
     );
@@ -558,24 +666,30 @@ export async function insertBlockBatchVolatile(
         );
     }
 
-    // Bun SQLite rejects multi-row VALUES ${sql([...])} — insert row-by-row.
-    await sql.begin(async (tx) => {
-        for (const r of records) {
-            await tx`
-				INSERT OR IGNORE INTO blocks
-				(hash, slot, header_data, block_data, block_fetch_RawCbor, is_valid, prev_hash)
-				VALUES (
-					${r.blockHash},
-					${Number(r.slot)},
-					${r.headerData},
-					${r.blockData},
-					${r.block_fetch_RawCbor},
-					${true},
-					${r.prevHash}
-				)
-			`;
-        }
-    });
+    // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
+    // No sql.begin(): concurrent rollForward must not nest BEGIN on the shared connection.
+    for (const r of records) {
+        // applyBlock writes a metadata stub row first (same hex key); fill it in
+        // rather than dropping the full record as a duplicate.
+        await sql`
+			INSERT INTO blocks
+			(hash, slot, header_data, block_data, block_fetch_RawCbor, is_valid, prev_hash)
+			VALUES (
+				${r.blockHash},
+				${Number(r.slot)},
+				${r.headerData},
+				${r.blockData},
+				${r.block_fetch_RawCbor},
+				${true},
+				${r.prevHash}
+			)
+			ON CONFLICT(hash) DO UPDATE SET
+				header_data = COALESCE(excluded.header_data, blocks.header_data),
+				block_data = COALESCE(excluded.block_data, blocks.block_data),
+				block_fetch_RawCbor = COALESCE(excluded.block_fetch_RawCbor, blocks.block_fetch_RawCbor),
+				prev_hash = COALESCE(excluded.prev_hash, blocks.prev_hash)
+		`;
+    }
     logger.info(
         `Committed ${records.length} blocks to volatile_blocks (ignored dups)`,
     );
@@ -765,6 +879,65 @@ export async function getUtxosByAddress(
     });
 }
 
+const referenceScriptCache = new Map<string, string>();
+let referenceScriptCacheDb = "";
+let referenceScriptCacheLoaded = false;
+
+/** Resolve a reference script currently present in the ledger UTxO set. */
+export async function getReferenceScriptCborByHash(
+    scriptHash: string,
+): Promise<string | null> {
+    const expected = scriptHash.replace(/^0x/i, "").toLowerCase();
+    if (!/^[0-9a-f]{56}$/.test(expected)) return null;
+    const dbPath = getSqlFilename();
+    if (referenceScriptCacheDb !== dbPath) {
+        referenceScriptCache.clear();
+        referenceScriptCacheDb = dbPath;
+        referenceScriptCacheLoaded = false;
+    }
+    const cached = referenceScriptCache.get(expected);
+    if (cached) return cached;
+
+    const exactRows = await sql`
+        SELECT tx_out
+        FROM utxo
+        WHERE json_extract(tx_out, '$.reference_script_hash') = ${expected}
+        LIMIT 1
+    `;
+    const exactRow = Array.isArray(exactRows) ? exactRows[0] : null;
+    if (exactRow != null) {
+        const raw = Array.isArray(exactRow) ? exactRow[0] : (exactRow as any)?.tx_out;
+        const parsed = parseStoredTxOut(
+            typeof raw === "string" ? raw : JSON.stringify(raw ?? {}),
+        );
+        if (parsed.scriptRefCbor) {
+            referenceScriptCache.set(expected, parsed.scriptRefCbor);
+            return parsed.scriptRefCbor;
+        }
+    }
+    if (referenceScriptCacheLoaded) return null;
+
+    const rows = await sql`
+        SELECT tx_out
+        FROM utxo
+        WHERE json_extract(tx_out, '$.script_bytes_hex') IS NOT NULL
+    `;
+    for (const row of Array.isArray(rows) ? rows : []) {
+        const raw = Array.isArray(row) ? row[0] : (row as any)?.tx_out;
+        const parsed = parseStoredTxOut(
+            typeof raw === "string" ? raw : JSON.stringify(raw ?? {}),
+        );
+        if (parsed.scriptRefHash && parsed.scriptRefCbor) {
+            referenceScriptCache.set(
+                parsed.scriptRefHash.toLowerCase(),
+                parsed.scriptRefCbor,
+            );
+        }
+    }
+    referenceScriptCacheLoaded = true;
+    return referenceScriptCache.get(expected) ?? null;
+}
+
 /** Latest protocol params JSONB row (if any). */
 export async function getLatestProtocolParams(): Promise<unknown | null> {
     const rows = await sql`
@@ -799,15 +972,43 @@ export async function getLatestProtocolParams(): Promise<unknown | null> {
 export async function getAllStake(): Promise<
     Array<{ stake_credentials: Uint8Array; amount: number }>
 > {
-    return await sql`SELECT stake_credentials, amount FROM stake`
-        .values() as Array<{ stake_credentials: Uint8Array; amount: number }>;
+    // Bun SQL .values() returns row arrays [[cred, amount], ...], not objects.
+    // Callers (BlockBodyValidator) destructure { stake_credentials, amount }.
+    const rows = await sql`SELECT stake_credentials, amount FROM stake`
+        .values() as any[];
+    return rows.map((row) => {
+        if (Array.isArray(row)) {
+            return {
+                stake_credentials: row[0] as Uint8Array,
+                amount: row[1] as number,
+            };
+        }
+        return {
+            stake_credentials: row?.stake_credentials as Uint8Array,
+            amount: row?.amount as number,
+        };
+    });
 }
 
 export async function getAllDelegations(): Promise<
     Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>
 > {
-    return await sql`SELECT stake_credentials, pool_key_hash FROM delegations`
-        .values() as Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>;
+    // Same Bun .values() dual-shape trap as getAllStake / getUtxosByRefs.
+    const rows =
+        await sql`SELECT stake_credentials, pool_key_hash FROM delegations`
+            .values() as any[];
+    return rows.map((row) => {
+        if (Array.isArray(row)) {
+            return {
+                stake_credentials: row[0] as Uint8Array,
+                pool_key_hash: row[1] as Uint8Array,
+            };
+        }
+        return {
+            stake_credentials: row?.stake_credentials as Uint8Array,
+            pool_key_hash: row?.pool_key_hash as Uint8Array,
+        };
+    });
 }
 
 /** Delta payload for spend/create — must carry utxo_ref so rollback can restore. */
@@ -847,10 +1048,122 @@ function parseUtxoDelta(raw: unknown): {
     }
 }
 
+/** Optional Mini-BF forward-index context (slot + in-block tx ordinal). */
+export type TxIndexCtx = {
+    slot: number;
+    txIndex: number;
+};
+
+/** Parse address from packed tx_out JSON (best-effort). */
+function addressFromTxOutJson(raw: unknown): string {
+    try {
+        const j = typeof raw === "string" ? JSON.parse(raw) : raw;
+        const a = j?.address != null ? String(j.address) : "";
+        return a.length > 8 ? a : "";
+    } catch {
+        return "";
+    }
+}
+
+/**
+ * Upsert Mini-BF indexes for one tx.
+ * Dual-writes legacy thin tables (tx_index/address_tx/block_tx) + mb_* projections.
+ * Best-effort — never throws into apply hot path.
+ */
+export async function indexTransaction(
+    db: SqlClient,
+    opts: {
+        txHash: string;
+        blockHash: Uint8Array;
+        slot: number;
+        txIndex: number;
+        fee?: string | null;
+        size?: number | null;
+        invalidHereafter?: string | null;
+        invalidBefore?: string | null;
+        /** address → direction (in|out|both) */
+        addresses: Map<string, "in" | "out" | "both">;
+        inputs?: MbTxIn[];
+        outputs?: MbTxOut[];
+    },
+): Promise<void> {
+    try {
+        const txHash = opts.txHash.toLowerCase();
+        if (!txHash || txHash.length < 64) return;
+
+        // Legacy thin indexes (compat during transition)
+        await db`
+            INSERT INTO tx_index (
+                tx_hash, block_hash, slot, fee, size,
+                invalid_hereafter, invalid_before
+            ) VALUES (
+                ${txHash},
+                ${opts.blockHash},
+                ${opts.slot},
+                ${opts.fee ?? null},
+                ${opts.size ?? null},
+                ${opts.invalidHereafter ?? null},
+                ${opts.invalidBefore ?? null}
+            )
+            ON CONFLICT(tx_hash) DO UPDATE SET
+                block_hash = excluded.block_hash,
+                slot = excluded.slot,
+                fee = excluded.fee,
+                size = excluded.size,
+                invalid_hereafter = excluded.invalid_hereafter,
+                invalid_before = excluded.invalid_before
+        `;
+
+        await db`
+            INSERT INTO block_tx (block_hash, tx_hash, tx_index)
+            VALUES (${opts.blockHash}, ${txHash}, ${opts.txIndex})
+            ON CONFLICT(block_hash, tx_hash) DO UPDATE SET
+                tx_index = excluded.tx_index
+        `;
+
+        for (const [address, direction] of opts.addresses) {
+            if (!address || address.length < 10) continue;
+            await db`
+                INSERT INTO address_tx (address, tx_hash, slot, direction)
+                VALUES (${address}, ${txHash}, ${opts.slot}, ${direction})
+                ON CONFLICT(address, tx_hash) DO UPDATE SET
+                    slot = excluded.slot,
+                    direction = CASE
+                        WHEN address_tx.direction = excluded.direction
+                            THEN address_tx.direction
+                        WHEN address_tx.direction IS NULL
+                            THEN excluded.direction
+                        ELSE 'both'
+                    END
+            `;
+        }
+
+        // mb_* derived projections (full IO when inputs/outputs provided)
+        await applyMbTx(db as any, {
+            txHash,
+            blockHash: opts.blockHash,
+            slot: opts.slot,
+            txIndex: opts.txIndex,
+            fee: opts.fee,
+            size: opts.size,
+            invalidBefore: opts.invalidBefore,
+            invalidHereafter: opts.invalidHereafter,
+            addresses: opts.addresses,
+            inputs: opts.inputs ?? [],
+            outputs: opts.outputs ?? [],
+        });
+    } catch (e: any) {
+        logger.warn(
+            `Mini-BF forward index failed for tx ${opts.txHash}: ${e?.message || e}`,
+        );
+    }
+}
+
 export async function applyTransaction(
     txBody: TxBody,
     blockHash: Uint8Array,
     client?: SqlClient,
+    indexCtx?: TxIndexCtx,
 ): Promise<void> {
     const db = client ?? sql;
     const txId = txBody.hash.toString(); // Canonical blake2b_256(txBody CBOR) hex from ledger-ts
@@ -869,6 +1182,28 @@ export async function applyTransaction(
 
     logger.debug(`Input refs: ${inputRefs.length} - ${inputRefs.slice(0, 3).join(', ')}`);
 
+    // Collect spend-side addresses BEFORE delete (for address_tx direction=out)
+    const addrDirs = new Map<string, "in" | "out" | "both">();
+    // MiniBF full-IO inputs (prev refs) — built from tx body inputs
+    const mbInputs: MbTxIn[] = [];
+    const mbOutputs: MbTxOut[] = [];
+
+    // Record inputs for mb_tx_in even if UTxO missing (historical soft apply)
+    for (let i = 0; i < txBody.inputs.length; i++) {
+        const input = txBody.inputs[i] as any;
+        try {
+            const prevHash = String(input.utxoRef.id.toString()).toLowerCase();
+            const prevIdx = Number(input.utxoRef.index);
+            if (prevHash && Number.isFinite(prevIdx)) {
+                mbInputs.push({
+                    inputIndex: i,
+                    prevTxHash: prevHash,
+                    prevOutputIndex: prevIdx,
+                });
+            }
+        } catch { /* skip bad input shape */ }
+    }
+
     if (inputRefs.length > 0) {
         // Object rows preferred; tolerate array rows from .values()
         const existingUtxos = await db`
@@ -886,9 +1221,20 @@ export async function applyTransaction(
                 const tx_hash = Array.isArray(row)
                     ? (row[2] != null ? String(row[2]) : undefined)
                     : (row.tx_hash != null ? String(row.tx_hash) : undefined);
-                await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${
-                    packUtxoDelta({ utxo_ref, tx_out, tx_hash })
-                })`;
+                const spentAddr = addressFromTxOutJson(tx_out);
+                if (spentAddr) {
+                    const prev = addrDirs.get(spentAddr);
+                    addrDirs.set(
+                        spentAddr,
+                        prev === "in" || prev === "both" ? "both" : "out",
+                    );
+                }
+                await insertUtxoDelta(
+                    db,
+                    blockHash,
+                    "spend",
+                    packUtxoDelta({ utxo_ref, tx_out, tx_hash }),
+                );
             }
             // Delete spent UTxOs in bulk (IN ${sql([...])} is supported)
             await db`DELETE FROM utxo WHERE utxo_ref IN ${db(inputRefs)}`;
@@ -922,10 +1268,47 @@ export async function applyTransaction(
                 assetsObj[policyStr] = assetObj;
             });
 
+            const addr = output.address?.toString() || "";
+            if (addr && addr.length > 8) {
+                const prev = addrDirs.get(addr);
+                addrDirs.set(
+                    addr,
+                    prev === "out" || prev === "both" ? "both" : "in",
+                );
+            }
+
+            const lovelace = output.value?.lovelaces?.toString() || "0";
+            const assetsJson =
+                Object.keys(assetsObj).length > 0
+                    ? JSON.stringify(assetsObj)
+                    : null;
+            const metadata = extractLedgerTxOutMetadata(output);
+            mbOutputs.push({
+                outputIndex: i,
+                address: addr,
+                lovelace,
+                assetsJson,
+                datumHash: metadata.datumHash,
+                inlineDatumCbor: metadata.inlineDatumCbor,
+                scriptRefHash: metadata.scriptRefHash,
+            });
+
             const txOutJson = JSON.stringify({
-                address: output.address?.toString() || "",
-                amount: output.value?.lovelaces?.toString() || "0",
+                address: addr,
+                amount: lovelace,
                 assets: assetsObj,
+                ...(metadata.datumHash
+                    ? { datum_hash: metadata.datumHash }
+                    : {}),
+                ...(metadata.inlineDatumCbor
+                    ? { inline_datum: metadata.inlineDatumCbor }
+                    : {}),
+                ...(metadata.scriptRefHash
+                    ? { reference_script_hash: metadata.scriptRefHash }
+                    : {}),
+                ...(metadata.scriptRefCbor
+                    ? { reference_script_cbor: metadata.scriptRefCbor }
+                    : {}),
             });
             return [utxoRef, txOutJson, txId] as [string, string, string];
         },
@@ -934,9 +1317,12 @@ export async function applyTransaction(
     if (outputData.length > 0) {
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
         for (const [utxoRef, json, txHash] of outputData) {
-            await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${
-                packUtxoDelta({ utxo_ref: utxoRef, tx_out: json, tx_hash: txHash })
-            })`;
+            await insertUtxoDelta(
+                db,
+                blockHash,
+                "create",
+                packUtxoDelta({ utxo_ref: utxoRef, tx_out: json, tx_hash: txHash }),
+            );
             await db`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${json}, ${txHash})`;
         }
     }
@@ -950,10 +1336,51 @@ export async function applyTransaction(
     }
 
     if (txBody.fee) {
-        await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"fee"}, ${
-            JSON.stringify({ amount: txBody.fee.toString() })
-        })`;
+        await insertUtxoDelta(
+            db,
+            blockHash,
+            "fee",
+            JSON.stringify({ amount: txBody.fee.toString() }),
+        );
         await db`UPDATE chain_account_state SET treasury = treasury + ${txBody.fee} WHERE id = 1`;
+    }
+
+    // Mini-BF forward index (live + batch when indexCtx provided)
+    if (indexCtx && Number.isFinite(indexCtx.slot) && !applySkipIndex()) {
+        let fee: string | null = null;
+        let size: number | null = null;
+        let invalidHereafter: string | null = null;
+        let invalidBefore: string | null = null;
+        try {
+            if ((txBody as any).fee != null) fee = String((txBody as any).fee);
+        } catch { /* */ }
+        try {
+            if (typeof (txBody as any).toCborBytes === "function") {
+                size = (txBody as any).toCborBytes().length;
+            }
+        } catch { /* */ }
+        try {
+            if ((txBody as any).ttl != null) {
+                invalidHereafter = String((txBody as any).ttl);
+            }
+            if ((txBody as any).validityIntervalStart != null) {
+                invalidBefore = String((txBody as any).validityIntervalStart);
+            }
+        } catch { /* */ }
+
+        await indexTransaction(db, {
+            txHash: txId,
+            blockHash,
+            slot: indexCtx.slot,
+            txIndex: indexCtx.txIndex,
+            fee,
+            size,
+            invalidHereafter,
+            invalidBefore,
+            addresses: addrDirs,
+            inputs: mbInputs,
+            outputs: mbOutputs,
+        });
     }
 }
 
@@ -980,7 +1407,7 @@ export async function applyCertificates(
     if (certDeltas.length) {
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
         for (const json of certDeltas) {
-            await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"cert"}, ${json})`;
+            await insertUtxoDelta(db, blockHash, "cert", json);
         }
     }
 
@@ -1047,12 +1474,15 @@ export async function applyWithdrawals(
     for (const { stakeCred, amount } of withdrawalData) {
         await db`UPDATE rewards SET amount = amount - ${amount} WHERE stake_credentials = ${stakeCred}`;
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
-        await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"withdrawal"}, ${
+        await insertUtxoDelta(
+            db,
+            blockHash,
+            "withdrawal",
             JSON.stringify({
                 stakeCred: toHex(stakeCred),
                 amount: amount.toString(),
-            })
-        })`;
+            }),
+        );
     }
 }
 
@@ -1145,6 +1575,8 @@ export async function rollbackChainTo(
     }
 
     await sql.begin(async (tx) => {
+        // MiniBF projections first (same txn as ledger deletes)
+        await rollbackMbToSlot(tx as any, Number(slot));
         await tx`DELETE FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`;
         await tx`DELETE FROM volatile_headers WHERE slot > ${slot}`;
         await tx`DELETE FROM blocks WHERE slot > ${slot}`;
@@ -1162,6 +1594,240 @@ export async function rollbackChainTo(
 export async function getUtxoCount(): Promise<number> {
     return countQuery(sql`SELECT COUNT(*) as c FROM utxo`);
 }
+
+/** Dual-shape row helper for Bun sql `.values()` vs object rows. */
+function mapRow(r: unknown): Record<string, unknown> {
+    if (r == null) return {};
+    if (Array.isArray(r)) {
+        // callers pass named projection — treat as positional only when needed
+        return { _0: r[0], _1: r[1], _2: r[2], _3: r[3], _4: r[4], _5: r[5], _6: r[6] };
+    }
+    return r as Record<string, unknown>;
+}
+
+function blobToHex(val: unknown): string | null {
+    if (val == null) return null;
+    if (typeof val === "string") {
+        // already hex or text
+        if (/^[0-9a-fA-F]+$/.test(val) && val.length % 2 === 0) return val.toLowerCase();
+        return val;
+    }
+    if (val instanceof Uint8Array) return toHex(val);
+    if (typeof Buffer !== "undefined" && Buffer.isBuffer(val)) return toHex(new Uint8Array(val));
+    try {
+        return toHex(new Uint8Array(val as ArrayBuffer));
+    } catch {
+        return String(val);
+    }
+}
+
+export type TxIndexRow = {
+    tx_hash: string;
+    block_hash: string | null;
+    slot: number;
+    fee: string | null;
+    size: number | null;
+    invalid_hereafter: string | null;
+    invalid_before: string | null;
+};
+
+/**
+ * Mini-BF P0: tx by hash — prefer mb_tx, fallback legacy tx_index.
+ */
+export async function getTxByHash(txHash: string): Promise<TxIndexRow | null> {
+    const mb = await getMbTxByHash(txHash);
+    if (mb) {
+        return {
+            tx_hash: mb.tx_hash,
+            block_hash: mb.block_hash,
+            slot: mb.slot,
+            fee: mb.fee,
+            size: mb.size,
+            invalid_hereafter: mb.invalid_hereafter,
+            invalid_before: mb.invalid_before,
+        };
+    }
+    const h = txHash.replace(/^0x/i, "").toLowerCase();
+    try {
+        const rows = await sql`
+			SELECT tx_hash, block_hash, slot, fee, size, invalid_hereafter, invalid_before
+			FROM tx_index WHERE tx_hash = ${h} LIMIT 1
+		`.values();
+        if (!rows.length) return null;
+        const r = rows[0] as any;
+        if (Array.isArray(r)) {
+            return {
+                tx_hash: String(r[0] ?? ""),
+                block_hash: blobToHex(r[1]),
+                slot: Number(r[2]),
+                fee: r[3] != null ? String(r[3]) : null,
+                size: r[4] != null ? Number(r[4]) : null,
+                invalid_hereafter: r[5] != null ? String(r[5]) : null,
+                invalid_before: r[6] != null ? String(r[6]) : null,
+            };
+        }
+        return {
+            tx_hash: String(r.tx_hash ?? ""),
+            block_hash: blobToHex(r.block_hash),
+            slot: Number(r.slot),
+            fee: r.fee != null ? String(r.fee) : null,
+            size: r.size != null ? Number(r.size) : null,
+            invalid_hereafter:
+                r.invalid_hereafter != null ? String(r.invalid_hereafter) : null,
+            invalid_before:
+                r.invalid_before != null ? String(r.invalid_before) : null,
+        };
+    } catch {
+        return null;
+    }
+}
+
+/** Mini-BF P0: address → txs — prefer mb_address_tx. */
+export async function getAddressTxs(
+    address: string,
+    opts?: { count?: number; page?: number },
+): Promise<{ tx_hash: string; slot: number; direction: string | null }[]> {
+    return getMbAddressTxs(address, opts);
+}
+
+/** Mini-BF P1: block → tx list — prefer mb_block_tx. */
+export async function getBlockTxHashes(
+    blockHash: string | Uint8Array,
+): Promise<{ tx_hash: string; tx_index: number }[]> {
+    return getMbBlockTxHashes(blockHash);
+}
+
+/** Mini-BF address summary from live UTxO set + address_tx. */
+export type AddressSummary = {
+    address: string;
+    amount: Array<{ unit: string; quantity: string }>;
+    stake_address: string | null;
+    type: string;
+    script: boolean;
+    utxo_count: number;
+    tx_count: number;
+};
+
+/**
+ * Mini-BF address summary from live UTxO set + address_tx.
+ * received_sum/sent_sum are not tracked historically — null until full IO index.
+ */
+export async function getAddressSummary(address: string): Promise<AddressSummary> {
+    const utxos = await getUtxosByAddress(address);
+    const lovelace = utxos.reduce((acc, u) => {
+        try {
+            const j = typeof u.tx_out === "string" ? JSON.parse(u.tx_out) : u.tx_out;
+            const a = j?.amount != null ? BigInt(String(j.amount)) : 0n;
+            return acc + a;
+        } catch {
+            return acc;
+        }
+    }, 0n);
+
+    // Aggregate multi-assets across UTxOs
+    const assetMap = new Map<string, bigint>();
+    for (const u of utxos) {
+        try {
+            const j = typeof u.tx_out === "string" ? JSON.parse(u.tx_out) : u.tx_out;
+            const assets = j?.assets && typeof j.assets === "object" ? j.assets : {};
+            for (const [policy, names] of Object.entries(assets as Record<string, any>)) {
+                if (!policy || !names || typeof names !== "object") continue;
+                for (const [name, qty] of Object.entries(names as Record<string, any>)) {
+                    const unit = name ? `${policy}${name}` : policy;
+                    const q = BigInt(String(qty ?? "0"));
+                    assetMap.set(unit, (assetMap.get(unit) ?? 0n) + q);
+                }
+            }
+        } catch { /* skip bad row */ }
+    }
+
+    const amount: Array<{ unit: string; quantity: string }> = [
+        { unit: "lovelace", quantity: lovelace.toString() },
+    ];
+    for (const [unit, qty] of assetMap) {
+        if (unit) amount.push({ unit, quantity: qty.toString() });
+    }
+
+    // tx_count from mb_address_tx (falls back to legacy address_tx)
+    const txCount = await countMbAddressTxs(address);
+
+    // Heuristic type (BF uses byron|shelley)
+    const type = address.startsWith("addr") || address.startsWith("stake")
+        ? "shelley"
+        : address.startsWith("Ae2") || address.startsWith("DdzFF")
+        ? "byron"
+        : "shelley";
+
+    return {
+        address,
+        amount,
+        stake_address: null, // needs credential decode — later
+        type,
+        script: false,
+        utxo_count: utxos.length,
+        tx_count: txCount,
+    };
+}
+
+/** Mini-BF /network tip snapshot (DB facts only). */
+export type NetworkSnapshot = {
+    tipSlot: string;
+    tipHash: string | null;
+    utxoCount: number;
+    txIndexCount: number;
+    addressTxCount: number;
+    mbCursorSlot: number;
+    mbTxCount: number;
+    lagSlots: number;
+};
+
+/**
+ * Mini-BF /network tip snapshot (DB facts only).
+ * Epoch / epoch_nonce computed in miniBlockfrost via preprod formula.
+ */
+export async function getNetworkSnapshot(): Promise<NetworkSnapshot> {
+    const tipSlot = await getMaxSlot();
+    const tipRow = tipSlot > 0n ? await getBlockBySlot(tipSlot) : null;
+    let tipHash: string | null = null;
+    if (tipRow) {
+        // getBlockBy*: SELECT id, chunk_id, slot, hash as block_hash, ...
+        if (Array.isArray(tipRow)) tipHash = blobToHex(tipRow[3] ?? tipRow[0]);
+        else tipHash = blobToHex(tipRow.block_hash ?? tipRow.hash);
+    }
+    const utxoCount = await getUtxoCount();
+    let txIndexCount = 0;
+    let addressTxCount = 0;
+    try {
+        const r1 = await sql`SELECT COUNT(*) AS c FROM tx_index`.values();
+        const a1 = r1?.[0] as any;
+        txIndexCount = Number(Array.isArray(a1) ? a1[0] : a1?.c ?? 0) || 0;
+        const r2 = await sql`SELECT COUNT(*) AS c FROM address_tx`.values();
+        const a2 = r2?.[0] as any;
+        addressTxCount = Number(Array.isArray(a2) ? a2[0] : a2?.c ?? 0) || 0;
+    } catch { /* */ }
+
+    const mbStats = await getMbIndexStats();
+    // Prefer denser of mb_* vs legacy for display counts
+    const mbTxCount = Math.max(mbStats.mbTx, txIndexCount);
+    const mbAddrCount = Math.max(mbStats.mbAddressTx, addressTxCount);
+    const tipN = Number(tipSlot);
+    const lagSlots =
+        Number.isFinite(tipN) && mbStats.cursorSlot > 0
+            ? Math.max(0, tipN - mbStats.cursorSlot)
+            : tipN;
+
+    return {
+        tipSlot: tipSlot.toString(),
+        tipHash,
+        utxoCount,
+        txIndexCount: mbTxCount,
+        addressTxCount: mbAddrCount,
+        mbCursorSlot: mbStats.cursorSlot,
+        mbTxCount: mbStats.mbTx,
+        lagSlots,
+    };
+}
+
 
 /**
  * Best-effort Byron ATxAux apply.
@@ -1250,9 +1916,12 @@ export async function applyByronTxPayload(
             const tx_hash = Array.isArray(row)
                 ? (row[2] != null ? String(row[2]) : undefined)
                 : (row.tx_hash != null ? String(row.tx_hash) : undefined);
-            await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"spend"}, ${
-                packUtxoDelta({ utxo_ref, tx_out, tx_hash })
-            })`;
+            await insertUtxoDelta(
+                db,
+                blockHash,
+                "spend",
+                packUtxoDelta({ utxo_ref, tx_out, tx_hash }),
+            );
         }
         if (existingUtxos.length > 0) {
             await db`DELETE FROM utxo WHERE utxo_ref IN ${db(inputRefs)}`;
@@ -1280,9 +1949,12 @@ export async function applyByronTxPayload(
             assets: {},
             era: "byron",
         });
-        await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${"create"}, ${
-            packUtxoDelta({ utxo_ref: utxoRef, tx_out: txOutJson, tx_hash: txId })
-        })`;
+        await insertUtxoDelta(
+            db,
+            blockHash,
+            "create",
+            packUtxoDelta({ utxo_ref: utxoRef, tx_out: txOutJson, tx_hash: txId }),
+        );
         await db`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash) VALUES (${utxoRef}, ${txOutJson}, ${txId})`;
     }
 
@@ -1290,3 +1962,26 @@ export async function applyByronTxPayload(
         `Byron tx applied: ${txId.slice(0, 16)}… in=${inputRefs.length} out=${outputs.length}`,
     );
 }
+
+// Re-export MiniBF projection schema/writer/queries for HTTP handlers
+export {
+    ensureMinibfSchema,
+    MINIBF_SCHEMA_VERSION,
+    applyMbTx,
+    rollbackMbToSlot,
+    getMbCursor,
+    getMbTxByHash,
+    getMbTxUtxos,
+    getMbAddressTxs,
+    getMbBlockTxHashes,
+    countMbAddressTxs,
+    getMbIndexStats,
+    type MbTxRow,
+    type MbTxIo,
+    type MbTxIn,
+    type MbTxOut,
+    type MbTxDelta,
+    type MbSql,
+    type MbCursor,
+    type MbIndexStats,
+} from "./db/minibf";

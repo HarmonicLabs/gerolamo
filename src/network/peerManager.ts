@@ -8,10 +8,12 @@ import {
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import type { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
+import { classifyPeerNetError } from "./peerNetError";
 import { GlobalSharedMempool } from "./SharedMempool";
 import {
     ConsensusOrchestrator,
     type PeerAccessor,
+    type SyncSnapshot,
 } from "../consensus/ConsensusOrchestratooor";
 import {
     PeerGovernor,
@@ -23,6 +25,13 @@ import {
     DEFAULT_PEER_GOVERNOR_TARGETS,
 } from "./PeerGovernor";
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
+import { emitPeers } from "./liveEvents";
+import { getShelleyGenesisConfig } from "../utils/paths";
+import { withTimeout } from "../utils/withTimeout";
+import type { ResolvedN2NConfig } from "./n2n/config";
+import { resolve4 } from "node:dns/promises";
+import { isIP } from "node:net";
+import { peerSharingAdvertised, resolveNodeRole, type NodeRole } from "./nodeRole";
 
 export interface PeerGovernorConfig {
     /** Master switch — false keeps legacy hot-first path. Default true. */
@@ -39,11 +48,42 @@ export interface PeerGovernorConfig {
     shareBatch?: number;
     /** Run PeerSharing every N ticks. Default 2. */
     shareEveryTicks?: number;
+    /** Max parallel cold→warm connects per tick. Default 2. */
+    maxConcurrentWarm?: number;
+    /** Handshake/connect timeout ms. Default 12000. */
+    connectTimeoutMs?: number;
+    /**
+     * Demote hot peers with no rollForward for this many ms.
+     * Default 180000 (3m). Set 0 to disable.
+     */
+    hotSilentMs?: number;
+    /**
+     * Advertise PeerSharing in the handshake and ask peers for addresses.
+     * Default: true for role "relay", false for "data" (see nodeRole.ts).
+     */
+    peerSharing?: boolean;
+    /** Forget shared (unverified) cold peers after this many failed connects. Default 3, 0 = never. */
+    maxSharedPeerFailures?: number;
+    /** Expand bootstrap/publicRoot DNS names into one peer per A record. Default true. */
+    resolveDns?: boolean;
+}
+
+export interface BlockFetchBatchConfig {
+    /** Inclusive range size while catching up. Clamped to 1..256. */
+    maxBlocks?: number;
+    /** Flush a partial live-tail header batch after this many ms. */
+    flushMs?: number;
+    /** Abort and terminate a contaminated range connection before spec 60s. */
+    rangeTimeoutMs?: number;
+    /** Ranges downloading concurrently across peers. Default = hot peer target. */
+    parallelRanges?: number;
 }
 
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly networkMagic: number;
+    /** "data" (default, outbound only) or "relay" (also accepts inbound N2N). See nodeRole.ts. */
+    readonly role?: NodeRole;
     readonly topologyFile: string;
     readonly syncFromTip: boolean;
     readonly syncFromGenesis: boolean;
@@ -53,6 +93,9 @@ export interface GerolamoConfig {
     readonly syncFromPointBlockHash: string;
     readonly logLevel: string;
     readonly shelleyGenesisFile: string;
+    readonly byronGenesisFile?: string;
+    /** Byron genesis hash: expected prevBlock of the epoch-0 EBB when syncing from origin. */
+    readonly byronGenesisHash?: string;
     readonly enableMinibf?: boolean;
     readonly dbPath: string;
     readonly port?: number;
@@ -63,6 +106,8 @@ export interface GerolamoConfig {
      * Env: GEROLAMO_N2C_SOCKET; disable with GEROLAMO_N2C=0.
      */
     readonly n2cSocketPath?: string;
+    /** Optional inbound Cardano node-to-node TCP relay listener. */
+    readonly n2n?: ResolvedN2NConfig;
     readonly logs: {
         readonly logToFile: boolean;
         readonly logToConsole: boolean;
@@ -76,10 +121,11 @@ export interface GerolamoConfig {
     readonly blockfrostUrl?: string;
     /**
      * Body validation policy.
-     * - soft (default): log failures but still apply (mid-chain tolerance)
+     * - auto (default): strict when syncing from genesis (ledger complete), soft otherwise
+     * - soft: log failures but still apply (mid-chain tolerance)
      * - strict: reject invalid bodies — no apply / no nonce feed / no insert
      */
-    readonly bodyValidation?: "soft" | "strict";
+    readonly bodyValidation?: "auto" | "soft" | "strict";
     /**
      * Plutus/native script validation.
      * - off (default): skip
@@ -89,6 +135,20 @@ export interface GerolamoConfig {
     readonly scriptValidation?: "off" | "log" | "strict";
     /** Cold/warm/hot governor knobs (network-design v1). */
     readonly peerGovernor?: PeerGovernorConfig;
+    /** True BlockFetch RequestRange catch-up batching. */
+    readonly blockFetchBatch?: BlockFetchBatchConfig;
+    /** Header-validation CPU pool. */
+    readonly validation?: {
+        /** Bun workers for header validation: number, or "auto" (= all cores). 0 = inline. */
+        readonly workers?: number | "auto";
+    };
+    /** Multi-peer honesty knobs. */
+    readonly sync?: {
+        /** Verifiers that must agree on an alternative before the primary is considered wrong. Default 2. */
+        readonly quorum?: number;
+        /** Cold hold for divergent / lying peers, ms. Default 1h. */
+        readonly maliciousHoldMs?: number;
+    };
     allPeers: Map<string, PeerClient>;
 }
 
@@ -106,6 +166,10 @@ let tickCount = 0;
 /** In-flight connects so we don't double-promote the same cold peer. */
 const connecting = new Set<string>();
 let tickRunning = false;
+
+const DEFAULT_CONNECT_TIMEOUT_MS = 12_000;
+const DEFAULT_MAX_CONCURRENT_WARM = 2;
+const DEFAULT_HOT_SILENT_MS = 180_000;
 
 function govEnabled(config: GerolamoConfig): boolean {
     return config.peerGovernor?.enabled !== false;
@@ -150,27 +214,35 @@ function wirePeerConsensus(peer: PeerClient): void {
     if (!consensus) return;
     const orch = consensus;
     peer.onRollForward = (peerId, rollForwardCborBytes, tip) => {
-        void orch.handleRollForward(
+        return orch.handleRollForward(
             rollForwardCborBytes,
             peerId,
             BigInt(tip),
         );
     };
-    peer.onRollBack = (peerId, point) => {
-        void orch.handleRollBack(point).catch((err) => {
+    peer.onRollForwardBatch = (peerId, items) => {
+        return orch.handleRollForwardBatch(items, peerId);
+    };
+    peer.onRollBack = async (peerId, point) => {
+        await orch.handleRollBack(point).catch((err) => {
             logger.error(`handleRollBack failed for ${peerId}:`, err);
+            throw err;
         });
     };
 }
 
-/** IPv4 PeerAddress.address is a 32-bit int — convert to dotted quad. */
+/**
+ * PeerSharing encodes SockAddrInet's raw Haskell HostAddress Word32.
+ * Its octets are least-significant first (the same order as
+ * Network.Socket.hostAddressToTuple), not display-order integer shifts.
+ */
 export function ipv4NumberToString(addr: number | bigint): string {
     const n = Number(addr) >>> 0;
     return [
-        (n >>> 24) & 0xff,
-        (n >>> 16) & 0xff,
-        (n >>> 8) & 0xff,
         n & 0xff,
+        (n >>> 8) & 0xff,
+        (n >>> 16) & 0xff,
+        (n >>> 24) & 0xff,
     ].join(".");
 }
 
@@ -195,29 +267,79 @@ export function peerAddressToHostPort(
     return null;
 }
 
-function seedTopologyIntoGovernor(topo: Topology, gov: PeerGovernor): void {
+export type DnsResolver = (host: string) => Promise<string[]>;
+
+const DEFAULT_DNS_TIMEOUT_MS = 4000;
+
+/**
+ * One topology access point → one peer per IPv4 A record.
+ * IOG's public relays (`preprod-node.play.dev.cardano.org`, `backbone.cardano.iog.io`)
+ * are round-robin names over 8+ hosts; cardano-node treats each address as its
+ * own peer (that is what `valency` counts). Without this the governor sees a
+ * single "peer" and can never reach targetHot from bootstrap alone.
+ * Literal IPs and failed lookups pass through unchanged.
+ */
+export async function expandAccessPoint(
+    host: string,
+    resolver: DnsResolver = (h) => resolve4(h),
+): Promise<string[]> {
+    const h = String(host).trim();
+    if (!h) return [];
+    if (isIP(h)) return [h];
+    try {
+        const addrs = await withTimeout(resolver(h), DEFAULT_DNS_TIMEOUT_MS, `dns ${h}`);
+        const uniq = [...new Set(addrs.filter((a) => isIP(a) === 4))];
+        return uniq.length > 0 ? uniq : [h];
+    } catch (err) {
+        logger.debug(`DNS expand failed for ${h}, keeping hostname:`, err);
+        return [h];
+    }
+}
+
+async function seedTopologyIntoGovernor(
+    topo: Topology,
+    gov: PeerGovernor,
+    resolveDns = true,
+    resolver?: DnsResolver,
+): Promise<void> {
+    const expand = (host: string) =>
+        resolveDns ? expandAccessPoint(host, resolver) : Promise.resolve([String(host)]);
     if (topo.bootstrapPeers) {
         for (const ap of topo.bootstrapPeers) {
-            gov.noteKnown(
-                String(ap.address),
-                ap.port,
-                "bootstrap",
-                false,
-            );
+            const hosts = await expand(String(ap.address));
+            for (const host of hosts) {
+                gov.noteKnown(host, ap.port, "bootstrap", false);
+            }
+            if (hosts.length > 1) {
+                logger.info(`Bootstrap ${ap.address}:${ap.port} → ${hosts.length} addresses`);
+            }
         }
     }
     if (topo.localRoots) {
-        for (const root of topo.localRoots) {
-            const trustable = (root as any).trustable !== false;
+        // P1: register each localRoots[] group + hard valency
+        for (let i = 0; i < topo.localRoots.length; i++) {
+            const root = topo.localRoots[i]!;
+            const groupId = `lr_${i}`;
+            const valency = Math.max(0, Math.floor(Number(root.valency ?? 0)));
+            gov.registerLocalRootGroup(groupId, valency);
+            const trustable = (root as { trustable?: boolean }).trustable !== false;
             for (const ap of root.accessPoints) {
-                gov.noteKnown(ap.address, ap.port, "localRoot", trustable);
+                gov.noteKnown(
+                    ap.address,
+                    ap.port,
+                    "localRoot",
+                    trustable,
+                    groupId,
+                );
             }
         }
     }
     if (topo.publicRoots) {
         for (const root of topo.publicRoots) {
             for (const ap of root.accessPoints) {
-                gov.noteKnown(ap.address, ap.port, "publicRoot", false);
+                for (const host of await expand(ap.address)) {
+                    gov.noteKnown(host, ap.port, "publicRoot", false);
+                }
             }
         }
     }
@@ -241,29 +363,90 @@ async function connectWarm(
     config: GerolamoConfig,
     gov: PeerGovernor,
 ): Promise<boolean> {
-    if (connecting.has(rec.key) || clientsByKey.has(rec.key)) return false;
+    if (connecting.has(rec.key)) return false;
+    // Respect exponential backoff gate
+    if (rec.nextRetryAt && rec.nextRetryAt > Date.now()) return false;
+
+    // Stale zombie: socket still in clientsByKey but governor tier is cold
+    // (e.g. prior silent-demote + markFail orphan). Tear down then redial.
+    const existing = clientsByKey.get(rec.key);
+    if (existing) {
+        const govRec = gov.get(rec.key);
+        if (govRec && (govRec.tier === "warm" || govRec.tier === "hot") && govRec.client) {
+            // Already warm/hot with a live client — nothing to do.
+            return true;
+        }
+        logger.info(
+            `connectWarm: clearing stale client ${rec.key} (govTier=${govRec?.tier ?? "?"})`,
+        );
+        try {
+            existing.terminate();
+        } catch {
+            /* */
+        }
+        unregisterClient(rec.key, existing.peerId);
+        gov.detachClient(rec.key);
+    }
+
     connecting.add(rec.key);
+    let peer: PeerClient | undefined;
+    let registered = false;
     try {
-        const peer = new PeerClient(
+        peer = new PeerClient(
             rec.host,
             rec.port,
             config,
-            (peerId, pKey) => {
+            shelleyGenesisConfig,
+            (peerId, pKey, reason) => {
                 logger.debug(`Peer terminated ${peerId} key=${pKey}`);
                 unregisterClient(pKey, peerId);
-                gov.markFail(pKey, "terminated");
+                consensus?.unregisterHotPeer(pKey);
+                if (reason?.startsWith("malicious:")) {
+                    // Provably bad data (body hash / signature / divergence): 1h cold hold.
+                    logger.warn(`Peer ${pKey} held cold for bad data: ${reason}`);
+                    gov.markMalicious(
+                        pKey,
+                        reason,
+                        config.sync?.maliciousHoldMs ?? PeerGovernor.MALICIOUS_BACKOFF_MS,
+                    );
+                    return;
+                }
+                if (registered) {
+                    gov.markFail(pKey, reason ?? "terminated");
+                }
                 gov.detachClient(pKey);
             },
         );
-        await peer.handShakePeer();
+        const timeoutMs =
+            config.peerGovernor?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+        await withTimeout(
+            peer.handShakePeer(),
+            timeoutMs,
+            `handshake ${rec.key}`,
+            () => peer?.terminate(`handshake ${rec.key} timed out`),
+        );
         peer.startKeepAlive();
         wirePeerConsensus(peer);
         registerClient(peer);
+        registered = true;
         gov.attachClient(rec.key, peer, "warm");
         logger.info(`Warm peer ready ${rec.key} (source=${rec.source})`);
         return true;
     } catch (error) {
-        logger.error(`Failed warm connect ${rec.key}:`, error);
+        const failure = classifyPeerNetError(error, rec.key);
+        if (failure.expected) logger.warn(`Failed warm connect ${failure.line}`);
+        else logger.error(`Failed warm connect ${rec.key}:`, error);
+        // Close unregistered half-open sockets too; timeouts used to leak SYN-SENT FDs.
+        try {
+            peer?.terminate(String((error as any)?.message || error));
+            const half = clientsByKey.get(rec.key);
+            if (half) {
+                half.terminate();
+                unregisterClient(rec.key, half.peerId);
+            }
+        } catch {
+            /* */
+        }
         gov.markFail(rec.key, String((error as any)?.message || error));
         return false;
     } finally {
@@ -271,31 +454,64 @@ async function connectWarm(
     }
 }
 
+export function startHotSyncWithTimeout(
+    client: {
+        startSyncLoop(): Promise<void>;
+        terminate(reason?: string): void;
+    },
+    key: string,
+    timeoutMs: number,
+): Promise<void> {
+    const label = `hot sync ${key}`;
+    return withTimeout(client.startSyncLoop(), timeoutMs, label, () => {
+        client.terminate(`${label} timed out after ${timeoutMs}ms`);
+    });
+}
+
 async function promoteToHot(
     rec: PeerRecord,
     gov: PeerGovernor,
+    timeoutMs: number,
 ): Promise<boolean> {
     const client = clientsByKey.get(rec.key);
     if (!client) return false;
     try {
         wirePeerConsensus(client);
-        await client.startSyncLoop();
+        consensus?.registerHotPeer(rec.key);
+        await startHotSyncWithTimeout(client, rec.key, timeoutMs);
         gov.attachClient(rec.key, client, "hot");
-        logger.info(`Hot peer syncing ${rec.key}`);
+        logger.info(`Hot peer syncing ${rec.key} (${consensus?.roleOf(rec.key) ?? "no-orchestrator"})`);
         return true;
     } catch (error) {
-        logger.error(`Failed hot promote ${rec.key}:`, error);
+        const failure = classifyPeerNetError(error);
+        if (failure.expected) {
+            logger.warn(`Failed hot promote ${rec.key} ${failure.line}`);
+        } else {
+            logger.error(`Failed hot promote ${rec.key}:`, error);
+        }
         try {
             client.stopSyncLoop();
         } catch {
             /* */
         }
-        gov.markFail(rec.key, String((error as any)?.message || error));
+        consensus?.unregisterHotPeer(rec.key);
+        const reason = failure.line;
+        client.terminate(`hot promotion ${rec.key}: ${reason}`);
+        // Registered-client termination records the failure. Keep this fallback
+        // for a client already absent from the manager map.
+        if (gov.get(rec.key)?.tier !== "cold") {
+            gov.markFail(rec.key, reason);
+        }
         return false;
     }
 }
 
+/**
+ * Spec (network-design): hot→warm demotion keeps the bearer for keepalive / ΔQ.
+ * ChainSync stops; socket + keepalive stay. Do NOT markFail (that cold-drops).
+ */
 function demoteHotToWarm(rec: PeerRecord, gov: PeerGovernor): void {
+    consensus?.unregisterHotPeer(rec.key);
     const client = clientsByKey.get(rec.key);
     if (client) {
         try {
@@ -309,6 +525,28 @@ function demoteHotToWarm(rec: PeerRecord, gov: PeerGovernor): void {
     logger.info(`Demoted hot→warm ${rec.key}`);
 }
 
+/**
+ * Re-home zombies: live socket in clientsByKey but governor tier is cold
+ * (orphan from prior silent+markFail). Spec warm = bearer up without consensus.
+ */
+function rehomeOrphanClients(gov: PeerGovernor): number {
+    let n = 0;
+    for (const [key, client] of clientsByKey) {
+        const rec = gov.get(key);
+        if (!rec) continue;
+        if (rec.tier === "cold" || !rec.client) {
+            gov.attachClient(key, client, "warm");
+            // Clear backoff so we can promote immediately.
+            gov.forceClearRetry(key);
+            n++;
+            logger.info(
+                `Rehomed orphan client ${key} → warm (was tier=${rec.tier})`,
+            );
+        }
+    }
+    return n;
+}
+
 async function runPeerSharing(
     gov: PeerGovernor,
     shareBatch: number,
@@ -320,12 +558,16 @@ async function runPeerSharing(
     ].filter((r) => r.client);
     if (donors.length === 0) return;
 
-    // Ask up to 2 connected peers
+    // Ask up to 2 connected peers (timeout — hung share must not stall tick)
     for (const rec of donors.slice(0, 2)) {
         const client = clientsByKey.get(rec.key);
         if (!client) continue;
         try {
-            const peers = await client.askForPeers(shareBatch);
+            const peers = await withTimeout(
+                client.askForPeers(shareBatch),
+                DEFAULT_CONNECT_TIMEOUT_MS,
+                `askForPeers ${rec.key}`,
+            );
             let added = 0;
             for (const p of peers) {
                 const hp = peerAddressToHostPort(p);
@@ -350,40 +592,90 @@ async function governorTick(
     config: GerolamoConfig,
     gov: PeerGovernor,
 ): Promise<void> {
-    if (tickRunning) return;
+    if (tickRunning) {
+        logger.debug("Governor tick skipped (already running)");
+        return;
+    }
     tickRunning = true;
+    const startedAt = Date.now();
     tickCount++;
     try {
         const gcfg = config.peerGovernor ?? {};
         const shareEvery = gcfg.shareEveryTicks ?? 2;
         const shareBatch = gcfg.shareBatch ?? 10;
+        const maxConcurrent =
+            gcfg.maxConcurrentWarm ?? DEFAULT_MAX_CONCURRENT_WARM;
+        const connectTimeoutMs =
+            gcfg.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
+        const silentMs = gcfg.hotSilentMs ?? DEFAULT_HOT_SILENT_MS;
+        const now = Date.now();
 
-        // 1) Grow cold via PeerSharing
-        if (tickCount === 1 || tickCount % shareEvery === 0) {
+        // 0) Drop shared addresses that never answer (ephemeral ports of other data nodes)
+        const pruned = gov.pruneFailedSharedPeers(gcfg.maxSharedPeerFailures ?? 3);
+        if (pruned.length > 0) {
+            logger.info(`Forgot ${pruned.length} dead shared peer(s): ${pruned.slice(0, 4).join(", ")}${pruned.length > 4 ? "…" : ""}`);
+        }
+
+        // 1) Grow cold via PeerSharing (only when we advertised it in the handshake)
+        if (
+            peerSharingAdvertised(config) &&
+            (tickCount === 1 || tickCount % shareEvery === 0)
+        ) {
             await runPeerSharing(gov, shareBatch);
         }
 
-        // 2) cold → warm
+        // 2) cold → warm (capped concurrency; pickColdForWarm respects nextRetryAt)
+        // Spec (network-design): maintain targetWarm even when cold peers are
+        // all in backoff — force-clear the best cold so warm does not stall at 0
+        // while hot alone holds the tip.
         const needWarm = gov.needsWarmSlots();
         if (needWarm > 0) {
-            const picks = gov.pickColdForWarm(needWarm);
-            for (const rec of picks) {
-                await connectWarm(rec, config, gov);
+            let picks = gov.pickColdForWarm(
+                Math.min(needWarm, maxConcurrent),
+                now,
+            );
+            if (picks.length === 0) {
+                const best = gov.pickBestColdIgnoringBackoff();
+                if (best) {
+                    gov.forceClearRetry(best.key);
+                    logger.info(
+                        `Warm force-clear retry ${best.key} ` +
+                            `(failCount=${best.failCount} source=${best.source})`,
+                    );
+                    picks = [best];
+                }
             }
+            await Promise.allSettled(
+                picks.map((rec) => connectWarm(rec, config, gov)),
+            );
         }
 
         // 3) warm → hot
         const needHot = gov.needsHotSlots();
         if (needHot > 0) {
-            const picks = gov.pickWarmForHot(needHot);
+            const picks = gov.pickWarmForHot(needHot, now);
             for (const rec of picks) {
-                await promoteToHot(rec, gov);
+                await promoteToHot(rec, gov, connectTimeoutMs);
             }
         }
 
-        // 4) demote excess hot (never last hot)
+        // 4) silent hot→warm liveness demote (spec churn; keep bearer)
+        // Do NOT markFail — that cold-drops and orphans the socket in clientsByKey.
+        if (silentMs > 0) {
+            for (const rec of gov.pickSilentHot(silentMs, now)) {
+                const last =
+                    rec.client?.lastRollForwardAt ??
+                    rec.promotedAt ??
+                    rec.addedAt;
+                logger.info(
+                    `Silent hot→warm ${rec.key} idleMs=${now - last}`,
+                );
+                demoteHotToWarm(rec, gov);
+            }
+        }
+
+        // 5) demote excess hot (never last hot; pure pick already enforces)
         const demote = gov.pickHotForDemotion(gov.excessHot() || 0);
-        // also soft-trim above targetHot
         if (demote.length === 0 && gov.counts().hot > gov.targets.targetHot) {
             const extra = gov.pickHotForDemotion(
                 gov.counts().hot - gov.targets.targetHot,
@@ -393,40 +685,141 @@ async function governorTick(
             for (const rec of demote) demoteHotToWarm(rec, gov);
         }
 
-        // 5) if zero hot and we have cold roots, force a warm+hot attempt
+        // 6) if zero hot, emergency recover
+        // Rehome orphan sockets first (warm with live bearer), then dial cold.
         if (gov.counts().hot === 0) {
-            const emergency = gov.pickColdForWarm(1);
-            for (const rec of emergency) {
-                const ok = await connectWarm(rec, config, gov);
-                if (ok) {
-                    const warm = gov.get(rec.key);
-                    if (warm) await promoteToHot(warm, gov);
-                }
+            const rehomed = rehomeOrphanClients(gov);
+            if (rehomed > 0) {
+                logger.info(`Emergency rehomed ${rehomed} orphan client(s)`);
             }
-            // also try existing warm
-            for (const rec of gov.pickWarmForHot(1)) {
-                await promoteToHot(rec, gov);
+            // Promote any warm bearer immediately (incl. rehomed).
+            for (const rec of gov.pickWarmForHot(1, now)) {
+                await promoteToHot(rec, gov, connectTimeoutMs);
+            }
+            if (gov.counts().hot === 0) {
+                let emergency = gov.pickColdForWarm(1, now);
+                if (emergency.length === 0) {
+                    const best = gov.pickBestColdIgnoringBackoff();
+                    if (best) {
+                        gov.forceClearRetry(best.key);
+                        logger.info(
+                            `Emergency force-clear retry ${best.key} ` +
+                                `(failCount=${best.failCount} source=${best.source})`,
+                        );
+                        emergency = [best];
+                    }
+                }
+                for (const rec of emergency) {
+                    const ok = await connectWarm(rec, config, gov);
+                    if (ok) {
+                        const warm = gov.get(rec.key);
+                        if (warm) {
+                            await promoteToHot(
+                                warm,
+                                gov,
+                                connectTimeoutMs,
+                            );
+                        }
+                    }
+                }
+                for (const rec of gov.pickWarmForHot(1, now)) {
+                    await promoteToHot(rec, gov, connectTimeoutMs);
+                }
             }
         }
 
+        const snap = gov.snapshot();
+        // Always publish peers for WS subscribers (fire-and-forget)
+        emitPeers(snap as unknown as Record<string, unknown>);
         if (tickCount === 1 || tickCount % 4 === 0) {
             logger.info(
-                `PeerGovernor snapshot ${JSON.stringify(gov.snapshot())}`,
+                `PeerGovernor snapshot ${JSON.stringify(snap)}`,
             );
         }
     } catch (err) {
         logger.error("PeerGovernor tick error:", err);
     } finally {
+        gov.noteTickComplete(startedAt);
         tickRunning = false;
     }
+}
+
+/** Multi-peer sync state (primary, verifier agreement, range scheduler, workers). */
+export function getSyncSnapshot(): SyncSnapshot | null {
+    return consensus?.syncSnapshot() ?? null;
 }
 
 export function getGovernorSnapshot(): PeerGovernorSnapshot | null {
     return governor?.snapshot() ?? null;
 }
 
+/** Best producer tip slot from live ChainSync (MsgRollForward / FindIntersect tip). */
+export function getBestPeerTipSlot(): string | null {
+    let best = 0n;
+    for (const c of clientsByKey.values()) {
+        const n = c.peerSlotNumber;
+        if (n == null || !Number.isFinite(n) || n <= 0) continue;
+        const slot = BigInt(Math.trunc(n));
+        if (slot > best) best = slot;
+    }
+    return best > 0n ? best.toString() : null;
+}
+
 export function getPeerGovernor(): PeerGovernor | undefined {
     return governor;
+}
+
+/**
+ * Thin facade for HTTP / Mini-BF: tx submit + governor observability.
+ * Does not expose full PeerClient map.
+ */
+export interface InboundN2NStatus {
+    listening: boolean;
+    host: string | null;
+    port: number | null;
+    clients: number;
+}
+
+let inboundStatusProvider: (() => InboundN2NStatus) | null = null;
+
+/** Called by the entrypoint once the inbound N2N listener is up (or known to be off). */
+export function setInboundN2NStatusProvider(fn: (() => InboundN2NStatus) | null): void {
+    inboundStatusProvider = fn;
+}
+
+export function getInboundN2NStatus(): InboundN2NStatus {
+    if (inboundStatusProvider) {
+        try {
+            return inboundStatusProvider();
+        } catch {
+            /* fall through */
+        }
+    }
+    return { listening: false, host: null, port: null, clients: 0 };
+}
+
+export function createHttpPeerManager(): {
+    submitTx: (args: { txCbor: Uint8Array }) => void;
+    getGovernorSnapshot: () => PeerGovernorSnapshot | null;
+    getBestPeerTipSlot: () => string | null;
+    getSyncSnapshot: () => SyncSnapshot | null;
+    getInboundStatus: () => InboundN2NStatus;
+} {
+    return {
+        submitTx({ txCbor }: { txCbor: Uint8Array }) {
+            const peer = getPeerAccessor().pickHotPeer();
+            if (!peer) {
+                throw new Error("No hot peer available for tx submit");
+            }
+            void peer.submitToSharedMempool(txCbor).catch((err) => {
+                logger.error("submitToSharedMempool failed:", err);
+            });
+        },
+        getGovernorSnapshot: () => getGovernorSnapshot(),
+        getBestPeerTipSlot: () => getBestPeerTipSlot(),
+        getSyncSnapshot: () => getSyncSnapshot(),
+        getInboundStatus: () => getInboundN2NStatus(),
+    };
 }
 
 export async function stopPeerManager(): Promise<void> {
@@ -468,13 +861,8 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
     }
     topology = parsedTopology;
 
-    const shelleyGenesisFile = Bun.file(config.shelleyGenesisFile);
-    if (!(await shelleyGenesisFile.exists())) {
-        throw new Error(
-            "missing Shelley genesis file at " + config.shelleyGenesisFile,
-        );
-    }
-    shelleyGenesisConfig = await shelleyGenesisFile.json();
+    // Load once before any peers are constructed; all validators share this promise cache.
+    shelleyGenesisConfig = await getShelleyGenesisConfig(config);
     GlobalSharedMempool.getInstance();
     logger.mempool("Global SharedMempool initialized in PeerManager");
 
@@ -491,7 +879,14 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
     }
 
     governor = new PeerGovernor(targetsFromConfig(config));
-    seedTopologyIntoGovernor(topology, governor);
+    await seedTopologyIntoGovernor(
+        topology,
+        governor,
+        config.peerGovernor?.resolveDns !== false,
+    );
+    logger.info(
+        `Node role: ${resolveNodeRole(config)} (peerSharing ${peerSharingAdvertised(config) ? "on" : "off"})`,
+    );
     logger.info(
         `PeerGovernor seeded ${JSON.stringify(governor.snapshot())}`,
     );
@@ -520,16 +915,23 @@ async function initLegacyHotFirst(config: GerolamoConfig): Promise<void> {
 
     async function addHot(host: string, port: number | bigint): Promise<void> {
         try {
-            const peer = new PeerClient(host, port, config, (peerId, pKey) => {
-                unregisterClient(pKey, peerId);
-                const idx = hotList.findIndex((p) => p.peerKey === pKey);
-                if (idx >= 0) hotList.splice(idx, 1);
-            });
+            const peer = new PeerClient(
+                host,
+                port,
+                config,
+                shelleyGenesisConfig,
+                (peerId, pKey) => {
+                    unregisterClient(pKey, peerId);
+                    const idx = hotList.findIndex((p) => p.peerKey === pKey);
+                    if (idx >= 0) hotList.splice(idx, 1);
+                },
+            );
             await peer.handShakePeer();
             peer.startKeepAlive();
             wirePeerConsensus(peer);
             registerClient(peer);
             hotList.push(peer);
+            consensus?.registerHotPeer(peer.peerKey);
             await peer.startSyncLoop();
             logger.debug(`Legacy hot peer ${peer.peerKey}`);
         } catch (error) {

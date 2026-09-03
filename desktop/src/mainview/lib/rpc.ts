@@ -61,6 +61,7 @@ function hookReceive() {
 
 function timeoutMsFor(method: string): number {
   if (method === "bootstrap.start" || method === "node.start") return 90_000;
+  if (method === "wipe.db" || method === "wipe.snapshots") return 60_000;
   return 15_000;
 }
 

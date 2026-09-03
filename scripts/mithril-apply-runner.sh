@@ -9,8 +9,9 @@
 # This runner STOPs on 2 and 3 (needs human attention). It retries exit 1
 # a bounded number of times, then stops.
 set -u
-export PATH="/home/bakon/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
-cd /media/bakon/data/Dev/HarmonicLabs/gerolamo
+export PATH="$HOME/.bun/bin:/usr/local/bin:/usr/bin:/bin:$PATH"
+# Repo root = parent of this scripts/ directory, wherever the checkout lives.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)" || exit 1
 
 LOG=/tmp/mithril-apply-gapfill.log
 MAX_TRANSIENT_RETRIES=3

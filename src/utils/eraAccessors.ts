@@ -80,6 +80,9 @@ export function isByronBlock(b: AnyEraBlock): boolean {
     const any = b as any;
     if (Array.isArray(any?.transactionBodies)) return false;
     if (Array.isArray(any?.body?.txPayload)) return true;
+    // ByronMainBlock / ByronEbBlock: header is ByronBlockHeaderBody / ByronEbbHead
+    // (both carry prevBlock); Shelley+ headers nest prevHash under header.body.
+    if (any?.header?.prevBlock != null && any?.header?.body == null) return true;
     // Header-only Byron epochs (empty payload) still count as Byron
     if (any?.consensusData?.slotId != null || any?.prevBlock != null) {
         return true;

@@ -36,6 +36,9 @@ bun install
 # Live preprod node
 NETWORK=preprod bun src/index.ts start-gerolamo
 
+# Standalone desktop Control Center (Electrobun — not The Lab)
+bun run ui:dev
+
 # Mainnet
 NETWORK=mainnet bun src/index.ts start-gerolamo
 ```
@@ -83,6 +86,8 @@ One **writer** per DB. Unique **port** per live instance.
 ```bash
 curl -s http://127.0.0.1:3030/health | jq .
 curl -s http://127.0.0.1:3030/metrics | jq .
+curl -s http://127.0.0.1:3030/governor | jq .
+open http://127.0.0.1:3030/stats   # HTML dashboard (or curl -s …/stats | head)
 curl -s http://127.0.0.1:3030/block/<slot-or-hash>
 curl -s "http://127.0.0.1:3030/utxo/<txhash>:<index>"
 curl -s http://127.0.0.1:3030/api/v0/
@@ -94,14 +99,72 @@ curl -X POST http://127.0.0.1:3030/txsubmit --data-binary @tx.cbor \
 | Method | Path | Notes |
 |--------|------|--------|
 | GET | `/health` `/healthz` | `{ healthy, network, port, uptimeSec }` |
-| GET | `/metrics` | tipSlot, utxoCount, epoch, epochNonce, flags |
+| GET | `/metrics` | tipSlot, utxoCount, epoch, epochNonce, peers, flags |
+| GET | `/governor` `/api/v0/governor` | Peer governor snapshot `{ cold, warm, hot, total, hotKeys, targets }` |
+| GET | `/stats` `/dashboard` | **HTML dashboard** (local only) — tip, UTxO, epoch, peer tiers; **WS-first** via `/ws/stats`, 5s poll fallback |
+| WS | `/ws/stats` | Bun WebSocket stream: `hello` + `tip`/`peers`/`metrics`/`governor` topics; client ops `subscribe`/`unsubscribe`/`ping` |
 | GET | `/block/{slot\|hash}` | Raw CBOR hex |
 | GET | `/utxo/{txhash:index}` | UTxO JSON if unspent |
-| POST | `/txsubmit` | Raw CBOR → mempool |
-| GET/POST | `/api/v0/*` | Mini-Blockfrost **subset** |
+| POST | `/txsubmit` | Raw CBOR → mempool / hot peers |
+| GET/POST | `/api/v0/*` | Mini-Blockfrost **subset** v0.2.0 |
 
-Mini-BF today: health, epochs/latest (+ params if stored), blocks, address UTxOs, tx UTxOs (unspent only), tx submit.  
-**Not** full Blockfrost (no full tx history/assets/pools/…). See `docs/gerolamo-vs-dolos-gap.md`.
+Mini-BF v0.2.0: health, epochs/latest (+ params if stored), blocks (+ `/txs`), address UTxOs + **transactions**, **tx by hash**, tx UTxOs (unspent only), **mempool** snapshot, tx submit (returns body hash).  
+Tx/address history needs `tx_index` (empty until backfill or forward index). **Not** full Blockfrost. See `docs/gerolamo-vs-dolos-gap.md`.
+
+```bash
+# Ops stream (Bun WS)
+# browser: open /stats  — or:
+# bun -e 'const ws=new WebSocket("ws://127.0.0.1:3040/ws/stats"); ws.onmessage=e=>console.log(e.data)'
+
+# Mini-BF listing
+curl -s http://127.0.0.1:3040/api/v0/ | jq '{version,endpoints}'
+
+# Off-hot-path index backfill (never dual-write soak batch.db while hydrate runs)
+bun scripts/backfill-tx-index.mjs --db .live/test.db --limit 200
+# refuse soak unless hydrate stopped: --force-batch
+```
+
+### How the tip advances (ChainSync)
+
+Yes — **peer tip is carried with each header** on the N2N **ChainSync** mini-protocol.
+
+1. Hot peer streams `MsgRollForward` = **header + tip** (point the peer claims is chain head).
+2. Gerolamo parses the header (`headerParser` / `handleRollForward`).
+3. **BlockFetch** pulls the body when needed.
+4. Soft body validation (optional) → apply → SQLite `MAX(slot)` rises.
+5. HTTP `/metrics` / `/stats` / Mini-BF `blocks/latest` read that DB tip.
+
+So tip is **not** HTTP-only. Frozen `tipSlot` + `hot = 0` means **stalled** (no header pipeline), not “at tip.”
+
+### Tip + peers (local)
+
+```bash
+# Local tip + peer tiers
+curl -s http://127.0.0.1:3030/metrics | jq '{tip:.tipSlot, peers:.peers, utxo:.utxoCount, epoch}'
+curl -s http://127.0.0.1:3030/governor | jq '{hot, warm, cold, hotKeys, warmKeys, coldSample, targets}'
+
+# HTML dashboard (peer bars + metrics panels, no external APIs)
+open http://127.0.0.1:3030/stats
+```
+
+Frozen `tipSlot` + `hot = 0` = stalled (no ChainSync header pipeline).
+
+### Optional log monitor (outside the node)
+
+```bash
+# Read-only watcher for a live node log + DB (does not write chain DBs)
+bun scripts/node-watch.mjs --log /tmp/gerolamo-live-test.log --db .live/test.db --http 3040 --port 3041
+curl -s http://127.0.0.1:3041/health | jq .
+curl -s http://127.0.0.1:3041/errors | jq .
+curl -s 'http://127.0.0.1:3041/tail?n=40' | jq .
+```
+
+| Method | Path | Notes |
+|--------|------|--------|
+| GET | `http://…:3041/health` | mon verdict, toHexCrashes, tip |
+| GET | `http://…:3041/errors` | classified log counts + samples |
+| GET | `http://…:3041/tail?n=N` | last N log lines |
+| GET | `http://…:3041/` | full JSON snapshot |
 
 ---
 
@@ -174,6 +237,14 @@ Research: [`docs/mithril-native-client-research.md`](./docs/mithril-native-clien
 
 ## N2C
 
+**Optional.** Gerolamo does **not** create a `node.socket` on every start.
+
+| Enable when | How |
+|-------------|-----|
+| Env | `GEROLAMO_N2C_SOCKET=./ledger/node.socket` |
+| Config | `n2c.enabled: true` + `n2c.socketPath` (path alone is not enough) |
+| Disable | `GEROLAMO_N2C=0` (or omit path) |
+
 ```bash
 GEROLAMO_N2C_SOCKET=./ledger/node.socket \
 NETWORK=preprod bun src/index.ts start-gerolamo
@@ -182,6 +253,8 @@ NETWORK=preprod bun src/index.ts start-gerolamo
 Hosts: Handshake, LocalChainSync, LocalTxSubmit, LocalTxMonitor, **minimal** LocalStateQuery.  
 Client pattern (Lab): `TheLab/src/bun/dolos/n2cClient.ts` — Multiplexer `node-to-client`.  
 Plan: [`docs/N2C_IMPLEMENTATION_PLAN.md`](./docs/N2C_IMPLEMENTATION_PLAN.md).
+
+**Note:** config `unixSocket` = **HTTP** over unix — **not** N2C. Use `GEROLAMO_N2C_SOCKET` for Ouroboros.
 
 ---
 

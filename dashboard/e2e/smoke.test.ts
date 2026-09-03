@@ -84,7 +84,7 @@ describe("Component barrel exports", () => {
 
   it("UI barrel exports Card, Badge, Stat, ProgressBar", async () => {
     const mod = await import(
-      resolve(DASHBOARD_ROOT, "src/components/UI/index.ts")
+      resolve(DASHBOARD_ROOT, "src/components/ui/index.ts")
     );
     expect(mod).toHaveProperty("Card");
     expect(mod).toHaveProperty("Badge");

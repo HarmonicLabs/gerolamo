@@ -5,13 +5,22 @@
  * Not full Blockfrost; honest subset:
  *   GET /api/v0/
  *   GET /api/v0/health
+ *   GET /api/v0/network
  *   GET /api/v0/epochs/latest
  *   GET /api/v0/epochs/latest/parameters
  *   GET /api/v0/blocks/latest
  *   GET /api/v0/blocks/{slot|hash}
+ *   GET /api/v0/blocks/{slot|hash}/txs
+ *   GET /api/v0/addresses/{address}
  *   GET /api/v0/addresses/{address}/utxos
+ *   GET /api/v0/addresses/{address}/transactions
+ *   GET /api/v0/txs/{hash}
  *   GET /api/v0/txs/{hash}/utxos
+ *   GET /api/v0/mempool
  *   POST /api/v0/tx/submit  (raw CBOR body)
+ *
+ * Forward index writes mb_* projections (+ legacy tx_index/address_tx/block_tx).
+ * History still needs backfill on .live only (Phase 3).
  */
 
 import {
@@ -23,11 +32,34 @@ import {
     getMaxSlot,
     getUtxoCount,
     getEpochNonce,
-    getLatestProtocolParams,
+    getTxByHash,
+    getAddressTxs,
+    getBlockTxHashes,
+    getAddressSummary,
+    getNetworkSnapshot,
+    getMbTxUtxos,
+    getReferenceScriptCborByHash,
 } from "../db";
+import { ensureLiveProtocolParams } from "./liveProtocolParams";
+import {
+    parseStoredTxOut,
+    storedTxOutContainsAsset,
+} from "../db/minibf/txOutMetadata";
 import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
 import { toHex } from "@harmoniclabs/uint8array-utils";
+import { blake2b_256 } from "@harmoniclabs/crypto";
 import { logger } from "../utils/logger";
+import { GlobalSharedMempool } from "../network/SharedMempool";
+import { mempoolTxHashToString } from "@harmoniclabs/shared-cardano-mempool-ts";
+
+/** CORS for Swagger try-it-out + external BF clients. */
+const CORS_HEADERS: Record<string, string> = {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
+    "Access-Control-Allow-Headers":
+        "Content-Type, Accept, Authorization, project_id, X-Requested-With",
+    "Access-Control-Max-Age": "86400",
+};
 
 function json(data: unknown, status = 200): Response {
     return new Response(JSON.stringify(data), {
@@ -35,6 +67,7 @@ function json(data: unknown, status = 200): Response {
         headers: {
             "Content-Type": "application/json",
             "X-Gerolamo-Api": "mini-blockfrost",
+            ...CORS_HEADERS,
         },
     });
 }
@@ -45,25 +78,6 @@ function bfError(
     message: string,
 ): Response {
     return json({ status_code: status, error, message }, status);
-}
-
-function parseTxOut(raw: string): {
-    address: string;
-    amount: string;
-    assets: Record<string, Record<string, string>>;
-} {
-    try {
-        const j = typeof raw === "string" ? JSON.parse(raw) : raw;
-        return {
-            address: String(j?.address ?? ""),
-            amount: String(j?.amount ?? "0"),
-            assets: (j?.assets && typeof j.assets === "object")
-                ? j.assets
-                : {},
-        };
-    } catch {
-        return { address: "", amount: "0", assets: {} };
-    }
 }
 
 /** BF amount array: [{unit:"lovelace",quantity}, ...assets] */
@@ -176,6 +190,17 @@ export async function handleMiniBlockfrost(
         return null;
     }
 
+    // OPTIONS preflight (Swagger try-it-out / external clients)
+    if (req.method === "OPTIONS") {
+        return new Response(null, {
+            status: 204,
+            headers: {
+                ...CORS_HEADERS,
+                "X-Gerolamo-Api": "mini-blockfrost",
+            },
+        });
+    }
+
     const sub = path === "/api/v0" || path === "/api/v0/"
         ? "/"
         : path.slice("/api/v0".length) || "/";
@@ -185,26 +210,76 @@ export async function handleMiniBlockfrost(
         if (req.method === "GET" && (sub === "/" || sub === "")) {
             return json({
                 url: "/api/v0",
-                version: "0.1.0",
+                version: "0.5.0",
                 node: "gerolamo",
                 network: ctx.network ?? process.env.NETWORK ?? "unknown",
                 endpoints: [
                     "GET /api/v0/health",
+                    "GET /api/v0/network",
                     "GET /api/v0/epochs/latest",
                     "GET /api/v0/epochs/latest/parameters",
                     "GET /api/v0/blocks/latest",
                     "GET /api/v0/blocks/{slot|hash}",
+                    "GET /api/v0/blocks/{slot|hash}/txs",
+                    "GET /api/v0/addresses/{address}",
                     "GET /api/v0/addresses/{address}/utxos",
+                    "GET /api/v0/addresses/{address}/utxos/{asset}",
+                    "GET /api/v0/addresses/{address}/transactions",
+                    "GET /api/v0/scripts/{hash}/cbor",
+                    "GET /api/v0/txs/{hash}",
                     "GET /api/v0/txs/{hash}/utxos",
+                    "GET /api/v0/mempool",
                     "POST /api/v0/tx/submit",
                 ],
-                note: "Mini-Blockfrost core — subset, not full Blockfrost parity",
+                note: "Mini-Blockfrost subset (not full BF). Live apply writes mb_* projections (+ legacy indexes). History needs Phase-3 backfill on .live only. Consensus never reads mb_*.",
             });
         }
 
         // GET /api/v0/health
         if (req.method === "GET" && sub === "/health") {
             return json({ is_healthy: true });
+        }
+
+        // GET /api/v0/network — tip + supply-ish subset (Dolos MiniBF comfort)
+        if (req.method === "GET" && sub === "/network") {
+            const snap = await getNetworkSnapshot();
+            const tipN = Number(snap.tipSlot);
+            const epoch = Number.isFinite(tipN) && tipN > 0
+                ? Number(calculatePreProdCardanoEpoch(tipN))
+                : null;
+            const nonce = epoch != null && Number.isFinite(epoch)
+                ? await getEpochNonce(epoch)
+                : null;
+            return json({
+                supply: {
+                    max: null,
+                    total: null,
+                    circulating: null,
+                    locked: null,
+                    treasury: null,
+                    reserves: null,
+                },
+                stake: {
+                    live: null,
+                    active: null,
+                },
+                // Gerolamo / Dolos-adjacent extensions
+                tip: {
+                    slot: snap.tipSlot,
+                    hash: snap.tipHash,
+                    epoch,
+                    epoch_nonce: nonce,
+                },
+                utxo_count: snap.utxoCount,
+                index: {
+                    tx_index: snap.txIndexCount,
+                    address_tx: snap.addressTxCount,
+                    mb_tx: snap.mbTxCount,
+                    mb_cursor_slot: snap.mbCursorSlot,
+                    lag_slots: snap.lagSlots,
+                },
+                note: "Subset — supply/stake not tracked; tip+utxo+mb_* lag only",
+            });
         }
 
         // GET /api/v0/epochs/latest
@@ -240,21 +315,18 @@ export async function handleMiniBlockfrost(
             req.method === "GET" &&
             sub === "/epochs/latest/parameters"
         ) {
-            const params = await getLatestProtocolParams();
-            if (params == null) {
-                // Honest empty: we may not have populated protocol_params yet
-                return json({
-                    epoch: null,
-                    min_fee_a: null,
-                    min_fee_b: null,
-                    note: "protocol_params not populated in local DB",
-                });
-            }
-            // If already BF-shaped, pass through; else wrap
-            if (typeof params === "object" && params !== null) {
+            try {
+                const params = await ensureLiveProtocolParams(
+                    ctx.network ?? process.env.NETWORK ?? "preprod",
+                );
                 return json(params);
+            } catch (err: any) {
+                return bfError(
+                    503,
+                    "Service Unavailable",
+                    err?.message ?? "protocol params unavailable",
+                );
             }
-            return json({ params });
         }
 
         // GET /api/v0/blocks/latest
@@ -298,13 +370,50 @@ export async function handleMiniBlockfrost(
             }
         }
 
-        // GET /api/v0/addresses/{address}/utxos
+        // GET /api/v0/addresses/{address} — summary (UTxO set + address_tx count)
         {
-            const m = sub.match(/^\/addresses\/([^/]+)\/utxos$/);
+            const m = sub.match(/^\/addresses\/([^/]+)$/);
             if (req.method === "GET" && m) {
                 const address = decodeURIComponent(m[1]);
                 if (!address || address.length < 10) {
                     return bfError(400, "Bad Request", "Invalid address");
+                }
+                const summary = await getAddressSummary(address);
+                // BF returns 404 when address never seen; we treat empty UTxO + 0 txs as empty shelley addr
+                if (summary.utxo_count === 0 && summary.tx_count === 0) {
+                    return bfError(
+                        404,
+                        "Not Found",
+                        "Address not found (no UTxOs and no address_tx rows)",
+                    );
+                }
+                return json({
+                    address: summary.address,
+                    amount: summary.amount,
+                    stake_address: summary.stake_address,
+                    type: summary.type,
+                    script: summary.script,
+                    // extras (honest)
+                    utxo_count: summary.utxo_count,
+                    tx_count: summary.tx_count,
+                    received_sum: null,
+                    sent_sum: null,
+                    note: "received/sent/stake_address null until full history index",
+                });
+            }
+        }
+
+        // GET /api/v0/addresses/{address}/utxos[/{asset}]
+        {
+            const m = sub.match(/^\/addresses\/([^/]+)\/utxos(?:\/([0-9a-fA-F]+))?$/);
+            if (req.method === "GET" && m) {
+                const address = decodeURIComponent(m[1]);
+                const assetUnit = m[2]?.toLowerCase() ?? null;
+                if (!address || address.length < 10) {
+                    return bfError(400, "Bad Request", "Invalid address");
+                }
+                if (assetUnit != null && (assetUnit.length < 56 || assetUnit.length % 2 !== 0)) {
+                    return bfError(400, "Bad Request", "Invalid asset unit");
                 }
                 const count = Math.min(
                     100,
@@ -319,39 +428,79 @@ export async function handleMiniBlockfrost(
                     parseInt(url.searchParams.get("page") || "1", 10) || 1,
                 );
                 const all = await getUtxosByAddress(address);
-                const slice = all.slice((page - 1) * count, page * count);
-                const mapped = slice.map((u) => {
+                const parsed = all.map((u) => ({ u, output: parseStoredTxOut(u.tx_out) }));
+                const filtered = assetUnit == null
+                    ? parsed
+                    : parsed.filter(({ output }) => storedTxOutContainsAsset(output, assetUnit));
+                const slice = filtered.slice((page - 1) * count, page * count);
+                const mapped = slice.map(({ u, output }) => {
                     const { tx_hash, output_index } = parseUtxoRef(u.utxo_ref);
-                    const parsed = parseTxOut(u.tx_out);
                     return {
-                        address: parsed.address || address,
+                        address: output.address || address,
                         tx_hash: tx_hash || u.tx_hash,
                         tx_index: output_index,
                         output_index,
-                        amount: toBfAmount(parsed.amount, parsed.assets),
+                        amount: toBfAmount(output.amount, output.assets),
                         block: null as string | null,
-                        data_hash: null as string | null,
-                        inline_datum: null as string | null,
-                        reference_script_hash: null as string | null,
+                        data_hash: output.datumHash,
+                        inline_datum: output.inlineDatumCbor,
+                        reference_script_hash: output.scriptRefHash,
                     };
                 });
                 return json(mapped);
             }
         }
 
-        // GET /api/v0/txs/{hash}/utxos  (unspent outputs still in set for this tx)
+        // GET /api/v0/scripts/{hash}/cbor — current UTxO reference scripts
+        {
+            const m = sub.match(/^\/scripts\/([0-9a-fA-F]{56})\/cbor$/);
+            if (req.method === "GET" && m) {
+                const cbor = await getReferenceScriptCborByHash(m[1]);
+                if (!cbor) {
+                    return bfError(404, "Not Found", "Reference script not found in current UTxO set");
+                }
+                return json({ cbor });
+            }
+        }
+
+        // GET /api/v0/txs/{hash}/utxos — prefer mb_* full IO; fall back to unspent set
         {
             const m = sub.match(/^\/txs\/([0-9a-fA-F]{64})\/utxos$/);
             if (req.method === "GET" && m) {
                 const txHash = m[1].toLowerCase();
+                const mbIo = await getMbTxUtxos(txHash);
+                if (mbIo.inputs.length > 0 || mbIo.outputs.length > 0) {
+                    return json({
+                        hash: txHash,
+                        inputs: mbIo.inputs.map((i) => ({
+                            address: i.address,
+                            amount: i.amount,
+                            tx_hash: i.tx_hash,
+                            output_index: i.output_index,
+                            data_hash: null,
+                            collateral: false,
+                            reference_script_hash: null,
+                        })),
+                        outputs: mbIo.outputs.map((o) => ({
+                            address: o.address,
+                            amount: o.amount,
+                            output_index: o.output_index,
+                            data_hash: o.data_hash,
+                            inline_datum: o.inline_datum,
+                            collateral: o.collateral,
+                            reference_script_hash: o.reference_script_hash,
+                        })),
+                        note: "Full IO from mb_tx_in/mb_tx_out (indexed)",
+                    });
+                }
+                // Legacy fallback: unspent outputs still in live UTxO set
                 const utxos = await getUtxosByTxHash(txHash);
                 if (utxos.length === 0) {
-                    // BF returns inputs+outputs for full tx; we only have unspent set
                     return json({
                         hash: txHash,
                         inputs: [],
                         outputs: [],
-                        note: "Only unspent outputs in local UTxO set (not full tx IO)",
+                        note: "Not in mb_* and no unspent outs — run backfill or wait for forward index",
                     });
                 }
                 const outputs = utxos.map((u: any) => {
@@ -364,22 +513,22 @@ export async function handleMiniBlockfrost(
                             : JSON.stringify(u[1] ?? {}))
                         : String(u.tx_out ?? "");
                     const { output_index } = parseUtxoRef(ref);
-                    const parsed = parseTxOut(raw);
+                    const parsed = parseStoredTxOut(raw);
                     return {
                         address: parsed.address,
                         amount: toBfAmount(parsed.amount, parsed.assets),
                         output_index,
-                        data_hash: null,
-                        inline_datum: null,
+                        data_hash: parsed.datumHash,
+                        inline_datum: parsed.inlineDatumCbor,
                         collateral: false,
-                        reference_script_hash: null,
+                        reference_script_hash: parsed.scriptRefHash,
                     };
                 });
                 return json({
                     hash: txHash,
                     inputs: [],
                     outputs,
-                    note: "Only unspent outputs in local UTxO set (not full tx IO)",
+                    note: "Only unspent outputs in local UTxO set (mb_* empty for this tx)",
                 });
             }
         }
@@ -400,7 +549,7 @@ export async function handleMiniBlockfrost(
                         ? utxo[1]
                         : JSON.stringify(utxo[1] ?? {}))
                     : String((utxo as any).tx_out ?? "");
-                const parsed = parseTxOut(raw);
+                const parsed = parseStoredTxOut(raw);
                 const { tx_hash, output_index } = parseUtxoRef(ref);
                 return json({
                     address: parsed.address,
@@ -408,6 +557,150 @@ export async function handleMiniBlockfrost(
                     output_index,
                     amount: toBfAmount(parsed.amount, parsed.assets),
                 });
+            }
+        }
+
+        // GET /api/v0/txs/{hash} — P0 (needs tx_index; 404 until backfill)
+        {
+            const m = sub.match(/^\/txs\/([0-9a-fA-F]{64})$/);
+            if (req.method === "GET" && m) {
+                const txHash = m[1].toLowerCase();
+                const row = await getTxByHash(txHash);
+                if (!row) {
+                    return bfError(
+                        404,
+                        "Not Found",
+                        "Transaction not in mb_tx/tx_index (run backfill or wait for forward index)",
+                    );
+                }
+                return json({
+                    hash: row.tx_hash,
+                    block: row.block_hash,
+                    block_height: null,
+                    block_time: null,
+                    slot: row.slot,
+                    index: null,
+                    output_amount: null,
+                    fees: row.fee,
+                    deposit: null,
+                    size: row.size,
+                    invalid_before: row.invalid_before,
+                    invalid_hereafter: row.invalid_hereafter,
+                    utxo_count: null,
+                    withdrawal_count: null,
+                    mir_cert_count: null,
+                    delegation_count: null,
+                    stake_cert_count: null,
+                    pool_update_count: null,
+                    pool_retire_count: null,
+                    asset_mint_or_burn_count: null,
+                    redeemer_count: null,
+                    valid_contract: null,
+                    note: "Subset from mb_tx/tx_index — many BF fields null",
+                });
+            }
+        }
+
+        // GET /api/v0/addresses/{address}/transactions — P0
+        {
+            const m = sub.match(/^\/addresses\/([^/]+)\/transactions$/);
+            if (req.method === "GET" && m) {
+                const address = decodeURIComponent(m[1]);
+                if (!address || address.length < 10) {
+                    return bfError(400, "Bad Request", "Invalid address");
+                }
+                const count = Math.min(
+                    100,
+                    Math.max(
+                        1,
+                        parseInt(url.searchParams.get("count") || "20", 10) || 20,
+                    ),
+                );
+                const page = Math.max(
+                    1,
+                    parseInt(url.searchParams.get("page") || "1", 10) || 1,
+                );
+                const rows = await getAddressTxs(address, { count, page });
+                // BF shape: array of { tx_hash, tx_index, block_height, block_time }
+                return json(
+                    rows.map((r) => ({
+                        tx_hash: r.tx_hash,
+                        tx_index: 0,
+                        block_height: null,
+                        block_time: null,
+                        slot: r.slot,
+                        direction: r.direction,
+                    })),
+                );
+            }
+        }
+
+        // GET /api/v0/blocks/{slot|hash}/txs — P1
+        {
+            const m = sub.match(/^\/blocks\/([^/]+)\/txs$/);
+            if (req.method === "GET" && m) {
+                const id = decodeURIComponent(m[1]);
+                let row: any;
+                if (/^\d+n?$/.test(id)) {
+                    row = await getBlockBySlot(BigInt(id.replace("n", "")));
+                } else if (/^[0-9a-f]{64}$/i.test(id)) {
+                    row = await getBlockByHash(id.toLowerCase());
+                } else {
+                    return bfError(
+                        400,
+                        "Bad Request",
+                        "Block id must be slot number or 64-hex hash",
+                    );
+                }
+                if (!row) {
+                    return bfError(404, "Not Found", "Block not found");
+                }
+                // extract block hash blob/hex for block_tx lookup (getter normalizes to hex)
+                let blockHash: unknown = null;
+                if (Array.isArray(row)) {
+                    blockHash = row[3];
+                } else {
+                    blockHash = row.block_hash ?? row.hash ?? null;
+                }
+                if (blockHash == null) {
+                    return json([]);
+                }
+                const txs = await getBlockTxHashes(
+                    blockHash as string | Uint8Array,
+                );
+                // BF returns array of tx hash strings
+                return json(txs.map((t) => t.tx_hash));
+            }
+        }
+
+        // GET /api/v0/mempool — P1 Gerolamo extension (local SharedMempool)
+        if (req.method === "GET" && (sub === "/mempool" || sub === "/mempool/txs")) {
+            try {
+                const entries = await GlobalSharedMempool.getTxHashesAndSizes();
+                const mapped = entries.map((e) => {
+                    let hashHex = "";
+                    try {
+                        hashHex = mempoolTxHashToString(e.hash);
+                    } catch {
+                        try {
+                            hashHex = toHex(new Uint8Array(e.hash.buffer));
+                        } catch {
+                            hashHex = "";
+                        }
+                    }
+                    return { tx_hash: hashHex, size: e.size };
+                });
+                return json({
+                    count: mapped.length,
+                    txs: mapped,
+                    note: "Local SharedMempool snapshot — not full BF mempool shape",
+                });
+            } catch (e: any) {
+                return bfError(
+                    503,
+                    "Service Unavailable",
+                    e?.message || "mempool unavailable",
+                );
             }
         }
 
@@ -439,12 +732,15 @@ export async function handleMiniBlockfrost(
             if (txCbor.length === 0) {
                 return bfError(400, "Bad Request", "Empty transaction body");
             }
+            // Best-effort body hash (not always equal to ledger tx id for multi-era wrappers)
+            const txHashHex = toHex(blake2b_256(txCbor));
             await ctx.submitTx(txCbor);
-            // BF returns tx hash on success; we don't compute hash yet — 202 + note
             return json(
                 {
+                    hash: txHashHex,
                     status: "relayed",
                     message: "Transaction relayed to hot peers",
+                    note: "hash is blake2b_256(raw body); may differ from ledger tx id for some encodings",
                 },
                 202,
             );

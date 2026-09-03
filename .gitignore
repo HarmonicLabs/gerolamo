@@ -54,3 +54,6 @@ desktop/dist/
 
 # Finder (MacOS) folder config
 .DS_Store
+
+# Electrobun dev artifact written to the repo root by desktop/scripts/dev-wait.sh
+/Resources/

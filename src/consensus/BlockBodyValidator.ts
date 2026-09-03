@@ -17,6 +17,7 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
+import type { EpochBodyParams } from "./epochParams";
 
 import { getUtxosByRefs, getAllStake, getAllDelegations } from "../db";
 
@@ -70,12 +71,17 @@ export class BlockBodyValidator {
         return block.block as AlonzoBlock | BabbageBlock | ConwayBlock;
     }
 
+    /** Per-epoch protocol parameters for the block being validated (set by validate()). */
+    private params: EpochBodyParams | null = null;
+
     public async validate(
         block: MultiEraBlock,
+        params: EpochBodyParams | null = null,
     ): Promise<boolean | null> {
         if (!block.block) return true; // Skip if block not parsed
         const actualBlock = this.getEraBlock(block);
         if (actualBlock === null) return null; // Unsupported era
+        this.params = params;
 
         logger.info("Starting block body validation", {
             era: block.era,
@@ -349,8 +355,9 @@ export class BlockBodyValidator {
         block: CardanoBlock,
         genesis: ShelleyGenesisConfig,
     ): Promise<boolean> {
-        const minFeeA = genesis.protocolParams.minFeeA;
-        const minFeeB = genesis.protocolParams.minFeeB;
+        // Live per-epoch parameters win; Shelley genesis is the fallback.
+        const minFeeA = this.params?.minFeeA ?? BigInt(genesis.protocolParams.minFeeA);
+        const minFeeB = this.params?.minFeeB ?? BigInt(genesis.protocolParams.minFeeB);
 
         return block.transactionBodies.every((txBody: any) => {
             const txSize = txBody.toCborBytes().length;
@@ -491,9 +498,9 @@ export class BlockBodyValidator {
     private async validateCollateralValid(
         block: CardanoBlock,
     ): Promise<boolean> {
-        // Use defaults for collateral params as they are not in Shelley genesis
-        const collateralPercent = 150;
-        const maxCollateralInputs = 3;
+        // Per-epoch parameters when known; the historical Alonzo defaults otherwise.
+        const collateralPercent = this.params?.collateralPercent ?? 150;
+        const maxCollateralInputs = this.params?.maxCollateralInputs ?? 3;
 
         // Collect all collateral UTxO references and validate in one pass
         const collateralUtxoRefs: string[] = [];
@@ -599,18 +606,31 @@ export class BlockBodyValidator {
         const stakeRows = await getAllStake();
         const delegationRows = await getAllDelegations();
 
-        // Create lookup maps with string keys for reliable comparison
-        const getKey = (cred: Uint8Array | string) =>
-            typeof cred === "string" ? cred : toHex(cred);
+        // Create lookup maps with string keys for reliable comparison.
+        // Defensive: Bun SQL / Buffer / undefined must not throw toHex.
+        const getKey = (cred: unknown): string => {
+            if (typeof cred === "string") return cred;
+            if (cred instanceof Uint8Array) return toHex(cred);
+            if (typeof Buffer !== "undefined" && Buffer.isBuffer(cred)) {
+                return toHex(new Uint8Array(cred));
+            }
+            return "";
+        };
         const stakeMap = new Map(
-            stakeRows.map((
-                { stake_credentials, amount },
-            ) => [getKey(stake_credentials), amount]),
+            stakeRows
+                .map(({ stake_credentials, amount }) => [
+                    getKey(stake_credentials),
+                    amount,
+                ] as const)
+                .filter(([k]) => k.length > 0),
         );
         const delegationMap = new Map(
-            delegationRows.map((
-                { stake_credentials, pool_key_hash },
-            ) => [getKey(stake_credentials), pool_key_hash]),
+            delegationRows
+                .map(({ stake_credentials, pool_key_hash }) => [
+                    getKey(stake_credentials),
+                    pool_key_hash,
+                ] as const)
+                .filter(([k]) => k.length > 0),
         );
 
         for (const txBody of block.transactionBodies) {
@@ -746,7 +766,7 @@ export class BlockBodyValidator {
         block: CardanoBlock,
         genesis: ShelleyGenesisConfig,
     ): Promise<boolean> {
-        const maxTxSize = genesis.protocolParams.maxTxSize;
+        const maxTxSize = this.params?.maxTxSize ?? genesis.protocolParams.maxTxSize;
 
         return block.transactionBodies.every((txBody: any) => {
             const txSize = txBody.toCborBytes().length;
@@ -766,7 +786,11 @@ export class BlockBodyValidator {
 export async function validateBlock(
     block: MultiEraBlock,
     config: any,
+    params: EpochBodyParams | null = null,
 ): Promise<boolean> {
     const validator = new BlockBodyValidator(config);
-    return await validator.validate(block) ?? false;
+    const result = await validator.validate(block, params);
+    // null = era has no body rules here (Byron … Mary): nothing to reject.
+    if (result === null) return true;
+    return result;
 }

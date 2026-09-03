@@ -2,6 +2,7 @@ import * as path from "node:path/posix";
 
 import {
     GerolamoConfig,
+    createHttpPeerManager,
     initPeerManager,
     stopPeerManager,
 } from "./peerManager";
@@ -13,6 +14,10 @@ import { logger } from "../utils/logger";
 import { startPeerBlockServer } from "./peerBlockServer";
 import { getSqlFilename, initSql } from "../sql";
 import { startN2CServer, type N2CServerHandle } from "./n2c";
+import { startN2NServer, type N2NServerHandle } from "./n2n";
+import { resolveN2NConfig } from "./n2n/config";
+import { setInboundN2NStatusProvider } from "./peerManager";
+import { resolveNodeRole } from "./nodeRole";
 
 async function runSnapShotPopulation(config: GerolamoConfig) {
     console.log(
@@ -49,6 +54,32 @@ async function runSnapShotPopulation(config: GerolamoConfig) {
     );
 }
 
+function mergeConfigOverlay(
+    base: Record<string, unknown>,
+    overlay: Record<string, unknown>,
+): Record<string, unknown> {
+    const nested = [
+        "n2c",
+        "n2n",
+        "logs",
+        "peerGovernor",
+        "snapshot",
+        "blockFetchBatch",
+    ] as const;
+    const out: Record<string, unknown> = { ...base, ...overlay };
+    for (const key of nested) {
+        const o = overlay[key];
+        if (o && typeof o === "object") {
+            const b = base[key];
+            out[key] = {
+                ...(b && typeof b === "object" ? (b as object) : {}),
+                ...(o as object),
+            };
+        }
+    }
+    return out;
+}
+
 async function loadConfig(network: string): Promise<GerolamoConfig> {
     // Load config using Bun.file from the local config directory
     const configPath = `./src/config/${network}/config.json`;
@@ -56,7 +87,21 @@ async function loadConfig(network: string): Promise<GerolamoConfig> {
     if (!(await configFile.exists())) {
         throw new Error(`Config file not found: ${configPath}`);
     }
-    const configData = await configFile.json() as GerolamoConfig;
+    let configData = (await configFile.json()) as GerolamoConfig;
+
+    // Instance overlay from the desktop Control Center (does not edit repo config.json)
+    const overlayPath = process.env.GEROLAMO_CONFIG_PATH?.trim();
+    if (overlayPath) {
+        const overlayFile = Bun.file(overlayPath);
+        if (await overlayFile.exists()) {
+            const overlay = (await overlayFile.json()) as Record<string, unknown>;
+            configData = mergeConfigOverlay(
+                configData as unknown as Record<string, unknown>,
+                overlay,
+            ) as unknown as GerolamoConfig;
+            logger.info(`Merged instance config overlay: ${overlayPath}`);
+        }
+    }
 
     // Lab / ops env overrides (instance isolation without editing repo config.json)
     // DATABASE_URL=sqlite:///abs/path  or  GEROLAMO_DB_PATH=/abs/path
@@ -97,11 +142,17 @@ async function loadConfig(network: string): Promise<GerolamoConfig> {
     }
     if (n2cSocketPath === "") n2cSocketPath = undefined;
 
+    // role: "relay" turns the inbound N2N listener on; "data" leaves it to n2n.enabled / env.
+    const n2nInput = { ...((configData as any).n2n ?? {}) };
+    if (String((configData as any).role ?? "").toLowerCase() === "relay") n2nInput.enabled = true;
+    const n2n = resolveN2NConfig(n2nInput, process.env);
+
     return {
         ...configData,
         dbPath,
         port: Number.isFinite(port) && port > 0 ? port : (configData.port ?? 3030),
         n2cSocketPath,
+        n2n,
     } as GerolamoConfig;
 }
 
@@ -145,6 +196,7 @@ export async function start() {
         await runSnapShotPopulation(config);
     }
 
+    logger.info(`Node role: ${resolveNodeRole(config)}${config.n2n ? ` (inbound N2N on ${config.n2n.host}:${config.n2n.port})` : " (no inbound N2N)"}`);
     logger.info("Starting peer manager...");
 
     await initPeerManager(config);
@@ -152,8 +204,36 @@ export async function start() {
 
     logger.info("Starting peer block server...");
 
-    await startPeerBlockServer(config, null);
+    await startPeerBlockServer(config, createHttpPeerManager());
     logger.info("Peer block server started.");
+
+    let n2nHandle: N2NServerHandle | undefined;
+    if (config.n2n) {
+        n2nHandle = await startN2NServer({
+            host: config.n2n.host,
+            port: config.n2n.port,
+            networkMagic: config.networkMagic,
+            maxConnections: config.n2n.maxConnections,
+            maxRangeBlocks: config.n2n.maxRangeBlocks,
+            handshakeTimeoutMs: config.n2n.handshakeTimeoutMs,
+            idleTimeoutMs: config.n2n.idleTimeoutMs,
+        });
+        logger.info(
+            `Inbound N2N ready: ${n2nHandle.host}:${n2nHandle.port}`,
+        );
+        const h = n2nHandle;
+        setInboundN2NStatusProvider(() => ({
+            listening: true,
+            host: h.host,
+            port: h.port,
+            clients: h.clientCount(),
+        }));
+    } else {
+        logger.info(
+            'Inbound N2N disabled (role "data"; set role "relay", n2n.enabled or GEROLAMO_N2N_PORT to accept peers)',
+        );
+        setInboundN2NStatusProvider(null);
+    }
 
     let n2cHandle: N2CServerHandle | undefined;
     if (config.n2cSocketPath) {
@@ -173,6 +253,11 @@ export async function start() {
 
     const shutdown = async (signal: string) => {
         logger.info(`Received ${signal}; shutting down...`);
+        try {
+            await n2nHandle?.stop();
+        } catch (err) {
+            logger.error("N2N shutdown error:", err);
+        }
         try {
             await stopPeerManager();
         } catch (err) {

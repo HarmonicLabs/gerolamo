@@ -27,8 +27,9 @@ export async function applyBlock(
 ): Promise<void> {
     const db = client ?? sql;
     // Metadata stub so getMaxSlot / tip can advance even if body UTxO apply is partial.
+    // Same key form as insertBlockBatchVolatile (hex TEXT) so lookups by hash hit one row.
     await db`INSERT OR IGNORE INTO blocks (hash, slot, prev_hash, is_valid) VALUES (${
-        blockHash
+        toHex(blockHash)
     }, ${Number(slot)}, NULL, ${true})`;
 
     if (isByronBlock(block as any)) {
@@ -46,7 +47,10 @@ export async function applyBlock(
     }
 
     // Shelley+ txs (writes go through optional client for batch hydrate)
+    // Forward Mini-BF indexes (tx_index / address_tx / block_tx) via indexCtx.
     const txBodies = getShelleyTxBodies(block);
+    const slotNum = Number(slot);
+    let txIndex = 0;
     for (const txBody of txBodies) {
         const hashBuf = typeof (txBody.hash as any)?.toBuffer === "function"
             ? (txBody.hash as any).toBuffer()
@@ -56,6 +60,9 @@ export async function applyBlock(
                 hashBuf instanceof Uint8Array ? toHex(hashBuf) : String(txBody.hash)
             }`,
         );
-        await applyTransaction(txBody, blockHash, client);
+        await applyTransaction(txBody, blockHash, client, {
+            slot: slotNum,
+            txIndex: txIndex++,
+        });
     }
 }

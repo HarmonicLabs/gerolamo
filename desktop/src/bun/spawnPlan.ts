@@ -7,6 +7,8 @@ export type NodeSpawnInput = {
   port: number;
   dbPath: string;
   n2cSocket?: string | null;
+  /** Absolute path to instance config.json overlay. */
+  configPath?: string | null;
 };
 
 export type SpawnPlan = {
@@ -28,6 +30,9 @@ export function buildNodeSpawn(input: NodeSpawnInput): SpawnPlan {
     env.GEROLAMO_N2C_SOCKET = assertAbsPath(input.n2cSocket, "n2cSocket");
   } else {
     env.GEROLAMO_N2C = "0";
+  }
+  if (input.configPath) {
+    env.GEROLAMO_CONFIG_PATH = assertAbsPath(input.configPath, "configPath");
   }
   return {
     argv: [input.bunPath, "src/index.ts", "start-gerolamo"],

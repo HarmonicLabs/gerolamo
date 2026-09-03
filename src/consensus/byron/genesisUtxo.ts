@@ -101,3 +101,11 @@ export function byronGenesisUtxos(genesis: ByronGenesisBalances): { utxos: Genes
     }
     return { utxos, nonAvvm, avvm };
 }
+
+/** How many genesis UTxOs `byronGenesisUtxos` would produce — without deriving any address. */
+export function countFundedGenesisEntries(genesis: ByronGenesisBalances): number {
+    let n = 0;
+    for (const bal of Object.values(genesis.nonAvvmBalances ?? {})) if (BigInt(String(bal)) > 0n) n++;
+    for (const bal of Object.values(genesis.avvmDistr ?? {})) if (BigInt(String(bal)) > 0n) n++;
+    return n;
+}

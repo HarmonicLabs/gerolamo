@@ -1716,6 +1716,11 @@ export async function seedGenesisUtxosIfMissing(
     return res;
 }
 
+/** Rows in the genesis registry (spent or not). */
+export async function countGenesisUtxoRegistry(): Promise<number> {
+    return countQuery(sql`SELECT COUNT(*) as c FROM genesis_utxo`);
+}
+
 /** Genesis outputs known vs still unspent (indexed join, cheap enough for /metrics). */
 export async function getGenesisUtxoStats(): Promise<{ total: number; unspent: number; avvm: number }> {
     const total = await countQuery(sql`SELECT COUNT(*) as c FROM genesis_utxo`);

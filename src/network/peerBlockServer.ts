@@ -19,6 +19,7 @@ import { logger } from "../utils/logger";
 import { createResourceSampler } from "../utils/processStats";
 import { resolveNodeRole } from "./nodeRole";
 import { resolveValidationPolicy } from "../consensus/validationPolicy";
+import { getBuildInfo } from "../utils/buildInfo";
 
 import type { GerolamoConfig } from "./peerManager";
 import {
@@ -117,6 +118,8 @@ async function buildMetricsPayload(
         validationNote: validation.note,
         uptimeSec: Math.round(process.uptime()),
         node: "gerolamo",
+        /** Node build: package version + git commit (+ -dirty when the checkout has local edits). */
+        version: getBuildInfo().label,
         /** "data" (outbound only) or "relay" (accepts inbound N2N). */
         role: resolveNodeRole(config),
         /** Inbound node-to-node listener state. */

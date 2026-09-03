@@ -290,7 +290,7 @@ export const NodeConfigForm: Component<Props> = (props) => {
           <div>
             <TipLabel
               text="role"
-              tip={"config.json → role\ndata = outbound only: follows the chain, serves MiniBF/N2C locally, no inbound peers, PeerSharing off (spec: only reachable nodes advertise it).\nrelay = also listens for inbound node-to-node peers (ChainSync, BlockFetch, KeepAlive) on n2n.port and advertises PeerSharing."}
+              tip={"config.json → role\noutbound only: connects out to peers, follows the chain, serves the local HTTP/N2C APIs.\naccept inbound peers: additionally listens on n2n.port so other nodes can sync from this one (needs the port reachable)."}
             />
             <select
               value={s().role}
@@ -300,8 +300,8 @@ export const NodeConfigForm: Component<Props> = (props) => {
               }}
               class={fieldClass}
             >
-              <option value="data">data node (outbound only)</option>
-              <option value="relay">relay (accept inbound peers)</option>
+              <option value="data">outbound only</option>
+              <option value="relay">accept inbound peers</option>
             </select>
           </div>
           <div>

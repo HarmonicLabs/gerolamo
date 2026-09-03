@@ -9,6 +9,14 @@ if [ ! -x node_modules/.bin/electrobun ] || [ ! -x node_modules/.bin/vite ]; the
   bun install
 fi
 bun ../scripts/preflight.ts || { echo "[Gerolamo UI] preflight failed — fix the items above and rerun"; exit 1; }
+
+# A previous dev session still running would keep serving old code next to the
+# new one (two windows, two bun backends). Refuse unless FORCE=1.
+if pgrep -f "electrobun dev" >/dev/null 2>&1 && [ "${FORCE:-0}" != "1" ]; then
+  echo "[Gerolamo UI] An Electrobun dev session is already running (pid $(pgrep -f 'electrobun dev' | head -1))."
+  echo "[Gerolamo UI] Close it first (Ctrl+C in its terminal), or run FORCE=1 bun run ui:dev to start another."
+  exit 1
+fi
 if [ ! -d node_modules/electrobun/dist-linux-x64 ]; then
   echo "[Gerolamo UI] First run: Electrobun downloads its Linux runtime (~150 MB) now…"
 fi
@@ -36,7 +44,12 @@ cp -f "$PWD/node_modules/electrobun/dist-linux-x64/libNativeWrapper.so" "$PWD/li
 cp -f "$PWD/node_modules/electrobun/dist-linux-x64/libasar.so" "$PWD/libasar.so" 2>/dev/null || true
 
 echo "[Gerolamo UI] Clearing cache and build folders..."
-rm -rf dist views build/dev-linux-x64/Gerolamo-dev/Resources/app/views 2>/dev/null || true
+# Wipe the previous dev bundle (views AND the bun main process) so a restart can
+# never run stale backend code from an earlier session.
+rm -rf dist views build/dev-linux-x64/Gerolamo-dev/Resources/app/views build/dev-linux-x64/Gerolamo-dev/Resources/app/bun 2>/dev/null || true
+GIT_HASH="$(git -C .. rev-parse --short HEAD 2>/dev/null || echo unknown)"
+GIT_DIRTY="$(git -C .. status --porcelain --untracked-files=no 2>/dev/null | head -1)"
+echo "[Gerolamo UI] Building UI from commit ${GIT_HASH}${GIT_DIRTY:+ (with local changes)} — $(date -u +%FT%TZ)"
 
 echo "[Gerolamo UI] Initial Vite build..."
 ./node_modules/.bin/vite build || exit 1

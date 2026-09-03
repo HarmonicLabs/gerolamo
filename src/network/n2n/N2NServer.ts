@@ -5,6 +5,7 @@ import { N2NBlockFetchHost } from "./N2NBlockFetchHost";
 import { N2NChainSyncHost } from "./N2NChainSyncHost";
 import { N2NHandshakeResponder } from "./N2NHandshakeResponder";
 import { N2NKeepAliveHost } from "./N2NKeepAliveHost";
+import { N2NPeerSharingHost, type SharePeersProvider } from "./N2NPeerSharingHost";
 import type { RelayChainStore } from "./RelayChainStore";
 import { SqliteRelayChainStore } from "./SqliteRelayChainStore";
 
@@ -19,6 +20,8 @@ export interface N2NServerOptions {
     handshakeTimeoutMs?: number;
     idleTimeoutMs?: number;
     store?: RelayChainStore;
+    /** Peers to hand out on MsgShareRequest. Omit to answer with an empty list. */
+    sharePeers?: SharePeersProvider;
 }
 
 export interface N2NServerHandle {
@@ -36,6 +39,7 @@ interface ActiveClient {
     chainSync?: N2NChainSyncHost;
     blockFetch?: N2NBlockFetchHost;
     keepAlive?: N2NKeepAliveHost;
+    peerSharing?: N2NPeerSharingHost;
     handshakeTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -123,6 +127,7 @@ function attachClient(
         client.chainSync?.dispose();
         client.blockFetch?.dispose();
         client.keepAlive?.dispose();
+        client.peerSharing?.dispose();
         try {
             if (!mplexer.isClosed()) mplexer.close({ closeSocket: false });
         } catch {
@@ -142,6 +147,7 @@ function attachClient(
                 maxRangeBlocks: options.maxRangeBlocks ?? 256,
             });
             client.keepAlive = new N2NKeepAliveHost(mplexer);
+            client.peerSharing = new N2NPeerSharingHost(mplexer, options.sharePeers ?? (() => []));
             log.info(`N2N handshake ok ${peer} version=${versionNumber}`);
         },
         onRefused: () => {
@@ -180,6 +186,7 @@ async function stopServer(
         client.chainSync?.dispose();
         client.blockFetch?.dispose();
         client.keepAlive?.dispose();
+        client.peerSharing?.dispose();
         try {
             client.mplexer.close({ closeSocket: false });
         } catch {

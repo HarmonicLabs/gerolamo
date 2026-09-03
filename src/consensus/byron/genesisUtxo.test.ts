@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { avvmGenesisAddress, base58Decode, byronGenesisUtxoId, byronGenesisUtxos } from "./genesisUtxo";
+import { avvmGenesisAddress, base58Decode, byronGenesisUtxoId, byronGenesisUtxos, countFundedGenesisEntries } from "./genesisUtxo";
 import genesis from "../../config/preprod/byron-genesis.json";
 
 describe("Byron genesis UTxO", () => {
@@ -61,3 +61,11 @@ describe("Byron genesis UTxO", () => {
 function funded(): string {
     return Object.keys((genesis as any).nonAvvmBalances)[0]!;
 }
+
+describe("countFundedGenesisEntries", () => {
+    test("matches the number of UTxOs produced, without deriving addresses", () => {
+        expect(countFundedGenesisEntries(genesis as any)).toBe(1);
+        const mainnet = require("../../config/mainnet/byron-genesis.json");
+        expect(countFundedGenesisEntries(mainnet)).toBe(Object.values(mainnet.avvmDistr as Record<string, string>).filter((v) => BigInt(v) > 0n).length);
+    });
+});

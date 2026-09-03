@@ -491,7 +491,15 @@ const ControlCenter: Component = () => {
           <p class="text-[10px] text-text-muted leading-tight">
             Harmonic Labs
             <br />
-            <span class="text-text-dim">Standalone TS node/relay</span>
+            <span class="text-text-dim">Gerolamo Node</span>
+            <br />
+            <span
+              class="font-mono text-[10px] text-text-muted"
+              title={`UI built ${new Date(__GEROLAMO_UI_BUILT_AT__).toLocaleString()}${sync()?.nodeVersion ? `\nnode ${sync()!.nodeVersion}` : ""}`}
+            >
+              ui {__GEROLAMO_UI_VERSION__}
+              <Show when={sync()?.nodeVersion}> · node {sync()!.nodeVersion}</Show>
+            </span>
           </p>
         </div>
       </aside>
@@ -567,16 +575,12 @@ const ControlCenter: Component = () => {
                       <Show when={sync()?.multiPeer?.mode}>
                         <Badge variant="muted">{sync()!.multiPeer!.mode} sync</Badge>
                       </Show>
-                      <Show when={sync()?.role}>
+                      <Show when={sync()?.inbound?.listening}>
                         <Badge
-                          variant={sync()!.role === "relay" ? "cyan" : "muted"}
-                          title={
-                            sync()!.role === "relay"
-                              ? `Relay: accepting inbound node-to-node peers on ${sync()!.inbound?.host ?? "?"}:${sync()!.inbound?.port ?? "?"} · ${sync()!.inbound?.clients ?? 0} connected`
-                              : "Data node: outbound only, no inbound peers. Switch to relay in Node › config (role)."
-                          }
+                          variant="cyan"
+                          title={`Accepting inbound node-to-node connections on ${sync()!.inbound?.host ?? "?"}:${sync()!.inbound?.port ?? "?"} · ${sync()!.inbound?.clients ?? 0} connected`}
                         >
-                          {sync()!.role === "relay" ? `relay · ${sync()!.inbound?.clients ?? 0} in` : "data node"}
+                          {sync()!.inbound?.clients ?? 0} inbound
                         </Badge>
                       </Show>
                       <Show when={sync()?.multiPeer?.bodyValidation}>

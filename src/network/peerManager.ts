@@ -548,11 +548,15 @@ async function runPeerSharing(
     shareBatch: number,
 ): Promise<void> {
     if (!gov.needsColdPeers()) return;
+    // Only peers that agreed to PeerSharing in the handshake may be asked.
     const donors = [
         ...gov.listByTier("hot"),
         ...gov.listByTier("warm"),
-    ].filter((r) => r.client);
-    if (donors.length === 0) return;
+    ].filter((r) => r.client && clientsByKey.get(r.key)?.peerSharingNegotiated);
+    if (donors.length === 0) {
+        logger.debug("PeerSharing: no connected peer negotiated it; skipping");
+        return;
+    }
 
     // Ask up to 2 connected peers (timeout — hung share must not stall tick)
     for (const rec of donors.slice(0, 2)) {
@@ -769,6 +773,34 @@ export function getPeerGovernor(): PeerGovernor | undefined {
  * Thin facade for HTTP / Mini-BF: tx submit + governor observability.
  * Does not expose full PeerClient map.
  */
+/**
+ * Peers we advertise to others over PeerSharing: connected hot/warm first, then
+ * a sample of cold ones; IPv4 host:port keys only (IPv6 sharing not implemented).
+ */
+export function listShareablePeers(amount: number): Array<{ host: string; port: number }> {
+    if (!governor) return [];
+    const out: Array<{ host: string; port: number }> = [];
+    const seen = new Set<string>();
+    const push = (key: string) => {
+        if (seen.has(key)) return;
+        const i = key.lastIndexOf(":");
+        if (i < 0) return;
+        const host = key.slice(0, i);
+        const port = Number(key.slice(i + 1));
+        if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || !Number.isInteger(port) || port <= 0) return;
+        seen.add(key);
+        out.push({ host, port });
+    };
+    for (const tier of ["hot", "warm", "cold"] as const) {
+        for (const r of governor.listByTier(tier)) {
+            if (out.length >= amount) return out;
+            if (r.malicious && r.malicious.until > Date.now()) continue;
+            push(r.key);
+        }
+    }
+    return out;
+}
+
 export interface InboundN2NStatus {
     listening: boolean;
     host: string | null;

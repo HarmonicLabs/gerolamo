@@ -20,6 +20,7 @@ export type MetricsPayload = {
   sync?: unknown;
   role?: unknown;
   inbound?: unknown;
+  version?: unknown;
   /** Node process resources (rssBytes, heapUsedBytes, cpuPercent …); see shared/resources. */
   process?: unknown;
   system?: unknown;
@@ -81,6 +82,8 @@ export type GerolamoEpochProgress = {
 };
 
 export type GerolamoSyncStatus = {
+  /** Node build label (`version+commit[-dirty]`), null for nodes that predate it. */
+  nodeVersion: string | null;
   epochProgress: GerolamoEpochProgress | null;
   /** "data" or "relay"; null when the node predates roles. */
   role: "data" | "relay" | null;
@@ -297,6 +300,7 @@ export function deriveGerolamoSyncStatus(
   const inb = metrics.inbound && typeof metrics.inbound === "object" ? (metrics.inbound as Record<string, unknown>) : null;
 
   return {
+    nodeVersion: typeof metrics.version === "string" && metrics.version ? metrics.version : null,
     epochProgress: tip > 0n ? deriveEpochProgress(tip, networkTip, network) : null,
     role: metrics.role === "relay" || metrics.role === "data" ? metrics.role : null,
     inbound: inb

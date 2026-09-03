@@ -8,9 +8,9 @@ import {
 } from "./peerManager";
 import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
 import { setupKeyboard } from "../tui";
-import { ensureInitialized, getMaxSlot, seedGenesisUtxosIfMissing } from "../db";
+import { countGenesisUtxoRegistry, ensureInitialized, getMaxSlot, seedGenesisUtxosIfMissing } from "../db";
 import { getByronGenesisConfig } from "../utils/paths";
-import { byronGenesisUtxos } from "../consensus/byron/genesisUtxo";
+import { byronGenesisUtxos, countFundedGenesisEntries } from "../consensus/byron/genesisUtxo";
 import { populateEpochState } from "../state/blockfrost";
 import { logger } from "../utils/logger";
 import { startPeerBlockServer } from "./peerBlockServer";
@@ -18,9 +18,10 @@ import { getSqlFilename, initSql } from "../sql";
 import { startN2CServer, type N2CServerHandle } from "./n2c";
 import { startN2NServer, type N2NServerHandle } from "./n2n";
 import { resolveN2NConfig } from "./n2n/config";
-import { setInboundN2NStatusProvider } from "./peerManager";
+import { listShareablePeers, setInboundN2NStatusProvider } from "./peerManager";
 import { resolveNodeRole } from "./nodeRole";
 import { ignoredValidationKeys, resolveValidationPolicy } from "../consensus/validationPolicy";
+import { getBuildInfo } from "../utils/buildInfo";
 
 async function runSnapShotPopulation(config: GerolamoConfig) {
     console.log(
@@ -162,7 +163,7 @@ async function loadConfig(network: string): Promise<GerolamoConfig> {
 export async function start() {
     const network = process.env.NETWORK ?? "preprod";
     console.log(
-        `Gerolamo Network Node starting on ${network} network...`,
+        `Gerolamo Network Node ${getBuildInfo().label} starting on ${network} network...`,
     );
 
     console.log(`Loading config for ${network} network`);
@@ -200,11 +201,19 @@ export async function start() {
     if (config.syncFromGenesis) {
         const byronGenesis = await getByronGenesisConfig(config);
         if (byronGenesis) {
-            const { utxos, nonAvvm, avvm } = byronGenesisUtxos(byronGenesis);
-            const r = await seedGenesisUtxosIfMissing(utxos);
-            logger.info(
-                `Genesis UTxOs: ${utxos.length} (${nonAvvm} funded address(es), ${avvm} AVVM) — ${r.inserted} added, ${r.present} present, ${r.spent} already spent on chain (tip slot ${await getMaxSlot()})`,
-            );
+            // Deriving 14.5k mainnet redeem addresses costs ~15 s of CPU: do it once.
+            // The registry table remembers every genesis output ever seeded.
+            const expected = countFundedGenesisEntries(byronGenesis);
+            const registered = await countGenesisUtxoRegistry();
+            if (registered >= expected && expected > 0) {
+                logger.info(`Genesis UTxOs already registered (${registered}); skipping derivation`);
+            } else {
+                const { utxos, nonAvvm, avvm } = byronGenesisUtxos(byronGenesis);
+                const r = await seedGenesisUtxosIfMissing(utxos);
+                logger.info(
+                    `Genesis UTxOs: ${utxos.length} (${nonAvvm} funded address(es), ${avvm} AVVM) — ${r.inserted} added, ${r.present} present, ${r.spent} already spent on chain (tip slot ${await getMaxSlot()})`,
+                );
+            }
         } else {
             logger.warn("syncFromGenesis but no byronGenesisFile configured: genesis UTxOs not seeded");
         }
@@ -242,6 +251,7 @@ export async function start() {
             maxRangeBlocks: config.n2n.maxRangeBlocks,
             handshakeTimeoutMs: config.n2n.handshakeTimeoutMs,
             idleTimeoutMs: config.n2n.idleTimeoutMs,
+            sharePeers: (amount) => listShareablePeers(amount),
         });
         logger.info(
             `Inbound N2N ready: ${n2nHandle.host}:${n2nHandle.port}`,

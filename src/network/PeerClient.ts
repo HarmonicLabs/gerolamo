@@ -119,6 +119,12 @@ export class PeerClient implements IPeerClient {
     private csIntersect: { slot: bigint; hash: string } | null = null;
     /** While true, replies are counted but their content is dropped (pre-restart drain). */
     private csDraining = false;
+    /**
+     * PeerSharing as *negotiated* in the handshake (ours AND theirs). Starting the
+     * mini-protocol when the peer did not agree to it is a protocol violation —
+     * mainnet backbone relays answer it with a connection reset.
+     */
+    peerSharingNegotiated = false;
     isSyncing = false;
     /** ms epoch of last ChainSync rollForward (hot liveness for PeerGovernor). */
     lastRollForwardAt?: number;
@@ -321,7 +327,11 @@ export class PeerClient implements IPeerClient {
             throw new Error("Handshake failed");
         }
 
-        logger.debug(`Handshake success for peer ${this.peerId}`);
+        const vd: any = (handshakeResult as any).versionData;
+        this.peerSharingNegotiated = vd?.peerSharing === true;
+        logger.debug(
+            `Handshake success for peer ${this.peerId} (version ${String((handshakeResult as any).versionNumber ?? "?")}, peerSharing ${this.peerSharingNegotiated ? "on" : "off"})`,
+        );
     }
 
     notePeerTip(point: ChainPoint | undefined | null): void {
@@ -709,6 +719,9 @@ export class PeerClient implements IPeerClient {
     }
 
     async askForPeers(amount = 10): Promise<PeerAddress[]> {
+        if (!this.peerSharingNegotiated) {
+            throw new Error(`peer ${this.peerKey} did not negotiate PeerSharing`);
+        }
         logger.debug(`Requesting peers from peer ${this.peerId}...`);
         const peerResponse = await this.peerSharingClient.request(amount);
         logger.debug(
@@ -752,9 +765,18 @@ export class PeerClient implements IPeerClient {
         }
     }
 
-    startKeepAlive(interval: number = 60000) {
+    /**
+     * KeepAlive keeps a warm connection alive on the *server's* terms:
+     * cardano-node's inbound governor closes a connection on which no
+     * mini-protocol has started within ~5 s (RemoteIdle timeout). The first
+     * request therefore goes out immediately after the handshake, and the
+     * cadence matches cardano-node's own 10 s keepAliveInterval. (Measured on
+     * mainnet backbone relays: warm peers were reset 3–5 s after handshake
+     * when the first keep-alive waited 60 s.)
+     */
+    startKeepAlive(interval: number = 10_000) {
         if (this.keepAliveInterval) return;
-        this.keepAliveInterval = setInterval(() => {
+        const tick = () => {
             if (this.terminated) return;
             this.cookieCounter = (this.cookieCounter + 1) % 65536;
             logger.debug(
@@ -769,7 +791,9 @@ export class PeerClient implements IPeerClient {
                     err,
                 );
             }
-        }, interval);
+        };
+        tick();
+        this.keepAliveInterval = setInterval(tick, interval);
     }
 
     stopKeepAlive() {

@@ -10,6 +10,7 @@ export {
 export { N2NChainSyncHost } from "./N2NChainSyncHost";
 export { N2NBlockFetchHost } from "./N2NBlockFetchHost";
 export { N2NKeepAliveHost } from "./N2NKeepAliveHost";
+export { N2NPeerSharingHost, ipv4ToWord32, type SharePeersProvider, type ShareablePeer } from "./N2NPeerSharingHost";
 export { SqliteRelayChainStore } from "./SqliteRelayChainStore";
 export {
     resolveN2NConfig,

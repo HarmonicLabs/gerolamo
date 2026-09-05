@@ -3,7 +3,16 @@
  * Fire-and-forget only — never await from rollForward / governor paths.
  */
 
-export type WsTopic = "tip" | "peers" | "metrics" | "governor";
+/**
+ * Topics:
+ *   tip      — every applied block (coalesced 75 ms): slot, hash, epoch, era
+ *   block    — the tip block in Blockfrost `/blocks/{id}` shape (only built when subscribed)
+ *   metrics  — the /metrics document, at most once per second while blocks land
+ *   peers    — governor snapshot on every governor tick
+ *   governor — alias of peers
+ *   mempool  — local mempool snapshot whenever it changes
+ */
+export type WsTopic = "tip" | "block" | "peers" | "metrics" | "governor" | "mempool";
 
 export type WsClientData = {
     id: string;
@@ -13,7 +22,7 @@ export type WsClientData = {
 /** Bun Server requires a WebSocket data type param. */
 export type GerolamoServer = import("bun").Server<WsClientData>;
 
-const ALL_TOPICS: WsTopic[] = ["tip", "peers", "metrics", "governor"];
+const ALL_TOPICS: WsTopic[] = ["tip", "block", "peers", "metrics", "governor", "mempool"];
 
 let serverRef: GerolamoServer | null = null;
 let seq = 0;
@@ -32,12 +41,16 @@ export function nextClientId(): string {
 }
 
 export function isWsTopic(t: unknown): t is WsTopic {
-    return (
-        t === "tip" ||
-        t === "peers" ||
-        t === "metrics" ||
-        t === "governor"
-    );
+    return typeof t === "string" && (ALL_TOPICS as string[]).includes(t);
+}
+
+/** Subscribers on a topic; 0 when no server is attached. Lets publishers skip building payloads nobody reads. */
+export function wsSubscriberCount(topic: WsTopic): number {
+    try {
+        return serverRef?.subscriberCount(topic) ?? 0;
+    } catch {
+        return 0;
+    }
 }
 
 export function defaultTopics(): Set<WsTopic> {

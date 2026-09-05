@@ -1,6 +1,7 @@
 import os from "node:os";
 import { logger } from "../../utils/logger";
 import { runHeaderValidationJob, type HeaderValidationJob, type HeaderValidationResult, type RangeVerifyJob, type RangeVerifyResult, runRangeVerifyJob, fresh } from "./validationJob";
+import { runWitnessVerifyJob, type WitnessVerifyJob, type WitnessVerifyResult } from "./witnessJob";
 
 /**
  * Pool of Bun Workers for header validation (KES/VRF are the CPU cost of
@@ -164,6 +165,25 @@ export class ValidationPool {
         });
     }
 
+    /**
+     * Verify witness signatures off the main thread. Items are copied and
+     * transferred; inline when the pool has no workers.
+     */
+    verifyWitnesses(job: WitnessVerifyJob): Promise<WitnessVerifyResult> {
+        if (this.closed) return Promise.reject(new Error("ValidationPool closed"));
+        if (job.items.length === 0) return Promise.resolve({ ok: [] });
+        if (this.workers.length === 0) return Promise.resolve(runWitnessVerifyJob(job));
+        const worker = this.leastLoadedWorker();
+        const weight = Math.max(1, Math.ceil(job.items.length / 8));
+        this.load.set(worker, (this.load.get(worker) ?? 0) + weight);
+        const id = this.nextId++;
+        return new Promise<WitnessVerifyResult>((resolve, reject) => {
+            this.pending.set(id, { resolve, reject, worker, weight });
+            const items = job.items.map((it) => ({ publicKey: fresh(it.publicKey), signature: fresh(it.signature), message: fresh(it.message) }));
+            worker.postMessage({ id, job: { kind: "witnesses", items } }, items.flatMap((it) => [it.publicKey.buffer, it.signature.buffer, it.message.buffer]));
+        });
+    }
+
     /** Validate many jobs concurrently, preserving order. */
     validateAll(jobs: HeaderValidationJob[]): Promise<HeaderValidationResult[]> {
         return Promise.all(jobs.map((j) => this.validate(j)));
@@ -171,6 +191,17 @@ export class ValidationPool {
 
     stats(): { workers: number; pending: number } {
         return { workers: this.workers.length, pending: this.pending.size };
+    }
+
+    /** Heap sizes of every worker thread (diagnostics for memory growth outside the main heap). */
+    memory(): Promise<Array<{ heapUsed: number; heapTotal: number; external: number }>> {
+        if (this.closed || this.workers.length === 0) return Promise.resolve([]);
+        return Promise.all(this.workers.map((worker) => new Promise<{ heapUsed: number; heapTotal: number; external: number }>((resolve) => {
+            const id = this.nextId++;
+            const timer = setTimeout(() => { this.pending.delete(id); resolve({ heapUsed: -1, heapTotal: -1, external: -1 }); }, 5000);
+            this.pending.set(id, { resolve: (r: any) => { clearTimeout(timer); resolve(r); }, reject: () => { clearTimeout(timer); resolve({ heapUsed: -1, heapTotal: -1, external: -1 }); }, worker, weight: 0 } as any);
+            worker.postMessage({ id, job: { kind: "memory" } });
+        })));
     }
 
     close(): void {

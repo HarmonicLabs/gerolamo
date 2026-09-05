@@ -61,8 +61,20 @@ export interface CertView {
     certType: number;
     /** Stake credential hash (hex), when the certificate carries one. */
     credHex: string | null;
+    /**
+     * Credential type: 0 = key hash, 1 = script hash. The ledger keys stake
+     * credentials by (type, hash): a script credential and a key credential
+     * with the same 28 bytes are two different accounts (preprod slot
+     * 22056654 registers the script twin of a key registered at 22056832).
+     */
+    credType: number | null;
     /** Pool key hash (hex) for pool delegations. */
     poolHex: string | null;
+}
+
+/** Map key for a stake credential: `${type}:${hash}`. */
+export function credKey(credType: number | null | undefined, credHex: string): string {
+    return `${credType ?? 0}:${credHex.toLowerCase()}`;
 }
 
 export type CertSequenceResult = { ok: true } | { ok: false; reason: string };
@@ -83,19 +95,19 @@ export function checkCertificateSequence(
         if (!fx.known) return { ok: false, reason: `Unknown certificate type: ${cert.certType}` };
         const touchesStake = fx.registers || fx.deregisters || fx.requiresRegistered;
         if (!touchesStake) continue;
-        const key = cert.credHex;
-        if (!key) return { ok: false, reason: `Certificate type ${cert.certType} without a stake credential` };
+        if (!cert.credHex) return { ok: false, reason: `Certificate type ${cert.certType} without a stake credential` };
+        const key = credKey(cert.credType, cert.credHex);
 
         if (fx.registers) {
-            if (registered.has(key)) return { ok: false, reason: `Stake key already registered: ${key}` };
+            if (registered.has(key)) return { ok: false, reason: `Stake credential already registered: ${key}` };
             registered.add(key);
         } else if (fx.deregisters) {
-            if (!registered.has(key)) return { ok: false, reason: `Stake key not registered: ${key}` };
+            if (!registered.has(key)) return { ok: false, reason: `Stake credential not registered: ${key}` };
             registered.delete(key);
             delegated.delete(key);
         } else if (fx.requiresRegistered) {
             if (!registered.has(key) && !delegated.has(key)) {
-                return { ok: false, reason: `Cannot delegate unregistered stake key: ${key}` };
+                return { ok: false, reason: `Cannot delegate unregistered stake credential: ${key}` };
             }
         }
         if (fx.delegatesToPool) delegated.set(key, cert.poolHex ?? "");
@@ -104,11 +116,14 @@ export function checkCertificateSequence(
 }
 
 /** Credentials (hex) whose registration / delegation state the block's certificates read or write. */
-export function stakeCredentialsTouched(certs: readonly CertView[]): string[] {
-    const out = new Set<string>();
+export function stakeCredentialsTouched(certs: readonly CertView[]): Array<{ hex: string; type: number }> {
+    const out = new Map<string, { hex: string; type: number }>();
     for (const c of certs) {
         const fx = certStakeEffect(c.certType);
-        if ((fx.registers || fx.deregisters || fx.requiresRegistered) && c.credHex) out.add(c.credHex);
+        if ((fx.registers || fx.deregisters || fx.requiresRegistered) && c.credHex) {
+            const type = c.credType ?? 0;
+            out.set(credKey(type, c.credHex), { hex: c.credHex.toLowerCase(), type });
+        }
     }
-    return Array.from(out);
+    return Array.from(out.values());
 }

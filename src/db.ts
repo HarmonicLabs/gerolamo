@@ -1,5 +1,13 @@
 import { getSqlFilename, sql } from "./sql";
+import { outputAddressString } from "./utils/byronAddressString";
+import { shelleyStartSlot } from "./utils/epochFromSlotCalculations";
+import { bech32HeaderByte, credTypeOf, headerStakeIsScript, pointerFromAddressBytes, rawAddressBytesOf, shelleyAddressBech32, typedCredBytes, typedCredHex, typedCredHexOf } from "./db/stakeCred";
 import { logger } from "./utils/logger";
+import { Address as LedgerAddress } from "@harmoniclabs/cardano-ledger-ts";
+import { addFeeToPot, ensureLeaderStateTables, recordGenesisDelegation, recordPoolRegistration, recordPoolRetirement, queueMir } from "./db/leaderState";
+import { stabilityWindowSlots } from "./utils/epochFromSlotCalculations";
+import { ensurePParamsTables, recordUpdateProposal } from "./consensus/pparams";
+import { ensureGovernanceTables, recordCommitteeHot, recordCommitteeResign, recordDRepActivity, recordDRepRegistration, recordDRepUnregistration, recordProposals, recordVoteDelegation, recordVotes } from "./consensus/governance/state";
 import {
     AllegraTxBody,
     AlonzoTxBody,
@@ -182,6 +190,15 @@ export async function ensureInitialized(): Promise<void> {
 			pool_key_hash BLOB
 		)
 	`;
+    // Stake credentials are (type, hash): 0 = key, 1 = script. Rows from before the
+    // column existed keep NULL ("type unknown") and match either type on lookup.
+    for (const table of ["stake", "delegations"]) {
+        const cols = (await sql.unsafe(`PRAGMA table_info(${table})`)) as any[];
+        const names = cols.map((c: any) => String(Array.isArray(c) ? c[1] : c?.name));
+        if (!names.includes("cred_type")) {
+            await sql.unsafe(`ALTER TABLE ${table} ADD COLUMN cred_type INTEGER`);
+        }
+    }
 
     // Keyed lookups by credential (BlockBodyValidator): without these every
     // certificate check would scan tables that reach millions of rows on mainnet.
@@ -225,13 +242,35 @@ export async function ensureInitialized(): Promise<void> {
     const utxoCols = new Set(
         ((await sql`PRAGMA table_info(utxo)`.values()) as unknown[][]).map((r) => String(r[1])),
     );
-    for (const [col, type] of [["address", "TEXT"], ["lovelace", "INTEGER"], ["reference_script_hash", "TEXT"]] as const) {
+    for (const [col, type] of [["address", "TEXT"], ["lovelace", "INTEGER"], ["reference_script_hash", "TEXT"], ["stake_key", "TEXT"]] as const) {
         if (!utxoCols.has(col)) {
             logger.warn(`utxo table predates the indexed side columns; adding ${col} and backfilling`);
             await sql.unsafe(`ALTER TABLE utxo ADD COLUMN ${col} ${type}`);
         }
     }
     if (!utxoCols.has("address")) await sql.unsafe(BACKFILL_UTXO_COLUMNS_SQL);
+    if (!utxoCols.has("stake_key")) await backfillStakeKeys();
+    await ensureTypedStakeKeys();
+    // Untyped stake/delegation rows (written before cred_type existed) get their type
+    // from the certificate history in the stored blocks, once per database.
+    try {
+        const hasBlocks = (await sql`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'blocks'`.values()) as unknown[][];
+        if (hasBlocks.length) {
+            const { ensureStakeCredTypes, ensureDelegationsReaped } = await import("./db/retypeStakeCreds");
+            await ensureStakeCredTypes(Number(shelleyStartSlot()));
+            await ensureDelegationsReaped(Number(shelleyStartSlot()));
+            await ensureByronOutputAddresses(Number(shelleyStartSlot()));
+            await ensureOrphanedDeltasReverted();
+            await sql`CREATE TABLE IF NOT EXISTS stake_pointers (slot INTEGER NOT NULL, tx_ix INTEGER NOT NULL, cert_ix INTEGER NOT NULL, stake_key TEXT NOT NULL, PRIMARY KEY (slot, tx_ix, cert_ix))`;
+            await ensureStakePointers(Number(shelleyStartSlot()));
+        }
+    } catch (err) {
+        logger.warn("stake credential type rebuild failed (untyped rows keep matching either type):", err);
+    }
+    await sql`CREATE INDEX IF NOT EXISTS idx_utxo_stake_key ON utxo(stake_key) WHERE stake_key IS NOT NULL`;
+    await ensureLeaderStateTables();
+    await ensurePParamsTables();
+    await ensureGovernanceTables();
     await sql`CREATE INDEX IF NOT EXISTS idx_utxo_address ON utxo(address)`;
     await sql`
         CREATE INDEX IF NOT EXISTS idx_utxo_reference_script_hash
@@ -413,6 +452,13 @@ export async function ensureInitialized(): Promise<void> {
 			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		)
 	`;
+    // Pointer addresses (Shelley type 4/5) name their stake credential by the position of
+    // its registration certificate (slot, tx index, cert index); resolved from this table.
+    await sql`CREATE TABLE IF NOT EXISTS stake_pointers (
+        slot INTEGER NOT NULL, tx_ix INTEGER NOT NULL, cert_ix INTEGER NOT NULL, stake_key TEXT NOT NULL,
+        PRIMARY KEY (slot, tx_ix, cert_ix)
+    )`;
+    await sql`CREATE INDEX IF NOT EXISTS idx_utxo_deltas_block ON utxo_deltas(block_hash)`;
 
     // Indexes for volatile_headers
     await sql`
@@ -717,6 +763,14 @@ export async function getBlockListRowByHash(hashHex: string): Promise<BlockListR
     return rows.length ? toBlockListRow(rows[0]!) : null;
 }
 
+/** The applied block with the highest slot strictly below `slot` (prev hash + slot), or null. */
+export async function getLastBlockBefore(slot: number): Promise<{ slot: number; hash: string; prevHash: string | null } | null> {
+    const rows = (await sql`SELECT slot, hash, prev_hash FROM blocks WHERE slot < ${slot} AND is_valid = TRUE ORDER BY slot DESC LIMIT 1`.values()) as unknown[][];
+    if (!rows.length) return null;
+    const r = rows[0]!;
+    return { slot: Number(r[0]), hash: String(r[1]), prevHash: r[2] == null ? null : String(r[2]) };
+}
+
 export async function getBlockListRowBySlot(slot: number): Promise<BlockListRow | null> {
     const rows = (await sql`
         SELECT slot, hash, prev_hash, block_no, length(block_data), block_data, header_data FROM blocks
@@ -731,6 +785,15 @@ export async function getBlockListRowByHeight(blockNo: number): Promise<BlockLis
         WHERE block_no = ${Math.trunc(blockNo)} LIMIT 1
     `.values()) as unknown[][];
     return rows.length ? toBlockListRow(rows[0]!) : null;
+}
+
+/** Chain tip for a block producer: highest applied block (slot, number, header hash hex). */
+export async function getChainTip(): Promise<{ slot: bigint; blockNumber: bigint; hashHex: string } | null> {
+    const rows = (await sql`SELECT hash, slot, block_no FROM blocks WHERE is_valid = TRUE ORDER BY slot DESC LIMIT 1`.values()) as unknown[][];
+    if (!rows.length) return null;
+    const h = rows[0]![0];
+    const hashHex = h instanceof Uint8Array ? Buffer.from(h).toString("hex") : String(h);
+    return { slot: BigInt(String(rows[0]![1])), blockNumber: BigInt(String(rows[0]![2] ?? 0)), hashHex: hashHex.toLowerCase() };
 }
 
 export async function getMaxBlockNo(): Promise<number> {
@@ -1247,6 +1310,61 @@ export interface TxOutColumns {
     /** Decimal string; SQLite stores it as INTEGER. */
     lovelace: string | null;
     referenceScriptHash: string | null;
+    /** Stake credential hash (hex) of a Shelley base address; null otherwise. Feeds the stake snapshot. */
+    stakeKey: string | null;
+}
+
+/**
+ * Stake credential of a Shelley address string (base addresses only) as typed hex:
+ * the hash for a key credential, "01" + hash for a script credential (see db/stakeCred.ts).
+ */
+export function stakeKeyOfAddress(address: string | null | undefined): string | null {
+    if (!address || !address.startsWith("addr")) return null;
+    try {
+        const a: any = LedgerAddress.fromString(address);
+        const h = a?.stakeCreds?.hash;
+        if (!h || Array.isArray(h)) return null; // pointer credentials carry no hash
+        const hex = String(h.toString()).toLowerCase();
+        if (!/^[0-9a-f]{56}$/.test(hex)) return null;
+        const header = bech32HeaderByte(address);
+        const isScript = header != null ? headerStakeIsScript(header) : credTypeOf(a?.stakeCreds) === 1;
+        return typedCredHex(isScript ? 1 : 0, hex);
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * One-off migration: `utxo.stake_key` rows written before script stake credentials
+ * were typed carry the bare hash for script-stake addresses (types 2 and 3); rewrite
+ * them as "01" + hash so the snapshot joins them with script delegations only.
+ */
+export async function ensureTypedStakeKeys(): Promise<void> {
+    await sql`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)`;
+    const done = (await sql`SELECT 1 FROM schema_migrations WHERE name = 'utxo_stake_key_typed'`.values()) as unknown[][];
+    if (done.length) return;
+    let scanned = 0, changed = 0;
+    let last = "";
+    for (;;) {
+        const rows = (await sql`SELECT utxo_ref, address, stake_key FROM utxo WHERE utxo_ref > ${last} AND stake_key IS NOT NULL AND length(stake_key) = 56 ORDER BY utxo_ref LIMIT 5000`.values()) as unknown[][];
+        if (rows.length === 0) break;
+        const updates: Array<[string, string]> = [];
+        for (const r of rows) {
+            last = String(r[0]);
+            scanned++;
+            const addr = r[1] == null ? "" : String(r[1]);
+            const header = addr.startsWith("addr") ? bech32HeaderByte(addr) : null;
+            if (header != null && headerStakeIsScript(header)) updates.push([last, `01${String(r[2])}`]);
+        }
+        if (updates.length) {
+            await sql.begin(async () => {
+                for (const [ref, key] of updates) await sql`UPDATE utxo SET stake_key = ${key} WHERE utxo_ref = ${ref}`;
+            });
+            changed += updates.length;
+        }
+    }
+    await sql`INSERT OR REPLACE INTO schema_migrations (name) VALUES ('utxo_stake_key_typed')`;
+    if (scanned) logger.info(`utxo.stake_key typed: ${changed} script-stake output(s) retagged out of ${scanned}`);
 }
 
 export function txOutColumns(txOut: string | Record<string, unknown> | null | undefined): TxOutColumns {
@@ -1264,7 +1382,7 @@ export function txOutColumns(txOut: string | Record<string, unknown> | null | un
     const ref = typeof j?.reference_script_hash === "string" && j.reference_script_hash.length > 0
         ? j.reference_script_hash.toLowerCase()
         : null;
-    return { address, lovelace, referenceScriptHash: ref };
+    return { address, lovelace, referenceScriptHash: ref, stakeKey: stakeKeyOfAddress(address) };
 }
 
 /**
@@ -1278,6 +1396,214 @@ export const BACKFILL_UTXO_COLUMNS_SQL =
     "reference_script_hash = lower(json_extract(tx_out, '$.reference_script_hash')) " +
     "WHERE address IS NULL";
 
+/**
+ * One-off: outputs at Byron bootstrap addresses inside Shelley-era transactions
+ * were stored with ledger-ts's bogus bech32 form (`addr…prvpsk…`, see
+ * utils/byronAddressString.ts). Rebuild the base58 address from the stored blocks
+ * for every such unspent output so bootstrap witnesses can be checked when spent.
+ */
+export async function ensureByronOutputAddresses(shelleyStartSlot: number): Promise<void> {
+    await sql`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)`;
+    const done = (await sql`SELECT 1 FROM schema_migrations WHERE name = 'utxo_byron_addresses_rebuilt'`.values()) as unknown[][];
+    if (done.length) return;
+    const tip = (await sql`SELECT COALESCE(MAX(slot), 0) FROM blocks`.values()) as unknown[][];
+    if (Number(tip[0]?.[0] ?? 0) < shelleyStartSlot) {
+        await sql`INSERT OR REPLACE INTO schema_migrations (name) VALUES ('utxo_byron_addresses_rebuilt')`;
+        return;
+    }
+    const t0 = performance.now();
+    let scanned = 0, rewritten = 0;
+    const { MultiEraBlock } = await import("@harmoniclabs/cardano-ledger-ts");
+    const { isByronTypedAddress, byronBase58Of } = await import("./utils/byronAddressString");
+    for await (const row of storedBlocksInSlotRange(shelleyStartSlot, Number(tip[0]?.[0] ?? 0))) {
+        let m: any;
+        try { m = MultiEraBlock.fromCbor(row.block_data); } catch { continue; }
+        if (Number(m.era) < 2) continue;
+        scanned++;
+        const bodies: any[] = m.block?.transactionBodies ?? [];
+        for (const body of bodies) {
+            const outs: any[] = body?.outputs ?? [];
+            for (let i = 0; i < outs.length; i++) {
+                const a = outs[i]?.address;
+                if (!isByronTypedAddress(a)) continue;
+                const b58 = byronBase58Of(a);
+                if (!b58) continue;
+                let txId = "";
+                try { txId = toHex(body.hash instanceof Uint8Array ? body.hash : body.hash.toBuffer()); } catch { continue; }
+                const ref = `${txId}:${i}`;
+                const cur = (await sql`SELECT tx_out FROM utxo WHERE utxo_ref = ${ref} AND address <> ${b58}`.values()) as unknown[][];
+                if (!cur.length) continue;
+                let json: any = {};
+                try { json = JSON.parse(String(cur[0]![0])); } catch { /* keep */ }
+                json.address = b58;
+                await sql`UPDATE utxo SET address = ${b58}, tx_out = ${JSON.stringify(json)}, stake_key = NULL WHERE utxo_ref = ${ref}`;
+                rewritten++;
+            }
+        }
+    }
+    await sql`INSERT OR REPLACE INTO schema_migrations (name) VALUES ('utxo_byron_addresses_rebuilt')`;
+    logger.info(`Byron-address outputs rebuilt from ${scanned} stored block(s) in ${((performance.now() - t0) / 1000).toFixed(1)}s: ${rewritten} unspent output(s) rewritten to base58`);
+}
+
+/**
+ * One-off: deltas whose block is no longer in `blocks` belong to rolled-back blocks
+ * whose UTxO effects were never reverted (the rollback compared a hex-text hash with
+ * a blob). Revert them now — newest first: creates removed, spends re-inserted — and
+ * drop them, so the UTxO set matches the chain again.
+ */
+export async function ensureOrphanedDeltasReverted(): Promise<void> {
+    await sql`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)`;
+    const done = (await sql`SELECT 1 FROM schema_migrations WHERE name = 'orphaned_utxo_deltas_reverted'`.values()) as unknown[][];
+    if (done.length) return;
+    const t0 = performance.now();
+    const rows = (await sql`
+        SELECT d.id, d.action, d.utxo, d.block_hash FROM utxo_deltas d
+        WHERE NOT EXISTS (SELECT 1 FROM blocks b WHERE b.hash = lower(hex(d.block_hash)) OR b.hash = d.block_hash)
+        ORDER BY d.id DESC`.values()) as unknown[][];
+    let restored = 0, removed = 0;
+    const blocks = new Set<string>();
+    await sql.begin(async () => {
+        for (const r of rows) {
+            const action = String(r[1]);
+            const parsed = parseUtxoDelta(r[2]);
+            blocks.add(String(r[3]));
+            if (action === "create" && parsed.utxo_ref) {
+                await sql`DELETE FROM utxo WHERE utxo_ref = ${parsed.utxo_ref}`;
+                removed++;
+            } else if (action === "spend" && parsed.utxo_ref) {
+                const txHash = parsed.tx_hash ?? (parsed.utxo_ref.includes(":") ? parsed.utxo_ref.split(":")[0] : "");
+                await upsertUtxoRow(sql, parsed.utxo_ref, parsed.tx_out, txHash);
+                restored++;
+            }
+            await sql`DELETE FROM utxo_deltas WHERE id = ${Number(r[0])}`;
+        }
+        await sql`INSERT OR REPLACE INTO schema_migrations (name) VALUES ('orphaned_utxo_deltas_reverted')`;
+    });
+    if (rows.length) logger.warn(`Reverted ${rows.length} orphaned UTxO delta(s) from ${blocks.size} rolled-back block(s) in ${((performance.now() - t0) / 1000).toFixed(1)}s: ${restored} spent output(s) restored, ${removed} created output(s) removed`);
+}
+
+const BECH32_ALPHABET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+function bech32Bytes(addr: string): Uint8Array | null {
+    const i = addr.lastIndexOf("1");
+    if (i <= 0 || addr.length < i + 7) return null;
+    const data = addr.slice(i + 1, -6).toLowerCase();
+    let acc = 0, bits = 0;
+    const out: number[] = [];
+    for (const c of data) {
+        const v = BECH32_ALPHABET.indexOf(c);
+        if (v < 0) return null;
+        acc = (acc << 5) | v; bits += 5;
+        while (bits >= 8) { bits -= 8; out.push((acc >> bits) & 255); }
+    }
+    return Uint8Array.from(out);
+}
+
+/** (slot, tx index, cert index) of a pointer address's stake credential, or null for other addresses. */
+export function pointerOfAddress(a: any): { slot: number; txIx: number; certIx: number } | null {
+    try {
+        if (String(a?.type ?? "").toLowerCase() !== "pointer") return null;
+        // ledger-ts does not decode the pointer: read it from the raw address bytes.
+        const raw = rawAddressBytesOf(a);
+        return raw ? pointerFromAddressBytes(raw) : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Pointer of a stored bech32 address string (full form, see utils/byronAddressString.ts), or null. */
+export function pointerOfAddressString(address: string): { slot: number; txIx: number; certIx: number } | null {
+    if (!address.startsWith("addr")) return null;
+    const raw = bech32Bytes(address);
+    return raw ? pointerFromAddressBytes(raw) : null;
+}
+
+/** Typed stake key registered at a pointer's position, or null when nothing was registered there. */
+export async function resolveStakePointer(db: SqlClient, ptr: { slot: number; txIx: number; certIx: number }): Promise<string | null> {
+    const rows = (await db`SELECT stake_key FROM stake_pointers WHERE slot = ${ptr.slot} AND tx_ix = ${ptr.txIx} AND cert_ix = ${ptr.certIx}`.values()) as unknown[][];
+    return rows.length ? String(rows[0]![0]) : null;
+}
+
+/**
+ * One-off: build `stake_pointers` from the stored blocks and give pointer-address
+ * outputs their stake key (preview account 0c90492b… had 35.55·10⁹ at a pointer
+ * address that never counted in its stake).
+ */
+export async function ensureStakePointers(shelleyStartSlot: number): Promise<void> {
+    await sql`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)`;
+    const done = (await sql`SELECT 1 FROM schema_migrations WHERE name = 'stake_pointers_built'`.values()) as unknown[][];
+    if (done.length) return;
+    const tip = (await sql`SELECT COALESCE(MAX(slot), 0) FROM blocks`.values()) as unknown[][];
+    if (Number(tip[0]?.[0] ?? 0) < shelleyStartSlot) {
+        await sql`INSERT OR REPLACE INTO schema_migrations (name) VALUES ('stake_pointers_built')`;
+        return;
+    }
+    const t0 = performance.now();
+    const { MultiEraBlock } = await import("@harmoniclabs/cardano-ledger-ts");
+    let pointers = 0, retagged = 0, scanned = 0;
+    for await (const row of storedBlocksInSlotRange(shelleyStartSlot, Number(tip[0]?.[0] ?? 0))) {
+        let m: any;
+        try { m = MultiEraBlock.fromCbor(row.block_data); } catch { continue; }
+        if (Number(m.era) < 2) continue;
+        scanned++;
+        const bodies: any[] = m.block?.transactionBodies ?? [];
+        const invalid = new Set<number>(((m.block as any)?.invalidTransactions ?? []).map((x: any) => Number(x)));
+        for (let ti = 0; ti < bodies.length; ti++) {
+            if (invalid.has(ti)) continue;
+            const certs: any[] = bodies[ti]?.certs ?? [];
+            for (let ci = 0; ci < certs.length; ci++) {
+                if (!certStakeEffect(Number(certs[ci]?.certType)).registers) continue;
+                const key = typedCredHexOf(certs[ci]?.stakeCredential);
+                if (!key) continue;
+                await sql`INSERT OR REPLACE INTO stake_pointers (slot, tx_ix, cert_ix, stake_key) VALUES (${row.slot}, ${ti}, ${ci}, ${key})`;
+                pointers++;
+            }
+            // Outputs at pointer addresses (stored truncated by ledger-ts): full address + stake key.
+            if (Number(m.era) >= 7) continue; // Conway: pointer addresses carry no stake rights
+            const outs: any[] = bodies[ti]?.outputs ?? [];
+            for (let oi = 0; oi < outs.length; oi++) {
+                const a = outs[oi]?.address;
+                if (String(a?.type ?? "").toLowerCase() !== "pointer") continue;
+                const raw = rawAddressBytesOf(a);
+                const ptr = raw ? pointerFromAddressBytes(raw) : null;
+                if (!raw || !ptr) continue;
+                let txId = "";
+                try { txId = toHex(bodies[ti].hash instanceof Uint8Array ? bodies[ti].hash : bodies[ti].hash.toBuffer()); } catch { continue; }
+                const ref = `${txId}:${oi}`;
+                const cur = (await sql`SELECT tx_out FROM utxo WHERE utxo_ref = ${ref}`.values()) as unknown[][];
+                if (!cur.length) continue;
+                const key = await resolveStakePointer(sql, ptr);
+                const full = shelleyAddressBech32(raw);
+                let json: any = {};
+                try { json = JSON.parse(String(cur[0]![0])); } catch { /* keep */ }
+                json.address = full;
+                await sql`UPDATE utxo SET address = ${full}, tx_out = ${JSON.stringify(json)}, stake_key = ${key} WHERE utxo_ref = ${ref}`;
+                if (key) retagged++;
+            }
+        }
+    }
+    await sql`INSERT OR REPLACE INTO schema_migrations (name) VALUES ('stake_pointers_built')`;
+    logger.info(`stake pointers built from ${scanned} block(s) in ${((performance.now() - t0) / 1000).toFixed(1)}s: ${pointers} registration(s) indexed, ${retagged} pointer-address output(s) given a stake key`);
+}
+
+/** Fill `utxo.stake_key` for rows written before the column existed (Shelley base addresses only). */
+export async function backfillStakeKeys(): Promise<number> {
+    let done = 0;
+    let last = "";
+    for (;;) {
+        const rows = (await sql`SELECT utxo_ref, address FROM utxo WHERE utxo_ref > ${last} AND address LIKE 'addr%' ORDER BY utxo_ref LIMIT 5000`.values()) as unknown[][];
+        if (rows.length === 0) break;
+        for (const r of rows) {
+            const ref = String(r[0]);
+            const key = stakeKeyOfAddress(r[1] == null ? null : String(r[1]));
+            if (key) await sql`UPDATE utxo SET stake_key = ${key} WHERE utxo_ref = ${ref}`;
+            last = ref;
+            done++;
+        }
+    }
+    if (done) logger.info(`utxo.stake_key backfilled for ${done} Shelley outputs`);
+    return done;
+}
+
 /** The one writer of `utxo` rows: JSON plus the indexed side columns. */
 async function upsertUtxoRow(
     db: SqlClient,
@@ -1287,8 +1613,8 @@ async function upsertUtxoRow(
     cols: TxOutColumns = txOutColumns(txOut),
 ): Promise<void> {
     await db`
-        INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash, address, lovelace, reference_script_hash)
-        VALUES (${utxoRef}, ${txOut}, ${txHash}, ${cols.address}, ${cols.lovelace}, ${cols.referenceScriptHash})
+        INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash, address, lovelace, reference_script_hash, stake_key)
+        VALUES (${utxoRef}, ${txOut}, ${txHash}, ${cols.address}, ${cols.lovelace}, ${cols.referenceScriptHash}, ${cols.stakeKey})
     `;
 }
 
@@ -1330,10 +1656,17 @@ function bytesOf(v: unknown): Uint8Array {
 }
 
 /** Distinct credentials, in first-seen order. */
-function distinctCredentials(creds: Uint8Array[]): Uint8Array[] {
-    const seen = new Map<string, Uint8Array>();
+/** A stake credential as the ledger keys it: hash plus type (0 = key, 1 = script). */
+export interface StakeCredRef {
+    hash: Uint8Array;
+    type: number;
+}
+
+function distinctCredentials(creds: Array<Uint8Array | StakeCredRef>): StakeCredRef[] {
+    const seen = new Map<string, StakeCredRef>();
     for (const c of creds) {
-        if (c && c.length > 0) seen.set(toHex(c), c);
+        const ref: StakeCredRef = c instanceof Uint8Array ? { hash: c, type: 0 } : c;
+        if (ref.hash && ref.hash.length > 0) seen.set(`${ref.type}:${toHex(ref.hash)}`, ref);
     }
     return Array.from(seen.values());
 }
@@ -1346,16 +1679,17 @@ function distinctCredentials(creds: Uint8Array[]): Uint8Array[] {
  * touches a handful of credentials; the table grows to millions of rows.
  */
 export async function getStakeByCredentials(
-    creds: Uint8Array[],
-): Promise<Array<{ stake_credentials: Uint8Array; amount: number }>> {
-    const out: Array<{ stake_credentials: Uint8Array; amount: number }> = [];
+    creds: Array<Uint8Array | StakeCredRef>,
+): Promise<Array<{ stake_credentials: Uint8Array; cred_type: number; amount: number }>> {
+    const out: Array<{ stake_credentials: Uint8Array; cred_type: number; amount: number }> = [];
     for (const cred of distinctCredentials(creds)) {
-        const rows = await sql`SELECT stake_credentials, amount FROM stake WHERE stake_credentials = ${cred}`
+        // A legacy row (cred_type NULL) matches either type.
+        const rows = await sql`SELECT stake_credentials, amount FROM stake WHERE stake_credentials = ${cred.hash} AND (cred_type IS NULL OR cred_type = ${cred.type})`
             .values() as any[];
         for (const row of rows) {
             const c = Array.isArray(row) ? row[0] : row?.stake_credentials;
             const a = Array.isArray(row) ? row[1] : row?.amount;
-            out.push({ stake_credentials: bytesOf(c), amount: Number(a ?? 0) });
+            out.push({ stake_credentials: bytesOf(c), cred_type: cred.type, amount: Number(a ?? 0) });
         }
     }
     return out;
@@ -1363,22 +1697,28 @@ export async function getStakeByCredentials(
 
 /** Keyed alternative to getAllDelegations(): only the rows for `creds`. See getStakeByCredentials. */
 export async function getDelegationsByCredentials(
-    creds: Uint8Array[],
-): Promise<Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>> {
-    const out: Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }> = [];
+    creds: Array<Uint8Array | StakeCredRef>,
+): Promise<Array<{ stake_credentials: Uint8Array; cred_type: number; pool_key_hash: Uint8Array }>> {
+    const out: Array<{ stake_credentials: Uint8Array; cred_type: number; pool_key_hash: Uint8Array }> = [];
     for (const cred of distinctCredentials(creds)) {
-        const rows = await sql`SELECT stake_credentials, pool_key_hash FROM delegations WHERE stake_credentials = ${cred}`
+        const rows = await sql`SELECT stake_credentials, pool_key_hash FROM delegations WHERE stake_credentials = ${cred.hash} AND (cred_type IS NULL OR cred_type = ${cred.type})`
             .values() as any[];
         for (const row of rows) {
             const c = Array.isArray(row) ? row[0] : row?.stake_credentials;
             const p = Array.isArray(row) ? row[1] : row?.pool_key_hash;
-            out.push({ stake_credentials: bytesOf(c), pool_key_hash: bytesOf(p) });
+            out.push({ stake_credentials: bytesOf(c), cred_type: cred.type, pool_key_hash: bytesOf(p) });
         }
     }
     return out;
 }
 
 export type TxIndexCtx = {
+    /** Block era (0 Byron … 7 Conway), for era-dependent update decoding. */
+    era?: number;
+    /** Epoch of the block (governance capture). */
+    epoch?: number;
+    /** `gov_action_lifetime` of the epoch (proposal expiry). */
+    govActionLifetime?: number;
     slot: number;
     txIndex: number;
     /** Chain height of the containing block (mb_tx.block_height). */
@@ -1386,6 +1726,11 @@ export type TxIndexCtx = {
 };
 
 /** Parse address from packed tx_out JSON (best-effort). */
+/** Address as stored: bech32 for Shelley addresses, base58 for Byron ones (ByronAddress has no toString). */
+export function addressToString(a: any): string {
+    return outputAddressString(a);
+}
+
 function addressFromTxOutJson(raw: unknown): string {
     try {
         const j = typeof raw === "string" ? JSON.parse(raw) : raw;
@@ -1492,6 +1837,25 @@ export async function indexTransaction(
     }
 }
 
+/**
+ * Strict apply: a block that spends an input we do not hold is rejected instead
+ * of applied with the input skipped. Set by the orchestrator from the validation
+ * policy (complete ledger → strict); the Mithril importer and tip sync keep the
+ * tolerant behaviour.
+ */
+let strictUtxoApply = false;
+export function setStrictUtxoApply(on: boolean): void {
+    strictUtxoApply = on;
+}
+
+function assertInputsPresent(inputRefs: string[], rows: any[], txId: string): void {
+    if (!strictUtxoApply || rows.length === inputRefs.length) return;
+    const have = new Set(rows.map((r) => String(Array.isArray(r) ? r[0] : r.utxo_ref)));
+    const missing = inputRefs.filter((r) => !have.has(r));
+    if (missing.length === 0) return;
+    throw new Error(`tx ${txId} spends ${missing.length} input(s) not in the UTxO set: ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ", …" : ""}`);
+}
+
 export async function applyTransaction(
     txBody: TxBody,
     blockHash: Uint8Array,
@@ -1541,6 +1905,7 @@ export async function applyTransaction(
         const existingUtxos = await db`
             SELECT utxo_ref, tx_out, tx_hash, address FROM utxo WHERE utxo_ref IN ${db(inputRefs)}
         ` as any[];
+        assertInputsPresent(inputRefs, existingUtxos, txId);
         if (existingUtxos.length > 0) {
             // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
             for (const row of existingUtxos) {
@@ -1601,7 +1966,7 @@ export async function applyTransaction(
                 assetsObj[policyStr] = assetObj;
             });
 
-            const addr = output.address?.toString() || "";
+            const addr = addressToString(output.address);
             if (addr && addr.length > 8) {
                 const prev = addrDirs.get(addr);
                 addrDirs.set(
@@ -1654,6 +2019,18 @@ export async function applyTransaction(
         },
     );
 
+    // Pointer addresses: the stake credential is the one registered at (slot, tx, cert).
+    // Conway removed pointer addresses' stake rights, so only pre-Conway outputs resolve.
+    if (indexCtx == null || Number(indexCtx.era ?? 0) <= 6) {
+        for (let i = 0; i < outputData.length; i++) {
+            const cols = outputData[i]![3];
+            if (cols.stakeKey != null) continue;
+            const ptr = pointerOfAddress((txBody.outputs as any[])[i]?.address);
+            if (!ptr) continue;
+            cols.stakeKey = await resolveStakePointer(db, ptr);
+        }
+    }
+
     if (outputData.length > 0) {
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
         for (const [utxoRef, json, txHash, cols] of outputData) {
@@ -1668,10 +2045,34 @@ export async function applyTransaction(
     }
 
     if (txBody.certs && Array.isArray(txBody.certs)) {
-        await applyCertificates(txBody.certs, blockHash, client);
+        await applyCertificates(txBody.certs, blockHash, client, indexCtx ? { slot: indexCtx.slot, epoch: indexCtx.epoch, txIndex: indexCtx.txIndex } : undefined);
+    }
+    if (indexCtx) {
+        const body: any = txBody;
+        try {
+            if (Array.isArray(body.proposalProcedures) && body.proposalProcedures.length) {
+                const lifetime = Number(indexCtx.govActionLifetime ?? 6);
+                await recordProposals(db, txId, body.proposalProcedures, Number(indexCtx.epoch ?? 0), lifetime);
+            }
+            if (Array.isArray(body.votingProcedures?.procedures) && body.votingProcedures.procedures.length) {
+                await recordVotes(db, body.votingProcedures.procedures, indexCtx.slot, Number(indexCtx.epoch ?? 0));
+            }
+        } catch (err) {
+            logger.warn("governance capture failed:", err);
+        }
+    }
+    if ((txBody as any).protocolUpdate && indexCtx) {
+        try {
+            await recordUpdateProposal(db, (txBody as any).protocolUpdate, indexCtx.slot, (txBody as any).cborRef?.toBuffer?.() ?? null, (indexCtx.era ?? 0) >= 6 ? 7 : 5);
+        } catch (err) {
+            logger.warn("protocol update proposal not recorded:", err);
+        }
     }
 
-    if (txBody.withdrawals && Array.isArray(txBody.withdrawals)) {
+    // ledger-ts `TxWithdrawals` is an object with `.map`, never an array: the
+    // `Array.isArray` guard here meant no withdrawal was ever debited from `rewards`
+    // (found by per-delegator stake comparison with Koios on preprod epoch 41).
+    if (withdrawalEntries(txBody.withdrawals).length > 0) {
         await applyWithdrawals(txBody.withdrawals, blockHash, client);
     }
 
@@ -1683,6 +2084,12 @@ export async function applyTransaction(
             JSON.stringify({ amount: txBody.fee.toString() }),
         );
         await db`UPDATE chain_account_state SET treasury = treasury + ${txBody.fee} WHERE id = 1`;
+        // Fees accumulate in the fee pot; the boundary distributes them with the reward pot (Phase 4c).
+        try {
+            await addFeeToPot(db, BigInt(txBody.fee ?? 0));
+        } catch {
+            /* pots not initialised yet (pre-Shelley) */
+        }
     }
 
     // Mini-BF forward index (live + batch when indexCtx provided)
@@ -1729,8 +2136,72 @@ export async function applyCertificates(
     certs: any[],
     blockHash: Uint8Array,
     client?: SqlClient,
+    ctx?: { slot: number; epoch?: number; txIndex?: number },
 ): Promise<void> {
     const db = client ?? sql;
+    // Registration certificates are the targets of pointer addresses.
+    if (ctx && ctx.txIndex != null) {
+        for (let ci = 0; ci < certs.length; ci++) {
+            const c: any = certs[ci];
+            if (!certStakeEffect(Number(c?.certType)).registers) continue;
+            const key = typedCredHexOf(c?.stakeCredential);
+            if (key) await db`INSERT OR REPLACE INTO stake_pointers (slot, tx_ix, cert_ix, stake_key) VALUES (${ctx.slot}, ${ctx.txIndex}, ${ci}, ${key})`;
+        }
+    }
+    // Header-rule state: registered pools with their VRF keys, retirements by
+    // epoch, genesis delegations (effective after the stability window).
+    if (ctx) {
+        for (const cert of certs) {
+            const c = cert as any;
+            const t = Number(c.certType);
+            try {
+                if (t === 3 && c.poolParams?.operator && c.poolParams?.vrfKeyHash) {
+                    const pp = c.poolParams;
+                    const margin = pp.margin ?? {};
+                    await recordPoolRegistration(db, String(pp.operator.toString()), String(pp.vrfKeyHash.toString()), ctx.slot, {
+                        pledge: String(pp.pledge ?? 0),
+                        cost: String(pp.cost ?? 0),
+                        marginNum: String(margin.num ?? margin.numerator ?? 0),
+                        marginDen: String(margin.den ?? margin.denominator ?? 1),
+                        rewardAccount: typedCredHexOf(pp.rewardAccount?.credentials) ?? String(pp.rewardAccount?.credentials?.hash?.toString?.() ?? pp.rewardAccount?.credentials?.toString?.() ?? ""),
+                        owners: ((pp.owners ?? []) as any[]).map((o) => String(o.toString()).toLowerCase()),
+                    });
+                } else if (t === 4 && c.poolHash) {
+                    await recordPoolRetirement(db, String(c.poolHash.toString()), Number(c.epoch));
+                } else if (t === 6) {
+                    // MoveInstantRewards: takes effect at the next boundary (leaderState.applyPendingMir)
+                    const source = Number(c.source ?? c.pot ?? 0) === 1 ? 1 : 0;
+                    const dest: any = c.destination;
+                    const entries: Array<{ stakeKey: string | null; amount: bigint }> = [];
+                    if (Array.isArray(dest)) {
+                        for (const e of dest) {
+                            const key = typedCredHexOf(e?.stakeCredentials ?? e?.stakeCreds ?? e?.credential);
+                            if (key) entries.push({ stakeKey: key, amount: BigInt(String(e?.amount ?? 0)) });
+                        }
+                    } else if (dest != null) {
+                        entries.push({ stakeKey: null, amount: BigInt(String(typeof dest === "object" && "toString" in dest ? dest.toString() : dest)) });
+                    }
+                    if (entries.length) await queueMir(db, Number(ctx.epoch ?? 0), source, entries);
+                } else if (t === 5 && c.genesisHash && c.genesisDelegateHash && c.vrfKeyHash) {
+                    await recordGenesisDelegation(db, String(c.genesisHash.toString()), String(c.genesisDelegateHash.toString()), String(c.vrfKeyHash.toString()), ctx.slot + stabilityWindowSlots());
+                } else if (t === 9 || t === 10 || t === 12 || t === 13) {
+                    if (c.stakeCredential && c.drep) await recordVoteDelegation(db, c.stakeCredential, c.drep);
+                } else if (t === 14 && c.coldCredential && c.hotCredential) {
+                    await recordCommitteeHot(db, c.coldCredential, c.hotCredential);
+                } else if (t === 15 && c.coldCredential) {
+                    await recordCommitteeResign(db, c.coldCredential);
+                } else if (t === 16 && c.drepCredential) {
+                    await recordDRepRegistration(db, c.drepCredential, BigInt(c.coin ?? 0), ctx.slot, Number(ctx.epoch ?? 0));
+                } else if (t === 17 && c.drepCredential) {
+                    await recordDRepUnregistration(db, c.drepCredential);
+                } else if (t === 18 && c.drepCredential) {
+                    await recordDRepActivity(db, String(c.drepCredential.hash?.toString?.() ?? "").toLowerCase(), Number(ctx.epoch ?? 0));
+                }
+            } catch (err) {
+                logger.warn(`leader-state update failed for certificate type ${t}:`, err);
+            }
+        }
+    }
     const certDeltas: string[] = [];
     for (const cert of certs) {
         const certAny = cert as any;
@@ -1740,6 +2211,7 @@ export async function applyCertificates(
         certDeltas.push(JSON.stringify({
             type: cert.certType,
             stakeCred: stakeCred ? toHex(stakeCred) : null,
+            credType: certAny.stakeCredential ? (Number(certAny.stakeCredential.type) === 1 ? 1 : 0) : null,
             poolId: certAny.poolKeyHash?.toString() ||
                 certAny.poolParams?.operator?.toString() ||
                 certAny.poolHash?.toString(),
@@ -1759,17 +2231,21 @@ export async function applyCertificates(
         // Stake-credential effects come from the same table the body validator uses
         // (certificateRules.ts), so validate and apply cannot drift per certificate type.
         const fx = certStakeEffect(Number(cert.certType));
+        // (type, hash) keys a stake credential; a legacy row with cred_type NULL matches either type.
+        const credType = certAny.stakeCredential ? (Number(certAny.stakeCredential.type) === 1 ? 1 : 0) : 0;
         if (stakeCred && fx.registers) {
-            await db`INSERT OR REPLACE INTO stake (stake_credentials, amount) VALUES (${stakeCred}, 0)`;
+            await db`INSERT OR REPLACE INTO stake (stake_credentials, cred_type, amount) VALUES (${stakeCred}, ${credType}, 0)`;
         }
         if (stakeCred && fx.deregisters) {
-            await db`DELETE FROM stake WHERE stake_credentials = ${stakeCred}`;
-            await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred}`;
+            await db`DELETE FROM stake WHERE stake_credentials = ${stakeCred} AND (cred_type IS NULL OR cred_type = ${credType})`;
+            await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred} AND (cred_type IS NULL OR cred_type = ${credType})`;
         }
         if (stakeCred && fx.delegatesToPool) {
             const poolKh = certAny.poolKeyHash?.toBuffer();
             if (poolKh) {
-                await db`INSERT OR REPLACE INTO delegations (stake_credentials, pool_key_hash) VALUES (${stakeCred}, ${poolKh})`;
+                // one row per credential: a re-delegation replaces the previous one
+                await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred} AND (cred_type IS NULL OR cred_type = ${credType})`;
+                await db`INSERT INTO delegations (stake_credentials, cred_type, pool_key_hash) VALUES (${stakeCred}, ${credType}, ${poolKh})`;
             }
         }
         switch (cert.certType) {
@@ -1795,22 +2271,100 @@ export async function applyCertificates(
     }));
 }
 
+/**
+ * A transaction the block producer marked as phase-2 invalid: no inputs are
+ * spent and no outputs created; the collateral inputs are consumed, the
+ * collateral return (if any) is created at index `outputs.length`, and the
+ * collateral lovelace goes to the fee pot (Alonzo UTXOS, `isValid = False`).
+ */
+export async function applyInvalidTransaction(
+    txBody: TxBody,
+    blockHash: Uint8Array,
+    client?: SqlClient,
+    indexCtx?: TxIndexCtx,
+): Promise<void> {
+    const db = client ?? sql;
+    const body: any = txBody;
+    const txId = txBody.hash.toString().toLowerCase();
+    const refs: string[] = [];
+    for (const c of (body.collateralInputs ?? []) as any[]) {
+        try {
+            refs.push(`${String(c.utxoRef.id.toString()).toLowerCase()}:${Number(c.utxoRef.index)}`);
+        } catch { /* malformed: the rules rejected it */ }
+    }
+    let consumed = 0n;
+    if (refs.length) {
+        const rows = (await db`SELECT utxo_ref, tx_out, tx_hash, lovelace FROM utxo WHERE utxo_ref IN ${db(refs)}`) as any[];
+        assertInputsPresent(refs, rows, txId);
+        for (const row of rows) {
+            const utxo_ref = Array.isArray(row) ? String(row[0]) : String(row.utxo_ref);
+            const tx_out = Array.isArray(row) ? String(row[1]) : String(row.tx_out);
+            const tx_hash = Array.isArray(row) ? (row[2] != null ? String(row[2]) : undefined) : (row.tx_hash != null ? String(row.tx_hash) : undefined);
+            const lovelace = Array.isArray(row) ? row[3] : row.lovelace;
+            consumed += BigInt(String(lovelace ?? 0));
+            await insertUtxoDelta(db, blockHash, "spend", packUtxoDelta({ utxo_ref, tx_out, tx_hash }));
+        }
+        await db`DELETE FROM utxo WHERE utxo_ref IN ${db(refs)}`;
+    }
+    const ret: any = body.collateralReturn;
+    let returned = 0n;
+    if (ret) {
+        const idx = (body.outputs ?? []).length;
+        const utxoRef = `${txId}:${idx}`;
+        const address = addressToString(ret.address);
+        const assetsObj: Record<string, Record<string, string>> = {};
+        for (const ma of (Array.isArray(ret.value?.map) ? ret.value.map : []) as any[]) {
+            const policyStr = String(ma.policy?.toString?.() ?? "");
+            if (!policyStr) continue;
+            const a: Record<string, string> = {};
+            for (const asset of (ma.assets ?? []) as any[]) a[toHex(asset.name)] = String(asset.quantity);
+            assetsObj[policyStr] = a;
+        }
+        const lovelace = ret.value?.lovelaces ?? 0n;
+        returned = BigInt(lovelace);
+        const json = JSON.stringify({ address, amount: String(lovelace), assets: assetsObj, collateral_return: true });
+        await upsertUtxoRow(db, utxoRef, json, txId, txOutColumns({ address, amount: String(lovelace) }));
+        await insertUtxoDelta(db, blockHash, "create", packUtxoDelta({ utxo_ref: utxoRef, tx_out: json, tx_hash: txId }));
+    }
+    const toPot = body.totCollateral != null ? BigInt(body.totCollateral) : consumed - returned;
+    try {
+        if (toPot > 0n) await addFeeToPot(db, toPot);
+    } catch { /* pots not initialised */ }
+    void indexCtx;
+}
+
+/** `[credential hash bytes, amount]` for every withdrawal of a body (any withdrawals shape: array, `{ map }`, or entries with `rewardAccount` / `stakeCred`). */
+export function withdrawalEntries(withdrawals: any): Array<{ stakeCred: Uint8Array; amount: bigint }> {
+    const list: any[] = Array.isArray(withdrawals) ? withdrawals : Array.isArray(withdrawals?.map) ? withdrawals.map : [];
+    const out: Array<{ stakeCred: Uint8Array; amount: bigint }> = [];
+    for (const w of list) {
+        const acc = w?.rewardAccount ?? w?.stakeAddress ?? w?.stakeCred;
+        const cred = acc?.credentials?.hash ?? acc?.credentials ?? acc?.hash ?? acc;
+        let bytes: Uint8Array | null = null;
+        if (cred instanceof Uint8Array) bytes = cred;
+        else if (typeof cred?.toBuffer === "function") bytes = cred.toBuffer();
+        else if (typeof cred?.toString === "function" && /^[0-9a-f]{56}$/i.test(String(cred))) bytes = Buffer.from(String(cred), "hex");
+        if (!bytes) continue;
+        // Reward accounts are (type, hash): keep the type (typed bytes, see db/stakeCred.ts).
+        let type = acc?.credentials != null ? credTypeOf(acc.credentials) : credTypeOf(acc);
+        if (bytes.length === 29) {
+            if (headerStakeIsScript(bytes[0]!)) type = 1; // a whole stake address: its header carries the type
+            bytes = bytes.subarray(1);
+        }
+        if (bytes.length !== 28) continue;
+        out.push({ stakeCred: typedCredBytes(type, new Uint8Array(bytes)), amount: BigInt(w?.amount ?? 0) });
+    }
+    return out;
+}
+
 export async function applyWithdrawals(
     withdrawals: any,
     blockHash: Uint8Array,
     client?: SqlClient,
 ): Promise<void> {
     const db = client ?? sql;
-    if (withdrawals.map.length === 0) return;
-
-    const withdrawalData = withdrawals.map.map((
-        { rewardAccount, amount }: any,
-    ) => ({
-        stakeCred: rewardAccount.toBuffer(),
-        amount,
-    }));
-    for (const { stakeCred, amount } of withdrawalData) {
-        await db`UPDATE rewards SET amount = amount - ${amount} WHERE stake_credentials = ${stakeCred}`;
+    for (const { stakeCred, amount } of withdrawalEntries(withdrawals)) {
+        await db`UPDATE rewards SET amount = amount - ${amount.toString()} WHERE stake_credentials = ${stakeCred}`;
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
         await insertUtxoDelta(
             db,
@@ -1871,8 +2425,14 @@ export async function rollbackChainTo(
     counts.headersDeleted = await countQuery(
         sql`SELECT COUNT(*) as c FROM volatile_headers WHERE slot > ${slot}`,
     );
+    // `blocks.hash` is stored as lowercase hex text while `utxo_deltas.block_hash` is the
+    // raw 32-byte blob: match the deltas through hex(), never by direct comparison (the
+    // direct join matched nothing, so rollbacks left every spent input missing and every
+    // created output in place — mainnet slot 5753400).
+    const goneHashes = ((await sql`SELECT hash FROM blocks WHERE slot > ${slot}`.values()) as unknown[][])
+        .map((r) => String(r[0]).toLowerCase());
     counts.deltasDeleted = await countQuery(
-        sql`SELECT COUNT(*) as c FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`,
+        sql`SELECT COUNT(*) as c FROM utxo_deltas WHERE lower(hex(block_hash)) IN (SELECT hash FROM blocks WHERE slot > ${slot}) OR block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`,
     );
 
     logger.rollback(
@@ -1882,13 +2442,18 @@ export async function rollbackChainTo(
     const beforeTip = await getMaxSlot();
 
     // Capture deltas before delete — newest first so reverse order is natural
-    const deltaRows = await sql`
-        SELECT d.action, d.utxo, b.slot
-        FROM utxo_deltas d
-        INNER JOIN blocks b ON b.hash = d.block_hash
-        WHERE b.slot > ${slot}
-        ORDER BY b.slot DESC, d.id DESC
-    ` as any[];
+    const deltaRows: any[] = [];
+    for (const h of goneHashes) {
+        const rows = (await sql`
+            SELECT d.action, d.utxo, d.id, b.slot
+            FROM utxo_deltas d
+            INNER JOIN blocks b ON b.hash = ${h}
+            WHERE d.block_hash = ${Buffer.from(h, "hex")} OR d.block_hash = ${h}
+        `.values()) as unknown[][];
+        for (const r of rows) deltaRows.push(r);
+    }
+    // newest first so the reverse order is natural
+    deltaRows.sort((a, b) => Number(b[3]) - Number(a[3]) || Number(b[2]) - Number(a[2]));
 
     for (const row of deltaRows) {
         const action = Array.isArray(row) ? String(row[0]) : String(row.action);
@@ -1920,7 +2485,7 @@ export async function rollbackChainTo(
     await sql.begin(async (tx) => {
         // MiniBF projections first (same txn as ledger deletes)
         await rollbackMbToSlot(tx as any, Number(slot));
-        await tx`DELETE FROM utxo_deltas WHERE block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`;
+        for (const h of goneHashes) await tx`DELETE FROM utxo_deltas WHERE block_hash = ${Buffer.from(h, "hex")} OR block_hash = ${h}`;
         await tx`DELETE FROM volatile_headers WHERE slot > ${slot}`;
         await tx`DELETE FROM blocks WHERE slot > ${slot}`;
     });
@@ -2302,8 +2867,10 @@ export async function applyByronTxPayload(
     // Derive a stable-ish tx id for UTxO refs
     let txId = "";
     try {
-        if (typeof tx.hash?.toString === "function") {
-            txId = String(tx.hash.toString());
+        // ByronTx.hash is a method (Hash32 of the tx CBOR); Shelley-style bodies have a getter.
+        const h = typeof tx.hash === "function" ? tx.hash() : tx.hash;
+        if (typeof h?.toString === "function" && /^[0-9a-f]{64}$/i.test(String(h.toString()))) {
+            txId = String(h.toString()).toLowerCase();
         } else if (typeof entry.hash?.toString === "function") {
             txId = String(entry.hash.toString());
         } else if (typeof tx.toCborBytes === "function") {
@@ -2347,6 +2914,7 @@ export async function applyByronTxPayload(
         const existingUtxos = await db`
             SELECT utxo_ref, tx_out, tx_hash, address FROM utxo WHERE utxo_ref IN ${db(inputRefs)}
         ` as any[];
+        assertInputsPresent(inputRefs, existingUtxos, txId);
         for (const row of existingUtxos) {
             const utxo_ref = Array.isArray(row)
                 ? String(row[0])
@@ -2374,9 +2942,7 @@ export async function applyByronTxPayload(
         let address = "";
         let amount = "0";
         try {
-            address = out?.address?.toString?.() ??
-                out?.addr?.toString?.() ??
-                String(out?.address ?? "");
+            address = addressToString(out?.address ?? out?.addr);
             const coin = out?.value?.lovelaces ?? out?.coin ?? out?.amount ??
                 out?.value;
             amount = coin != null ? String(coin) : "0";
@@ -2422,3 +2988,46 @@ export {
     type MbCursor,
     type MbIndexStats,
 } from "./db/minibf";
+
+let epochNonceStartColumns: Promise<void> | null = null;
+async function ensureEpochNonceStartColumns(): Promise<void> {
+    if (!epochNonceStartColumns) {
+        epochNonceStartColumns = (async () => {
+            for (const col of ["start_evolving_hex", "start_candidate_hex"]) {
+                try {
+                    await sql.unsafe(`ALTER TABLE epoch_nonces ADD COLUMN ${col} TEXT`);
+                } catch {
+                    /* exists */
+                }
+            }
+        })();
+    }
+    await epochNonceStartColumns;
+}
+
+/** The evolver state right after TICKN into `epoch` (ηv, ηc at the epoch start), for header replay after a restart or rollback. */
+export async function storeEpochNonceStart(epoch: number, etaVHex: string, etaCHex: string): Promise<void> {
+    await ensureEpochNonceStartColumns();
+    await sql`UPDATE epoch_nonces SET start_evolving_hex = ${etaVHex}, start_candidate_hex = ${etaCHex} WHERE epoch = ${epoch}`;
+}
+
+export async function getEpochNonceStart(epoch: number): Promise<{ etaVHex: string; etaCHex: string } | null> {
+    await ensureEpochNonceStartColumns();
+    const rows = (await sql`SELECT start_evolving_hex, start_candidate_hex FROM epoch_nonces WHERE epoch = ${epoch}`.values()) as unknown[][];
+    if (!rows.length || rows[0]![0] == null || rows[0]![1] == null) return null;
+    return { etaVHex: String(rows[0]![0]), etaCHex: String(rows[0]![1]) };
+}
+
+/** Stored blocks with `from <= slot <= to`, ascending, in chunks (header replay). */
+export async function* storedBlocksInSlotRange(from: number, to: number, chunk = 2000): AsyncGenerator<{ slot: number; block_data: Uint8Array }> {
+    let cursor = from - 1;
+    for (;;) {
+        const rows = (await sql`SELECT slot, block_data FROM blocks WHERE slot > ${cursor} AND slot <= ${to} AND is_valid = TRUE ORDER BY slot LIMIT ${chunk}`.values()) as unknown[][];
+        if (!rows.length) return;
+        for (const r of rows) {
+            cursor = Number(r[0]);
+            yield { slot: cursor, block_data: new Uint8Array(r[1] as Buffer) };
+        }
+        if (rows.length < chunk) return;
+    }
+}

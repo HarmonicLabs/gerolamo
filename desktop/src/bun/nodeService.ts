@@ -28,6 +28,7 @@ import {
 import { buildConfigOverlay, DEFAULT_NODE_SETTINGS } from "../shared/nodeSettings";
 import { bootstrapAlive, bootstrapDbPath } from "./mithrilService";
 import { dbSidecars, wipeDirContents, wipeFiles } from "./wipe";
+import { ensureFeed, feedMempool, feedMetrics, stopFeed } from "./nodeFeed";
 
 const live = new Map<string, Subprocess>();
 
@@ -187,6 +188,7 @@ export async function startNode(input: Partial<InstanceConfig>): Promise<{
     }
 
     if (config.pid && isPidAlive(config.pid)) {
+      ensureFeed(config.id, gerolamoHttpBase(config.port));
       return { success: true, pid: config.pid, config };
     }
 
@@ -241,9 +243,11 @@ export async function startNode(input: Partial<InstanceConfig>): Promise<{
     config.lastError = undefined;
     saveInstance(getAppDb(), config);
     appendLog(logPath, `[ui] spawned pid=${pid} network=${config.network}\n`);
+    ensureFeed(config.id, gerolamoHttpBase(config.port));
 
     void child.exited.then((code) => {
       live.delete(config.id);
+      stopFeed(config.id);
       const row = getInstance(getAppDb(), config.id);
       const crashed = code !== 0 && !intentionalStop.has(config.id);
       let restartIn: number | null = null;
@@ -331,6 +335,7 @@ export async function stopNode(id: string): Promise<{ success: boolean; error?: 
       clearTimeout(pendingRestart);
       restartTimers.delete(id);
     }
+    stopFeed(id);
     const row = getInstance(getAppDb(), id);
     const liveProc = live.get(id);
     const pid = row?.pid ?? liveProc?.pid ?? null;
@@ -403,6 +408,8 @@ export async function submitTx(id: string, txHex: string): Promise<SubmitTxResul
 export async function mempool(id: string): Promise<MempoolSnapshot> {
   const row = getInstance(getAppDb(), id);
   if (!row) return { ok: false, count: 0, txs: [], error: "unknown instance" };
+  const cached = feedMempool(id, 30_000);
+  if (cached) return cached;
   try {
     const res = await fetch(gerolamoHttpBase(row.port) + "/api/v0/mempool", { signal: AbortSignal.timeout(4000) });
     if (!res.ok) return { ok: false, count: 0, txs: [], error: `HTTP ${res.status}` };
@@ -446,8 +453,11 @@ export async function getNodeStatus(id: string): Promise<StatusResult | null> {
   let sync = null;
   let metrics = null;
   if (running) {
+    // The node's WebSocket pushes /metrics as blocks land; only fall back to an
+    // HTTP fetch while the stream is down or idle (no block for 5 s).
+    ensureFeed(id, gerolamoHttpBase(row.port));
     health = await healthCheck(row);
-    metrics = await fetchGerolamoMetrics(gerolamoHttpBase(row.port));
+    metrics = feedMetrics(id) ?? (await fetchGerolamoMetrics(gerolamoHttpBase(row.port)));
     sync = metrics ? deriveGerolamoSyncStatus(metrics, row.network) : null;
   }
   const resources = resourceSnapshot({
@@ -537,10 +547,32 @@ export function wipeSnapshots(id: string): { ok: boolean; error?: string; path?:
   }
 }
 
-export function hydrate(): void {
+/**
+ * Instances the user left running that are not running now: the app was closed
+ * (or the machine rebooted) while the node was up, or it crashed with a restart
+ * still pending when the app went away. Those come back on launch.
+ */
+export function autostartCandidates(nodes: InstanceConfig[], alive: (pid: number | null | undefined) => boolean = isPidAlive): InstanceConfig[] {
+  return nodes.filter((n) => {
+    if (n.pid && alive(n.pid)) return false;
+    if (n.runState === "running") return true;
+    return n.runState === "failed" && /restarting in/.test(n.lastError ?? "");
+  });
+}
+
+/** Reconcile persisted state with reality on launch, then bring back what was running. */
+export async function hydrate(start: (input: Partial<InstanceConfig>) => Promise<{ success: boolean; error?: string }> = startNode): Promise<string[]> {
+  const started: string[] = [];
   for (const n of listNodes()) {
-    if (n.pid && !isPidAlive(n.pid) && n.runState === "running") {
-      saveInstance(getAppDb(), { ...n, pid: null, runState: "stopped" });
-    }
+    if (n.pid && isPidAlive(n.pid)) ensureFeed(n.id, gerolamoHttpBase(n.port));
   }
+  for (const n of autostartCandidates(listNodes())) {
+    saveInstance(getAppDb(), { ...n, pid: null, runState: "stopped" });
+    const logPath = join(n.instanceDir, "logs", "daemon.log");
+    appendLog(logPath, `[ui] autostart: node was running when the app last exited (${new Date().toISOString()})\n`);
+    const r = await start(n);
+    if (r.success) started.push(n.id);
+    else appendLog(logPath, `[ui] autostart failed: ${r.error}\n`);
+  }
+  return started;
 }

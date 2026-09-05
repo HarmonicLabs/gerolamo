@@ -1,3 +1,5 @@
+import { Cbor, CborArray, CborBytes, CborMap, CborObj, CborTag, CborUInt } from "@harmoniclabs/cbor";
+import { blake2b_224 } from "@harmoniclabs/crypto";
 import { Hash32, Script } from "@harmoniclabs/cardano-ledger-ts";
 import { dataToCbor, isData } from "@harmoniclabs/plutus-data";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
@@ -50,26 +52,106 @@ function scriptFromStoredFields(value: Record<string, unknown>): Script | null {
     }
 }
 
+/**
+ * Datum / reference-script metadata of a ledger-ts output, read from the
+ * output's own CBOR bytes. The class-based checks (`instanceof Hash32`,
+ * `isData`) silently failed for objects built by ledger-ts's nested copies of
+ * plutus-data / cbor, which dropped every inline datum from the UTxO set.
+ */
 export function extractLedgerTxOutMetadata(output: unknown): MiniBfTxOutMetadata {
     if (output == null || typeof output !== "object") return { ...EMPTY_METADATA };
-    const txOut = output as { datum?: unknown; refScript?: unknown };
+    const txOut = output as { datum?: unknown; refScript?: unknown; cborRef?: any; toCborBytes?: () => Uint8Array };
+    let bytes: Uint8Array | null = null;
+    try {
+        bytes = txOut.cborRef?.toBuffer?.() ?? txOut.toCborBytes?.() ?? null;
+    } catch {
+        bytes = null;
+    }
+    const fromBytes = bytes ? txOutMetadataFromCbor(bytes) : null;
+    if (fromBytes) return fromBytes;
 
+    // Fallback: duck-typed object inspection.
     let datumHash: string | null = null;
     let inlineDatumCbor: string | null = null;
-    if (txOut.datum instanceof Hash32) {
-        datumHash = txOut.datum.toString();
-    } else if (isData(txOut.datum)) {
-        inlineDatumCbor = dataToCbor(txOut.datum).toString();
+    const d: any = txOut.datum;
+    if (d != null) {
+        const asHex = typeof d.toString === "function" ? String(d.toString()) : "";
+        if (/^[0-9a-f]{64}$/i.test(asHex)) datumHash = asHex.toLowerCase();
+        else {
+            try {
+                inlineDatumCbor = toHex(typeof d.toCbor === "function" ? d.toCbor().toBuffer() : dataToCbor(d).toBuffer());
+            } catch {
+                inlineDatumCbor = null;
+            }
+        }
     }
-
     let scriptRefHash: string | null = null;
     let scriptRefCbor: string | null = null;
-    if (txOut.refScript instanceof Script) {
-        scriptRefHash = txOut.refScript.hash.toString();
-        scriptRefCbor = toHex(txOut.refScript.cbor);
+    const rs: any = txOut.refScript;
+    if (rs && rs.hash != null) {
+        scriptRefHash = String(rs.hash.toString()).toLowerCase();
+        try {
+            scriptRefCbor = rs.cbor ? toHex(rs.cbor) : null;
+        } catch {
+            scriptRefCbor = null;
+        }
     }
-
     return { datumHash, inlineDatumCbor, scriptRefHash, scriptRefCbor };
+}
+
+/**
+ * Babbage map-form output `{0: addr, 1: value, 2: datum_option, 3: script_ref}`
+ * with `datum_option = [0, hash32] / [1, #6.24(bytes .cbor data)]` and
+ * `script_ref = #6.24(bytes .cbor [lang, script])`; pre-Babbage array form
+ * `[addr, value, datum_hash?]`.
+ */
+export function txOutMetadataFromCbor(bytes: Uint8Array): MiniBfTxOutMetadata | null {
+    let obj: CborObj;
+    try {
+        obj = Cbor.parse(bytes);
+    } catch {
+        return null;
+    }
+    const out: MiniBfTxOutMetadata = { ...EMPTY_METADATA };
+    if (obj instanceof CborArray) {
+        const third = obj.array[2];
+        if (third instanceof CborBytes && third.bytes.length === 32) out.datumHash = toHex(third.bytes);
+        return out;
+    }
+    if (!(obj instanceof CborMap)) return null;
+    for (const { k, v } of obj.map) {
+        if (!(k instanceof CborUInt)) continue;
+        const key = Number(k.num);
+        if (key === 2 && v instanceof CborArray) {
+            const kind = v.array[0], payload = v.array[1];
+            if (kind instanceof CborUInt && Number(kind.num) === 0 && payload instanceof CborBytes) out.datumHash = toHex(payload.bytes);
+            else if (kind instanceof CborUInt && Number(kind.num) === 1 && payload instanceof CborTag && payload.data instanceof CborBytes) out.inlineDatumCbor = toHex(payload.data.bytes);
+        } else if (key === 3 && v instanceof CborTag && v.data instanceof CborBytes) {
+            const inner = v.data.bytes; // cbor of [lang, script]
+            out.scriptRefCbor = toHex(inner);
+            out.scriptRefHash = scriptHashOfWrapped(inner);
+        }
+    }
+    return out;
+}
+
+/** Script hash of a `[lang, script]` wrapper: blake2b_224(lang_tag ‖ script bytes) — native scripts hash their CBOR, Plutus their flat bytes. */
+export function scriptHashOfWrapped(wrapped: Uint8Array): string | null {
+    try {
+        const arr = Cbor.parse(wrapped);
+        if (!(arr instanceof CborArray) || !(arr.array[0] instanceof CborUInt)) return null;
+        const lang = Number((arr.array[0] as CborUInt).num);
+        const body = arr.array[1];
+        if (!body) return null;
+        const scriptBytes = lang === 0 ? Cbor.encode(body).toBuffer() : body instanceof CborBytes ? body.bytes : null;
+        if (!scriptBytes) return null;
+        const pre = new Uint8Array(1 + scriptBytes.length);
+        pre[0] = lang;
+        pre.set(scriptBytes, 1);
+        return toHex(blake2b_224(pre));
+    } catch {
+        return null;
+    }
 }
 
 export function parseStoredTxOut(raw: unknown): StoredTxOut {

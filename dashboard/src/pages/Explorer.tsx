@@ -17,6 +17,7 @@ import {
   type ExplorerRoute,
   type NodeMetrics,
 } from "@/lib/explorer";
+import { nodeSocket } from "@/lib/nodeSocket";
 
 // ---------------------------------------------------------------------------
 // Small shared pieces
@@ -56,9 +57,18 @@ const ErrorBox: Component<{ error: unknown; what: string }> = (props) => (
 );
 
 function useTip() {
-  const [tip, { refetch }] = createResource<NodeMetrics | null>(() => explorer.metrics().catch(() => null));
-  const timer = setInterval(() => void refetch(), 5000);
-  onCleanup(() => clearInterval(timer));
+  const [tip, setTip] = createSignal<NodeMetrics | null>(null);
+  const load = () => explorer.metrics().then(setTip).catch(() => {});
+  onMount(() => void load());
+  const off = nodeSocket.subscribe("metrics", (data) => setTip(data as NodeMetrics));
+  // While the socket is down, poll slowly; while it is up the node pushes at most once a second.
+  const timer = setInterval(() => {
+    if (!nodeSocket.connected()) void load();
+  }, 10_000);
+  onCleanup(() => {
+    off();
+    clearInterval(timer);
+  });
   return tip;
 }
 
@@ -66,19 +76,25 @@ function useTip() {
 // Blocks list
 // ---------------------------------------------------------------------------
 
+/** Rows shown while following the tip: the list is always the newest LIVE_WINDOW blocks, never more. */
+const LIVE_WINDOW = 30;
+const PAGE_SIZE = 30;
+
 const BlocksPage: Component<{ before?: string }> = (props) => {
   const [pages, setPages] = createSignal<BfBlock[][]>([]);
   const [cursor, setCursor] = createSignal<string | undefined>(props.before);
   const [loading, setLoading] = createSignal(false);
   const [error, setError] = createSignal<unknown>(null);
   const all = createMemo(() => pages().flat());
+  // Following the tip until the reader pages into history; then the list holds still.
+  const live = createMemo(() => !props.before && pages().length <= 1);
 
   const loadMore = async () => {
     if (loading()) return;
     setLoading(true);
     setError(null);
     try {
-      const page = await explorer.blocks(25, cursor());
+      const page = await explorer.blocks(PAGE_SIZE, cursor());
       setPages((p) => [...p, page]);
       const last = page[page.length - 1];
       setCursor(last ? last.hash : undefined);
@@ -91,19 +107,37 @@ const BlocksPage: Component<{ before?: string }> = (props) => {
   };
   onMount(() => void loadMore());
 
-  // live prepend: poll the tip every 5 s and fetch anything newer than the first row
+  // Live view: the node pushes each applied block (coalesced while syncing fast);
+  // prepend it and keep the newest LIVE_WINDOW rows, so the list never grows.
+  const off = nodeSocket.subscribe("block", (doc) => {
+    const b = doc as BfBlock;
+    if (!live() || !b?.hash) return;
+    const cur = all();
+    if (cur.some((x) => x.hash === b.hash)) return;
+    const next = [b, ...cur].slice(0, LIVE_WINDOW);
+    setPages([next]);
+    const last = next[next.length - 1];
+    setCursor(last ? last.hash : undefined);
+  });
+  // Socket down: fall back to replacing the window every 5 s.
   const timer = setInterval(async () => {
-    const first = all()[0];
-    if (!first || props.before) return;
+    if (nodeSocket.connected() || !live() || loading() || all().length === 0) return;
     try {
-      const fresh = await explorer.blocks(10);
-      const newer = fresh.filter((b) => b.slot > first.slot || (b.slot === first.slot && b.hash !== first.hash && !all().some((x) => x.hash === b.hash)));
-      if (newer.length) setPages((p) => [newer, ...p]);
+      const fresh = await explorer.blocks(LIVE_WINDOW);
+      const first = all()[0];
+      if (fresh.length && (fresh[0]!.hash !== first?.hash || fresh.length !== all().length)) {
+        setPages([fresh]);
+        const last = fresh[fresh.length - 1];
+        setCursor(last ? last.hash : undefined);
+      }
     } catch {
       /* transient */
     }
   }, 5000);
-  onCleanup(() => clearInterval(timer));
+  onCleanup(() => {
+    off();
+    clearInterval(timer);
+  });
 
   return (
     <Card class="glass-card-accent flex flex-col flex-1 min-h-0">
@@ -112,6 +146,11 @@ const BlocksPage: Component<{ before?: string }> = (props) => {
           <div class="flex items-center gap-3">
             <CardTitle>Blocks</CardTitle>
             <Badge variant="muted">{all().length}</Badge>
+            <Show when={live()}>
+              <Badge variant={nodeSocket.connected() ? "success" : "muted"} title={nodeSocket.connected() ? "Blocks arrive over the node's WebSocket as they are applied." : "WebSocket down; refreshing every 5 s."}>
+                {nodeSocket.connected() ? "live" : "polling"} · newest {LIVE_WINDOW}
+              </Badge>
+            </Show>
           </div>
           <span class="text-[11px] text-text-dim">newest first · click a row for the block, an epoch, or the leader</span>
         </div>

@@ -66,4 +66,49 @@ describe("RollForwardBatcher", () => {
         expect(batcher.size).toBe(0);
         batcher.dispose();
     });
+
+    test("holds pushes while more than maxQueuedBatches batches wait for consensus", async () => {
+        const started: number[][] = [];
+        let release: (() => void) | null = null;
+        const batcher = new RollForwardBatcher<number>({
+            maxItems: 2,
+            flushMs: 1000, // no deadline flush during the test: only full batches chain
+            maxQueuedBatches: 1,
+            onBatch: async (items) => {
+                started.push(items);
+                await new Promise<void>((r) => { release = r; });
+            },
+        });
+        // batch 1 fills and starts (blocked inside onBatch); batch 2 chains behind it
+        void batcher.push(1); void batcher.push(2);
+        void batcher.push(3); void batcher.push(4);
+        await Promise.resolve();
+        expect(batcher.queued).toBe(2);
+        // a push that does not fill a batch must now wait for room
+        let resolved = false;
+        const held = batcher.push(5).then(() => { resolved = true; });
+        await new Promise((r) => setTimeout(r, 5));
+        expect(resolved).toBe(false);
+        // consensus finishes batch 1 → one batch queued → room
+        release!();
+        await new Promise((r) => setTimeout(r, 5));
+        expect(resolved).toBe(true);
+        await held;
+        expect(started[0]).toEqual([1, 2]);
+        batcher.dispose();
+    });
+
+    test("dispose releases held pushes", async () => {
+        const batcher = new RollForwardBatcher<number>({
+            maxItems: 1,
+            flushMs: 0,
+            maxQueuedBatches: 1,
+            onBatch: () => new Promise<void>(() => {}),
+        });
+        void batcher.push(1); void batcher.push(2); void batcher.push(3);
+        const held = batcher.whenRoom();
+        batcher.dispose();
+        await held;
+        expect(batcher.queued).toBe(3);
+    });
 });

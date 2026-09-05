@@ -50,6 +50,28 @@ export function emitTip(tip: TipEvent): void {
     }, TIP_COALESCE_MS);
 }
 
+type MempoolListener = () => void;
+let mempoolListener: MempoolListener | null = null;
+let mempoolTimer: ReturnType<typeof setTimeout> | null = null;
+const MEMPOOL_COALESCE_MS = 200;
+
+export function setMempoolListener(cb: MempoolListener | null): void {
+    mempoolListener = cb;
+}
+
+/** The local mempool changed (a tx was added or drained). Coalesced; the listener snapshots it. */
+export function emitMempool(): void {
+    if (mempoolTimer != null) return;
+    mempoolTimer = setTimeout(() => {
+        mempoolTimer = null;
+        try {
+            mempoolListener?.();
+        } catch {
+            /* */
+        }
+    }, MEMPOOL_COALESCE_MS);
+}
+
 export function emitPeers(snap: PeersEvent): void {
     if (!peersListener) return;
     queueMicrotask(() => {

@@ -3,13 +3,15 @@ import { format, isAbsolute } from "node:path";
 
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import { blake2b_256 } from "@harmoniclabs/crypto";
 
 import { Logger } from "../utils/logger";
 import { sql } from "../sql";
+import { getMaxBlockNo, insertBlockVolatile } from "../db";
 import { applyBlock } from "../consensus/BlockApplication";
+import { blockFetchHeaderIdentity } from "../consensus/blockHeaderParser";
 import {
     getByronTxPayloads,
+    getHeaderPrevHashHex,
     getHeaderSlot,
     getShelleyTxBodies,
     isByronBlock,
@@ -163,22 +165,49 @@ export async function processChunk(
     const eras: Record<string, number> = {};
 
     const applyLoop = async (): Promise<void> => {
+        // Chain height continues from whatever the block store already holds
+        // (chunks are applied in order, so this is the previous chunk's last
+        // main block). Byron EBBs (era 0) carry no height, like live sync.
+        let nextBlockNo = await getMaxBlockNo();
         for (const block of blocks) {
             let era: number | string = "?";
             let blockHashHex = "";
             try {
                 const meb = MultiEraBlock.fromCbor(block.blockCbor);
                 era = meb.era;
-                blockHashHex = toHex(block.blockHash);
+                // Hash the header bytes as they appear in the chunk with the era's
+                // rule (Byron: blake2b over `[type, header]`), never a re-encoding:
+                // this is the hash ChainSync peers and the block store key on.
+                const identity = blockFetchHeaderIdentity(block.blockCbor);
+                const headerBytes = identity.rawHeaderBytes;
+                const headerHash = identity.hash;
+                blockHashHex = toHex(headerHash);
+                const slot = getHeaderSlot(meb.block.header);
+                const isEbb = identity.era === 0;
+                const blockNo = isEbb ? null : ++nextBlockNo;
 
                 const stats = countBlockBodyStats(meb);
 
                 await applyBlock(
                     meb.block,
-                    getHeaderSlot(meb.block.header),
-                    blake2b_256(meb.block.header.toCborBytes()),
+                    slot,
+                    headerHash,
                     client,
+                    blockNo,
                 );
+                // Same row live sync writes (src/consensus/ConsensusOrchestratooor.ts):
+                // the chunk's block bytes are the `[era, block]` wire form BlockFetch
+                // delivers, so tip lookup, ChainSync resume, header replay after a
+                // restart, the relay store and the explorer all see Mithril-imported
+                // history exactly like synced history.
+                await insertBlockVolatile({
+                    slot,
+                    blockHash: blockHashHex,
+                    prevHash: getHeaderPrevHashHex(meb.block.header),
+                    blockNo,
+                    headerData: headerBytes,
+                    blockData: block.blockCbor,
+                });
                 appliedCount++;
                 txs += stats.txs;
                 inputs += stats.inputs;

@@ -279,14 +279,29 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
         if (this.applying) return;
         this.applying = true;
         try {
-            while (!this.poisoned) {
+            for (;;) {
+                if (this.poisoned) break;
+                const gen = this.generation;
                 const job = this.jobs.get(this.nextApplySeq);
                 if (!job || !job.blocks) break;
+                let failure: unknown = null;
+                let failed = false;
                 try {
                     await this.opts.onRange(job.points, job.blocks, job.peer!);
                 } catch (err) {
-                    job.error = err;
-                    this.poison(err);
+                    failed = true;
+                    failure = err;
+                }
+                if (gen !== this.generation) {
+                    // reset() ran while this range was applying: the job is gone and
+                    // nextApplySeq already points at the first post-reset submission.
+                    // Advancing it here skipped that range for good (preview: a 150-block
+                    // hole, then a false "ledger inconsistent" halt). Look at the new queue.
+                    continue;
+                }
+                if (failed) {
+                    job.error = failure;
+                    this.poison(failure);
                     break;
                 }
                 this.jobs.delete(job.seq);

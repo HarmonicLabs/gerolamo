@@ -1,3 +1,4 @@
+import { getShelleyGenesisConfig } from "../utils/paths";
 import { sql } from "../sql";
 import { logger } from "../utils/logger";
 import { blockFrostFetchEpochParams } from "../utils/blockFrostFetchEra";
@@ -75,6 +76,18 @@ export function epochParamsFromGenesis(epoch: number, genesis: ShelleyGenesisCon
         max_block_size: pp.maxBlockBodySize,
         max_block_header_size: pp.maxBlockHeaderSize,
         protocol_major_ver: (pp.protocolVersion as { major?: number } | undefined)?.major,
+        decentralisation_param: pp.decentralisationParam,
+        key_deposit: pp.keyDeposit,
+        pool_deposit: pp.poolDeposit,
+        min_utxo: pp.minUTxOValue,
+        protocol_minor_ver: (pp.protocolVersion as { minor?: number } | undefined)?.minor,
+        e_max: pp.eMax,
+        n_opt: pp.nOpt,
+        a0: pp.a0,
+        rho: pp.rho,
+        tau: pp.tau,
+        min_pool_cost: pp.minPoolCost,
+        extra_entropy: (pp.extraEntropy as { tag?: string } | undefined)?.tag === "NeutralNonce" ? null : (pp.extraEntropy as any)?.hash ?? null,
         source: "shelley-genesis",
     });
 }
@@ -109,6 +122,24 @@ async function readDb(epoch: number): Promise<Record<string, unknown> | null> {
     }
 }
 
+/** Store a locally derived (or imported) parameter record for an epoch. */
+export async function storeEpochParams(epoch: number, raw: Record<string, unknown>, source: string): Promise<void> {
+    cache.delete(epoch);
+    await writeDb(epoch, raw, source);
+}
+
+/** The stored raw record for an epoch, or null. */
+export async function readEpochParamsRaw(epoch: number): Promise<Record<string, unknown> | null> {
+    return readDb(epoch);
+}
+
+/** The `source` column of the stored record ("genesis" | "local" | "external" …), or null. */
+export async function readEpochParamsSource(epoch: number): Promise<string | null> {
+    await ensureTable();
+    const rows = (await sql`SELECT source FROM epoch_params WHERE epoch = ${epoch}`.values()) as unknown[][];
+    return rows.length ? String(rows[0]![0]) : null;
+}
+
 async function writeDb(epoch: number, raw: Record<string, unknown>, source: string): Promise<void> {
     await ensureTable();
     await sql`INSERT OR REPLACE INTO epoch_params (epoch, params, source) VALUES (${epoch}, ${JSON.stringify(raw)}, ${source})`;
@@ -121,6 +152,7 @@ async function writeDb(epoch: number, raw: Record<string, unknown>, source: stri
 export async function getEpochBodyParams(
     config: GerolamoConfig,
     epoch: number,
+    depth = 0,
 ): Promise<EpochBodyParams | null> {
     const hit = cache.get(epoch);
     if (hit) return hit;
@@ -136,10 +168,41 @@ export async function getEpochBodyParams(
         logger.warn(`epoch_params read failed for epoch ${epoch}:`, err);
     }
 
+    // Local derivation: the previous epoch's record carried forward (the boundary
+    // hook applies quorum updates when it writes the new epoch; this covers reads
+    // that happen before that, e.g. header-stage lookups).
+    try {
+        // Headers can run several epochs ahead of the applier: derive from the nearest
+        // stored record epoch by epoch (in memory) rather than fetching externally.
+        let prev = await readDb(epoch - 1);
+        if (!prev && depth < 24) prev = (await getEpochBodyParams(config, epoch - 1, depth + 1))?.raw ?? null;
+        if (prev) {
+            // Same derivation the boundary will do (quorum updates of the previous epoch,
+            // era-genesis merges on a hard fork), so headers that arrive ahead of the
+            // boundary are judged with the coming epoch's parameters (d, protocol version).
+            const { deriveNextEpochParams, applyEraGenesis, eraGenesisFilesFor } = await import("./pparams");
+            let quorum = 5;
+            try {
+                const g: any = await getShelleyGenesisConfig(config as any);
+                quorum = Number(g?.updateQuorum ?? 5);
+            } catch {
+                /* default quorum */
+            }
+            const { raw } = await deriveNextEpochParams(prev, epoch, quorum);
+            await applyEraGenesis(raw, Number(prev.protocol_major_ver ?? 0), eraGenesisFilesFor(config));
+            raw.source = "local-carry";
+            const p = epochParamsFromRecord(epoch, raw);
+            cache.set(epoch, p);
+            return p;
+        }
+    } catch {
+        /* fall through */
+    }
     try {
         const raw = await blockFrostFetchEpochParams(config, epoch);
         const p = epochParamsFromRecord(epoch, raw);
         cache.set(epoch, p);
+        logger.warn(`epoch parameters for epoch ${epoch} taken from an external source (no local record); Phase 4 tracks them locally`);
         try {
             await writeDb(epoch, raw, "external");
         } catch (err) {

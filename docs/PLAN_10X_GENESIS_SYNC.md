@@ -962,5 +962,49 @@ GC, `BlockFetchBlock` retained: 912 (the in-flight/awaiting ranges), rate
   Replaced by a set-based pass (temp table with `ROW_NUMBER() OVER (ORDER BY
   slot)` + index + one `UPDATE`).
 
+### 2026-09-03 — Mithril importer on the new block schema; WASM client removed
+
+- **Mithril chunk import wrote no block rows.** `processChunk` applied ledger
+  state but never inserted into `blocks`, and the node derives everything
+  from that table: the ChainSync resume point (`getMaxSlot` → `getBlockBySlot`),
+  the Byron OBFT header replay after a restart (`header_data`), the relay
+  block server and the explorer (`block_data`, `block_no`). A Mithril-bootstrapped
+  DB therefore looked empty and re-synced from genesis on top of the applied
+  UTxO. The importer now writes the same row live sync writes, inside the
+  chunk's transaction: header hash via `blockFetchHeaderIdentity` on the raw
+  chunk bytes (Byron `[type, header]` rule, no re-encoding), `header_data` =
+  raw header, `block_data` = the chunk's `[era, block]` bytes (the BlockFetch
+  wire form), heights continued from `getMaxBlockNo()` with EBBs unnumbered.
+  `src/state/legacy.chunkImport.test.ts` builds a two-chunk ImmutableDB from
+  the preprod fixtures and checks heights, hashes, bytes and the resume point.
+- **WASM Mithril client removed.** `@mithril-dev/mithril-client-wasm` dropped
+  from `package.json`/`bun.lock`; `createMithrilClient`, `runWasmBootstrap`,
+  `dualRunCertificateChain`, `--engine wasm|both|auto` and the chaos dual-run
+  script are gone. `MithrilEngine` is `"ts" | "bin"`. The crypto inventory now
+  reports pure TS as the source of truth. `mithril_certificates.wasm_ok` /
+  `dual_match` stay as nullable legacy columns.
+- **Dead block-store code deleted.** `AnchoredVolatileState.ts` and
+  `StableState.ts` used a pre-migration schema (`blocks.data`,
+  `immutable_blocks` without `header_data`) and had no consumers.
+
+### 2026-09-03 — verifiers stuck on "behind"
+
+- **Symptom.** Two of three hot verifiers read `behind` for the whole run and
+  were never swapped. A verifier slower than the primary drops out of the
+  k-deep comparison window within a minute of a 470 blocks/s sync and, once
+  there, every header it sends is "behind": it verified nothing and nothing
+  demoted it (only silence and excess-hot did).
+- **Fix 1: late agreement.** A "behind" point is now checked against the
+  applied chain (`confirmBehindPoint`, every 32nd header): our block at that
+  slot → `noteAgreedBehind`, the peer reads `agrees @slot · N slots behind`;
+  not ours and our chain is settled k blocks past it → malicious. Slow
+  verifiers keep confirming history instead of being dead weight.
+- **Fix 2: rotation.** Governor step 4b swaps a verifier more than
+  `sync.verifierMaxLagSlots` (200 000) behind the primary for a warm peer, only
+  when one is ready, after 2 min hot; the leaver waits warm
+  `sync.verifierLagHoldMs` (10 min). A fresh verifier starts at our tip, so
+  near-tip agreement (what makes a rollback possible) comes back.
+  `src/network/verifierRotation.ts` + tests; the desktop shows the lag.
+
 Next: a from-genesis mainnet run into Shelley/Alonzo with `Sync profile:`
 lines kept, then §6.3 → §5 against those numbers.

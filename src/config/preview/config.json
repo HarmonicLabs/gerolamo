@@ -1,0 +1,72 @@
+{
+  "network": "testnet",
+  "networkMagic": 2,
+  "role": "data",
+  "byronGenesisFile": "./src/config/preview/byron-genesis.json",
+  "byronGenesisHash": "83de1d7302569ad56cf9139a41e2e11346d4cb4a31c00142557b6ab3fa550761",
+  "topologyFile": "./src/config/preview/topology.json",
+  "syncFromTip": true,
+  "syncFromGenesis": false,
+  "genesisBlockHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "syncFromPoint": false,
+  "syncFromPointSlot": "0",
+  "syncFromPointBlockHash": "0000000000000000000000000000000000000000000000000000000000000000",
+  "logLevel": "info",
+  "shelleyGenesisFile": "./src/config/preview/shelley-genesis.json",
+  "dbPath": "./.live/test.db",
+  "port": 3035,
+  "unixSocket": false,
+  "n2c": {
+    "enabled": false,
+    "socketPath": "./ledger/node.socket"
+  },
+  "n2n": {
+    "enabled": false,
+    "host": "0.0.0.0",
+    "port": 3001,
+    "maxConnections": 64,
+    "maxRangeBlocks": 256,
+    "handshakeTimeoutMs": 10000,
+    "idleTimeoutMs": 120000
+  },
+  "blockFetchBatch": {
+    "pipelineDepth": 32,
+    "maxBlocks": 32,
+    "flushMs": 25,
+    "rangeTimeoutMs": 55000,
+    "parallelRanges": 3
+  },
+  "logs": {
+    "logToFile": false,
+    "logToConsole": true,
+    "logDirectory": "./logs"
+  },
+  "snapshot": {
+    "enable": false,
+    "source": "blockfrost"
+  },
+  "tuiEnabled": false,
+  "blockfrostUrl": "https://cardano-preview.blockfrost.io/api/v0",
+  "peerGovernor": {
+    "enabled": true,
+    "targetHot": 3,
+    "targetWarm": 6,
+    "targetCold": 64,
+    "maxHot": 8,
+    "maxWarm": 24,
+    "maxCold": 256,
+    "tickMs": 15000,
+    "shareBatch": 10,
+    "shareEveryTicks": 2
+  },
+  "validation": {
+    "workers": "auto"
+  },
+  "sync": {
+    "quorum": 2,
+    "maliciousHoldMs": 3600000
+  },
+  "shelleyGenesisHash": "363498d1024f84bb39d3fa9593ce391483cb40d479b87233f868d6e57c3a400d",
+  "alonzoGenesisFile": "./src/config/preview/alonzo-genesis.json",
+  "conwayGenesisFile": "./src/config/preview/conway-genesis.json"
+}

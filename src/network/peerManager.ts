@@ -25,7 +25,13 @@ import {
     DEFAULT_PEER_GOVERNOR_TARGETS,
 } from "./PeerGovernor";
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { emitPeers } from "./liveEvents";
+import { emitMempool, emitPeers } from "./liveEvents";
+import {
+    DEFAULT_VERIFIER_LAG_HOLD_MS,
+    DEFAULT_VERIFIER_MAX_LAG_SLOTS,
+    DEFAULT_VERIFIER_MIN_HOT_AGE_MS,
+    pickLaggingVerifiers,
+} from "./verifierRotation";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import { withTimeout } from "../utils/withTimeout";
 import type { ResolvedN2NConfig } from "./n2n/config";
@@ -94,11 +100,24 @@ export interface BlockFetchBatchConfig {
     parallelRanges?: number;
 }
 
+export interface ProducerConfig {
+    coldVkeyFile: string;
+    kesSkeyFile: string;
+    vrfSkeyFile: string;
+    opcertFile: string;
+    /** Where the last forged slot is persisted (never two blocks in one slot across restarts). */
+    stateFile?: string;
+    /** Log leadership without forging (read-only check against cardano-cli). */
+    dryRun?: boolean;
+}
+
 export interface GerolamoConfig {
     readonly network: NetworkT;
     readonly networkMagic: number;
     /** "data" (default, outbound only) or "relay" (also accepts inbound N2N). See nodeRole.ts. */
     readonly role?: NodeRole;
+    /** Block producer keys (cardano-cli TextEnvelope files); present ⇒ the node forges when it leads. */
+    readonly producer?: ProducerConfig;
     readonly topologyFile: string;
     readonly syncFromTip: boolean;
     readonly syncFromGenesis: boolean;
@@ -163,6 +182,13 @@ export interface GerolamoConfig {
         readonly quorum?: number;
         /** Cold hold for divergent / lying peers, ms. Default 1h. */
         readonly maliciousHoldMs?: number;
+        /**
+         * A hot verifier whose tip trails the primary's by more than this many slots is
+         * swapped for a warm peer (which starts at our tip). Default 200000; 0 disables.
+         */
+        readonly verifierMaxLagSlots?: number;
+        /** How long a rotated-out verifier waits warm before it may go hot again. Default 10 min. */
+        readonly verifierLagHoldMs?: number;
     };
     allPeers: Map<string, PeerClient>;
 }
@@ -176,6 +202,11 @@ const clientsById = new Map<string, PeerClient>();
 let governor: PeerGovernor | undefined;
 let monitorInterval: ReturnType<typeof setInterval> | undefined;
 let consensus: ConsensusOrchestrator | undefined;
+
+/** The running consensus orchestrator (after initPeerManager), for the block producer. */
+export function getConsensus(): ConsensusOrchestrator | undefined {
+    return consensus;
+}
 let activeConfig: GerolamoConfig | undefined;
 let tickCount = 0;
 /** In-flight connects so we don't double-promote the same cold peer. */
@@ -699,6 +730,35 @@ async function governorTick(
             }
         }
 
+        // 4b) rotate verifiers that fell too far behind the primary: they no longer
+        // compare anything near the tip. Only when a warm peer is ready to take the
+        // slot, so the hot count never dips; the leaver waits warm for a while.
+        const maxLag = BigInt(Math.max(0, Math.trunc(config.sync?.verifierMaxLagSlots ?? Number(DEFAULT_VERIFIER_MAX_LAG_SLOTS))));
+        if (maxLag > 0n && consensus) {
+            const snap = consensus.syncSnapshot();
+            const byKey = new Map(snap.peers.map((a) => [a.key, a] as const));
+            const lagging = pickLaggingVerifiers(
+                gov.listByTier("hot").map((rec) => ({
+                    key: rec.key,
+                    role: byKey.get(rec.key)?.role ?? null,
+                    lagSlots: byKey.get(rec.key)?.lagSlots ?? null,
+                    promotedAt: rec.promotedAt ?? null,
+                })),
+                { maxLagSlots: maxLag, minHotAgeMs: DEFAULT_VERIFIER_MIN_HOT_AGE_MS, now },
+            );
+            for (const lag of lagging) {
+                const rec = gov.get(lag.key);
+                const [replacement] = gov.pickWarmForHot(1, now);
+                if (!rec || !replacement) break;
+                logger.info(
+                    `Lagging verifier hot→warm ${rec.key} (${lag.lagSlots} slots behind the primary, limit ${maxLag}); promoting ${replacement.key}`,
+                );
+                demoteHotToWarm(rec, gov);
+                rec.nextRetryAt = now + (config.sync?.verifierLagHoldMs ?? DEFAULT_VERIFIER_LAG_HOLD_MS);
+                await promoteToHot(replacement, gov, connectTimeoutMs);
+            }
+        }
+
         // 5) demote excess hot (never last hot; pure pick already enforces)
         const demote = gov.pickHotForDemotion(gov.excessHot() || 0);
         if (demote.length === 0 && gov.counts().hot > gov.targets.targetHot) {
@@ -867,6 +927,7 @@ export function createHttpPeerManager(): {
             // The mempool is shared by every peer connection; any hot peer's client
             // appends to it, and every hot peer serves it on TxSubmission requests.
             const r = await peer.submitToSharedMempool(txCbor);
+            emitMempool();
             return { status: String(r.status), nTxs: Number(r.nTxs), availableSpace: Number(r.aviableSpace) };
         },
         getGovernorSnapshot: () => getGovernorSnapshot(),

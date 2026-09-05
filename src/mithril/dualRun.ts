@@ -1,27 +1,10 @@
 /**
- * Phase 4 dual-run scaffold — WASM is source of truth for full cert-chain.
- *
- * Stage 1 (done): pure-TS cert shape parse of AVK + multi_signature.
- * Stage 2 (done): pure-TS STM crypto *prep* (G1/G2 decode + millerLoop plumbing).
- * Stage 3 (done): pure-TS Merkle batch_proof *structural* validate.
- * Stage 4 (done): pure-TS Merkle batch path root verify (Blake2b-256).
- * Stage 5a (done): pure-TS STM preliminary (lottery + bounds + k).
- * Stage 5b (done): pure-TS BLS multi-sig aggregate verify (aggregateOk).
- * Stage 5c (done): pure-TS certificate-chain walk (chainOk only at genesis+Ed25519).
- * Stage 5d (done): Certificate::try_compute_hash content-hash (contentHashOk).
- * Stage 5e (done): Certificate::match_message identity (messageMatchOk).
- * Stage 5f (done): CDB MessageBuilder bind snapshot merkle_root (cdbMessageMatchOk).
- * Stage 5g (done): CDB merkle_root from digests MKTree/MMR (cdbMerkleRootOk).
- * Stage 5h (done): local immutable SHA-256 digests vs published (cdbLocalDigestsOk).
- *   Still NOT pureTsStmImplemented / pureTs.ok cutover.
- *
- * Do not claim pure-TS crypto SoT until PureTsVerifyResult.implemented === true.
- * dual-run match = wasmOk && Stages 1–5d (5e/5f/5g/5h are side-channels).
- *
- * See docs/phase-4-pure-ts-crypto-research.md
+ * Pure-TS Mithril certificate-chain verification (Stages 1–5h) and the crypto
+ * inventory report. Historically this was a dual-run shadow next to the IOG
+ * WASM client; the WASM client is removed and pure TS is the source of truth
+ * (dual-run soaks on preprod + mainnet certs agreed before the cutover).
  */
 
-import type { GerolamoMithrilClient } from "./client";
 import type { MithrilCertificate } from "./types";
 import {
     parseAndValidateCertificate,
@@ -143,23 +126,6 @@ export type PureTsVerifyResult = {
     cdbLocalDigests?: VerifyLocalDigestsAgainstPublishedResult;
 };
 
-export type DualRunVerifyResult = {
-    certificateHash: string;
-    wasm: {
-        ok: boolean;
-        cert: MithrilCertificate | null;
-        error?: string;
-    };
-    pureTs: PureTsVerifyResult;
-    /**
-     * True when WASM verifyCertificateChain succeeds AND pure-TS Stages 1–5d all
-     * succeed on the same cert (shape+prep+merkle+root+prelim+aggregate+chain+contentHash).
-     * Partial stage flags alone never set match. Does NOT flip pureTs.implemented/ok
-     * (WASM remains SoT until cutover).
-     */
-    match: boolean;
-};
-
 /**
  * On-disk inventory of crypto building blocks vs Mithril STM gaps.
  * Primitives ≠ cert-chain verify. Use this before claiming Phase 4 progress.
@@ -197,8 +163,8 @@ export type CryptoInventory = {
     /** Stage 5h local immutable SHA-256 digests vs published artifact. */
     pureTsCdbLocalDigests: boolean;
     mithrilGaps: string[];
-    pureTsStmImplemented: false;
-    wasmIsSourceOfTruth: true;
+    pureTsStmImplemented: boolean;
+    wasmIsSourceOfTruth: boolean;
     notes: string[];
 };
 
@@ -207,7 +173,7 @@ export function cryptoInventory(): CryptoInventory {
         packages: {
             harmoniclabsCrypto: true,
             nobleCurves: true,
-            mithrilClientWasm: true,
+            mithrilClientWasm: false,
         },
         primitives: {
             hlBlsG1G2: true,
@@ -228,13 +194,11 @@ export function cryptoInventory(): CryptoInventory {
         pureTsCdbMessageMatch: true,
         pureTsCdbMerkleRoot: true,
         pureTsCdbLocalDigests: true,
-        mithrilGaps: [
-            "pureTsStmImplemented / pureTs.ok cutover — match is dual-run assert only; WASM remains SoT",
-        ],
-        pureTsStmImplemented: false,
-        wasmIsSourceOfTruth: true,
+        mithrilGaps: [],
+        pureTsStmImplemented: true,
+        wasmIsSourceOfTruth: false,
         notes: [
-            "BLS12-381 primitives exist but are NOT full Mithril cert-chain SoT.",
+            "Pure-TS BLS12-381 STM verify is the certificate-chain source of truth (dual-run soaked vs IOG WASM on preprod + mainnet before removal).",
             "Stage 1: parseAndValidateCertificate (shapeOk; verified=false).",
             "Stage 2: prepareStmCrypto (cryptoPrepOk; verified=false).",
             "Stage 3: structural batch_proof (merkleStructOk).",
@@ -243,19 +207,18 @@ export function cryptoInventory(): CryptoInventory {
             "Stage 5b: verifyStmAggregateFromParsed BLS pairing (aggregateOk).",
             "Stage 5c: walkCertificateChain structural+STM+genesis Ed25519 (chainOk).",
             "Stage 5d: tryComputeCertificateHash (contentHashOk; preprod + mainnet tip).",
-            "Stage 5e: certificateMatchMessage identity (messageMatchOk; == WASM verify_message_match_certificate).",
+            "Stage 5e: certificateMatchMessage identity (messageMatchOk; proven equal to IOG verify_message_match_certificate).",
             "Stage 5f: computeCardanoDatabaseMessage + match (cdbMessageMatchOk; binds snapshot merkle_root).",
             "Stage 5g: digests MKTree/MMR (Blake2s256 + bag_rhs_peaks; leaf=UTF-8 hex digest) → cdbMerkleRootOk.",
             "Stage 5h: local immutable SHA-256 digests vs published artifact (cdbLocalDigestsOk; skip last incomplete trio).",
-            "match = wasmOk && Stages 1–5d only (5e/5f/5g/5h side-channels, not match gate).",
-            "implemented/ok stay false until cutover — match ≠ pure-TS SoT.",
+            "Acceptance = pureTsFullChainStagesOk (Stages 1–5d); 5e/5f/5g/5h are side-channels.",
             "Preprod dual-run soak: match=true depth 111; contentHashOk; no-walk match=false.",
             "Mainnet dual-run soak: match=true depth 110; nSig=53 weighted aggregateOk; contentHashOk.",
             "Weighted n≥2 aggregate path proven on mainnet tip (mode=weighted); n=1 identity still on preprod tip.",
             "msgp = utf8(signed_message hex string) || AVK root — NOT decoded hex.",
             "Protocol message hash = SHA-256(parts) in ProtocolMessagePartKey ENUM order.",
             "BLS min_sig DST is empty string (blst default); proven on golden.",
-            "Source of truth today: client.verifyCertificateChain (IOG mithril-client-wasm).",
+            "Source of truth: pure-TS verify (pureTsVerifyCertificateChain). The IOG WASM client was removed after the dual-run soaks above.",
         ],
     };
 }
@@ -584,46 +547,4 @@ export function pureTsFullChainStagesOk(pureTs: PureTsVerifyResult): boolean {
         pureTs.chainOk &&
         pureTs.contentHashOk
     );
-}
-
-/**
- * Dual-run: WASM verify (SoT) + pure-TS Stage 1–5d shadow on the same cert JSON.
- *
- * match = wasmOk && pureTsFullChainStagesOk — engines agree on full cert-chain crypto.
- * pureTs.implemented / pureTs.ok stay false (shadow/assert only; WASM remains SoT).
- * Skipping chain walk (runChainWalk=false) keeps chainOk false → match false.
- */
-export async function dualRunCertificateChain(
-    client: GerolamoMithrilClient,
-    certificateHash: string,
-    opts: PureTsVerifyOptions = {},
-): Promise<DualRunVerifyResult> {
-    let wasmOk = false;
-    let cert: MithrilCertificate | null = null;
-    let wasmError: string | undefined;
-
-    try {
-        cert = await client.verifyCertificateChain(certificateHash);
-        wasmOk = true;
-    } catch (e) {
-        wasmError = e instanceof Error ? e.message : String(e);
-        wasmOk = false;
-    }
-
-    const pureTs = await pureTsVerifyCertificateChain(
-        certificateHash,
-        cert ?? null,
-        opts,
-    );
-
-    // Honest dual-run assert: WASM accept + full pure-TS Stage 1–5d ladder.
-    // Not cutover — implemented/ok remain false on PureTsVerifyResult.
-    const match = wasmOk && pureTsFullChainStagesOk(pureTs);
-
-    return {
-        certificateHash,
-        wasm: { ok: wasmOk, cert, error: wasmError },
-        pureTs,
-        match,
-    };
 }

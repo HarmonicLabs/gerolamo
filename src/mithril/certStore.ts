@@ -2,8 +2,9 @@
  * Mithril certificate persistence (audit trail in Gerolamo DB).
  *
  * Honesty:
- *   - Stores certificates + dual-run verdicts as facts; does NOT make
- *     pure-TS the SoT. wasm_ok / dual_match recorded as observed.
+ *   - Stores certificates + verdicts as facts. Pure TS is the verifier;
+ *     wasm_ok / dual_match are legacy columns from the dual-run era, kept
+ *     nullable so old rows stay readable and new rows write NULL.
  *   - Upsert by hash; re-runs refresh verdicts, never duplicate.
  */
 import { sql } from "../sql";

@@ -2,10 +2,15 @@ import { fetch } from "bun";
 import { logger } from "./logger";
 import { GerolamoConfig } from "../network/peerManager";
 
-function defaultOnchainappsBase(network?: string): string {
-    return network === "mainnet"
-        ? "https://blockfrost-mainnet.onchainapps.io"
-        : "https://blockfrost-preprod.onchainapps.io";
+/**
+ * Mirror without auth for the network, or "" when none exists: preview has no
+ * mirror, and preprod's values must never stand in for it (its epoch nonces and
+ * parameters differ).
+ */
+export function defaultOnchainappsBase(network?: string, networkMagic?: number): string {
+    if (network === "mainnet" || networkMagic === 764824073) return "https://blockfrost-mainnet.onchainapps.io";
+    if (network === "preview" || networkMagic === 2) return "";
+    return "https://blockfrost-preprod.onchainapps.io";
 }
 
 /**
@@ -27,15 +32,21 @@ export async function blockFrostFetchEpochParams(
         typeof configOrBaseUrl === "string"
             ? undefined
             : configOrBaseUrl.network;
+    const magic = typeof configOrBaseUrl === "string" ? undefined : Number(configOrBaseUrl.networkMagic);
     const primary =
         typeof configOrBaseUrl === "string"
             ? configOrBaseUrl
             : configOrBaseUrl.blockfrostUrl?.trim() ||
-              defaultOnchainappsBase(configOrBaseUrl.network);
+              defaultOnchainappsBase(configOrBaseUrl.network, magic);
 
-    const bases = [primary, defaultOnchainappsBase(network)].filter(
+    const bases = [primary, defaultOnchainappsBase(network, magic)].filter(
         (u, i, arr) => Boolean(u) && arr.indexOf(u) === i,
     );
+    if (bases.length === 0) {
+        throw new Error(
+            `No external epoch source for network ${network ?? "?"} (magic ${magic ?? "?"}): set blockfrostUrl or sync from genesis`,
+        );
+    }
 
     const projectId = process.env.BLOCKFROST_PROJECT_ID?.trim();
     const headers: Record<string, string> = {

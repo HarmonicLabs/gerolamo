@@ -1,0 +1,92 @@
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-2a0d8b1eec261f6a b/.bun-tag-2a0d8b1eec261f6a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-4643c719138adca8 b/.bun-tag-4643c719138adca8
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-915142c23e8b924a b/.bun-tag-915142c23e8b924a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/BnCEK/BnCEK.js b/dist/BnCEK/BnCEK.js
+index 9e6c1209fab79cbc6ff9aeeb09b3696ddb4510a7..86271814b3092e33ea68be45d82314b0eb241a91 100644
+--- a/dist/BnCEK/BnCEK.js
++++ b/dist/BnCEK/BnCEK.js
+@@ -54,20 +54,21 @@ var findFirstSetBit_1 = require("./impl/findFirstSetBit.js");
+ var readBit_1 = require("./impl/readBit.js");
+ var writeBit_1 = require("./impl/writeBit.js");
+ function intToSize(n) {
++    // Plutus `ExMemoryUsage Integer`: 0 → 1; otherwise integerLog2(|n|) `quot` 64 + 1 (64-bit words).
+     n = BigInt(n);
+     if (n === _0n)
+         return BigInt(1);
+-    // same as `intToSize( -n - BigInt( 1 ) )` but inlined
+     if (n < _0n)
+-        return ((0, bigint_utils_1.log2)((-n - BigInt(1)) << BigInt(1)) / BigInt(8)) + BigInt(1);
+-    return ((0, bigint_utils_1.log2)(n << BigInt(1)) / BigInt(8)) + BigInt(1);
++        n = -n;
++    return ((0, bigint_utils_1.log2)(n) / BigInt(64)) + BigInt(1);
+ }
+ function bsToSize(bs) {
++    // Plutus `ExMemoryUsage ByteString`: ((n - 1) `quot` 8) + 1 in 8-byte words; the empty
++    // string counts as 1 (quot truncates toward zero).
+     var len = ((bs instanceof Uint8Array) ? bs : bs.toBuffer()).length;
+-    return len === 0 ?
+-        // TODO: Bug in cardano-node; to fix next hard fork
+-        BigInt(1) :
+-        BigInt(len);
++    if (len === 0)
++        return BigInt(1);
++    return BigInt(Math.floor((len - 1) / 8) + 1);
+ }
+ function strToSize(str) {
+     return bsToSize((0, uint8array_utils_1.fromUtf8)(str));
+diff --git a/dist/Machine/Machine.js b/dist/Machine/Machine.js
+index ad96077c883f0a7ae2971b84287259abcd0460d0..980cea2c8c33801d6ca8fd86fe863c241c263779 100644
+--- a/dist/Machine/Machine.js
++++ b/dist/Machine/Machine.js
+@@ -78,6 +78,45 @@ var Machine = /** @class */ (function () {
+         var has_src = typeof srcmap === "object" && srcmap !== null;
+         // new budget for each call
+         var budget = new ExBudget_1.ExBudget({ mem: 0, cpu: 0 });
++        // Optional hard limit (gerolamo patch): `machine.maxBudget = { mem, cpu }` makes the
++        // evaluation stop as soon as the spent budget exceeds it, like the ledger does with
++        // a redeemer's declared ex-units. The thrown error carries `budgetExceeded = true`.
++        var maxBudget = this.maxBudget;
++        if (maxBudget) {
++            var _origAdd = budget.add.bind(budget);
++            var _maxCpu = BigInt(maxBudget.cpu), _maxMem = BigInt(maxBudget.mem);
++            var _deadline = typeof maxBudget.deadlineMs === "number" ? maxBudget.deadlineMs : 0;
++            // `maxStepCpu`: refuse a single builtin step costing more than this before it
++            // runs (builtins charge before executing). JavaScriptCore multiplies BigInts in
++            // quadratic time, so one multiplyInteger on huge operands can take minutes and
++            // no wall-clock check between steps would ever see it.
++            var _maxStep = maxBudget.maxStepCpu != null ? BigInt(maxBudget.maxStepCpu) : 0n;
++            var _tick = 0;
++            budget.add = function (other) {
++                var stepCpu = BigInt(other.cpu);
++                var heavy = stepCpu > 100000n;
++                if (_maxStep && stepCpu > _maxStep) {
++                    var serr = new Error("single builtin step cost " + stepCpu.toString() + " exceeds the evaluator's per-step limit " + _maxStep.toString() + " (cpu so far " + budget.cpu.toString() + ")");
++                    serr.timedOut = true;
++                    serr.stepTooLarge = true;
++                    serr.budgetSpent = { cpu: budget.cpu, mem: budget.mem };
++                    throw serr;
++                }
++                _origAdd(other);
++                if (_deadline && (heavy || ((++_tick) & 0x3ff) === 0) && Date.now() > _deadline) {
++                    var terr = new Error("evaluation wall-clock limit reached (cpu " + budget.cpu.toString() + "/" + _maxCpu.toString() + ")");
++                    terr.timedOut = true;
++                    terr.budgetSpent = { cpu: budget.cpu, mem: budget.mem };
++                    throw terr;
++                }
++                if (budget.cpu > _maxCpu || budget.mem > _maxMem) {
++                    var err = new Error("execution budget exceeded (cpu " + budget.cpu.toString() + "/" + _maxCpu.toString() + ", mem " + budget.mem.toString() + "/" + _maxMem.toString() + ")");
++                    err.budgetExceeded = true;
++                    err.budgetSpent = { cpu: budget.cpu, mem: budget.mem };
++                    throw err;
++                }
++            };
++        }
+         var spend = budget.add.bind(budget);
+         var logs = [];
+         var machineCosts = this.machineCosts;

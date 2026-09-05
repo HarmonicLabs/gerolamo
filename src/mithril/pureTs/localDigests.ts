@@ -12,7 +12,7 @@
  *   (maxLocal=6028; last trio 06028.* incomplete — skipped).
  *
  * Side-channel only — does NOT enter dual-run match gate.
- * WASM remains SoT until pureTsStmImplemented cutover.
+ * Pure TS is the source of truth (IOG WASM client removed after dual-run soaks).
  */
 
 import { createHash } from "crypto";

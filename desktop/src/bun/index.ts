@@ -18,6 +18,7 @@ import {
 } from "./nodeService";
 import { applyWindowIcon } from "./windowIcon";
 import { getAppDb, getPref, setPref } from "./database";
+import { setFeedEventListener } from "./nodeFeed";
 import {
   bootstrapLogs,
   bootstrapStatus,
@@ -159,6 +160,16 @@ const mainWindow = new BrowserWindow({
   frame: { width: 1280, height: 900, x: 80, y: 40 },
 });
 
+// Node frames (metrics, mempool) reach the page as "node.event" messages so it
+// refreshes the moment a block lands; its 2 s poll stays as the fallback.
+setFeedEventListener((id, type) => {
+  try {
+    (bunRpc as any).send?.["node.event"]?.({ id, type });
+  } catch {
+    /* page not ready */
+  }
+});
+
 // Taskbar / window icon on Linux (dev builds show a generic icon otherwise).
 setTimeout(() => {
   try {
@@ -169,9 +180,9 @@ setTimeout(() => {
 }, 250);
 
 setTimeout(() => {
-  try {
-    hydrate();
-  } catch (e) {
-    console.error("[hydrate]", e);
-  }
+  hydrate()
+    .then((ids) => {
+      if (ids.length) console.log("[hydrate] autostarted", ids.join(", "));
+    })
+    .catch((e) => console.error("[hydrate]", e));
 }, 0);

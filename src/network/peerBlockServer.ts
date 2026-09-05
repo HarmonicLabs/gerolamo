@@ -1,3 +1,4 @@
+import { getBlockProducer } from "../pool/startBlockProducer";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { getBasePath } from "../utils/paths";
 import {
@@ -10,9 +11,16 @@ import {
     getEpochNonce,
     getGenesisUtxoStats,
 } from "../db";
-import { handleMiniBlockfrost } from "../api/miniBlockfrost";
+import { bfBlockByHash, handleMiniBlockfrost, mempoolSnapshot } from "../api/miniBlockfrost";
 import { handleOpenApiRoutes } from "../api/openApi";
-import { calculatePreProdCardanoEpoch } from "../utils/epochFromSlotCalculations";
+import { calculatePreProdCardanoEpoch, epochLengthSlots, firstSlotOfEpoch, getEpochNetwork } from "../utils/epochFromSlotCalculations";
+
+/** The network the node runs on (preprod / preview / mainnet), not the config's generic "testnet". */
+function networkName(config: { network?: string } | undefined): string {
+    const n = String(process.env.NETWORK ?? "").toLowerCase();
+    if (n === "preprod" || n === "preview" || n === "mainnet") return n;
+    return getEpochNetwork() ?? config?.network ?? "unknown";
+}
 import { eraName } from "../utils/eraNames";
 import { Cbor, CborArray, CborBytes, CborTag, CborUInt } from "@harmoniclabs/cbor";
 import { BlockFetchBlock } from "@harmoniclabs/ouroboros-miniprotocols-ts";
@@ -34,10 +42,12 @@ import {
     allTopics,
     isWsTopic,
     wsPublish,
+    wsSubscriberCount,
     type WsClientData,
     type WsTopic,
 } from "./wsHub";
 import {
+    setMempoolListener,
     setTipListener,
     setPeersListener,
 } from "./liveEvents";
@@ -93,6 +103,14 @@ async function buildMetricsPayload(
     const utxoCount = await getUtxoCount();
     const epoch = Number(calculatePreProdCardanoEpoch(Number(tipSlot)));
     const era = await tipEra(tipSlot);
+    // Progress through the tip's epoch (network geometry: Byron vs Shelley epoch length).
+    const epochProgress = Number.isFinite(epoch) && epoch >= 0
+        ? (() => {
+            const first = firstSlotOfEpoch(epoch), len = epochLengthSlots(epoch);
+            const inEpoch = BigInt(tipSlot) - first;
+            return { firstSlot: first.toString(), epochLength: Number(len), slotInEpoch: Number(inEpoch), percent: Math.min(100, Math.max(0, Number(inEpoch * 10000n / len) / 100)) };
+        })()
+        : null;
     const epochNonce =
         Number.isFinite(epoch) && epoch >= 0
             ? await getEpochNonce(epoch)
@@ -105,7 +123,7 @@ async function buildMetricsPayload(
     const validation = resolveValidationPolicy(config);
     const genesisUtxos = await getGenesisUtxoStats().catch(() => ({ total: 0, unspent: 0, avvm: 0 }));
     return {
-        network: config.network ?? process.env.NETWORK ?? "unknown",
+        network: networkName(config),
         tipSlot: tipSlot.toString(),
         utxoCount,
         /** Genesis outputs seeded from the Byron genesis file: how many exist and how many are still unspent (included in utxoCount). */
@@ -113,6 +131,7 @@ async function buildMetricsPayload(
         epoch: Number.isFinite(epoch) ? epoch : null,
         era,
         eraName: eraName(era),
+        epochProgress,
         epochNonce,
         bodyValidation: validation.body,
         scriptValidation: validation.script,
@@ -125,6 +144,7 @@ async function buildMetricsPayload(
         version: getBuildInfo().label,
         /** "data" (outbound only) or "relay" (accepts inbound N2N). */
         role: resolveNodeRole(config),
+        producer: getBlockProducer()?.stats() ?? null,
         /** Inbound node-to-node listener state. */
         inbound:
             typeof manager?.getInboundStatus === "function"
@@ -217,6 +237,8 @@ function statsHtmlPage(port: number, network: string): string {
   .card .k { color:var(--m); font-size:11px; text-transform:uppercase; letter-spacing:.04em; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .card .v { font-size:20px; font-weight:650; margin-top:4px; font-variant-numeric:tabular-nums; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; line-height:1.2; }
   .card .s { color:var(--m); font-size:11px; margin-top:4px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .bar { height:6px; background:var(--b); border-radius:3px; margin-top:8px; overflow:hidden; }
+  .bar > div { height:100%; width:0; background:var(--a); border-radius:3px; transition:width .6s ease; }
   .panels { display:grid; grid-template-columns:1.1fr 1fr 1fr; gap:12px; }
   @media (max-width:980px) { .panels { grid-template-columns:1fr; } }
   .panel-title { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--m); margin:0 0 10px; font-weight:600; }
@@ -280,9 +302,10 @@ Frozen tip + hot=0 = stalled."><div class="k">Tip slot</div><div class="v" id="t
 Soft ledger applies blocks even when
 body/UTxO checks fail (mid-chain sync tolerance).
 Not full consensus proof."><div class="k">UTxO</div><div class="v" id="utxo">—</div><div class="s">soft ledger</div></div>
-    <div class="card" data-tooltip="Epoch — Cardano epoch from tip slot.
-Subtitle shows epoch nonce prefix when known.
-Preprod epoch length ≈ 5 days."><div class="k">Epoch</div><div class="v" id="epoch">—</div><div class="s" id="epochNote"></div></div>
+    <div class="card" data-tooltip="Epoch — Cardano epoch from tip slot (${network} geometry: ${Number(epochLengthSlots(1_000_000n)).toLocaleString()} slots per Shelley epoch, ${network === "preview" ? "1 day" : "5 days"}).
+Subtitle shows epoch nonce prefix when known."><div class="k">Epoch</div><div class="v" id="epoch">—</div><div class="bar"><div id="epochBar"></div></div><div class="s" id="epochNote"></div></div>
+    <div class="card" data-tooltip="Era — ledger era of the block at the tip (Byron, Shelley, Allegra, Mary, Alonzo, Babbage, Conway), decoded from the stored block.
+Subtitle shows the era number the hard-fork combinator uses."><div class="k">Era</div><div class="v" id="era">—</div><div class="s" id="eraNote"></div></div>
     <div class="card" data-tooltip="Uptime — live process wall time since start.
 Subtitle is raw seconds.
 Resets on live-only restart (not soak)."><div class="k">Uptime</div><div class="v" id="up">—</div><div class="s" id="upNote">process</div></div>
@@ -502,7 +525,12 @@ function applyView(m, gov) {
   if (tip != null) el("tip").textContent = fmt(tip);
   if (m.utxoCount != null) el("utxo").textContent = fmt(m.utxoCount);
   if (m.epoch != null) el("epoch").textContent = String(m.epoch);
-  if (m.epochNonce) el("epochNote").textContent = "nonce " + String(m.epochNonce).slice(0, 16) + "…";
+  if (m.eraName) { el("era").textContent = m.eraName; el("eraNote").textContent = m.era != null ? "era " + m.era : ""; }
+  if (m.epochProgress) {
+    const p = m.epochProgress;
+    el("epochBar").style.width = p.percent.toFixed(1) + "%";
+    el("epochNote").textContent = fmt(p.slotInEpoch) + " / " + fmt(p.epochLength) + " slots · " + p.percent.toFixed(1) + "%" + (m.epochNonce ? " · nonce " + String(m.epochNonce).slice(0, 10) + "…" : "");
+  } else if (m.epochNonce) el("epochNote").textContent = "nonce " + String(m.epochNonce).slice(0, 16) + "…";
   if (m.uptimeSec != null) { el("up").textContent = fmtUptime(m.uptimeSec); el("upNote").textContent = fmt(m.uptimeSec) + "s"; }
   if (m.bodyValidation || m.scriptValidation) el("flags").textContent = (m.bodyValidation || "?") + " / " + (m.scriptValidation || "?");
   el("peersTotal").textContent = fmt(total);
@@ -566,6 +594,12 @@ function applyTip(d) {
   if (!d) return;
   const m = Object.assign({}, lastMetrics || {}, { tipSlot: d.slot });
   if (d.epoch != null) m.epoch = d.epoch;
+  if (m.epochProgress && (d.epoch == null || d.epoch === (lastMetrics || {}).epoch)) {
+    const inEpoch = Number(BigInt(String(d.slot)) - BigInt(m.epochProgress.firstSlot));
+    if (inEpoch >= 0 && inEpoch < m.epochProgress.epochLength) {
+      m.epochProgress = Object.assign({}, m.epochProgress, { slotInEpoch: inEpoch, percent: inEpoch / m.epochProgress.epochLength * 100 });
+    }
+  }
   applyView(m, lastGov);
 }
 async function jget(path) {
@@ -616,7 +650,7 @@ export async function startPeerBlockServer(
 ) {
     const BASE_PATH = getBasePath();
     const port = config.port || 3030;
-    const network = config.network ?? process.env.NETWORK ?? "unknown";
+    const network = networkName(config);
 
     interface BlockRow {
         block_data?: Uint8Array;
@@ -645,14 +679,14 @@ export async function startPeerBlockServer(
 
             // OpenAPI 3 + Swagger docs (/docs, /openapi.json); old /dashboard/ai → 302 /docs
             const oaResp = await handleOpenApiRoutes(req, url, {
-                network: config.network ?? process.env.NETWORK,
+                network: networkName(config),
                 port,
             });
             if (oaResp) return oaResp;
 
             // Mini-Blockfrost core (/api/v0/*) — before generic fallback
             const bfResp = await handleMiniBlockfrost(req, url, {
-                network: config.network ?? process.env.NETWORK,
+                network: networkName(config),
                 submitTx: manager
                     ? (txCbor: Uint8Array) => manager.submitTx({ txCbor })
                     : undefined,
@@ -938,8 +972,33 @@ export async function startPeerBlockServer(
     attachWsServer(server);
 
     let lastMetricsPush = 0;
+    let lastMempoolCount = -1;
+    const publishMempool = async (): Promise<void> => {
+        if (wsSubscriberCount("mempool") === 0) return;
+        try {
+            const snap = await mempoolSnapshot();
+            lastMempoolCount = snap.count;
+            wsPublish("mempool", snap);
+        } catch {
+            /* mempool not up yet */
+        }
+    };
     setTipListener((tip) => {
         wsPublish("tip", tip);
+        // The explorer's live list wants the block document, not just the point.
+        // Built only when someone listens: three SQLite reads per coalesced tip.
+        if (tip.hash && wsSubscriberCount("block") > 0) {
+            void bfBlockByHash(tip.hash, config.network ?? process.env.NETWORK)
+                .then((doc) => { if (doc) wsPublish("block", doc); })
+                .catch(() => {});
+        }
+        // Txs leave the mempool without an event of their own (peers pull them, blocks
+        // apply them); a block landing is the moment to notice the count changed.
+        if (wsSubscriberCount("mempool") > 0) {
+            void mempoolSnapshot()
+                .then((snap) => { if (snap.count !== lastMempoolCount) { lastMempoolCount = snap.count; wsPublish("mempool", snap); } })
+                .catch(() => {});
+        }
         const now = Date.now();
         if (now - lastMetricsPush < 1000) return;
         lastMetricsPush = now;
@@ -947,6 +1006,7 @@ export async function startPeerBlockServer(
             .then((body) => wsPublish("metrics", body))
             .catch(() => {});
     });
+    setMempoolListener(() => void publishMempool());
     setPeersListener((snap) => {
         wsPublish("peers", snap);
         wsPublish("governor", snap);

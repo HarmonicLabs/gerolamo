@@ -17,11 +17,13 @@ import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
+import { evaluateBlockRules } from "./rules/blockRules";
+import type { ValidationPool } from "./workers/ValidationPool";
 import type { EpochBodyParams } from "./epochParams";
 
 import { getUtxosByRefs, getStakeByCredentials, getDelegationsByCredentials, countUtxosWithReferenceScript } from "../db";
 import { resolveValidationPolicy } from "./validationPolicy";
-import { checkCertificateSequence, stakeCredentialsTouched, type CertView } from "./certificateRules";
+import { checkCertificateSequence, stakeCredentialsTouched, type CertView, credKey } from "./certificateRules";
 
 /** Safe BigInt from DB amount (string | number | null). Null/invalid → 0n. */
 type UtxoAmountMap = Map<string, { utxo_ref: string; amount: bigint }>;
@@ -81,11 +83,24 @@ export class BlockBodyValidator {
     public async validate(
         block: MultiEraBlock,
         params: EpochBodyParams | null = null,
+        rulesCovered = false,
     ): Promise<boolean | null> {
         if (!block.block) return true; // Skip if block not parsed
         const actualBlock = this.getEraBlock(block);
         if (actualBlock === null) return null; // Unsupported era
         this.params = params;
+
+        if (rulesCovered) {
+            // rules/ (witnesses, conservation, fees, intervals, collateral, redeemers…)
+            // already ran for this block; only the checks it does not cover remain.
+            const genesisCfg = await getCachedShelleyGenesis(this.config);
+            if (!genesisCfg) return false;
+            if (!this.validateTransactionCountMatch(actualBlock)) return false;
+            if (!(await this.runScriptValidationPolicy(actualBlock))) return false;
+            if (!(await this.validateCertificatesValid(actualBlock))) return false;
+            if (!(await this.validateSizeLimits(actualBlock, genesisCfg))) return false;
+            return true;
+        }
 
 
         const genesis = await getCachedShelleyGenesis(this.config);
@@ -272,11 +287,13 @@ export class BlockBodyValidator {
                         }
                     })
                     .filter((r): r is string => !!r);
+                // Script provision is enforced by the rules (`script … required but not
+                // provided`, which resolve reference inputs exactly); this structural
+                // look-up reads `referenceInputs` that ledger-ts calls `refInputs` and
+                // halted a valid preprod block. Report only.
                 const referenced = refs.length > 0 ? await countUtxosWithReferenceScript(refs) : 0;
                 if (referenced === 0) {
-                    issues.push(
-                        `tx[${i}]: redeemers present but no plutus scripts in witness set and no reference scripts among ${refs.length} referenced/spent UTxO(s)`,
-                    );
+                    logger.debug(`scriptValidation: tx[${i}]: no plutus scripts in the witness set and none found among ${refs.length} spent UTxO(s) (reference inputs are checked by the rules)`);
                 }
                 continue;
             }
@@ -284,9 +301,13 @@ export class BlockBodyValidator {
             // Best-effort UPLC decode when script bytes are available
             for (let s = 0; s < scriptList.length; s++) {
                 const scr = scriptList[s];
+                // The flat-encoded program is `bytes`; `toCborBytes()` adds the CBOR
+                // wrapper the flat decoder cannot read (a false "decode failed").
                 const bytes: Uint8Array | null =
                     scr instanceof Uint8Array
                         ? scr
+                        : scr?.bytes instanceof Uint8Array
+                        ? scr.bytes
                         : typeof scr?.toCborBytes === "function"
                         ? scr.toCborBytes()
                         : scr?.cbor != null
@@ -304,11 +325,9 @@ export class BlockBodyValidator {
                         (UPLCDecoder as any).parse(bytes);
                     }
                 } catch (err: any) {
-                    issues.push(
-                        `tx[${i}] script[${s}]: UPLC decode failed: ${
-                            err?.message ?? err
-                        }`,
-                    );
+                    // A script the chain accepted that our decoder cannot read is a gap in
+                    // the decoder, not an invalid block: the phase-2 rules report it.
+                    logger.warn(`scriptValidation: tx[${i}] script[${s}]: UPLC decode failed: ${err?.message ?? err}`);
                 }
             }
         }
@@ -606,6 +625,7 @@ export class BlockBodyValidator {
                 certs.push({
                     certType: Number(cert.certType),
                     credHex: hexOf(c.stakeCredential?.hash),
+                    credType: c.stakeCredential ? (Number(c.stakeCredential.type) === 1 ? 1 : 0) : null,
                     poolHex: hexOf(c.poolKeyHash),
                 });
             }
@@ -614,18 +634,18 @@ export class BlockBodyValidator {
 
         // Look up only the credentials this block touches (indexed, keyed) rather
         // than scanning the whole stake / delegations tables on every block.
-        const touched = stakeCredentialsTouched(certs).map((h) => fromHex(h));
+        const touched = stakeCredentialsTouched(certs).map((c) => ({ hash: fromHex(c.hex), type: c.type }));
         const stakeRows = await getStakeByCredentials(touched);
         const delegationRows = await getDelegationsByCredentials(touched);
         const registered = new Set<string>();
         for (const r of stakeRows) {
             const k = hexOf(r.stake_credentials);
-            if (k) registered.add(k);
+            if (k) registered.add(credKey(r.cred_type, k));
         }
         const delegated = new Map<string, string>();
         for (const r of delegationRows) {
             const k = hexOf(r.stake_credentials);
-            if (k) delegated.set(k, hexOf(r.pool_key_hash) ?? "");
+            if (k) delegated.set(credKey(r.cred_type, k), hexOf(r.pool_key_hash) ?? "");
         }
 
         const verdict = checkCertificateSequence(certs, registered, delegated);
@@ -703,6 +723,13 @@ export class BlockBodyValidator {
         genesis: ShelleyGenesisConfig,
     ): Promise<boolean> {
         const maxTxSize = this.params?.maxTxSize ?? genesis.protocolParams.maxTxSize;
+        const maxBlockSize = this.params?.maxBlockSize ?? genesis.protocolParams.maxBlockBodySize;
+        // The header commits to the body size; the body hash check bound the bytes to it.
+        const bodySize = Number((block as any).header?.body?.blockBodySize ?? -1);
+        if (Number.isFinite(maxBlockSize) && maxBlockSize > 0 && bodySize > maxBlockSize) {
+            logger.error(`Block body size ${bodySize} exceeds maximum ${maxBlockSize}`);
+            return false;
+        }
 
         return block.transactionBodies.every((txBody: any) => {
             const txSize = txBody.toCborBytes().length;
@@ -719,14 +746,59 @@ export class BlockBodyValidator {
     }
 }
 
+export interface BlockValidationContext {
+    /** Slot of the block (validity intervals, timelocks). */
+    slot: bigint;
+    /** Worker pool for witness signatures; null runs them inline. */
+    pool: ValidationPool | null;
+}
+
+/** Rule reports (checks this node cannot yet enforce exactly) are logged sparsely. */
+let reportCount = 0;
+/** Phase-2 shadow totals since start, logged whenever they grow past the next threshold. */
+const plutusTotals = { evaluated: 0, skipped: 0, mismatches: 0, nextLogAt: 1 };
+const plutusReasons: Record<string, number> = {};
+
+/**
+ * Body validation for every era: witness signatures, required signers, native
+ * scripts and the era's transaction rules (rules/), then the Alonzo+ checks the
+ * validator class carries. False = a strict node must not apply the block.
+ */
 export async function validateBlock(
     block: MultiEraBlock,
     config: any,
     params: EpochBodyParams | null = null,
+    ctx: BlockValidationContext | null = null,
 ): Promise<boolean> {
+    if (ctx) {
+        const genesis = block.era >= 2 ? await getCachedShelleyGenesis(config) : null;
+        const outcome = await evaluateBlockRules(block, { config, pool: ctx.pool, params, genesis, slot: ctx.slot });
+        if (outcome.failures.length) {
+            logger.error(`Block body validation failed at slot ${ctx.slot} (era ${block.era}, ${outcome.txs} tx): ${outcome.failures.slice(0, 5).join(" | ")}${outcome.failures.length > 5 ? ` | +${outcome.failures.length - 5} more` : ""}`);
+            return false;
+        }
+        const pl = outcome.plutus;
+        if (pl && (pl.evaluated || pl.skipped)) {
+            plutusTotals.evaluated += pl.evaluated;
+            plutusTotals.skipped += pl.skipped;
+                for (const [k, n] of Object.entries(outcome.plutus.skipReasons ?? {})) plutusReasons[k] = (plutusReasons[k] ?? 0) + n;
+            plutusTotals.mismatches += pl.mismatches;
+            if (plutusTotals.evaluated + plutusTotals.skipped >= plutusTotals.nextLogAt) {
+                plutusTotals.nextLogAt *= 4;
+                const top = Object.entries(plutusReasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n}× ${k}`).join("; ");
+                logger.info(`Plutus shadow so far: ${plutusTotals.evaluated} redeemer(s) evaluated, ${plutusTotals.skipped} skipped, ${plutusTotals.mismatches} tx verdict mismatch(es)${top ? ` — ${top}` : ""}`);
+            }
+        }
+        if (outcome.reports.length) {
+            reportCount += outcome.reports.length;
+            if (reportCount <= 20 || reportCount % 1000 === 0) {
+                logger.info(`Body rule report at slot ${ctx.slot}: ${outcome.reports.slice(0, 3).join(" | ")} (reports so far: ${reportCount})`);
+            }
+        }
+    }
     const validator = new BlockBodyValidator(config);
-    const result = await validator.validate(block, params);
-    // null = era has no body rules here (Byron … Mary): nothing to reject.
+    const result = await validator.validate(block, params, ctx != null);
+    // null = the validator class has no extra rules for this era (pre-Alonzo).
     if (result === null) return true;
     return result;
 }

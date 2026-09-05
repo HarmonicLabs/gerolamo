@@ -16,7 +16,7 @@
  *
  * verified / pureTsStmImplemented stay false until cutover.
  * dual-run match = wasmOk && Stages 1–5d only (5e/5f/5g/5h are side-channels).
- * WASM remains source of truth for certificate-chain verification.
+ * Pure TS is the source of truth for certificate-chain verification.
  *
  * See docs/phase-4-pure-ts-crypto-research.md
  */

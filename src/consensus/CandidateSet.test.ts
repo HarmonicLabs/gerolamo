@@ -260,3 +260,18 @@ describe("fasterAgreeingVerifier", () => {
         expect(cs.fasterAgreeingVerifier(1)).toBeNull();
     });
 });
+
+describe("CandidateSet lagging verifiers", () => {
+    test("a verifier below the window reads behind with its lag; a late match makes it agree", () => {
+        const cs = new CandidateSet({ depth: 3 });
+        cs.addPeer("p");
+        cs.addPeer("v");
+        for (let i = 10; i <= 14; i++) cs.observe("p", { slot: BigInt(i), hash: h(String(i % 10)) });
+        // window is slots 12..14; the verifier is at slot 5
+        expect(cs.observe("v", { slot: 5n, hash: h("5") })).toEqual({ kind: "behind", slot: 5n });
+        expect(cs.agreement("v")).toMatchObject({ status: "behind", lagSlots: 9n });
+        expect(cs.noteAgreedBehind("v", 5n)).toBe(true);
+        expect(cs.agreement("v")).toMatchObject({ status: "agrees", agreedAtSlot: 5n, lagSlots: 9n });
+        expect(cs.agreement("p")!.lagSlots).toBeNull();
+    });
+});

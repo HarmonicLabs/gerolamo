@@ -1,6 +1,7 @@
 import { Component, For, Show, createEffect, createResource, createSignal, onCleanup, onMount } from "solid-js";
 import { manager } from "../lib/manager";
-import { gerolamoHttpBase, type BootstrapStatus, type HealthResult, type InstanceConfig, type StatusResult } from "../../shared/types";
+import { eraProgress } from "../../shared/eraSchedule";
+import { gerolamoHttpBase, type BootstrapStatus, type HealthResult, type InstanceConfig, type StatusResult, instanceLabel } from "../../shared/types";
 import { formatBytes, formatCores, formatPercent, nodeCoresBusy, nodeCpuShare, nodeMemShare, type ResourceSnapshot } from "../../shared/resources";
 import { DEFAULT_WINDOW_MIN, HISTORY_WINDOWS_MIN, pushSample, series, spanLabel, windowSamples, type ResourceSample } from "../../shared/history";
 import type { MempoolSnapshot } from "../../shared/types";
@@ -96,6 +97,10 @@ const ControlCenter: Component = () => {
 
   let healthTimer: ReturnType<typeof setInterval> | null = null;
   let bootTimer: ReturnType<typeof setInterval> | null = null;
+  /** The status refresh of the instance being followed; pushed node events call it early. */
+  let statusTick: (() => Promise<void>) | null = null;
+  let statusTickId: string | null = null;
+  let eventTimer: ReturnType<typeof setTimeout> | null = null;
   /** One sample per status poll (2 s); the store holds the 10-minute maximum window. */
   const [history, setHistory] = createSignal<ResourceSample[]>([]);
   const [windowMin, setWindowMin] = createSignal<number>(DEFAULT_WINDOW_MIN);
@@ -172,9 +177,11 @@ const ControlCenter: Component = () => {
 
   const startNodePolls = (id: string) => {
     if (healthTimer) clearInterval(healthTimer);
+    statusTickId = id;
     const tick = async () => {
       try {
         const st = await manager.status(id);
+        if (st?.running && !nodeRunning()) setStatusMsg(`Running · ${id}`);
         setNodeRunning(!!st?.running);
         // A single failed /metrics poll while the node runs must not blank the panels.
         if (st?.sync || !st?.running) setSync(st?.sync ?? null);
@@ -201,9 +208,24 @@ const ControlCenter: Component = () => {
         /* ignore */
       }
     };
+    statusTick = tick;
     void tick();
     healthTimer = setInterval(tick, 2000);
   };
+
+  // Pushed frames: refresh at once (debounced) instead of waiting for the next 2 s tick.
+  onMount(() => {
+    const off = manager.onNodeEvent((e) => {
+      if (e.id !== statusTickId) return;
+      if (e.type === "mempool") void refreshMempool();
+      if (e.type !== "metrics" || eventTimer) return;
+      eventTimer = setTimeout(() => {
+        eventTimer = null;
+        void statusTick?.();
+      }, 250);
+    });
+    onCleanup(off);
+  });
 
   const startBootPolls = (id: string) => {
     if (bootTimer) clearInterval(bootTimer);
@@ -243,12 +265,14 @@ const ControlCenter: Component = () => {
     const st = await manager.status(target.id);
     if (st?.running) {
       setNodeRunning(true);
-      setStatusMsg(`Resumed running · ${target.id}`);
-      startNodePolls(target.id);
+      setStatusMsg(`Resumed running · ${instanceLabel(target)}`);
     } else {
       setNodeRunning(false);
-      if (target.instanceDir) setStatusMsg(`Resumed instance · ${target.id}`);
+      if (target.instanceDir) setStatusMsg(`Resumed instance · ${instanceLabel(target)}`);
     }
+    // Poll whether or not it is up: the app autostarts a node that was running
+    // when it last exited, and that spawn can land after this page has loaded.
+    if (target.instanceDir) startNodePolls(target.id);
   };
 
   /**
@@ -365,7 +389,7 @@ const ControlCenter: Component = () => {
       setConfigWritten(true);
       if (result.config.dbPath) setDbPath(result.config.dbPath);
       if (result.config.snapshotDir) setSnapshotDir(result.config.snapshotDir);
-      setStatusMsg(`Config saved · ${result.config.id}`);
+      setStatusMsg(`Config saved · ${instanceLabel(result.config)}`);
     } catch (e: any) {
       setErrorMsg(e?.message || "writeConfig failed");
     } finally {
@@ -685,14 +709,9 @@ const ControlCenter: Component = () => {
                       size={100}
                       strokeWidth={7}
                       variant={pct() >= 99.9 ? "green" : "accent"}
+                      decimals={2}
                     />
                     <div class="flex flex-col flex-1 gap-3">
-                      <div class="flex items-end gap-3">
-                        <span class="font-mono text-[42px] font-bold leading-none tabular-nums text-text text-glow-strong">
-                          {pct().toFixed(2)}
-                        </span>
-                        <span class="text-[18px] font-semibold text-text-secondary mb-1">%</span>
-                      </div>
                       <div class="relative">
                         <ProgressBar value={pct()} variant={pct() >= 99.9 ? "green" : "accent"} />
                         <div class="shimmer-bar absolute inset-0 rounded-full pointer-events-none" />
@@ -722,6 +741,29 @@ const ControlCenter: Component = () => {
                               </span>
                             </div>
                             <ProgressBar value={ep().percent} variant={ep().live ? "green" : "cyan"} />
+                            {(() => {
+                              const era = eraProgress(ep().epoch, network());
+                              return (
+                                <div
+                                  class="flex items-center justify-between text-[11px]"
+                                  title={
+                                    era.nextEra
+                                      ? `${era.era} runs from epoch ${era.startEpoch} to ${era.nextEpoch! - 1}; ${era.nextEra} begins at epoch ${era.nextEpoch}.`
+                                      : `${era.era} began at epoch ${era.startEpoch}; no later hard fork is scheduled.`
+                                  }
+                                >
+                                  <span class="text-text-dim">
+                                    Era <span class="font-mono text-text">{era.era}</span>
+                                    <span class="text-text-muted"> since epoch {era.startEpoch}</span>
+                                  </span>
+                                  <span class="font-mono tabular-nums text-text">
+                                    <Show when={era.nextEra} fallback={<span class="text-text-muted">current era</span>}>
+                                      {era.epochsLeft!.toLocaleString("en-US")} epoch{era.epochsLeft === 1 ? "" : "s"} left · {era.nextEra} at {era.nextEpoch}
+                                    </Show>
+                                  </span>
+                                </div>
+                              );
+                            })()}
                           </div>
                         )}
                       </Show>
@@ -864,10 +906,16 @@ const ControlCenter: Component = () => {
                               <span class="font-mono">{formatPercent(nodeMemShare(node(), sys()), 1)}</span>
                             </div>
                             <ProgressBar value={nodeMemShare(node(), sys())} variant="cyan" />
-                            <div class="grid grid-cols-3 gap-2 pt-1">
-                              <Stat label="JS heap" title="Memory used by JavaScript objects in the node process, out of what the engine has reserved." value={node()?.heapUsedBytes != null ? `${formatBytes(node()!.heapUsedBytes)} / ${formatBytes(node()!.heapTotalBytes)}` : "—"} size="sm" />
-                              <Stat label="Native / buffers" title="Memory held outside the JS heap: CBOR buffers, SQLite, crypto." value={formatBytes(node()?.externalBytes)} size="sm" />
-                              <Stat label="Chain DB on disk" title="Size of the SQLite chain database plus its WAL and SHM sidecar files." value={formatBytes(node()?.dbBytes)} size="sm" />
+                            <div class="flex items-center justify-between gap-3 text-[10px] text-text-dim">
+                              <span title="Memory used by JavaScript objects in the node process, out of what the engine has reserved.">
+                                JS heap <span class="font-mono text-text">{node()?.heapUsedBytes != null ? `${formatBytes(node()!.heapUsedBytes)} / ${formatBytes(node()!.heapTotalBytes)}` : "—"}</span>
+                              </span>
+                              <span title="Memory held outside the JS heap: CBOR buffers, SQLite, crypto.">
+                                native / buffers <span class="font-mono text-text">{formatBytes(node()?.externalBytes)}</span>
+                              </span>
+                              <span title="Size of the SQLite chain database plus its WAL and SHM sidecar files.">
+                                chain DB on disk <span class="font-mono text-text">{formatBytes(node()?.dbBytes)}</span>
+                              </span>
                             </div>
                           </div>
                           <div class="flex flex-col gap-2">
@@ -911,9 +959,11 @@ const ControlCenter: Component = () => {
                                 {p.role === "primary"
                                   ? "primary · drives the chain"
                                   : p.status === "agrees"
-                                  ? `✓ agrees @${p.agreedAtSlot ?? "?"}`
+                                  ? `✓ agrees @${p.agreedAtSlot ?? "?"}${(p.lagSlots ?? 0) > 0 ? ` · ${p.lagSlots!.toLocaleString("en-US")} slots behind` : ""}`
                                   : p.status === "divergent"
                                   ? `✗ divergent @${p.divergenceSlot ?? "?"}`
+                                  : p.status === "behind" && p.lagSlots != null
+                                  ? `behind · ${p.lagSlots.toLocaleString("en-US")} slots · checking against our chain`
                                   : p.status}
                               </span>
                             </div>
@@ -1222,7 +1272,7 @@ const ControlCenter: Component = () => {
                 }
               >
                 <div class="glass-card overflow-hidden" style={{ height: "calc(100vh - 140px)" }}>
-                  <iframe title="Block explorer" src={`${gerolamoHttpBase(port())}/explorer/#/explorer`} class="h-full w-full border-0 bg-transparent" />
+                  <iframe title="Block explorer" src={`${gerolamoHttpBase(port())}/explorer/?embed=1#/explorer`} class="h-full w-full border-0 bg-transparent" />
                 </div>
               </Show>
             </Show>

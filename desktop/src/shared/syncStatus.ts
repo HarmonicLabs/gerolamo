@@ -38,6 +38,8 @@ export type GerolamoPeerAgreement = {
   tipSlot: string | null;
   headersSeen: number;
   divergenceSlot: string | null;
+  /** Slots this verifier's tip trails the primary's; null for the primary or when unknown. */
+  lagSlots: number | null;
 };
 
 export type GerolamoMaliciousPeer = { key: string; reason: string; until: number };
@@ -238,6 +240,7 @@ export function deriveMultiPeerSync(value: unknown): GerolamoMultiPeerSync | nul
           tipSlot: slotString(p.tipSlot),
           headersSeen: finiteNumber(p.headersSeen) ?? 0,
           divergenceSlot: div ? slotString(div.slot) : null,
+          lagSlots: p.lagSlots == null ? null : finiteNumber(p.lagSlots),
         }];
       })
     : [];

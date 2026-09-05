@@ -1,5 +1,12 @@
 # Mithril → native Gerolamo client research
 
+> **Status 2026-09-03:** the IOG WASM client (`@mithril-dev/mithril-client-wasm`) and the
+> dual-run engine (`--engine wasm|both|auto`, `dualRunCertificateChain`) are **removed**.
+> Pure TS (`src/mithril/httpClient.ts` + `pureTs/`) is the only in-process verifier and
+> the source of truth; `--engine bin` still shells out to the external `mithril-client`.
+> Everything below that describes WASM as the source of truth is history.
+
+
 Research notes for embedding Mithril **certify + restore** into Gerolamo without
 pretending we already reimplement the full protocol in TypeScript.
 

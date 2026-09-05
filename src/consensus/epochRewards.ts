@@ -1,0 +1,162 @@
+/**
+ * Epoch-boundary reward accounting (Phase 4c), run when the first block of
+ * epoch `e` is about to be applied:
+ *
+ *   1. pots initialised at the first Shelley boundary (reserves = max supply −
+ *      UTxO total; treasury and fee pot 0);
+ *   2. rewards queued for `e` are paid into the reward accounts (they were
+ *      computed one boundary earlier from epoch e − 2's performance);
+ *   3. rewards for the performance of epoch e − 1 are computed from the
+ *      snapshot taken at the start of e − 2 ("go"), the blocks made in e − 1,
+ *      the fee pot and the parameters of e − 1, and queued to be paid at e + 1.
+ *
+ * Reports only: the amounts feed the stake snapshots and the withdrawal
+ * report; nothing halts on them until they are verified against a reference.
+ */
+import { sql } from "../sql";
+import { logger } from "../utils/logger";
+import { readEpochParamsRaw } from "./epochParams";
+import { computeEpochRewards, type PoolInput, type RewardParams } from "./rewards";
+import {
+    blocksMadeInEpoch,
+    initRewardPots,
+    poolStakeForEpoch,
+    readRewardPots,
+    recordRewardEpoch,
+    registeredPoolParams,
+    poolParamsAt,
+    registeredStakeKeys,
+    stakeSnapshotMembers,
+    updateRewardPots,
+    creditRewards,
+    recordRewardPayouts,
+    recordPoolRewards,
+    ensurePotSnapshotsTable,
+    readPotSnapshot,
+    recordPotSnapshot,
+} from "../db/leaderState";
+import { rationalFromDecimal } from "./rules/overlay";
+
+function ratio(v: unknown, fallback: string): { num: bigint; den: bigint } {
+    try {
+        return rationalFromDecimal(String(v ?? fallback));
+    } catch {
+        return rationalFromDecimal(fallback);
+    }
+}
+
+/**
+ * Shelley reward update timing (`NEWEPOCH` / `RUPD`): the update applied at the
+ * boundary into epoch e was created during e − 1 from
+ *   reserves at the start of e − 1, fees collected during e − 2,
+ *   blocks made during e − 2, the stake distribution that led e − 2
+ *   (snapshot taken at the start of e − 3), and the parameters of e − 2 (`esPrevPp`);
+ * its treasury cut and member/leader rewards land at the boundary into e.
+ * Verified against Koios `totals` per boundary (scripts/verify-pots.ts).
+ */
+/** Everything `computeEpochRewards` needs for the update applied at the boundary into `epoch` (null when nothing applies yet). */
+export async function buildRewardInputs(epoch: number, genesis: any, shelleyStart: number, slotsPerEpoch: bigint): Promise<{ perfEpoch: number; input: Parameters<typeof computeEpochRewards>[0]; prevReserves: bigint; fees: bigint; totalBlocks: bigint; expectedBlocks: bigint; pools: number } | null> {
+    const maxSupply = BigInt(String(genesis?.maxLovelaceSupply ?? 45_000_000_000_000_000n));
+    const perfEpoch = epoch - 2;
+    const prev = await readPotSnapshot(epoch - 1);
+    if (!prev) return null;
+    const feesSnap = await readPotSnapshot(epoch - 1); // fees collected during e − 2 were recorded at the boundary into e − 1
+    const fees = feesSnap?.feesCollected ?? 0n;
+    const dist = perfEpoch >= shelleyStart ? await poolStakeForEpoch(perfEpoch) : null; // taken at perfEpoch − 1
+    // `createRUpd` reads `esPrevPp`: the parameters in force during e − 2 (during e − 1,
+    // when the update is created, those are the previous parameters). Koios: the pot of the
+    // boundary into preprod epoch 7 used d = 1 (epoch 5) although epoch 6 already had d = 0.
+    const raw = (await readEpochParamsRaw(epoch - 2)) ?? (await readEpochParamsRaw(epoch - 1)) ?? {};
+    const params: RewardParams = {
+        rhoNum: ratio(raw.rho, "0.003").num, rhoDen: ratio(raw.rho, "0.003").den,
+        tauNum: ratio(raw.tau, "0.2").num, tauDen: ratio(raw.tau, "0.2").den,
+        a0Num: ratio(raw.a0, "0.3").num, a0Den: ratio(raw.a0, "0.3").den,
+        nOpt: BigInt(String(raw.n_opt ?? 150)),
+        dNum: ratio(raw.decentralisation_param, "0").num, dDen: ratio(raw.decentralisation_param, "0").den,
+        protocolMajor: Number(raw.protocol_major_ver ?? 0),
+    };
+    const f = rationalFromDecimal(String(genesis?.activeSlotsCoeff ?? 0.05));
+    // expected blocks = slotsPerEpoch · f · (1 − d)
+    const expectedBlocks = (slotsPerEpoch * f.num * (params.dDen - params.dNum)) / (f.den * params.dDen);
+    const blocks = perfEpoch >= shelleyStart ? await blocksMadeInEpoch(perfEpoch) : new Map<string, number>();
+    // BlocksMade counts pool blocks only: overlay slots are issued by genesis delegates,
+    // which are not pools (mainnet epoch 213: 16 817 of 21 442 blocks), and η compares
+    // pool blocks with (1 − d)·f·slotsPerEpoch.
+    const poolIdsForBlocks = new Set((await registeredPoolParams()).keys());
+    for (const id of (await poolParamsAt(dist?.takenAt ?? epoch - 1)).keys()) poolIdsForBlocks.add(id);
+    let totalBlocks = 0n;
+    for (const [id, n] of blocks) if (poolIdsForBlocks.has(id)) totalBlocks += BigInt(n);
+    const poolParams = dist ? await poolParamsAt(dist.takenAt) : await registeredPoolParams();
+    const members = dist ? await stakeSnapshotMembers(dist.takenAt) : new Map<string, Array<{ credential: string; stake: bigint }>>();
+    const registered = await registeredStakeKeys();
+
+    const pools: PoolInput[] = [];
+    for (const [poolId, stake] of dist?.stake ?? new Map<string, bigint>()) {
+        const pp = poolParams.get(poolId)?.params;
+        if (!pp) continue;
+        const list = members.get(poolId) ?? [];
+        const owners = new Set(pp.owners.map((o) => o.toLowerCase()));
+        let ownerStake = 0n;
+        for (const m of list) if (owners.has(m.credential)) ownerStake += m.stake;
+        pools.push({
+            poolId,
+            stake,
+            ownerStake,
+            pledge: BigInt(pp.pledge),
+            cost: BigInt(pp.cost),
+            marginNum: BigInt(pp.marginNum),
+            marginDen: BigInt(pp.marginDen || "1"),
+            rewardAccount: pp.rewardAccount.toLowerCase(),
+            owners: [...owners],
+            blocks: BigInt(blocks.get(poolId) ?? 0),
+            members: list,
+        });
+    }
+    const input = {
+        reserves: prev.reserves,
+        fees,
+        totalStake: maxSupply - prev.reserves,
+        activeStake: dist?.total ?? 0n,
+        totalBlocks,
+        expectedBlocks,
+        params,
+        pools,
+        registered,
+    };
+    return { perfEpoch, input, prevReserves: prev.reserves, fees, totalBlocks, expectedBlocks, pools: pools.length };
+}
+
+export async function runEpochRewards(epoch: number, genesis: any, shelleyStart: number, slotsPerEpoch: bigint): Promise<void> {
+    const maxSupply = BigInt(String(genesis?.maxLovelaceSupply ?? 45_000_000_000_000_000n));
+    if (epoch < shelleyStart) return;
+    await ensurePotSnapshotsTable(sql);
+    const pots = await initRewardPots(sql, epoch, maxSupply);
+    if (epoch === shelleyStart || !(await readPotSnapshot(epoch - 1))) {
+        // First Shelley boundary (or a DB from before pot snapshots): nothing to apply yet.
+        const cur = (await readRewardPots()) ?? pots;
+        await recordPotSnapshot(sql, epoch, { reserves: cur.reserves, treasury: cur.treasury, feesCollected: cur.feePot });
+        await updateRewardPots(sql, { reserves: 0n, treasury: 0n, resetFees: true });
+        return;
+    }
+    const perfEpoch = epoch - 2;
+    // Idempotent across restarts: a boundary re-run must not move the pots twice.
+    const done = (await sql`SELECT 1 FROM reward_epochs WHERE performance_epoch = ${perfEpoch}`.values()) as unknown[][];
+    if (done.length) return;
+    const built = await buildRewardInputs(epoch, genesis, shelleyStart, slotsPerEpoch);
+    if (!built) return;
+    const { input, prevReserves: prevReservesUsed, fees, totalBlocks, expectedBlocks } = built;
+    const out = computeEpochRewards(input);
+    const pools = input.pools;
+    let paidTotal = 0n;
+    for (const v of out.paid.values()) paidTotal += v;
+    // Rewards land now (boundary into `epoch`), as do the treasury cut and the reserves movement.
+    await creditRewards(sql, out.paid);
+    await recordRewardPayouts(sql, perfEpoch, out.paid);
+    await recordPoolRewards(sql, perfEpoch, out.pools);
+    await updateRewardPots(sql, { reserves: out.reservesDelta, treasury: out.treasuryDelta, resetFees: false });
+    await recordRewardEpoch(sql, perfEpoch, { rewardPot: out.rewardPot, treasuryDelta: out.treasuryDelta, paid: paidTotal, unclaimed: out.unclaimed, pools: pools.length, accounts: out.paid.size });
+    const cur = (await readRewardPots()) ?? pots;
+    await recordPotSnapshot(sql, epoch, { reserves: cur.reserves, treasury: cur.treasury, feesCollected: cur.feePot });
+    await updateRewardPots(sql, { reserves: 0n, treasury: 0n, resetFees: true });
+    logger.info(`Epoch ${epoch}: reward update for epoch ${perfEpoch} applied — pot ${out.rewardPot} (reserves ${prevReservesUsed}, fees ${fees}), treasury +${out.treasuryDelta} (forfeited ${out.forfeited}), ${paidTotal} to ${out.paid.size} account(s) across ${pools.length} pool(s) (${totalBlocks}/${expectedBlocks} blocks), ${out.unclaimed} unclaimed`);
+}

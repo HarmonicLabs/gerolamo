@@ -54,9 +54,8 @@ export function series(history: readonly ResourceSample[], key: keyof ResourceSa
 export function spanLabel(history: readonly ResourceSample[]): string {
   if (history.length < 2) return "—";
   const ms = history[history.length - 1]!.t - history[0]!.t;
-  const min = Math.round(ms / 60_000);
-  if (min < 1) return `${Math.round(ms / 1000)} s`;
-  return `${min} min`;
+  if (ms < 60_000) return `${Math.round(ms / 1000)} s`;
+  return `${Math.round(ms / 60_000)} min`;
 }
 
 /** Sample index under a horizontal fraction (0..1) of a chart with `n` evenly spaced samples. */

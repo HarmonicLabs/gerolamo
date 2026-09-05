@@ -1,14 +1,14 @@
 /**
- * Gerolamo Mithril client — hybrid WASM verify + pure-TS download / external bin.
+ * Gerolamo Mithril client — pure-TS verify + download, external bin optional.
  *
  * Spec role: https://mithril.network/doc/mithril/advanced/mithril-network/client
  * Research: docs/mithril-native-client-research.md
  *
  * Honesty:
  *   - Production cert verify = HTTP aggregator + pure-TS Stages 1–5d (`--engine ts`)
- *   - WASM / bin are debug or bulk-restore only (`--engine wasm|both|bin`)
+ *   - `--engine bin` shells out to the external mithril-client (bulk restore)
  *   - Download/extract = TS HTTP + fzstd + tar-stream
- *   - dual-run match still available for debug compare
+ *   - No WASM dependency: the IOG client was removed after pure-TS dual-run soaks
  */
 
 export type {
@@ -25,11 +25,9 @@ export type {
 } from "./types";
 
 export {
-    createMithrilClient,
     fetchGenesisVkey,
     networkConfig,
     selectSnapshot,
-    type GerolamoMithrilClient,
 } from "./client";
 
 export {
@@ -58,11 +56,9 @@ export {
 
 export {
     cryptoInventory,
-    dualRunCertificateChain,
     pureTsFullChainStagesOk,
     pureTsVerifyCertificateChain,
     type CryptoInventory,
-    type DualRunVerifyResult,
     type PureTsVerifyResult,
     type PureTsVerifyOptions,
 } from "./dualRun";

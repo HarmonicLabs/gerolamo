@@ -1,5 +1,5 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
-import { applyByronTxPayload, applyTransaction, type SqlClient } from "../db";
+import { applyByronTxPayload, applyInvalidTransaction, applyTransaction, type SqlClient } from "../db";
 import { logger } from "../utils/logger";
 import { sql } from "../sql";
 import {
@@ -25,6 +25,7 @@ export async function applyBlock(
     blockHash: Uint8Array,
     client?: SqlClient,
     blockHeight: number | null = null,
+    opts: { epoch?: number; govActionLifetime?: number; era?: number } = {},
 ): Promise<void> {
     if (isByronBlock(block as any)) {
         const payloads = getByronTxPayloads(block as any);
@@ -41,12 +42,13 @@ export async function applyBlock(
     // Forward Mini-BF indexes (tx_index / address_tx / block_tx) via indexCtx.
     const txBodies = getShelleyTxBodies(block);
     const slotNum = Number(slot);
+    // Phase-2 failures marked by the producer: only their collateral is consumed.
+    const invalid = new Set<number>((((block as any).invalidTransactions ?? []) as Array<number | bigint>).map((i) => Number(i)));
     let txIndex = 0;
     for (const txBody of txBodies) {
-        await applyTransaction(txBody, blockHash, client, {
-            slot: slotNum,
-            txIndex: txIndex++,
-            blockHeight,
-        });
+        const ctx = { slot: slotNum, txIndex, blockHeight, epoch: opts.epoch, govActionLifetime: opts.govActionLifetime, era: opts.era };
+        if (invalid.has(txIndex)) await applyInvalidTransaction(txBody, blockHash, client, ctx);
+        else await applyTransaction(txBody, blockHash, client, ctx);
+        txIndex++;
     }
 }

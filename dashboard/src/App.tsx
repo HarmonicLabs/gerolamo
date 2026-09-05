@@ -1,9 +1,31 @@
-import { createSignal, lazy, Suspense, Show, type Component } from "solid-js";
+import { createSignal, lazy, onCleanup, onMount, Suspense, Show, type Component } from "solid-js";
 import { Sidebar, Topbar, Footer } from "@/components/Layout";
 import { SkeletonCard } from "@/components/ui/skeleton";
 import ErrorBoundary from "@/components/ui/error-boundary";
 import { ToastProvider } from "@/components/ui/toast";
-import type { NavItemId } from "@/lib/constants";
+import { NAV_ITEMS, type NavItemId } from "@/lib/constants";
+
+// ---------------------------------------------------------------------------
+// URL ↔ page. Pages live under hash routes (#/overview, #/blocks, #/explorer/…)
+// so a deep link such as /explorer/#/explorer/block/<id> opens the right page
+// and the browser back button works. `?embed=1` renders the explorer alone
+// (no sidebar, topbar, chain diagram or footer): the desktop app frames it and
+// those parts talk to the dashboard server, which the desktop does not run.
+// ---------------------------------------------------------------------------
+const PAGE_IDS = new Set<string>(NAV_ITEMS.map((n) => n.id));
+
+function pageFromHash(hash: string): NavItemId {
+  const first = (hash || "").replace(/^#\/?/, "").split(/[/?]/)[0] ?? "";
+  return (PAGE_IDS.has(first) ? first : "overview") as NavItemId;
+}
+
+function isEmbedded(): boolean {
+  try {
+    return new URLSearchParams(location.search).get("embed") != null;
+  } catch {
+    return false;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Lazy-loaded pages
@@ -36,7 +58,32 @@ const PageSkeleton: Component = () => (
 // App root
 // ---------------------------------------------------------------------------
 const App: Component = () => {
-  const [activePage, setActivePage] = createSignal<NavItemId>("overview");
+  const [activePage, setActivePage] = createSignal<NavItemId>(pageFromHash(location.hash));
+  const onHash = () => setActivePage(pageFromHash(location.hash));
+  onMount(() => window.addEventListener("hashchange", onHash));
+  onCleanup(() => window.removeEventListener("hashchange", onHash));
+  function navigate(page: NavItemId) {
+    setActivePage(page);
+    // The explorer keeps its own sub-routes; only replace the hash when leaving
+    // the page family, so #/explorer/block/<id> survives a re-click.
+    if (pageFromHash(location.hash) !== page) location.hash = `#/${page}`;
+  }
+
+  if (isEmbedded()) {
+    return (
+      <ToastProvider>
+        <div class="h-screen overflow-y-auto bg-mesh bg-grid-subtle">
+          <main id="main-content" class="mx-auto max-w-[1400px] px-6 py-4" aria-label="Block explorer">
+            <ErrorBoundary>
+              <Suspense fallback={<PageSkeleton />}>
+                <Explorer />
+              </Suspense>
+            </ErrorBoundary>
+          </main>
+        </div>
+      </ToastProvider>
+    );
+  }
 
   // Read initial collapsed state from localStorage
   let initialCollapsed = false;
@@ -67,7 +114,7 @@ const App: Component = () => {
         {/* ---- Sidebar ---- */}
         <Sidebar
           activePage={activePage()}
-          onNavigate={(page) => setActivePage(page as NavItemId)}
+          onNavigate={(page) => navigate(page as NavItemId)}
           collapsed={collapsed()}
           onToggle={toggleSidebar}
         />

@@ -1,3 +1,5 @@
+import type { TicknResult } from "../utils/nonceEvolver";
+import { nonceFactsOf } from "../utils/nonceReplay";
 import { logger } from "../utils/logger";
 import { sql } from "../sql";
 import { SerializedMutationQueue } from "./SerializedMutationQueue";
@@ -14,7 +16,7 @@ import {
     ChainPoint,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { prettyBlockValidationLog } from "../tui";
-import { calculatePreProdCardanoEpoch, epochForSlot, epochLengthSlots } from "../utils/epochFromSlotCalculations";
+import { getEpochNetwork, calculatePreProdCardanoEpoch, epochForSlot, epochLengthSlots } from "../utils/epochFromSlotCalculations";
 import { blockFrostFetchEra } from "../utils/blockFrostFetchEra";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
@@ -27,6 +29,12 @@ import {
     applyTransaction,
     getBlockByHash,
     getBlockBySlot,
+    getBlockListRowByHash,
+    getLastBlockBefore,
+    getEpochNonceStart,
+    storeEpochNonceStart,
+    storedBlocksInSlotRange,
+    setStrictUtxoApply,
     getEpochNonce as dbGetEpochNonce,
     getEpochNonceState,
     getMaxSlot,
@@ -53,12 +61,23 @@ import { getShelleyGenesisConfig } from "../utils/paths";
 import { NonceEvolver } from "../utils/nonceEvolver";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { emitTip } from "../network/liveEvents";
+import { LeaderChecker } from "./rules/leaderCheck";
+import { applyPendingMir, noteBlockMade, poolsMissingFromSnapshot, promotePendingPoolParams, refreshPotSnapshot, refundPoolDeposits, retirePoolsAtEpochDetailed, seedGenesisDelegs, setOpcertCounter, takeStakeSnapshot } from "../db/leaderState";
+import { deriveNextEpochParams } from "./pparams";
+import { runEpochRewards } from "./epochRewards";
+import { ratifyAndEnact, seedGovernance } from "./governance/state";
+import { applyEraGenesis, diffRawParams, eraGenesisFilesFor, repairLocalEpochParams } from "./pparams";
+import { creditRewards, updateRewardPots } from "../db/leaderState";
+import { epochParamsFromGenesis, readEpochParamsRaw, readEpochParamsSource, storeEpochParams } from "./epochParams";
+import { firstSlotOfEpoch, shelleyStartEpoch } from "../utils/epochFromSlotCalculations";
+import { prevHashToNonce } from "../utils/calcEpochNonce";
+import { blake2b_224 } from "@harmoniclabs/crypto";
 import { assertBlockRangeMatches } from "./blockRange";
 import { splitEraBlock } from "./bodyHash";
 import { clampMaxRangeBlocks, rangeSizeFor } from "./rangeSizing";
 import { ByronObftState } from "./byron/ByronOBFT";
 import { getByronGenesisConfig } from "../utils/paths";
-import { Cbor, LazyCborArray } from "@harmoniclabs/cbor";
+import { Cbor, CborArray, CborBytes, CborTag, CborUInt, LazyCborArray } from "@harmoniclabs/cbor";
 import { CandidateSet, type PeerAgreement, type PeerRole } from "./CandidateSet";
 import { RangeMismatch, RangeScheduler, type RangeSchedulerStats } from "./RangeScheduler";
 import { ValidationPool, resolveWorkerCount } from "./workers/ValidationPool";
@@ -113,6 +132,8 @@ export interface SyncSnapshot {
     peers: PeerAgreement[];
     scheduler: RangeSchedulerStats;
     validationWorkers: number;
+    /** Worker-thread heaps (bytes, heapUsed per worker) from the last sampling, for memory diagnostics. */
+    workerHeaps: number[] | null;
     pendingHeaders: number;
     blocksApplied: number;
     blocksPerSec: number;
@@ -171,8 +192,16 @@ export class ConsensusOrchestrator {
     private readonly applyTimestamps: number[] = [];
     private readonly profile = new ApplyProfile();
     private halted: SyncHalt | null = null;
+    private haltDropLogged = false;
     /** Last header accepted from the primary (hash hex); null = re-anchor on the DB tip. */
     private lastAccepted: { slot: bigint; hash: string } | null = null;
+    /** Main-thread header rules with ledger state (overlay schedule, pool registration, stake). */
+    private leaderChecker: LeaderChecker | null = null;
+    private leaderCheckerInit: Promise<LeaderChecker | null> | null = null;
+    private leaderReports = 0;
+    private readonly peekLogged = new Set<number>();
+    /** Epoch of the last applied Shelley+ block; a higher epoch triggers the boundary work. */
+    private lastAppliedEpoch: number | null = null;
     private static readonly PROFILE_LOG_EVERY = 256;
     /** Continuous UPDN+TICKN (phase 3). Lazy-init after genesis load. */
     private nonceEvolver: NonceEvolver | null = null;
@@ -207,6 +236,10 @@ export class ConsensusOrchestrator {
         this.config = config;
         this.peers = peers;
         this.pool = new ValidationPool(resolveWorkerCount(config.validation?.workers));
+        this.startWorkerHeapSampling();
+        // A complete ledger has every input a block spends; a missing one is a bug or a
+        // fork, never something to skip. Tip sync keeps the tolerant apply.
+        setStrictUtxoApply(resolveValidationPolicy(config).ledgerComplete);
         // setInterval(() => {
         // 	if (Date.now() - this.lastActivity > 300000) { // 5 minutes
         // 		logger.warn("Sync stalled, no rollForward for 5 minutes");
@@ -248,26 +281,70 @@ export class ConsensusOrchestrator {
         const evolver = await this.ensureNonceEvolver();
         if (!evolver || evolver.isActive()) return;
         try {
-            const st = await getEpochNonceState(epoch);
-            if (st?.evolving_hex && st?.candidate_hex) {
-                evolver.bootstrap(epoch, eta0Hex, {
-                    etaVHex: st.evolving_hex,
-                    etaCHex: st.candidate_hex,
-                });
-                logger.debug(
-                    `NonceEvolver restored ηv/ηc from DB for epoch ${epoch}`,
-                );
+            const tipRow = await getLastBlockBefore(Number.MAX_SAFE_INTEGER);
+            const tipSlot = tipRow?.slot ?? -1;
+            const shelleyStart = Number(shelleyStartEpoch());
+            const start = epoch > shelleyStart ? await getEpochNonceStart(epoch) : null;
+            if (start) {
+                // ηh carried into this epoch: the previous hash of the last block of epoch − 1.
+                const firstSlot = Number(firstSlotOfEpoch(epoch));
+                const last = await getLastBlockBefore(firstSlot);
+                const etaHHex = last?.prevHash ? toHex(prevHashToNonce(fromHex(last.prevHash))) : null;
+                evolver.bootstrap(epoch, eta0Hex, { etaVHex: start.etaVHex, etaCHex: start.etaCHex, etaHHex });
+                const n = await this.replayStoredHeaders(evolver, firstSlot, tipSlot);
+                logger.info(`NonceEvolver restored from the epoch ${epoch} start state and ${n} stored header(s)${etaHHex ? " (ηh from the previous epoch's last block)" : ""}`);
             } else {
-                evolver.bootstrap(epoch, eta0Hex);
-                logger.debug(
-                    `NonceEvolver bootstrapped ηv=ηc=η0 for epoch ${epoch}`,
-                );
+                // No epoch-start state (DB from before it was recorded, or the first Shelley
+                // epoch): replay from the Shelley start, where ηv = ηc = η0.
+                const eta0Start = epoch === shelleyStart ? eta0Hex : await dbGetEpochNonce(shelleyStart).catch(() => null);
+                if (!eta0Start) {
+                    evolver.bootstrap(epoch, eta0Hex);
+                    logger.warn(`NonceEvolver bootstrapped ηv=ηc=η0 for epoch ${epoch} (no epoch-start state and no η0 for epoch ${shelleyStart})`);
+                    return;
+                }
+                evolver.bootstrap(shelleyStart, eta0Start);
+                const firstSlot = Number(firstSlotOfEpoch(shelleyStart));
+                const t0 = performance.now();
+                const n = await this.replayStoredHeaders(evolver, firstSlot, tipSlot);
+                logger.info(`NonceEvolver rebuilt from the Shelley start: ${n} stored header(s) replayed in ${((performance.now() - t0) / 1000).toFixed(1)}s (now epoch ${evolver.getEpoch()})`);
             }
         } catch (err: unknown) {
             logger.warn(
                 `NonceEvolver bootstrap failed for epoch ${epoch}:`,
                 err,
             );
+        }
+    }
+
+    /** UPDN every stored Shelley+ block in [fromSlot, toSlot] into `evolver`; TICKNs on the way persist their η0 and start state. */
+    private async replayStoredHeaders(evolver: NonceEvolver, fromSlot: number, toSlot: number): Promise<number> {
+        let n = 0;
+        if (toSlot < fromSlot) return 0;
+        for await (const row of storedBlocksInSlotRange(fromSlot, toSlot)) {
+            const f = nonceFactsOf(row);
+            if (!f) continue;
+            const tickns = evolver.processBlock(f.slot, f.bnonce, f.prevHash);
+            for (const t of tickns) await this.recordTickn(t);
+            n++;
+        }
+        return n;
+    }
+
+    /** Persist a TICKN result (η0, source local, and the epoch-start ηv/ηc for later replays). */
+    private async recordTickn(t: TicknResult): Promise<void> {
+        const known = this.epochNonceCache.get(t.epoch) ?? (await dbGetEpochNonce(t.epoch).catch(() => null));
+        if (known && known.toLowerCase() !== t.eta0Hex.toLowerCase()) {
+            logger.error(`NonceEvolver disagrees for epoch ${t.epoch}: computed ${t.eta0Hex.slice(0, 16)}…, known ${known.slice(0, 16)}…; keeping the known value (evolver state suspect)`);
+            this.nonceEvolver?.reset();
+            return;
+        }
+        this.epochNonceCache.set(t.epoch, t.eta0Hex);
+        try {
+            await storeEpochNonce(t.epoch, t.eta0Hex, "local", t.etaVHex, t.etaCHex);
+            await storeEpochNonceStart(t.epoch, t.etaVHex, t.etaCHex);
+            logger.info(`TICKN η0_${t.epoch}=${t.eta0Hex.slice(0, 16)}… (blocks=${t.nBlocksPrev} freeze=${t.nBeforeFreeze})`);
+        } catch (storeErr: unknown) {
+            logger.warn(`Failed to persist TICKN η0 for epoch ${t.epoch}:`, storeErr);
         }
     }
 
@@ -305,27 +382,7 @@ export class ConsensusOrchestrator {
 
             const prevHash = getHeaderPrevHash(header as any);
             const tickns = evolver.processBlock(slot, bnonce, prevHash);
-            for (const t of tickns) {
-                this.epochNonceCache.set(t.epoch, t.eta0Hex);
-                try {
-                    await storeEpochNonce(
-                        t.epoch,
-                        t.eta0Hex,
-                        "local",
-                        t.etaVHex,
-                        t.etaCHex,
-                    );
-                    logger.info(
-                        `TICKN η0_${t.epoch}=${t.eta0Hex.slice(0, 16)}… ` +
-                            `(blocks=${t.nBlocksPrev} freeze=${t.nBeforeFreeze})`,
-                    );
-                } catch (storeErr: unknown) {
-                    logger.warn(
-                        `Failed to persist TICKN η0 for epoch ${t.epoch}:`,
-                        storeErr,
-                    );
-                }
-            }
+            for (const t of tickns) await this.recordTickn(t);
 
             // ηv/ηc for mid-chain resume are persisted once per range (persistNonceSnapshot),
             // not per block: a range commits atomically, so the two are equivalent.
@@ -333,6 +390,18 @@ export class ConsensusOrchestrator {
         } catch (err: unknown) {
             logger.warn("NonceEvolver feed failed:", err);
         }
+    }
+
+    /** Hashes (hex) at the DB tip slot: a Byron EBB shares its slot with the epoch's first block. */
+    private async dbTipHashes(): Promise<string[] | null> {
+        const maxSlot = await getMaxSlot();
+        if (maxSlot <= 0n) return null;
+        const rows = (await sql`SELECT hash FROM blocks WHERE slot = ${maxSlot}`.values()) as unknown[];
+        const hashes = rows.map((r: any) => {
+            const h = Array.isArray(r) ? r[0] : r?.hash;
+            return h instanceof Uint8Array ? toHex(h) : String(h ?? "").toLowerCase();
+        }).filter((h) => h.length === 64);
+        return hashes.length ? hashes : null;
     }
 
     /** Hash (hex) of the block at the DB tip, or null on an empty DB. */
@@ -354,46 +423,131 @@ export class ConsensusOrchestrator {
         return { blockNumber: blockCount, slotNumber: maxSlot };
     }
 
+    /** Nonce rows we derived ourselves; an external value never overrides them. */
+    private static readonly LOCAL_NONCE_SOURCES = new Set(["local", "local-genesis", "tickn"]);
+
     /**
-     * Resolve epoch η0 for header VRF:
-     * 1) in-memory cache
-     * 2) local SQLite (epoch_nonces)
-     * 3) external Blockfrost/onchainapps → persist to DB
-     *
-     * Continuous UPDN+TICKN (phase 3) evolves ηv/ηc on applied blocks and
-     * writes next-epoch η0 via storeEpochNonce(source='local').
-     * Mid-chain still bootstraps η0 from DB/external when needed.
+     * True when the local chain derivation is authoritative for `epoch`: we sync
+     * from genesis, the evolver is live, or we derived η0 of the previous epoch.
+     * An external value must then never be consulted: it may belong to another
+     * network or another chain, and a wrong η0 rejects every header of the epoch
+     * (preview epoch 9 was once served preprod's nonce by a fallback mirror).
+     */
+    private async localNonceAuthoritative(epoch: number): Promise<boolean> {
+        if ((this.config as any).syncFromGenesis === true) return true;
+        if (this.nonceEvolver?.isActive()) return true;
+        try {
+            const prev = await getEpochNonceState(epoch - 1);
+            return !!prev && ConsensusOrchestrator.LOCAL_NONCE_SOURCES.has(prev.source);
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Re-activate the evolver at the applied tip's epoch after a rollback or a
+     * primary switch reset it (the header stage may ask for the next epoch's
+     * η0 before any block is applied again).
+     */
+    private async ensureEvolverAtTip(): Promise<void> {
+        const evolver = await this.ensureNonceEvolver();
+        if (!evolver || evolver.isActive()) return;
+        const tipSlot = await getMaxSlot();
+        const tipEpoch = Number(epochForSlot(tipSlot));
+        if (tipSlot <= 0n || tipEpoch < Number(shelleyStartEpoch())) return;
+        const eta0 = this.epochNonceCache.get(tipEpoch) ?? (await dbGetEpochNonce(tipEpoch).catch(() => null));
+        if (!eta0) return;
+        await this.ensureEvolverBootstrapped(tipEpoch, eta0);
+    }
+
+    /** η0 of `epoch` from the evolver's frozen candidate (headers ahead of the boundary block), or null. */
+    private async peekLocalNonce(epoch: number): Promise<string | null> {
+        await this.ensureEvolverAtTip();
+        const evolver = this.nonceEvolver;
+        if (!evolver?.isActive() || epoch !== evolver.getEpoch() + 1) return null;
+        return evolver.peekNextEpochNonceHex(await getMaxSlot());
+    }
+
+    /**
+     * Resolve epoch η0 for header VRF: in-memory cache → locally derived SQLite
+     * row (epoch_nonces) → the evolver's frozen candidate for the next epoch →
+     * Shelley genesis hash for the first epoch → external (only when the local
+     * derivation is not authoritative; reported).
      */
     private async getEpochNonce(epoch: number): Promise<string | null> {
-        if (this.epochNonceCache.has(epoch)) {
-            return this.epochNonceCache.get(epoch)!;
-        }
+        const cached = this.epochNonceCache.get(epoch);
+        if (cached) return cached;
 
+        let external: string | null = null;
         try {
-            const local = await dbGetEpochNonce(epoch);
-            if (local) {
-                this.epochNonceCache.set(epoch, local);
-                logger.debug(`DB hit for epoch nonce ${epoch}`);
-                return local;
+            const row = await getEpochNonceState(epoch);
+            if (row?.nonce_hex) {
+                if (ConsensusOrchestrator.LOCAL_NONCE_SOURCES.has(row.source)) {
+                    this.epochNonceCache.set(epoch, row.nonce_hex);
+                    logger.debug(`DB hit for epoch nonce ${epoch}`);
+                    return row.nonce_hex;
+                }
+                external = row.nonce_hex; // re-derived below whenever the evolver can
             }
         } catch (error: unknown) {
             logger.warn(`Local epoch nonce read failed for ${epoch}:`, error);
         }
 
+        // Next epoch, headers ahead of the boundary block: the evolver already knows
+        // η0 once the candidate nonce is frozen. Not cached: the boundary's TICKN
+        // writes the final value (and would report a disagreement).
+        const peek = await this.peekLocalNonce(epoch);
+        if (peek) {
+            if (!this.peekLogged.has(epoch)) {
+                this.peekLogged.add(epoch);
+                logger.info(`Epoch ${epoch} nonce derived ahead of the boundary from the local evolver`);
+            }
+            if (external) {
+                if (external !== peek) {
+                    logger.warn(
+                        `Epoch ${epoch} nonce stored from an external source (${external.slice(0, 12)}…) disagrees with the local derivation (${peek.slice(0, 12)}…); using the local value`,
+                    );
+                }
+                try {
+                    await storeEpochNonce(epoch, peek, "local");
+                } catch { /* the boundary TICKN persists it regardless */ }
+            }
+            return peek;
+        }
+        // First Shelley epoch: η0 is the Shelley genesis hash (checked against the
+        // mainnet epoch 208 nonce). Later epochs come from the local evolver.
+        const genesisHash = String((this.config as any).shelleyGenesisHash ?? "").toLowerCase();
+        if (epoch === Number(shelleyStartEpoch()) && /^[0-9a-f]{64}$/.test(genesisHash)) {
+            this.epochNonceCache.set(epoch, genesisHash);
+            try {
+                await storeEpochNonce(epoch, genesisHash, "local-genesis");
+            } catch { /* cache is enough */ }
+            return genesisHash;
+        }
+        if (await this.localNonceAuthoritative(epoch)) {
+            const evolver = this.nonceEvolver;
+            if (epoch === Number(shelleyStartEpoch())) {
+                logger.error(`Epoch ${epoch} is the first Shelley epoch but the config carries no valid shelleyGenesisHash (η0 = Shelley genesis hash); from-genesis sync cannot proceed`);
+                return null;
+            }
+            logger.warn(
+                `Epoch ${epoch} nonce not derivable yet (applied tip slot ${await getMaxSlot()}, evolver ${evolver?.isActive() ? `epoch ${evolver.getEpoch()}` : "inactive"}); the header batch waits for the applier instead of an external value`,
+            );
+            return null;
+        }
+        if (external) {
+            this.epochNonceCache.set(epoch, external);
+            return external;
+        }
         try {
             const nonce = await blockFrostFetchEra(this.config, epoch);
+            logger.warn(`Epoch ${epoch} nonce taken from an external source (the local evolver had no value); from-genesis sync derives it locally`);
             this.epochNonceCache.set(epoch, nonce);
             try {
                 await storeEpochNonce(epoch, nonce, "external");
             } catch (storeErr: unknown) {
-                logger.warn(
-                    `Failed to persist epoch ${epoch} nonce to DB:`,
-                    storeErr,
-                );
+                logger.warn(`Failed to persist epoch ${epoch} nonce to DB:`, storeErr);
             }
-            logger.debug(
-                `Fetched and cached epoch ${epoch} nonce from external (persisted)`,
-            );
             return nonce;
         } catch (error: unknown) {
             logger.error(`Failed to fetch epoch ${epoch} nonce:`, error);
@@ -450,6 +604,8 @@ export class ConsensusOrchestrator {
 
     /** Pending ranges/headers/fragments are void after the chain moved backwards. */
     private afterRollback(): void {
+        // ηv/ηc are only valid for the chain they were computed on: rebuild from stored headers.
+        this.nonceEvolver?.reset();
         this.lastBlockNo = null; // heights past the rollback point are gone
         this.lastAccepted = null;
         this.pendingHeaders.clear();
@@ -654,6 +810,190 @@ export class ConsensusOrchestrator {
         return resolveValidationPolicy(this.config).body;
     }
 
+    private ensureLeaderChecker(): Promise<LeaderChecker | null> {
+        if (this.leaderChecker) return Promise.resolve(this.leaderChecker);
+        if (!this.leaderCheckerInit) {
+            this.leaderCheckerInit = (async () => {
+                try {
+                    const genesis = await getShelleyGenesisConfig(this.config as any);
+                    await seedGenesisDelegs((genesis as any)?.genDelegs ?? {});
+                    await repairLocalEpochParams(eraGenesisFilesFor(this.config), genesis).catch((err) => logger.warn("epoch parameter repair skipped:", err));
+                    this.leaderChecker = new LeaderChecker(this.config, genesis);
+                    return this.leaderChecker;
+                } catch (err) {
+                    logger.warn("Leader rules unavailable (no Shelley genesis):", err);
+                    return null;
+                }
+            })();
+        }
+        return this.leaderCheckerInit;
+    }
+
+    /**
+     * First block of a Shelley+ epoch is about to be applied: retire pools whose
+     * epoch arrived and take the stake snapshot that decides leaders one epoch
+     * later. Runs inside the range's transaction.
+     */
+    private lastWorkerHeaps: number[] | null = null;
+    private workerHeapTimer: ReturnType<typeof setInterval> | null = null;
+
+    /** Log the worker-thread heaps every 5 minutes (memory diagnostics: an OOM at 24 GB RSS with a 90 MB main heap). */
+    private startWorkerHeapSampling(): void {
+        if (this.workerHeapTimer) return;
+        this.workerHeapTimer = setInterval(async () => {
+            try {
+                const heaps = await this.pool?.memory();
+                if (!heaps || heaps.length === 0) return;
+                this.lastWorkerHeaps = heaps.map((h) => h.heapUsed);
+                const total = heaps.reduce((a, h) => a + Math.max(0, h.heapUsed), 0);
+                const totalExt = heaps.reduce((a, h) => a + Math.max(0, h.external), 0);
+                const mu = process.memoryUsage();
+                // rss minus every JS-visible number = native (allocator, sqlite, sockets); that is what grows toward an OOM
+                const accounted = mu.heapTotal + mu.external + total + totalExt;
+                logger.info(`Memory: rss ${(mu.rss / 2 ** 30).toFixed(2)} GB, main heap ${(mu.heapUsed / 2 ** 20).toFixed(0)} MB, external ${(mu.external / 2 ** 20).toFixed(0)} MB, ${heaps.length} worker heaps ${(total / 2 ** 20).toFixed(0)} MB (max ${(Math.max(...heaps.map((h) => h.heapUsed)) / 2 ** 20).toFixed(0)} MB), worker external ${(totalExt / 2 ** 20).toFixed(0)} MB, unaccounted native ${((mu.rss - accounted) / 2 ** 30).toFixed(2)} GB`);
+            } catch { /* diagnostics only */ }
+        }, 300_000);
+    }
+
+    private async onEpochStart(epoch: number): Promise<void> {
+        if (this.lastAppliedEpoch == null) {
+            const tipSlot = await getMaxSlot();
+            this.lastAppliedEpoch = tipSlot > 0n ? Number(calculatePreProdCardanoEpoch(Number(tipSlot))) : -1;
+        }
+        if (epoch <= this.lastAppliedEpoch) return;
+        const t0 = performance.now();
+        const enacted = await this.governanceBoundary(epoch);
+        await this.deriveLocalParams(epoch, enacted?.paramChanges ?? {});
+        // Ledger order at the boundary: the reward update lands (applyRUpd), then the
+        // snapshot is taken (SNAP) with the pool parameters in force during the ending
+        // epoch, then pending re-registrations apply and retirements happen (POOLREAP).
+        try {
+            const genesis = await getShelleyGenesisConfig(this.config as any).catch(() => null);
+            if (genesis) await runEpochRewards(epoch, genesis, Number(shelleyStartEpoch()), BigInt(Number((genesis as any).epochLength ?? 432_000)));
+        } catch (err) {
+            logger.warn(`epoch ${epoch} reward accounting failed:`, err);
+        }
+        try {
+            const mir = await applyPendingMir(sql, epoch);
+            if (mir.credited || mir.transferred || mir.dropped) logger.info(`Epoch ${epoch}: MIR applied — ${mir.credited} to reward accounts, ${mir.transferred} between pots, ${mir.dropped} entr(y|ies) dropped (pot too small)`);
+        } catch (err) {
+            logger.warn(`Epoch ${epoch}: MIR application failed:`, err);
+        }
+        const snap = await takeStakeSnapshot(sql, epoch);
+        try {
+            const missing = await poolsMissingFromSnapshot(epoch);
+            if (missing.length) {
+                logger.warn(`Epoch ${epoch}: ${missing.length} registered pool(s) with delegations have no stake in the snapshot: ${missing.map((m) => `${m.poolId.slice(0, 12)}… (retiring ${m.retiringEpoch ?? "-"}, ${m.delegators} delegator(s))`).join(", ")}`);
+            }
+        } catch (err) {
+            logger.debug("snapshot diagnostic failed:", err);
+        }
+        const promoted = await promotePendingPoolParams(sql);
+        const retiredPools = await retirePoolsAtEpochDetailed(sql, epoch);
+        const retired = retiredPools.length;
+        if (retired) {
+            // POOLREAP: the pool deposit returns to the reward account (or the treasury).
+            try {
+                const raw = (await readEpochParamsRaw(epoch)) ?? (await readEpochParamsRaw(epoch - 1)) ?? {};
+                const deposit = BigInt(String((raw as any).pool_deposit ?? (raw as any).stakePoolDeposit ?? 0));
+                const r = await refundPoolDeposits(sql, retiredPools, deposit);
+                logger.info(`Epoch ${epoch}: ${retired} pool(s) retired (${retiredPools.reduce((n, p) => n + p.delegationsRemoved, 0)} delegation(s) removed); deposits ${r.refunded} refunded to reward accounts, ${r.toTreasury} to the treasury`);
+            } catch (err) {
+                logger.warn(`Epoch ${epoch}: pool deposit refund failed:`, err);
+            }
+        }
+        if (promoted) logger.info(`Epoch ${epoch}: ${promoted} pool re-registration(s) took effect`);
+        try {
+            await refreshPotSnapshot(sql, epoch); // reserves/treasury as they stand after MIR and POOLREAP
+        } catch (err) {
+            logger.warn(`Epoch ${epoch}: pot snapshot refresh failed:`, err);
+        }
+        this.lastAppliedEpoch = epoch;
+        this.leaderChecker?.invalidate();
+        logger.info(`Epoch ${epoch} begins: stake snapshot taken (${snap.pools} pools, ${snap.total} lovelace active), ${retired} pool(s) retired, ${(performance.now() - t0).toFixed(0)} ms`);
+    }
+
+    /**
+     * Protocol parameters for a new epoch, locally: the Shelley genesis for the
+     * first Shelley epoch, otherwise the previous epoch's record plus any update
+     * that reached the genesis-key quorum (Phase 4b). Conway governance changes
+     * are not applied yet (Phase 4d); an external record, when one exists, wins.
+     */
+    private conwayGenesis: any | null | undefined;
+
+    /**
+     * Conway governance at the boundary (Phase 4d): seed from the Conway genesis
+     * once the era is reached, then ratify and enact proposals using the
+     * previous epoch's parameters and stake snapshot. Treasury withdrawals and
+     * deposit refunds are credited to reward accounts immediately.
+     */
+    private async governanceBoundary(epoch: number): Promise<import("./governance/state").EnactmentResult | null> {
+        try {
+            const prev = await readEpochParamsRaw(epoch - 1);
+            const major = Number(prev?.protocol_major_ver ?? 0);
+            if (major < 9) return null; // pre-Conway
+            if (this.conwayGenesis === undefined) {
+                try {
+                    const file = String(eraGenesisFilesFor(this.config).conway ?? "");
+                    this.conwayGenesis = file ? JSON.parse(await Bun.file(file).text()) : null;
+                } catch {
+                    this.conwayGenesis = null;
+                }
+            }
+            if (this.conwayGenesis) await seedGovernance(sql, this.conwayGenesis, epoch);
+            const already = (await sql`SELECT 1 FROM gov_enacted WHERE epoch = ${epoch}`.values()) as unknown[][];
+            const result = await ratifyAndEnact(sql, epoch, prev ?? {});
+            if (result.withdrawals.size) {
+                const paid = await creditRewards(sql, result.withdrawals);
+                await updateRewardPots(sql, { reserves: 0n, treasury: -paid, resetFees: false });
+            }
+            if (result.refunds.size) await creditRewards(sql, result.refunds);
+            if (result.enacted.length || result.expired.length) {
+                logger.info(`Epoch ${epoch} governance: enacted [${result.enacted.join(", ")}], expired ${result.expired.length}, withdrawals ${result.withdrawals.size}, refunds ${result.refunds.size}${already.length ? " (re-run)" : ""}`);
+            }
+            return result;
+        } catch (err) {
+            logger.warn(`epoch ${epoch} governance boundary failed:`, err);
+            return null;
+        }
+    }
+
+    private async deriveLocalParams(epoch: number, enacted: Record<string, unknown> = {}): Promise<void> {
+        try {
+            const existingSource = await readEpochParamsSource(epoch);
+            if (existingSource === "local" || existingSource === "genesis") return;
+            const external = existingSource ? await readEpochParamsRaw(epoch) : null;
+            const genesis = await getShelleyGenesisConfig(this.config as any).catch(() => null) as any;
+            if (!genesis) return;
+            const startEpoch = Number(shelleyStartEpoch());
+            if (epoch <= startEpoch) {
+                const g = epochParamsFromGenesis(epoch, genesis);
+                await storeEpochParams(epoch, { ...g.raw, epoch }, "genesis");
+                logger.info(`Protocol parameters for epoch ${epoch} seeded from the Shelley genesis`);
+                return;
+            }
+            const prev = await readEpochParamsRaw(epoch - 1);
+            if (!prev) return; // no local chain of records; the reader falls back and reports
+            const quorum = Number(genesis.updateQuorum ?? 5);
+            const { raw } = await deriveNextEpochParams(prev, epoch, quorum);
+            if (Object.keys(enacted).length) {
+                Object.assign(raw, enacted);
+                logger.info(`Protocol parameters for epoch ${epoch}: governance enactment applied (${Object.keys(enacted).join(", ")})`);
+            }
+            await applyEraGenesis(raw, Number(prev.protocol_major_ver ?? 0), eraGenesisFilesFor(this.config));
+            if (external) {
+                // A header-stage fetch got here first: the local derivation replaces it and any
+                // disagreement is a verification finding.
+                const diffs = diffRawParams(raw, external);
+                if (diffs.length) logger.warn(`Protocol parameters for epoch ${epoch}: local derivation disagrees with the external record: ${diffs.join("; ")}`);
+                else logger.info(`Protocol parameters for epoch ${epoch}: local derivation matches the external record`);
+            }
+            await storeEpochParams(epoch, raw, "local");
+        } catch (err) {
+            logger.warn(`local protocol parameters for epoch ${epoch} not derived:`, err);
+        }
+    }
+
     syncSnapshot(): SyncSnapshot {
         const now = Date.now();
         while (this.applyTimestamps.length && now - this.applyTimestamps[0]! > 10_000) this.applyTimestamps.shift();
@@ -672,6 +1012,7 @@ export class ConsensusOrchestrator {
             peers: cand.peers,
             scheduler: this.scheduler?.stats() ?? { inFlight: 0, queued: 0, awaitingApply: 0, applied: 0, retries: 0, nextApplySeq: 0 },
             validationWorkers: this.pool?.workerCount ?? 0,
+            workerHeaps: this.lastWorkerHeaps,
             pendingHeaders: this.pendingHeaders.size,
             blocksApplied: this.blocksApplied,
             blocksPerSec: Math.round((this.applyTimestamps.length / 10) * 100) / 100,
@@ -817,6 +1158,15 @@ export class ConsensusOrchestrator {
         items: RollForwardBatchItem[],
         peerId: string,
     ): Promise<void> {
+        if (this.halted) {
+            // Strict validation stopped the applier: validating headers of a chain we will
+            // never apply only burns the validation pool. Drop the batch.
+            if (!this.haltDropLogged) {
+                this.haltDropLogged = true;
+                logger.warn(`Sync halted at slot ${this.halted.slot}: incoming headers are dropped until restart`);
+            }
+            return;
+        }
         try {
             const peer = this.peers.getPeer(peerId);
             if (!peer) {
@@ -871,18 +1221,35 @@ export class ConsensusOrchestrator {
                     config: {
                         networkMagic: this.config.networkMagic,
                         shelleyGenesisFile: this.config.shelleyGenesisFile,
-                        network: String(this.config.network),
+                        network: getEpochNetwork(), // workers pin their slot→epoch geometry to this
                     },
                 })),
             );
             this.profile.add("hdr.validate", performance.now() - tVal);
             const parsed: HeaderSummary[] = [];
             const nonces: string[] = [];
+            const checker = results.some((r) => r.ok && r.shelley) ? await this.ensureLeaderChecker() : null;
             for (const r of results) {
                 if (!r.ok) {
                     const msg = `Header validation failed at slot ${r.slot} hash=${r.hashHex}: ${r.reason ?? "invalid"}`;
                     if (role === "verifier") this.terminateMalicious(peer, msg);
                     throw new Error(msg);
+                }
+                if (r.shelley && checker) {
+                    const tLeader = performance.now();
+                    const v = await checker.check({ era: r.era, slot: BigInt(r.slot), epoch: r.epoch, ...r.shelley });
+                    this.profile.add("hdr.leader", performance.now() - tLeader);
+                    if (!v.ok) {
+                        const msg = `Header leader rule failed at slot ${r.slot} hash=${r.hashHex}: ${v.reason}`;
+                        if (role === "verifier") this.terminateMalicious(peer, msg);
+                        throw new Error(msg);
+                    }
+                    if (v.reports.length) {
+                        this.leaderReports += v.reports.length;
+                        if (this.leaderReports <= 20 || this.leaderReports % 500 === 0) {
+                            logger.info(`Leader rule report at slot ${r.slot}: ${v.reports.join(" | ")} (reports so far: ${this.leaderReports})`);
+                        }
+                    }
                 }
                 parsed.push({
                     slot: BigInt(r.slot),
@@ -896,6 +1263,7 @@ export class ConsensusOrchestrator {
                     ...(r.byron?.ok && r.byron.issuerKeyHash && r.byron.signerKeyHash
                         ? { byronSig: { issuerKeyHash: r.byron.issuerKeyHash, signerKeyHash: r.byron.signerKeyHash } }
                         : {}),
+                    ...(r.shelley ? { shelley: r.shelley } : {}),
                 });
                 nonces.push(r.isByron ? "" : noncesByEpoch[String(r.epoch)] ?? "");
             }
@@ -937,11 +1305,42 @@ export class ConsensusOrchestrator {
         }
     }
 
+    /** Every Nth header of a verifier that trails the comparison window is checked against the applied chain. */
+    private static readonly BEHIND_CHECK_EVERY = 32;
+    private readonly behindHeaders = new Map<string, number>();
+
+    /**
+     * A verifier point older than the primary's k-deep window cannot be compared
+     * in memory, but the applied chain is right there: its hash either is one of
+     * our blocks at that slot (late agreement) or it is not. Sampled, since a
+     * lagging verifier stays lagging and a fork changes every hash after it.
+     * Only the settled part of our chain (k blocks below the tip) can convict.
+     */
+    private async confirmBehindPoint(peer: PeerClient, slot: bigint, hash: string): Promise<void> {
+        const key = peer.peerKey;
+        const n = (this.behindHeaders.get(key) ?? 0) + 1;
+        this.behindHeaders.set(key, n);
+        if (n % ConsensusOrchestrator.BEHIND_CHECK_EVERY !== 1) return;
+        const row = await getBlockListRowByHash(hash);
+        if (row && BigInt(row.slot) === slot) {
+            this.candidates.noteAgreedBehind(key, slot);
+            return;
+        }
+        const settledBelow = (await getMaxSlot()) - BigInt(this.candidates.fragmentDepth);
+        if (settledBelow < slot) return; // our chain may not have reached it yet
+        this.terminateMalicious(peer, `diverges from the applied chain at slot ${slot}: peer=${hash} is not one of our blocks`);
+    }
+
     /** Verifier headers: compare against the primary; act on divergence. */
     private async observeVerifierHeaders(peer: PeerClient, parsed: HeaderSummary[]): Promise<void> {
         const peerKey = peer.peerKey;
         for (const p of parsed) {
-            const verdict = this.candidates.observe(peerKey, { slot: p.slot, hash: toHex(p.blockHeaderHash), ebb: p.isEbb });
+            const hash = toHex(p.blockHeaderHash);
+            const verdict = this.candidates.observe(peerKey, { slot: p.slot, hash, ebb: p.isEbb });
+            if (verdict.kind === "behind") {
+                await this.confirmBehindPoint(peer, p.slot, hash);
+                continue;
+            }
             if (verdict.kind !== "divergent") continue;
 
             const outvote = this.candidates.primaryOutvoted(this.quorum());
@@ -1047,6 +1446,7 @@ export class ConsensusOrchestrator {
         let skippedDuplicates = 0;
         let prevByronHashInBatch: string | null = null;
         let expectedPrev: string | null | undefined = this.lastAccepted?.hash; // undefined = not yet anchored
+        let expectedPrevSlot: bigint | null = this.lastAccepted?.slot ?? null;
 
         for (let i = 0; i < parsed.length; i++) {
             const parsedHeader = parsed[i]!;
@@ -1067,7 +1467,14 @@ export class ConsensusOrchestrator {
             // verifier or a peer that skipped ahead would otherwise leave a hole in the
             // DB that strict validation only notices much later.
             if (!parsedHeader.isByron && parsedHeader.prevHashHex) {
-                if (expectedPrev === undefined) expectedPrev = await this.dbTipHash();
+                if (expectedPrev === undefined) {
+                    expectedPrev = await this.dbTipHash();
+                    expectedPrevSlot = expectedPrev ? await getMaxSlot() : null;
+                }
+                // Slots strictly increase along a chain (Shelley+; Byron shares the EBB slot).
+                if (expectedPrevSlot != null && expectedPrevSlot > 0n && parsedHeader.slot <= expectedPrevSlot) {
+                    this.terminateMalicious(peer, `header at slot ${parsedHeader.slot} does not advance past its parent at slot ${expectedPrevSlot}`);
+                }
                 if (expectedPrev && parsedHeader.prevHashHex.toLowerCase() !== expectedPrev.toLowerCase()) {
                     logger.warn(
                         `Primary ${peerKey} header at slot ${parsedHeader.slot} does not chain onto our tip (prev ${parsedHeader.prevHashHex.slice(0, 12)}… ≠ ${expectedPrev.slice(0, 12)}…); restarting its ChainSync from the DB tip`,
@@ -1078,6 +1485,7 @@ export class ConsensusOrchestrator {
                 }
             }
             expectedPrev = headerHashHex;
+            expectedPrevSlot = parsedHeader.slot;
 
             if (parsedHeader.isByron) {
                 try {
@@ -1204,6 +1612,31 @@ export class ConsensusOrchestrator {
         }
     }
 
+    // ───────────────────────────── block producer ─────────────────────────────
+
+    /** η0 of `epoch` (hex) from the local evolver / DB, or null when not yet known. */
+    async epochNonceFor(epoch: number): Promise<string | null> {
+        return this.getEpochNonce(epoch);
+    }
+
+    /**
+     * Apply a block this node forged (`[era, block]` bytes) through the same
+     * strict path a fetched range takes: identity, continuity with the DB tip,
+     * body rules, ledger apply, header row. Throws when our own block would not
+     * pass — the producer then must not publish it.
+     */
+    async adoptLocalBlock(blockFetchBytes: Uint8Array): Promise<{ slot: bigint; hashHex: string }> {
+        if (this.halted) throw new Error("sync halted: not adopting a local block");
+        const identity = headerIdentityOfBlock(blockFetchBytes);
+        const parsed = await headerParser(Cbor.encode(new CborArray([new CborUInt(BigInt(identity.era - 1)), new CborTag(24, new CborBytes(identity.rawHeaderBytes))])).toBuffer()).catch(() => null);
+        const slot = parsed?.slot ?? (() => { throw new Error("adoptLocalBlock: header does not parse"); })();
+        const hashHex = toHex(identity.hash).toLowerCase();
+        const block = new BlockFetchBlock({ blockData: blockFetchBytes });
+        this.verifiedIdentities.set(block, identity);
+        await this.applyRange([{ slot, hash: hashHex }], [block], "self");
+        return { slot, hashHex };
+    }
+
     // ───────────────────────────── apply stage ─────────────────────────────
 
     /**
@@ -1278,6 +1711,11 @@ export class ConsensusOrchestrator {
     private async applyRangeBlocks(points: RangePt[], blocks: BlockFetchBlock[], fetchedFrom: string): Promise<void> {
         const bodyPolicy = this.resolveBodyPolicy();
         this.updateIndexSkip(points[0]!);
+        // Chain continuity: every applied block must extend the applied chain (the DB tip
+        // for the first one, then the previous block of the range). A range applied over
+        // a hole would leave the ledger without the hole's UTxOs and look exactly like a
+        // rule bug; undefined = not yet anchored on the DB tip.
+        let expectedPrev: string[] | null | undefined = undefined;
         for (let i = 0; i < points.length; i++) {
             const pt = points[i]!;
             const blockMessage = blocks[i]!;
@@ -1304,16 +1742,38 @@ export class ConsensusOrchestrator {
 
             if (await this.profile.timeAsync("blk.dedupe", () => this.isAlreadyApplied(blockHash))) {
                 this.pendingHeaders.delete(pt.hash);
+                expectedPrev = [blockHash.toLowerCase()];
                 continue;
+            }
+            if (expectedPrev === undefined) expectedPrev = await this.dbTipHashes();
+            if (expectedPrev) {
+                let prevHex = "";
+                try {
+                    prevHex = getHeaderPrevHashHex(blockHeader as any).toLowerCase();
+                } catch { /* unknown header shape: the body-hash binding still holds */ }
+                if (prevHex && !expectedPrev.includes(prevHex)) {
+                    throw new Error(
+                        `range from ${fetchedFrom} does not extend the applied chain: block ${blockHash.slice(0, 12)}…@${blockSlot} has prev ${prevHex.slice(0, 12)}… but the tip is ${expectedPrev.map((h) => h.slice(0, 12) + "…").join("/")}; nothing applied, re-anchoring on the DB tip`,
+                    );
+                }
             }
 
             // Ledger body rules (per-epoch parameters when available).
             let epochParams: EpochBodyParams | null = null;
             if (!isByron) {
+                await this.profile.timeAsync("blk.epoch", () => this.onEpochStart(blockEpoch));
                 epochParams = await this.profile.timeAsync("blk.params", () => getEpochBodyParams(this.config, blockEpoch));
             }
-            const valid = await this.profile.timeAsync("blk.validate", () => validateBlock(multiEraBlock, this.config, epochParams));
+            const valid = await this.profile.timeAsync("blk.validate", () => validateBlock(multiEraBlock, this.config, epochParams, { slot: blockSlot, pool: this.pool }));
             if (!valid && bodyPolicy === "strict") {
+                // Keep the offending block for offline replay (scripts/validate-stored-block.ts).
+                try {
+                    const dir = process.env.GEROLAMO_FAILED_BLOCK_DIR ?? "./logs";
+                    const { mkdirSync, writeFileSync } = await import("node:fs");
+                    mkdirSync(dir, { recursive: true });
+                    writeFileSync(`${dir}/failed-block-${blockSlot}.hex`, toHex(blockMessage.blockData));
+                    logger.error(`Offending block written to ${dir}/failed-block-${blockSlot}.hex`);
+                } catch { /* best effort */ }
                 throw new BodyValidationFailure(blockSlot, blockHash, `params=${epochParams ? "epoch " + epochParams.epoch : "genesis"}`);
             }
             if (!valid) {
@@ -1322,8 +1782,31 @@ export class ConsensusOrchestrator {
 
             if (this.lastBlockNo == null) this.lastBlockNo = await getMaxBlockNo();
             const blockNo = isEbb ? null : ++this.lastBlockNo;
-            await this.profile.timeAsync("blk.apply", () => applyBlock(multiEraBlock.block as MultiEraBlock["block"], blockSlot, blockHeaderHash, undefined, blockNo));
+            await this.profile.timeAsync("blk.apply", () => applyBlock(multiEraBlock.block as MultiEraBlock["block"], blockSlot, blockHeaderHash, undefined, blockNo, {
+                epoch: blockEpoch,
+                era: multiEraBlock.era,
+                govActionLifetime: epochParams?.raw?.gov_action_lifetime != null ? Number(epochParams.raw.gov_action_lifetime) : undefined,
+            }));
+            if (!isByron) {
+                // Operational certificate counters follow the applied chain.
+                try {
+                    const body: any = (blockHeader as any)?.body;
+                    const issuer = body?.issuerPubKey;
+                    const seq = body?.opCert?.sequenceNumber;
+                    if (issuer && seq != null) {
+                        const issuerBytes = issuer instanceof Uint8Array ? issuer : new Uint8Array(issuer.toBuffer?.() ?? []);
+                        if (issuerBytes.length === 32) {
+                            const issuerHash = toHex(blake2b_224(issuerBytes));
+                            await setOpcertCounter(sql, issuerHash, Number(seq), Number(blockSlot));
+                            await noteBlockMade(sql, issuerHash, blockEpoch);
+                        }
+                    }
+                } catch (err) {
+                    logger.debug("opcert counter update skipped:", err);
+                }
+            }
             this.rememberApplied(blockHash);
+            expectedPrev = [blockHash.toLowerCase()];
             this.blocksApplied++;
             const nowTs = Date.now();
             this.applyTimestamps.push(nowTs);

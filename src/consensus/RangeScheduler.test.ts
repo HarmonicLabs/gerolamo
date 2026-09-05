@@ -201,6 +201,35 @@ describe("RangeScheduler", () => {
         expect(s.stats().applied).toBe(1);
     });
 
+    test("a reset while a range is applying does not skip the first range submitted afterwards", async () => {
+        let release!: () => void;
+        const gate = new Promise<void>((r) => (release = r));
+        const applied: string[] = [];
+        let first = true;
+        const s = new RangeScheduler<Pt, Blk>({
+            maxInFlight: 1,
+            pickPeers: () => ["p"],
+            fetch: honestFetch(),
+            verify,
+            onRange: async (points) => {
+                applied.push(points[0]!.hash);
+                if (first) {
+                    first = false;
+                    await gate;
+                }
+            },
+        });
+        const a = s.submit(pts(0, 2));
+        a.applied.catch(() => {});
+        await sleep(30); // A is inside onRange
+        s.reset("primary switch");
+        const b = s.submit(pts(10, 1));
+        release();
+        await Promise.race([b.applied, sleep(1000).then(() => { throw new Error("range B was never applied"); })]);
+        expect(applied).toEqual(["h0", "h10"]);
+        await expect(a.applied).rejects.toThrow("primary switch");
+    });
+
     test("never runs two ranges on the same peer concurrently", async () => {
         const active = new Map<string, number>();
         let maxPerPeer = 0;

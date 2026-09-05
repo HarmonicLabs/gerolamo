@@ -147,7 +147,10 @@ export interface ParsedHeader {
  * `MultiEraHeader`. Validation workers return exactly these fields, so the
  * main thread no longer parses every header itself.
  */
-export type HeaderSummary = Omit<ParsedHeader, "multiEraHeader">;
+export type HeaderSummary = Omit<ParsedHeader, "multiEraHeader"> & {
+    /** Shelley+ facts the main-thread leader rules consume (from the validation worker). */
+    shelley?: { issuerHash: string; vrfKeyHash: string; leaderValue: Uint8Array; opcertCounter: number; opcertKesPeriod: number };
+};
 
 function readUInt(bytes: Uint8Array, what: string): number {
     const obj = Cbor.parse(bytes);

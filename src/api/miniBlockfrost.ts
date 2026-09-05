@@ -151,6 +151,33 @@ function rowHashToHex(hash: unknown): string {
 }
 
 /** Blockfrost `BlockContent` for a stored block (explorer M1). */
+/** Blockfrost `/blocks/{id}` document for one stored block, or null when the hash is unknown. Used by the WS `block` topic. */
+export async function bfBlockByHash(hashHex: string, network: string | undefined): Promise<Record<string, unknown> | null> {
+    const row = await getBlockListRowByHash(hashHex.toLowerCase());
+    if (!row) return null;
+    const [tipHeight, tipSlot] = await Promise.all([getMaxBlockNo(), getMaxSlot()]);
+    return bfBlock(row, tipHeight, Number(tipSlot), normalizeEpochNetwork(network ?? process.env.NETWORK));
+}
+
+/** Local SharedMempool snapshot (Gerolamo extension shape, also the WS `mempool` payload). */
+export async function mempoolSnapshot(): Promise<{ count: number; txs: Array<{ tx_hash: string; size: number }>; note: string }> {
+    const entries = await GlobalSharedMempool.getTxHashesAndSizes();
+    const txs = entries.map((e) => {
+        let hashHex = "";
+        try {
+            hashHex = mempoolTxHashToString(e.hash);
+        } catch {
+            try {
+                hashHex = toHex(new Uint8Array(e.hash.buffer));
+            } catch {
+                hashHex = "";
+            }
+        }
+        return { tx_hash: hashHex, size: e.size };
+    });
+    return { count: txs.length, txs, note: "Local SharedMempool snapshot — not full BF mempool shape" };
+}
+
 async function bfBlock(row: BlockListRow, tipHeight: number, tipSlot: number, network: EpochNetwork) {
     const epoch = Number(epochForSlot(row.slot, network));
     const isEbb = row.blockNo == null;
@@ -890,25 +917,7 @@ export async function handleMiniBlockfrost(
         // GET /api/v0/mempool — P1 Gerolamo extension (local SharedMempool)
         if (req.method === "GET" && (sub === "/mempool" || sub === "/mempool/txs")) {
             try {
-                const entries = await GlobalSharedMempool.getTxHashesAndSizes();
-                const mapped = entries.map((e) => {
-                    let hashHex = "";
-                    try {
-                        hashHex = mempoolTxHashToString(e.hash);
-                    } catch {
-                        try {
-                            hashHex = toHex(new Uint8Array(e.hash.buffer));
-                        } catch {
-                            hashHex = "";
-                        }
-                    }
-                    return { tx_hash: hashHex, size: e.size };
-                });
-                return json({
-                    count: mapped.length,
-                    txs: mapped,
-                    note: "Local SharedMempool snapshot — not full BF mempool shape",
-                });
+                return json(await mempoolSnapshot());
             } catch (e: any) {
                 return bfError(
                     503,

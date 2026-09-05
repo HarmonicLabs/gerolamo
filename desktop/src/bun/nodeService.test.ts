@@ -1,6 +1,35 @@
 import { describe, expect, test } from "bun:test";
 
-import { restartDelayMs, waitForPidExit } from "./nodeService";
+import { autostartCandidates, restartDelayMs, waitForPidExit } from "./nodeService";
+import type { InstanceConfig } from "../shared/types";
+
+describe("autostartCandidates (bring back what was running)", () => {
+  const inst = (partial: Partial<InstanceConfig>): InstanceConfig =>
+    ({ id: "x", name: "x", network: "preprod", port: 3030, instanceDir: "/tmp/x", runState: "never", pid: null, ...partial } as InstanceConfig);
+  const dead = () => false;
+  const alive = () => true;
+
+  test("a running row whose process is gone is started again", () => {
+    const rows = [inst({ id: "a", runState: "running", pid: 4242 })];
+    expect(autostartCandidates(rows, dead).map((n) => n.id)).toEqual(["a"]);
+  });
+  test("a running row whose process is still alive is left alone", () => {
+    const rows = [inst({ id: "a", runState: "running", pid: 4242 })];
+    expect(autostartCandidates(rows, alive)).toEqual([]);
+  });
+  test("a crash with a restart pending when the app closed counts as running", () => {
+    const rows = [inst({ id: "a", runState: "failed", lastError: "process exited 1; restarting in 5 s" })];
+    expect(autostartCandidates(rows, dead).map((n) => n.id)).toEqual(["a"]);
+  });
+  test("stopped, never-started and gave-up rows stay down", () => {
+    const rows = [
+      inst({ id: "s", runState: "stopped" }),
+      inst({ id: "n", runState: "never" }),
+      inst({ id: "f", runState: "failed", lastError: "process exited 1; 5 crashes in 10 min, not restarting" }),
+    ];
+    expect(autostartCandidates(rows, dead)).toEqual([]);
+  });
+});
 
 describe("waitForPidExit", () => {
   test("resolves true as soon as the pid is gone, without sleeping past that", async () => {

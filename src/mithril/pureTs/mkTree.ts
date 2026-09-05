@@ -12,7 +12,7 @@
  *   - bag_rhs_peaks = merge_peaks(right, left) = merge(right, left)
  *
  * Does NOT enter dual-run match gate (side-channel only).
- * WASM remains SoT until pureTsStmImplemented cutover.
+ * Pure TS is the source of truth (IOG WASM client removed after dual-run soaks).
  *
  * Source:
  *   - internal/mithril-merkle-tree/src/merkle_tree.rs

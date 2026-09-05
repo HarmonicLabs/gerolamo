@@ -150,7 +150,7 @@ async function loadConfig(network: string): Promise<GerolamoConfig> {
 
     // role: "relay" turns the inbound N2N listener on; "data" leaves it to n2n.enabled / env.
     const n2nInput = { ...((configData as any).n2n ?? {}) };
-    if (String((configData as any).role ?? "").toLowerCase() === "relay") n2nInput.enabled = true;
+    if (["relay", "producer"].includes(String((configData as any).role ?? "").toLowerCase())) n2nInput.enabled = true;
     const n2n = resolveN2NConfig(n2nInput, process.env);
 
     return {
@@ -280,6 +280,16 @@ export async function start() {
 
     await initPeerManager(config);
     logger.info("Peer manager started.");
+    if (config.producer) {
+        // Block producer: forges when this pool leads a slot; blocks go through the node's own
+        // strict validation (adoptLocalBlock) and are served to relays by the inbound N2N hosts.
+        try {
+            const { startBlockProducer } = await import("../pool/startBlockProducer");
+            await startBlockProducer(config);
+        } catch (err) {
+            logger.error("Block producer failed to start (node keeps running as a relay):", err);
+        }
+    }
 
     logger.info("Starting peer block server...");
 

@@ -18,6 +18,7 @@ export default defineConfig({
       // explorer → the node's Mini-Blockfrost API; everything else → dashboard-server
       "/api/v0": "http://localhost:3030",
       "/metrics": "http://localhost:3030",
+      "/ws": { target: "ws://localhost:3030", ws: true },
       "/api": "http://localhost:3050",
     },
   },

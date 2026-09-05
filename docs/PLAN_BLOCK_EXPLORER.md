@@ -208,3 +208,23 @@ Not done: M3 (metadata / certificates / mint / assets tables and pages) and
 M4 (staking). The legacy dashboard pages (Overview, Blocks, Peers, Mempool,
 Logs) still talk to `scripts/dashboard-server.ts`; only the Explorer page
 uses the node directly, so the embedded view is the Explorer route.
+
+### 2026-09-03 — live data over the node's WebSocket
+
+- **Node** (`src/network/wsHub.ts`, `liveEvents.ts`, `peerBlockServer.ts`): two new
+  topics on `/ws/stats`. `block` carries the tip block as the Blockfrost
+  `/blocks/{id}` document (built only while someone is subscribed, three SQLite
+  reads per coalesced tip); `mempool` carries the local mempool snapshot when a
+  tx is submitted or the count changes on a block. Clients narrow the default
+  tip/peers/metrics set with `{op:"subscribe"|"unsubscribe", topics}`.
+- **Explorer** (`dashboard/src/lib/nodeSocket.ts`): one shared reconnecting
+  socket. The tip strip subscribes to `metrics`, the live block list to `block`
+  (prepend, keep the newest 30). Polling remains only while the socket is down
+  (10 s tip, 5 s list). Dev proxy forwards `/ws`.
+- **Desktop** (`desktop/src/bun/nodeFeed.ts`): one socket per running instance
+  caches the latest `metrics` and `mempool`; `node.status` and `node.mempool`
+  answer from the cache (HTTP fallback while the stream is down or idle) and each
+  frame is pushed to the page as a `node.event` message so it refreshes at once.
+  The page's 2 s tick stays as the fallback and no longer touches the node.
+- **Not done:** the standalone dashboard's Overview/Blocks/Peers/Mempool pages
+  still go through `scripts/dashboard-server.ts`, which polls the node every 2 s.

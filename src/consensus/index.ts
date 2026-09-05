@@ -18,48 +18,5 @@ export { validateBlock } from "./BlockBodyValidator";
 export { applyBlock } from "./BlockApplication";
 
 // Volatile state management
-export {
-    createAnchor,
-    getVolatileState,
-    intoStoreUpdate,
-    updateVolatileState,
-} from "./AnchoredVolatileState";
-export type { StoreUpdate, VolatileState } from "./AnchoredVolatileState";
 
 // Stable state management
-export {
-    appendBlock,
-    createStreamFromExclusive,
-    createStreamFromInclusive,
-    createStreamIterator,
-    createStreamToInclusive,
-    garbageCollectVolatile,
-    getBlockComponent,
-    getBlockFromStable,
-    getBlocksFromChunk,
-    getBlocksInRange,
-    getBlocksReadyForImmutable,
-    getStableChain,
-    getStableState,
-    getTip,
-    hasBlockInStable,
-    initStableState,
-    makeBlocksImmutable,
-    reconstructChunk,
-    recoverFromCorruption,
-    stream,
-    transitionToStable,
-    validateAllChunks,
-    validateChunk,
-    validateIntegrity,
-} from "./StableState";
-export type {
-    BlockComponent,
-    Point,
-    RealPoint,
-    StableState,
-    StreamFrom,
-    StreamTo,
-    Tip,
-} from "./StableState";
-export { MissingBlockError, ResourceRegistry } from "./StableState";

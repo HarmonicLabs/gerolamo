@@ -1,7 +1,7 @@
 /**
  * Production Mithril client — HTTP aggregator + pure-TS cert-chain verify.
  *
- * WASM (`createMithrilClient`) is debug/compare only (`--engine wasm|both`).
+ * This is the only in-process engine; `--engine bin` shells out to mithril-client.
  */
 import type {
     MithrilCdbListItem,

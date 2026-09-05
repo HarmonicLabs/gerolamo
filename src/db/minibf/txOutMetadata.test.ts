@@ -1,54 +1,34 @@
 import { describe, expect, test } from "bun:test";
-import { Hash32, Script } from "@harmoniclabs/cardano-ledger-ts";
-import { DataConstr, dataToCbor } from "@harmoniclabs/plutus-data";
-import { toHex } from "@harmoniclabs/uint8array-utils";
-import {
-    extractLedgerTxOutMetadata,
-    parseStoredTxOut,
-    storedTxOutContainsAsset,
-} from "./txOutMetadata";
+import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
+import { extractLedgerTxOutMetadata, scriptHashOfWrapped, txOutMetadataFromCbor } from "./txOutMetadata";
 
-describe("MiniBF transaction-output metadata", () => {
-    test("preserves inline datum and reference script from live ledger outputs", () => {
-        const datum = new DataConstr(0, []);
-        const refScript = Script.plutusV2(Uint8Array.from([1, 2, 3, 4]));
-
-        const metadata = extractLedgerTxOutMetadata({ datum, refScript });
-
-        expect(metadata.datumHash).toBeNull();
-        expect(metadata.inlineDatumCbor).toBe(toHex(dataToCbor(datum).toBuffer()));
-        expect(metadata.scriptRefHash).toBe(refScript.hash.toString());
-        expect(metadata.scriptRefCbor).toBe(toHex(refScript.cbor));
-        expect(metadata.scriptRefCbor).toMatch(/^[0-9a-f]+$/);
+describe("tx output metadata from CBOR", () => {
+    test("inline datums of a real Babbage block are kept (preprod slot 10930253)", async () => {
+        const hex = (await Bun.file(new URL("../../consensus/__fixtures__/preprod-block-10930253.hex", import.meta.url)).text()).trim();
+        const b: any = (MultiEraBlock.fromCbor(new Uint8Array(Buffer.from(hex, "hex"))) as any).block;
+        const outs = b.transactionBodies[0].outputs;
+        expect(extractLedgerTxOutMetadata(outs[0]).inlineDatumCbor).toBeNull();
+        const m2 = extractLedgerTxOutMetadata(outs[2]);
+        expect(m2.inlineDatumCbor).toMatch(/^d8799f|^d87[9a-f]/);
+        expect(m2.datumHash).toBeNull();
+        expect(extractLedgerTxOutMetadata(outs[3]).inlineDatumCbor).not.toBeNull();
     });
-
-    test("preserves datum hashes without treating them as inline data", () => {
-        const datum = new Hash32(new Uint8Array(32).fill(7));
-
-        const metadata = extractLedgerTxOutMetadata({ datum });
-
-        expect(metadata.datumHash).toBe(datum.toString());
-        expect(metadata.inlineDatumCbor).toBeNull();
+    test("datum hash forms: map [0, hash] and legacy array", () => {
+        const hash = "ab".repeat(32);
+        // {0: bytes(addr), 1: 5, 2: [0, hash]}
+        const map = Buffer.from("a3" + "00" + "41aa" + "01" + "05" + "02" + "82" + "00" + "5820" + hash, "hex");
+        expect(txOutMetadataFromCbor(map)!.datumHash).toBe(hash);
+        const arr = Buffer.from("83" + "41aa" + "05" + "5820" + hash, "hex");
+        expect(txOutMetadataFromCbor(arr)!.datumHash).toBe(hash);
     });
-
-    test("derives Blockfrost reference-script fields from Mithril UTxO metadata", () => {
-        const refScript = Script.plutusV2(Uint8Array.from([9, 8, 7, 6]));
-        const policy = "ab".repeat(28);
-        const stored = parseStoredTxOut(JSON.stringify({
-            address: "addr_test1qpzexample",
-            amount: "5000000",
-            assets: { [policy]: { "746f6b656e": "2" } },
-            inline_datum: "d87980",
-            script_kind: "plutus",
-            script_language: 1,
-            script_bytes_hex: "09080706",
-        }));
-
-        expect(stored.inlineDatumCbor).toBe("d87980");
-        expect(stored.scriptRefHash).toBe(refScript.hash.toString());
-        expect(stored.scriptRefCbor).toBe(toHex(refScript.cbor));
-        expect(stored.scriptRefCbor).toMatch(/^[0-9a-f]+$/);
-        expect(storedTxOutContainsAsset(stored, `${policy}746f6b656e`)).toBe(true);
-        expect(storedTxOutContainsAsset(stored, `${policy}6d697373696e67`)).toBe(false);
+    test("reference script: hash prefixes the language tag", () => {
+        // [2, bytes(0x4d01000033)] → blake2b_224(0x02 ‖ 4d01000033)
+        const wrapped = Buffer.from("8202454d01000033", "hex");
+        const h = scriptHashOfWrapped(wrapped);
+        expect(h).toMatch(/^[0-9a-f]{56}$/);
+        const map = Buffer.from("a3" + "00" + "41aa" + "01" + "05" + "03" + "d818" + "48" + "8202454d01000033", "hex");
+        const m = txOutMetadataFromCbor(map)!;
+        expect(m.scriptRefHash).toBe(h);
+        expect(m.scriptRefCbor).toBe("8202454d01000033");
     });
 });

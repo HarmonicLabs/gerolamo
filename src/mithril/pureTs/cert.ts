@@ -7,7 +7,7 @@
  * - Genesis certs: empty multi_signature + non-empty genesis_signature is valid shape
  *   (STM multi-sig N/A; Ed25519 is Stage 5c). verified === false always.
  * - Does NOT verify STM multi-sig, cert chain, or genesis crypto.
- * - WASM remains source of truth for cryptographic acceptance.
+ * - Pure TS is the source of truth for cryptographic acceptance (WASM client removed).
  *
  * Observed preprod layout (testdata/mithril/certs/preprod/latest-verified-chain.json):
  *   aggregate_verification_key = hex(JSON({ mt_commitment: { root: u8[32], nr_leaves, hasher }, total_stake }))

@@ -1,3 +1,4 @@
+import { blake2b_256 } from "@harmoniclabs/crypto";
 /**
  * Continuous UPDN+TICKN state machine (cardano-ledger TPraos).
  *
@@ -140,11 +141,13 @@ export class NonceEvolver {
     static extractBlockNonce(header: unknown): Uint8Array | null {
         const body = (header as any)?.body ?? header;
         if (!body) return null;
-        const proofHash =
-            (body.nonceVrfResult?.proofHash as Uint8Array | undefined) ??
-            (body.vrfResult?.proofHash as Uint8Array | undefined);
-        if (!proofHash || !(proofHash instanceof Uint8Array)) return null;
-        return blockNonceFromVrfProofHash(proofHash);
+        const tpraos = body.nonceVrfResult?.proofHash as Uint8Array | undefined;
+        if (tpraos instanceof Uint8Array) return blockNonceFromVrfProofHash(tpraos);
+        // Praos (Babbage+): one VRF; its nonce value is blake2b_256("N" ‖ output) and the
+        // block nonce hashes that again (`mkNonceFromOutputVRF . vrfNonceValue`).
+        const praos = body.vrfResult?.proofHash as Uint8Array | undefined;
+        if (!(praos instanceof Uint8Array)) return null;
+        return blockNonceFromVrfProofHash(praosNonceValue(praos));
     }
 
     /**
@@ -217,6 +220,21 @@ export class NonceEvolver {
         return result;
     }
 
+    /**
+     * The next epoch's η0 as it stands now: ηc ⋆ ηh with the carried ηh. Exact
+     * once the candidate is frozen (past the stability window); headers of the
+     * next epoch arrive before its first block is applied, and this lets them be
+     * validated without an external nonce source. Null while not bootstrapped
+     * or before the freeze.
+     */
+    peekNextEpochNonceHex(currentSlot: bigint | number): string | null {
+        if (!this.active) return null;
+        const firstNext = BigInt(getFirstSlotOfEpoch(this.epoch + 1, this.genesis));
+        if (isBeforeNonceFreeze(BigInt(currentSlot), firstNext, this.stabilityWindow)) return null;
+        const etaH = this.etaH ?? new Uint8Array(0);
+        return toHex(ticknNewEpochNonce(this.etaC, etaH));
+    }
+
     /** Invalidate continuous state (e.g. after rollback). */
     reset(): void {
         this.active = false;
@@ -226,4 +244,12 @@ export class NonceEvolver {
         this.etaH = null;
         logger.debug("NonceEvolver reset (inactive)");
     }
+}
+
+/** Praos nonce value of a VRF output: blake2b_256("N" ‖ output). */
+export function praosNonceValue(vrfOutput: Uint8Array): Uint8Array {
+    const tagged = new Uint8Array(1 + vrfOutput.length);
+    tagged[0] = 0x4e; // "N"
+    tagged.set(vrfOutput, 1);
+    return new Uint8Array(blake2b_256(tagged));
 }

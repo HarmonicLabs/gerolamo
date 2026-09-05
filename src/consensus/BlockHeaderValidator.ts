@@ -20,6 +20,8 @@ import {
     VrfCert,
 } from "@harmoniclabs/cardano-ledger-ts";
 import { isByronEra } from "./blockHeaderParser";
+import { praosVrfInput, tpraosVrfInput } from "./vrfInputs";
+import { vrf03Verify } from "./fastVrf";
 import { validateByronHeader } from "./ByronHeaderValidator";
 import {
     blake2b_224,
@@ -172,26 +174,22 @@ export class ValidatePostBabbageHeader {
         cert: IVrfCert | VrfCert,
         era: "pre-babbage" | "post-babbage",
     ): boolean {
-        const proof = VrfProof03.fromBytes(cert.proof);
-        const verify = proof.verify(leaderPubKey, input);
-        const computedOutput = era === "pre-babbage"
-            ? blake2b_256(proof.toBytes())
-            : proof.toHash();
-        const out = uint8ArrayEq(computedOutput, output);
-        // logger.debug("VRF input:", toHex(input));
-        // logger.debug("VRF leaderPubKey:", toHex(leaderPubKey));
-        // logger.debug("VRF proof bytes:", toHex(cert.proof));
-        // logger.debug("VRF verify result:", verify);
-        // logger.debug("VRF computedOutput:", toHex(computedOutput));
-        // logger.debug("VRF expected output:", toHex(output));
-        // logger.debug("VRF output match:", out);
-        // Temporarily only check output match, as verify may have issues
-        return out;
+        // ECVRF-ED25519-SHA512-Elligator2 (draft-03): the proof must verify under the
+        // pool's VRF key for this slot's input, and the header's 64-byte output must be
+        // the proof's hash. Both eras carry the raw output (TPraos and Praos alike).
+        // Checked against real preprod headers with their epoch nonces (Shelley epoch 4
+        // and Conway epoch 310) before this was switched on.
+        void era;
+        // Fast draft-03 verifier (noble ed25519); cross-checked against the pure-BigInt
+        // reference on stored preprod headers (scripts/verify-fast-vrf.ts, 600/600 agree).
+        const proofBytes: Uint8Array = (cert.proof as any)?.toBuffer?.() ?? (cert.proof as Uint8Array);
+        const computed = vrf03Verify(leaderPubKey, input, proofBytes);
+        if (!computed) return false;
+        return uint8ArrayEq(computed, output);
     }
 
     private getVrfInput(slot: bigint, nonce: Uint8Array): Uint8Array {
-        const base = concatUint8Array(this.biguintToU64BE(slot), nonce);
-        return blake2b_256(base);
+        return praosVrfInput(slot, nonce);
     }
 
     private biguintToU64BE(n: bigint): Uint8Array {
@@ -309,14 +307,11 @@ export class ValidatePostBabbageHeader {
             },
         );
 
-        // Temporarily allow non-genesis leaders for post-Babbage testing
-        return (
-            // isKnownLeader && // only needs to be enable when pre SPO blocks syncing from genesis.
-            correctProof &&
-            verifyLeaderStake &&
-            verifyOpCertValidity &&
-            verifyKES
-        );
+        // Slot leadership (overlay schedule, pool registration, VRF key binding and
+        // the stake threshold) is decided on the main thread with ledger state
+        // (rules/leaderCheck.ts); `verifyLeaderStake` above is only logged.
+        void verifyLeaderStake;
+        return correctProof && verifyOpCertValidity && verifyKES;
     }
 }
 
@@ -389,33 +384,23 @@ export class ValidatePreBabbageHeader {
         cert: IVrfCert | VrfCert,
         era: "pre-babbage" | "post-babbage",
     ): boolean {
-        const proof = VrfProof03.fromBytes(cert.proof);
-        const verify = proof.verify(leaderPubKey, input);
-        const computedOutput = era === "pre-babbage"
-            ? blake2b_256(proof.toBytes())
-            : proof.toHash();
-        const out = uint8ArrayEq(computedOutput, output);
-        // logger.debug("VRF input:", toHex(input));
-        // logger.debug("VRF leaderPubKey:", toHex(leaderPubKey));
-        // logger.debug("VRF proof bytes:", toHex(cert.proof));
-        // logger.debug("VRF verify result:", verify);
-        // logger.debug("VRF computedOutput:", toHex(computedOutput));
-        // logger.debug("VRF expected output:", toHex(output));
-        // logger.debug("VRF output match:", out);
-        // Temporarily only check output match, as verify may have issues
-        return out;
+        // ECVRF-ED25519-SHA512-Elligator2 (draft-03): the proof must verify under the
+        // pool's VRF key for this slot's input, and the header's 64-byte output must be
+        // the proof's hash. Both eras carry the raw output (TPraos and Praos alike).
+        // Checked against real preprod headers with their epoch nonces (Shelley epoch 4
+        // and Conway epoch 310) before this was switched on.
+        void era;
+        // Fast draft-03 verifier (noble ed25519); cross-checked against the pure-BigInt
+        // reference on stored preprod headers (scripts/verify-fast-vrf.ts, 600/600 agree).
+        const proofBytes: Uint8Array = (cert.proof as any)?.toBuffer?.() ?? (cert.proof as Uint8Array);
+        const computed = vrf03Verify(leaderPubKey, input, proofBytes);
+        if (!computed) return false;
+        return uint8ArrayEq(computed, output);
     }
 
-    private getVrfInput(
-        slot: bigint,
-        nonce: Uint8Array,
-        domain?: Uint8Array,
-    ): Uint8Array {
-        const base = concatUint8Array(this.biguintToU64BE(slot), nonce);
-        if (domain) {
-            return blake2b_256(concatUint8Array(base, domain));
-        }
-        return blake2b_256(base);
+    /** TPraos VRF input (see vrfInputs.ts). */
+    private getVrfInput(slot: bigint, nonce: Uint8Array, seed: "leader" | "nonce"): Uint8Array {
+        return tpraosVrfInput(slot, nonce, seed);
     }
 
     private biguintToU64BE(n: bigint): Uint8Array {
@@ -471,29 +456,22 @@ export class ValidatePreBabbageHeader {
         const issuer = new PoolKeyHash(header.body.issuerPubKey);
         const isKnownLeader = this.verifyKnownLeader(issuer, genesis);
 
-        let correctProof: boolean = true; // temp for pre-babbage
-        /*
-        const leaderInput = this.getVrfInput(header.body.slot, nonce, Buffer.from("L"));
+        // Two VRFs per TPraos header, both proven under the pool's VRF key.
         const leaderCorrect = this.verifyVrfProof(
-            leaderInput,
+            this.getVrfInput(header.body.slot, nonce, "leader"),
             header.body.leaderVrfResult.proofHash,
             header.body.vrfPubKey,
             header.body.leaderVrfResult,
             "pre-babbage",
         );
-        logger.debug("Leader VRF correct:", leaderCorrect);
-        const nonceInput = this.getVrfInput(header.body.slot, nonce, Buffer.from("N"));
         const nonceCorrect = this.verifyVrfProof(
-            nonceInput,
+            this.getVrfInput(header.body.slot, nonce, "nonce"),
             header.body.nonceVrfResult.proofHash,
             header.body.vrfPubKey,
             header.body.nonceVrfResult,
             "pre-babbage",
         );
-        logger.debug("Nonce VRF correct:", nonceCorrect);
-        correctProof = leaderCorrect && nonceCorrect;
-        */
-        // logger.debug("correctProof:", correctProof);
+        const correctProof = leaderCorrect && nonceCorrect;
 
         // Stake calculation using genesis as fallback
         let individualStake = 0n;
@@ -557,12 +535,8 @@ export class ValidatePreBabbageHeader {
         // decentralisation kicked in, registered SPOs issue Shelley…Alonzo
         // headers too, so (like post-Babbage) a known-leader hit is logged,
         // not required.
-        return (
-            correctProof &&
-            verifyLeaderStake &&
-            verifyOpCertValidity &&
-            verifyKES
-        );
+        void verifyLeaderStake; // decided on the main thread (rules/leaderCheck.ts)
+        return correctProof && verifyOpCertValidity && verifyKES;
     }
 }
 

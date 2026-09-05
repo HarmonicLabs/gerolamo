@@ -4,6 +4,20 @@ let bridge: any = null;
 let receiveHooked = false;
 const pending = new Map<string, { resolve: (v: any) => void; reject: (e: any) => void; timeout: any }>();
 let nextId = 1;
+const messageListeners = new Map<string, Set<(payload: any) => void>>();
+
+/** Listen for a message the Bun side pushes (`rpc.send["<name>"](payload)`). Returns the unsubscribe. */
+export function onBunMessage(name: string, cb: (payload: any) => void): () => void {
+  let set = messageListeners.get(name);
+  if (!set) {
+    set = new Set();
+    messageListeners.set(name, set);
+  }
+  set.add(cb);
+  return () => {
+    set!.delete(cb);
+  };
+}
 
 export function rpcResponseError(msg: any): Error {
   const candidates = [msg?.error, msg?.payload, msg?.payload?.error, msg?.message];
@@ -48,6 +62,16 @@ function hookReceive() {
         pending.delete(msg.id);
         if (msg.success === false) entry.reject(rpcResponseError(msg));
         else entry.resolve(msg.payload);
+        return;
+      }
+      if (msg && msg.type === "message" && typeof msg.id === "string" && messageListeners.has(msg.id)) {
+        for (const cb of messageListeners.get(msg.id)!) {
+          try {
+            cb(msg.payload);
+          } catch {
+            /* one listener must not break the rest */
+          }
+        }
         return;
       }
     } catch {

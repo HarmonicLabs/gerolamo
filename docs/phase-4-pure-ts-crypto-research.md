@@ -1,5 +1,12 @@
 # Phase 4 — Pure-TS Mithril crypto research spike
 
+> **Status 2026-09-03:** the IOG WASM client (`@mithril-dev/mithril-client-wasm`) and the
+> dual-run engine (`--engine wasm|both|auto`, `dualRunCertificateChain`) are **removed**.
+> Pure TS (`src/mithril/httpClient.ts` + `pureTs/`) is the only in-process verifier and
+> the source of truth; `--engine bin` still shells out to the external `mithril-client`.
+> Everything below that describes WASM as the source of truth is history.
+
+
 **Status:** research + **Stage 1–5c** (shape → cryptoPrep → merkle → root → preliminary → BLS aggregate → **chain walk**) + dual-run shadow.  
 **Decision:** **do not claim full cert-chain SoT yet.** `rootVerified` / `preliminaryOk` / `aggregateOk` can be true; `chainOk` only when walk reaches genesis + Ed25519; `verified` / `match` / `implemented` stay false. Hybrid client (WASM certs + pure-TS I/O) is the production path.  
 **Date:** 2026-08-05 (density 0–199 green; Stage 1–5c chain walk landed; A2 tvar head scan only).

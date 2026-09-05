@@ -59,7 +59,7 @@ export function epochForSlot(absoluteSlot: number | bigint, network: EpochNetwor
 }
 
 export function firstSlotOfEpoch(epoch: number | bigint, network: EpochNetwork = activeNetwork): bigint {
-    const g = EPOCH_GEOMETRY[network];
+    const g = EPOCH_GEOMETRY[network] ?? EPOCH_GEOMETRY[activeNetwork];
     const e = BigInt(epoch);
     if (e < g.shelleyStartEpoch) return e * g.byronSlotsPerEpoch;
     return g.shelleyStartSlot + (e - g.shelleyStartEpoch) * g.shelleySlotsPerEpoch;
@@ -104,4 +104,24 @@ export function calculateCardanoEpoch(absoluteSlot: number | bigint): number | b
 /** @deprecated use firstSlotOfEpoch — `genesis` is accepted for signature compatibility. */
 export function getFirstSlotOfEpoch(epoch: number | bigint, _genesis?: ShelleyGenesisConfig): bigint | number {
     return firstSlotOfEpoch(epoch);
+}
+
+/**
+ * Shelley stability window in slots (3k/f): genesis key delegations and other
+ * "future" state become effective this many slots after their certificate.
+ * k = 2160 and f = 0.05 on every public Cardano network (129 600 slots).
+ */
+export function stabilityWindowSlots(): number {
+    return 129_600;
+}
+
+/** First Shelley slot of the network (mainnet 4 492 800, preprod 86 400, preview 0). */
+export function shelleyStartSlot(network: EpochNetwork = activeNetwork): bigint {
+    const g = EPOCH_GEOMETRY[network] ?? EPOCH_GEOMETRY[activeNetwork];
+    return firstSlotOfEpoch(g.shelleyStartEpoch, network);
+}
+
+/** First Shelley epoch of the network (mainnet 208, preprod 4, preview 0). */
+export function shelleyStartEpoch(network: EpochNetwork = activeNetwork): bigint {
+    return (EPOCH_GEOMETRY[network] ?? EPOCH_GEOMETRY[activeNetwork]).shelleyStartEpoch;
 }

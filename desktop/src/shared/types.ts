@@ -7,6 +7,16 @@ export { DEFAULT_NODE_SETTINGS } from "./nodeSettings";
 
 export type RunState = "never" | "running" | "stopped" | "failed";
 
+/**
+ * Human label for an instance: its name and network. The id is minted once
+ * (`gerolamo-<network>-<timestamp>`) and stays even if the record was later
+ * moved to another network, so never show the id as if it named the network.
+ */
+export function instanceLabel(cfg: { id: string; name?: string | null; network: string }): string {
+  const name = (cfg.name || "").trim();
+  return `${name || cfg.id} · ${cfg.network}`;
+}
+
 export type InstanceConfig = {
   id: string;
   name: string;

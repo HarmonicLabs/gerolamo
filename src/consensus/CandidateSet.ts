@@ -42,6 +42,8 @@ export interface PeerAgreement {
     tipSlot: bigint | null;
     tipHash: string | null;
     headersSeen: number;
+    /** Verifier only: slots its tip trails the primary's tip (0 when level or ahead); null without a primary. */
+    lagSlots: bigint | null;
 }
 
 export type ObserveVerdict =
@@ -365,6 +367,8 @@ export class CandidateSet {
             else if (p.pending.size > 0) status = "ahead";
             else if (tip && this.primaryState()?.fragment.points[0] && tip.slot < this.primaryState()!.fragment.points[0]!.slot) status = "behind";
         }
+        const primTip = p.role === "verifier" ? this.primaryState()?.fragment.points.at(-1) ?? null : null;
+        const lagSlots = primTip && tip ? (primTip.slot > tip.slot ? primTip.slot - tip.slot : 0n) : null;
         return {
             key: p.key,
             role: p.role,
@@ -374,7 +378,20 @@ export class CandidateSet {
             tipSlot: tip?.slot ?? null,
             tipHash: tip?.hash ?? null,
             headersSeen: p.headersSeen,
+            lagSlots,
         };
+    }
+
+    /**
+     * A verifier point below the primary's comparison window was found in the
+     * applied chain: that is agreement, just late. Raises `agreedAtSlot` so the
+     * peer reads "agrees" rather than "behind" for as long as it keeps matching.
+     */
+    noteAgreedBehind(key: string, slot: bigint): boolean {
+        const p = this.peers.get(key);
+        if (!p || p.role !== "verifier" || p.divergence) return false;
+        if (p.agreedAtSlot == null || slot > p.agreedAtSlot) p.agreedAtSlot = slot;
+        return true;
     }
 
     snapshot(): { primary: string | null; peers: PeerAgreement[] } {

@@ -1,4 +1,4 @@
-import { rpc } from "./rpc";
+import { onBunMessage, rpc } from "./rpc";
 import type {
   BootstrapStatus,
   DetectResult,
@@ -32,4 +32,6 @@ export const manager = {
   wipeSnapshots: (id: string) => rpc.request["wipe.snapshots"]({ id }),
   getPref: (key: string): Promise<{ value: string | null }> => rpc.request["pref.get"]({ key }),
   setPref: (key: string, value: string | null) => rpc.request["pref.set"]({ key, value }),
+  /** A node frame arrived over the Bun side's WebSocket feed: `metrics` or `mempool`. */
+  onNodeEvent: (cb: (e: { id: string; type: string }) => void) => onBunMessage("node.event", cb),
 };

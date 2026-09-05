@@ -23,9 +23,7 @@ import {
 
 /**
  * Mithril snapshot bootstrap (hybrid):
- *   --engine wasm  — list/verify via @mithril-dev/mithril-client-wasm; download via HTTP+zstd+tar
  *   --engine bin   — external mithril-client binary (full multi-GB restore)
- *   --engine auto  — prefer wasm, fall back to bin
  * Then optional processChunk apply into Gerolamo SQLite.
  * Ancillary UTxO extract remains blocked (A2) — see src/state/mithril.ts.
  */
@@ -33,7 +31,7 @@ export async function getCbor(dbPath: string, snapshotRoot: string) {
     console.error(
         [
             "Use the optional mithril-bootstrap command instead:",
-            "  bun src/index.ts mithril-bootstrap --network preprod --engine wasm --limit-chunks 1 --skip-apply",
+            "  bun src/index.ts mithril-bootstrap --network preprod --limit-chunks 1 --skip-apply",
             "  bun src/index.ts mithril-bootstrap --network preprod --download-dir ./snapshots/preprod",
             "Or apply already-downloaded chunks:",
             "  bun src/index.ts read-raw-chunks <immutable_dir>",
@@ -267,15 +265,13 @@ export function Main() {
     /**
      * Optional Mithril bootstrap:
      *   --engine ts    — production: HTTP + pure-TS cert verify (default)
-     *   --engine wasm  — debug: IOG WASM verify
-     *   --engine both  — ts verify + WASM compare
      *   --engine bin   — external mithril-client binary
      * Then optional processChunk apply into Gerolamo SQLite.
      */
     program
         .command("mithril-bootstrap")
         .description(
-            "Download/verify Mithril Cardano DB (pure-TS default; wasm/bin optional), then optionally apply immutable chunks",
+            "Download/verify Mithril Cardano DB (pure-TS; external mithril-client binary optional), then optionally apply immutable chunks",
         )
         .option(
             "--network <name>",
@@ -294,7 +290,7 @@ export function Main() {
         )
         .option(
             "--engine <engine>",
-            "ts | wasm | both | bin | auto (default: ts)",
+            "ts | bin (default: ts)",
             "ts",
         )
         .option(
@@ -361,15 +357,8 @@ export function Main() {
             }) => {
                 const logger = new Logger({ logLevel: LogLevel.INFO });
                 const engineRaw = (options.engine || "ts").toLowerCase();
-                const engine = (
-                    engineRaw === "ts" ||
-                        engineRaw === "wasm" ||
-                        engineRaw === "bin" ||
-                        engineRaw === "both" ||
-                        engineRaw === "auto"
-                        ? engineRaw
-                        : "ts"
-                ) as MithrilEngine;
+                const engine: MithrilEngine =
+                    engineRaw === "bin" ? "bin" : "ts";
 
                 // Apply path needs DB; download-only does not.
                 // Prefer --db / GEROLAMO_DB_PATH / .live/test.db (own Mithril path).

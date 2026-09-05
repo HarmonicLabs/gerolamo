@@ -1,0 +1,5 @@
+{
+    "type": "Certificate",
+    "description": "Stake Delegation Certificate",
+    "cborHex": "83028200581c17cb4b5dad954e89638f89fb33587889a6e22d57690edcd347fe1dc8581c61f4231ce4fca4db8944fd441ddabd080c077a6edf7eaba273573fe8"
+}

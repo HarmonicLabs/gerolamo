@@ -1,4 +1,4 @@
-import type { Component } from "solid-js";
+import { Show, type Component } from "solid-js";
 import { cn } from "../../lib/cn";
 
 interface ProgressRingProps {
@@ -7,6 +7,10 @@ interface ProgressRingProps {
   strokeWidth?: number;
   class?: string;
   variant?: "accent" | "green" | "orange" | "cyan";
+  /** Print the percentage in the middle (default). Off when the number is shown next to the ring already. */
+  showValue?: boolean;
+  /** Decimals for the printed percentage (default 1). */
+  decimals?: number;
 }
 
 const strokeColors: Record<string, string> = {
@@ -59,12 +63,14 @@ export const ProgressRing: Component<ProgressRingProps> = (props) => {
           }}
         />
       </svg>
-      <div class="absolute inset-0 flex flex-col items-center justify-center">
-        <span class="font-mono text-[22px] font-bold tabular-nums text-text text-glow-strong">
-          {clamped().toFixed(1)}
-        </span>
-        <span class="text-[11px] text-text-dim font-medium">%</span>
-      </div>
+      <Show when={props.showValue !== false}>
+        <div class="absolute inset-0 flex flex-col items-center justify-center">
+          <span class="font-mono text-[22px] font-bold tabular-nums text-text text-glow-strong">
+            {clamped().toFixed(props.decimals ?? 1)}
+          </span>
+          <span class="text-[11px] text-text-dim font-medium">%</span>
+        </div>
+      </Show>
     </div>
   );
 };

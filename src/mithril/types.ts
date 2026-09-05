@@ -1,5 +1,5 @@
 /**
- * Mithril Cardano DB types (aggregator / WASM client shapes).
+ * Mithril Cardano DB types (aggregator shapes).
  *
  * Client role (official): list/show/verify Mithril-certified artifacts.
  * Gerolamo uses Cardano DB snapshots for immutable chunk bootstrap only.
@@ -8,8 +8,8 @@
 
 export type MithrilNetwork = "preprod" | "mainnet";
 
-/** Engine for mithril-bootstrap. `ts` is production; `wasm`/`both` are debug. */
-export type MithrilEngine = "ts" | "wasm" | "bin" | "both" | "auto";
+/** Engine for mithril-bootstrap: pure TypeScript (production) or the external mithril-client binary. */
+export type MithrilEngine = "ts" | "bin";
 
 export type MithrilBeacon = {
     epoch: number;

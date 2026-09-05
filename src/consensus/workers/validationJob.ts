@@ -1,9 +1,11 @@
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
+import { blake2b_224, blake2b_256 } from "@harmoniclabs/crypto";
 import { blockFetchHeaderIdentity, headerParser } from "../blockHeaderParser";
 import { verifyBlockBodyHash } from "../bodyHash";
 import { verifyByronBlockSignature, type ByronBlockSignatureCheck } from "../byron/ByronCrypto";
 import { validateHeader } from "../BlockHeaderValidator";
 import { setEpochNetwork } from "../../utils/epochFromSlotCalculations";
+import type { WitnessVerifyJob } from "./witnessJob";
 
 /**
  * The unit of CPU work handed to a validation worker (or run inline):
@@ -54,6 +56,48 @@ export interface HeaderValidationResult {
     rawHeader: Uint8Array;
     /** Byron main blocks, when `byronProtocolMagic` was given. */
     byron?: ByronBlockSignatureCheck;
+    /** Shelley+ headers: what the main-thread leader rules need (hex / bytes). */
+    shelley?: {
+        issuerHash: string;
+        vrfKeyHash: string;
+        leaderValue: Uint8Array;
+        opcertCounter: number;
+        opcertKesPeriod: number;
+    };
+}
+
+/** Issuer / VRF / opcert facts of a Shelley+ header body. */
+function shelleyFacts(era: number, header: any): HeaderValidationResult["shelley"] | undefined {
+    if (era < 2) return undefined;
+    try {
+        const body = header?.header?.body ?? header?.body;
+        if (!body) return undefined;
+        const issuer = bytesOf(body.issuerPubKey);
+        const vrf = bytesOf(body.vrfPubKey);
+        if (!issuer || !vrf) return undefined;
+        // Praos (Babbage+): leader value = blake2b_256("L" ‖ VRF output); the ledger-ts
+        // helper hashes with SHA-256, which is not what the ledger compares against.
+        // TPraos: the raw 64-byte output of the leader VRF.
+        const leaderValue = era >= 6
+            ? praosLeaderValue(bytesOf(body.vrfResult?.proofHash) ?? new Uint8Array(0))
+            : new Uint8Array(bytesOf(body.leaderVrfResult?.proofHash) ?? new Uint8Array(0));
+        return {
+            issuerHash: toHex(blake2b_224(issuer)),
+            vrfKeyHash: toHex(blake2b_256(vrf)),
+            leaderValue,
+            opcertCounter: Number(body.opCert?.sequenceNumber ?? -1),
+            opcertKesPeriod: Number(body.opCert?.kesPeriod ?? -1),
+        };
+    } catch {
+        return undefined;
+    }
+}
+
+function bytesOf(v: any): Uint8Array | null {
+    if (v instanceof Uint8Array) return v;
+    if (v?.toBuffer) return new Uint8Array(v.toBuffer());
+    if (typeof v?.toString === "function" && /^[0-9a-f]+$/i.test(String(v))) return fromHex(String(v));
+    return null;
 }
 
 /** The header fields every result carries (one place to extend when ParsedHeader grows). */
@@ -117,7 +161,8 @@ export async function runHeaderValidationJob(job: HeaderValidationJob): Promise<
             reason = `Byron block signature: ${byron.reason ?? "invalid"}`;
         }
     }
-    return { ...summarize(parsed), ok, reason, ...(byron ? { byron } : {}) };
+    const shelley = ok && !parsed.isByron ? shelleyFacts(parsed.era, parsed.multiEraHeader) : undefined;
+    return { ...summarize(parsed), ok, reason, ...(byron ? { byron } : {}), ...(shelley ? { shelley } : {}) };
 }
 
 // ───────────────────────── fetched-range verification ─────────────────────────
@@ -147,7 +192,7 @@ export interface RangeVerifyResult {
     identities: RangeIdentity[];
 }
 
-export type PoolJob = HeaderValidationJob | RangeVerifyJob;
+export type PoolJob = HeaderValidationJob | RangeVerifyJob | WitnessVerifyJob;
 
 /**
  * Copy into a fresh ArrayBuffer before transferring: a Node Buffer's `.slice()` is a
@@ -193,4 +238,12 @@ export function runRangeVerifyJob(job: RangeVerifyJob): RangeVerifyResult {
         }
     }
     return { ok: true, identities };
+}
+
+/** Praos leader value: blake2b_256 over the "L"-tagged VRF output. */
+export function praosLeaderValue(vrfOutput: Uint8Array): Uint8Array {
+    const tagged = new Uint8Array(1 + vrfOutput.length);
+    tagged[0] = 0x4c; // "L"
+    tagged.set(vrfOutput, 1);
+    return new Uint8Array(blake2b_256(tagged));
 }

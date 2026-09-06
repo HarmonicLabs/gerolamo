@@ -672,9 +672,9 @@ function renderResources() {
   el("resSpan").textContent = "· showing " + resAgo(list).replace(" ago", "") + " · one sample per 2 s";
   el("resMeta").textContent = (p ? "pid " + p.pid + " · " : "") + (sy ? cpus + " cores · " + (sy.platform || "") + "/" + (sy.arch || "") + " · " + (sy.runtime || "") : "");
   // CPU
-  el("cpuHead").textContent = "node " + (nodeCores == null ? "—" : nodeCores.toFixed(2)) + " of " + cpus + " cores · host " + fmtP(sy && sy.cpuPercent);
-  el("cpuNode").textContent = nodeCores == null ? "—" : nodeCores.toFixed(2) + " cores";
-  el("cpuHost").textContent = sy && sy.cpuPercent != null ? fmtP(sy.cpuPercent) + " (" + (sy.cpuPercent / 100 * cpus).toFixed(1) + " cores)" : "—";
+  el("cpuHead").textContent = "node " + (nodeCores == null ? "—" : Math.round(nodeCores)) + " of " + cpus + " cores · host " + fmtP(sy && sy.cpuPercent);
+  el("cpuNode").textContent = nodeCores == null ? "—" : Math.round(nodeCores) + " cores";
+  el("cpuHost").textContent = sy && sy.cpuPercent != null ? fmtP(sy.cpuPercent) + " (" + Math.round(sy.cpuPercent / 100 * cpus) + " cores)" : "—";
   const share = nodeCores == null ? null : nodeCores / cpus * 100;
   el("cpuShare").textContent = fmtP(share, 1) + (sy && sy.loadAvg ? " · load " + sy.loadAvg.map((x) => Number(x).toFixed(1)).join(" / ") : "");
   el("cpuBar").style.width = Math.min(100, share || 0).toFixed(1) + "%";

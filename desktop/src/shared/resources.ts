@@ -97,9 +97,10 @@ export function nodeCoresBusy(node: NodeResources | null): number | null {
   return Math.max(0, node.cpuPercent / 100);
 }
 
+/** Whole cores: the figure is CPU time per wall time, so a decimal only adds noise to the label and the graph. */
 export function formatCores(cores: number | null | undefined): string {
   if (cores == null || !Number.isFinite(cores)) return "—";
-  return cores >= 10 ? cores.toFixed(0) : cores.toFixed(1);
+  return Math.round(cores).toString();
 }
 
 /** Node CPU normalised to the whole machine (100 = every core busy). */

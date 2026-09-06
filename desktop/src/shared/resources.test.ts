@@ -67,7 +67,8 @@ describe("nodeCoresBusy / formatCores", () => {
   test("cpuPercent is per core: 1345% is 13 cores busy, 45% is 0.5", () => {
     const base = { pid: 1, rssBytes: 1, heapUsedBytes: null, heapTotalBytes: null, externalBytes: null, threads: null, dbBytes: null, uptimeSec: null, source: "metrics" as const };
     expect(formatCores(nodeCoresBusy({ ...base, cpuPercent: 1345 }))).toBe("13");
-    expect(formatCores(nodeCoresBusy({ ...base, cpuPercent: 45 }))).toBe("0.5");
+    expect(formatCores(nodeCoresBusy({ ...base, cpuPercent: 45 }))).toBe("0");
+    expect(formatCores(nodeCoresBusy({ ...base, cpuPercent: 879 }))).toBe("9");
     expect(formatCores(nodeCoresBusy({ ...base, cpuPercent: null }))).toBe("—");
     expect(formatCores(nodeCoresBusy(null))).toBe("—");
   });

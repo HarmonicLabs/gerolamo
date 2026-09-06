@@ -880,8 +880,8 @@ const ControlCenter: Component = () => {
                               times={times()}
                               minMax={2}
                               lines={[
-                                { name: "node cores", color: "#00b3ff", values: series(shown(), "nodeCores"), format: (v) => `${v.toFixed(2)} cores` },
-                                { name: "host", color: "#ff8a00", values: series(shown(), "sysCpu").map((v) => (Number.isFinite(v) ? (v / 100) * sys().cpus : v)), format: (v) => `${((v / Math.max(1, sys().cpus)) * 100).toFixed(0)}% (${v.toFixed(1)} cores)` },
+                                { name: "node cores", color: "#00b3ff", values: series(shown(), "nodeCores"), format: (v) => `${Math.round(v)} cores` },
+                                { name: "host", color: "#ff8a00", values: series(shown(), "sysCpu").map((v) => (Number.isFinite(v) ? (v / 100) * sys().cpus : v)), format: (v) => `${((v / Math.max(1, sys().cpus)) * 100).toFixed(0)}% (${Math.round(v)} cores)` },
                               ]}
                             />
                             <div class="flex items-center justify-between text-[10px] text-text-dim">

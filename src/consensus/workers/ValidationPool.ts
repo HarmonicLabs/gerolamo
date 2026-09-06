@@ -1,6 +1,19 @@
 import os from "node:os";
 import { logger } from "../../utils/logger";
-import { runHeaderValidationJob, type HeaderValidationJob, type HeaderValidationResult, type RangeVerifyJob, type RangeVerifyResult, runRangeVerifyJob, fresh } from "./validationJob";
+import {
+    runHeaderValidationJob,
+    type HeaderValidationJob,
+    type HeaderValidationResult,
+    type RangeVerifyJob,
+    type RangeVerifyResult,
+    runRangeVerifyJob,
+    fresh,
+    type BlockWitnessResult,
+    runBlockWitnessJob,
+    type BlockRulesJob,
+    type BlockRulesResult,
+    runBlockRulesJob,
+} from "./validationJob";
 import { runWitnessVerifyJob, type WitnessVerifyJob, type WitnessVerifyResult } from "./witnessJob";
 
 /**
@@ -131,12 +144,24 @@ export class ValidationPool {
     }
 
     /** Blind round-robin piled large jobs onto one worker; pick the shortest queue instead. */
-    private leastLoadedWorker(): Worker {
-        const start = this.rr++ % this.workers.length;
-        let best = this.workers[start]!;
+    /**
+     * Workers 0..rulesReserved−1 take only block-rule jobs (the apply thread waits on
+     * those); everything else uses the rest. Each worker is a FIFO, so without the
+     * split a rules job queued behind a header batch or a range verify and the
+     * applier stalled (measured: 16 ms wait per block, throughput 87 → 31 blocks/s).
+     */
+    private get rulesReserved(): number {
+        return this.workers.length >= 8 ? Math.max(2, Math.floor(this.workers.length / 5)) : 0;
+    }
+
+    private leastLoadedWorker(kind: "general" | "rules" = "general"): Worker {
+        const r = this.rulesReserved;
+        const pool = r === 0 ? this.workers : kind === "rules" ? this.workers.slice(0, r) : this.workers.slice(r);
+        const start = this.rr++ % pool.length;
+        let best = pool[start]!;
         let bestLoad = this.load.get(best) ?? 0;
-        for (let k = 1; k < this.workers.length && bestLoad > 0; k++) {
-            const w = this.workers[(start + k) % this.workers.length]!;
+        for (let k = 1; k < pool.length && bestLoad > 0; k++) {
+            const w = pool[(start + k) % pool.length]!;
             const l = this.load.get(w) ?? 0;
             if (l < bestLoad) {
                 best = w;
@@ -181,6 +206,42 @@ export class ValidationPool {
             this.pending.set(id, { resolve, reject, worker, weight });
             const items = job.items.map((it) => ({ publicKey: fresh(it.publicKey), signature: fresh(it.signature), message: fresh(it.message) }));
             worker.postMessage({ id, job: { kind: "witnesses", items } }, items.flatMap((it) => [it.publicKey.buffer, it.signature.buffer, it.message.buffer]));
+        });
+    }
+
+    /**
+     * Verify a whole block's witnesses on a worker from its bytes (copied and
+     * transferred), so the apply loop does not wait on a per-block round trip.
+     */
+    verifyBlockWitnesses(block: Uint8Array): Promise<BlockWitnessResult> {
+        if (this.closed) return Promise.reject(new Error("ValidationPool closed"));
+        if (this.workers.length === 0) return Promise.resolve(runBlockWitnessJob({ kind: "blockWitnesses", block }));
+        const worker = this.leastLoadedWorker();
+        const weight = Math.max(1, Math.ceil(block.length / 16384));
+        this.load.set(worker, (this.load.get(worker) ?? 0) + weight);
+        const id = this.nextId++;
+        return new Promise<BlockWitnessResult>((resolve, reject) => {
+            this.pending.set(id, { resolve, reject, worker, weight });
+            const copy = fresh(block);
+            worker.postMessage({ id, job: { kind: "blockWitnesses", block: copy } }, [copy.buffer]);
+        });
+    }
+
+    /**
+     * Run a block's transaction rules (pure part) on a worker; the caller has
+     * resolved the ledger inputs. Falls back inline without workers.
+     */
+    evaluateBlockRules(job: BlockRulesJob): Promise<BlockRulesResult> {
+        if (this.closed) return Promise.reject(new Error("ValidationPool closed"));
+        if (this.workers.length === 0) return runBlockRulesJob(job);
+        const worker = this.leastLoadedWorker("rules");
+        const weight = Math.max(2, Math.ceil(job.block.length / 8192));
+        this.load.set(worker, (this.load.get(worker) ?? 0) + weight);
+        const id = this.nextId++;
+        return new Promise<BlockRulesResult>((resolve, reject) => {
+            this.pending.set(id, { resolve, reject, worker, weight });
+            const copy = fresh(job.block);
+            worker.postMessage({ id, job: { ...job, block: copy } }, [copy.buffer]);
         });
     }
 

@@ -62,14 +62,61 @@ export function setBulkSyncIndexSkip(on: boolean): boolean {
     return changed;
 }
 
+// ─────────────── batched UTxO writes (apply path) ───────────────
+// Row-by-row INSERTs through Bun.SQL cost ~30 µs each in plumbing; a block's
+// UTxO rows and deltas are queued here and written as multi-row statements
+// (11× cheaper measured). Queued rows are flushed before any read of the
+// utxo table on the apply path (start of applyTransaction /
+// applyInvalidTransaction) and at the end of applyBlock, so visibility is
+// identical to the row-by-row order. A failed range discards the queue
+// together with the rolled-back transaction (discardPendingUtxoWrites).
+const pendingUtxoRows: unknown[][] = [];
+const pendingDeltaRows: Array<[Uint8Array, string, string]> = [];
+const UTXO_ROWS_PER_STATEMENT = 120; // 7 params each → 840 (SQLite limit 32 766)
+const DELTA_ROWS_PER_STATEMENT = 300; // 3 params each
+
+export function pendingUtxoWriteCount(): number {
+    return pendingUtxoRows.length + pendingDeltaRows.length;
+}
+
+export function discardPendingUtxoWrites(): void {
+    pendingUtxoRows.length = 0;
+    pendingDeltaRows.length = 0;
+}
+
+/** Write every queued UTxO row and delta (multi-row statements), in queue order. */
+export async function flushPendingUtxoWrites(db: SqlClient): Promise<void> {
+    if (pendingUtxoRows.length) {
+        const rows = pendingUtxoRows.splice(0, pendingUtxoRows.length);
+        for (let i = 0; i < rows.length; i += UTXO_ROWS_PER_STATEMENT) {
+            const chunk = rows.slice(i, i + UTXO_ROWS_PER_STATEMENT);
+            const params: unknown[] = [];
+            for (const r of chunk) params.push(...r);
+            await db.unsafe(
+                `INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash, address, lovelace, reference_script_hash, stake_key) VALUES ${chunk.map(() => "(?, ?, ?, ?, ?, ?, ?)").join(",")}`,
+                params as any,
+            );
+        }
+    }
+    if (pendingDeltaRows.length) {
+        const rows = pendingDeltaRows.splice(0, pendingDeltaRows.length);
+        for (let i = 0; i < rows.length; i += DELTA_ROWS_PER_STATEMENT) {
+            const chunk = rows.slice(i, i + DELTA_ROWS_PER_STATEMENT);
+            const params: unknown[] = [];
+            for (const r of chunk) params.push(...r);
+            await db.unsafe(`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES ${chunk.map(() => "(?, ?, ?)").join(",")}`, params as any);
+        }
+    }
+}
+
 async function insertUtxoDelta(
-    db: SqlClient,
+    _db: SqlClient,
     blockHash: Uint8Array,
     action: string,
     utxo: string,
 ): Promise<void> {
     if (applySkipDeltas()) return;
-    await db`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${blockHash}, ${action}, ${utxo})`;
+    pendingDeltaRows.push([blockHash, action, utxo]);
 }
 
 interface HeaderInsertData {
@@ -1318,8 +1365,20 @@ export interface TxOutColumns {
  * Stake credential of a Shelley address string (base addresses only) as typed hex:
  * the hash for a key credential, "01" + hash for a script credential (see db/stakeCred.ts).
  */
+const stakeKeyCache = new Map<string, string | null>();
+const STAKE_KEY_CACHE_MAX = 20_000;
+
 export function stakeKeyOfAddress(address: string | null | undefined): string | null {
     if (!address || !address.startsWith("addr")) return null;
+    const hit = stakeKeyCache.get(address);
+    if (hit !== undefined) return hit;
+    const v = stakeKeyOfAddressUncached(address);
+    if (stakeKeyCache.size >= STAKE_KEY_CACHE_MAX) stakeKeyCache.delete(stakeKeyCache.keys().next().value!);
+    stakeKeyCache.set(address, v);
+    return v;
+}
+
+function stakeKeyOfAddressUncached(address: string): string | null {
     try {
         const a: any = LedgerAddress.fromString(address);
         const h = a?.stakeCreds?.hash;
@@ -1477,6 +1536,7 @@ export async function ensureOrphanedDeltasReverted(): Promise<void> {
             }
             await sql`DELETE FROM utxo_deltas WHERE id = ${Number(r[0])}`;
         }
+        await flushPendingUtxoWrites(sql); // upsertUtxoRow queues; write the restored outputs inside this transaction
         await sql`INSERT OR REPLACE INTO schema_migrations (name) VALUES ('orphaned_utxo_deltas_reverted')`;
     });
     if (rows.length) logger.warn(`Reverted ${rows.length} orphaned UTxO delta(s) from ${blocks.size} rolled-back block(s) in ${((performance.now() - t0) / 1000).toFixed(1)}s: ${restored} spent output(s) restored, ${removed} created output(s) removed`);
@@ -1612,10 +1672,9 @@ async function upsertUtxoRow(
     txHash: string | null,
     cols: TxOutColumns = txOutColumns(txOut),
 ): Promise<void> {
-    await db`
-        INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash, address, lovelace, reference_script_hash, stake_key)
-        VALUES (${utxoRef}, ${txOut}, ${txHash}, ${cols.address}, ${cols.lovelace}, ${cols.referenceScriptHash}, ${cols.stakeKey})
-    `;
+    // queued; written by flushPendingUtxoWrites before the next utxo read / at block end
+    void db;
+    pendingUtxoRows.push([utxoRef, txOut, txHash, cols.address, cols.lovelace, cols.referenceScriptHash, cols.stakeKey]);
 }
 
 function parseUtxoDelta(raw: unknown): {
@@ -1856,6 +1915,41 @@ function assertInputsPresent(inputRefs: string[], rows: any[], txId: string): vo
     throw new Error(`tx ${txId} spends ${missing.length} input(s) not in the UTxO set: ${missing.slice(0, 3).join(", ")}${missing.length > 3 ? ", …" : ""}`);
 }
 
+/** The UTxO row a transaction output becomes (same mapping as rollback's restore and the repair script). */
+export function buildUtxoRowForOutput(txId: string, i: number, output: any): {
+    utxoRef: string; txOutJson: string; cols: TxOutColumns; address: string; lovelace: string; assetsJson: string | null;
+    metadata: ReturnType<typeof extractLedgerTxOutMetadata>;
+} {
+    const utxoRef = `${txId}:${i}`;
+    const assetsObj: Record<string, Record<string, string>> = {};
+    const multiAssets = Array.isArray(output.value?.map) ? output.value.map : [];
+    multiAssets.forEach((ma: any) => {
+        const policyStr = ma.policy.toString();
+        const assetObj: Record<string, string> = {};
+        (Array.isArray(ma.assets) ? ma.assets : []).forEach((asset: any) => {
+            assetObj[toHex(asset.name)] = asset.quantity.toString();
+        });
+        assetsObj[policyStr] = assetObj;
+    });
+    const address = addressToString(output.address);
+    const lovelace = output.value?.lovelaces?.toString() || "0";
+    const assetsJson = Object.keys(assetsObj).length > 0 ? JSON.stringify(assetsObj) : null;
+    const metadata = extractLedgerTxOutMetadata(output);
+    const txOutJson = JSON.stringify({
+        address,
+        amount: lovelace,
+        assets: assetsObj,
+        ...(metadata.datumHash ? { datum_hash: metadata.datumHash } : {}),
+        ...(metadata.inlineDatumCbor ? { inline_datum: metadata.inlineDatumCbor } : {}),
+        ...(metadata.scriptRefHash ? { reference_script_hash: metadata.scriptRefHash } : {}),
+        ...(metadata.scriptRefCbor ? { reference_script_cbor: metadata.scriptRefCbor } : {}),
+    });
+    // Same mapping as the JSON→columns helper used on restore, so a UTxO written
+    // here and the same UTxO restored by rollbackChainTo index identically.
+    const cols: TxOutColumns = txOutColumns({ address, amount: lovelace, reference_script_hash: metadata.scriptRefHash ?? undefined });
+    return { utxoRef, txOutJson, cols, address, lovelace, assetsJson, metadata };
+}
+
 export async function applyTransaction(
     txBody: TxBody,
     blockHash: Uint8Array,
@@ -1863,6 +1957,7 @@ export async function applyTransaction(
     indexCtx?: TxIndexCtx,
 ): Promise<void> {
     const db = client ?? sql;
+    await flushPendingUtxoWrites(db); // earlier txs' outputs must be visible to this tx's input lookups
     const txId = txBody.hash.toString(); // Canonical blake2b_256(txBody CBOR) hex from ledger-ts
 
     if (!txBody.inputs || !Array.isArray(txBody.inputs)) {
@@ -1950,72 +2045,21 @@ export async function applyTransaction(
     // Force tuple typing in map return
     const outputData: [string, string, string, TxOutColumns][] = txBody.outputs.map(
         (output: any, i: number) => {
-            const utxoRef = `${txId}:${i}`;
-            const assetsObj: Record<string, Record<string, string>> = {};
-            const multiAssets = Array.isArray(output.value?.map)
-                ? output.value.map
-                : [];
-            multiAssets.forEach((ma: any) => {
-                const policyStr = ma.policy.toString();
-                const assetObj: Record<string, string> = {};
-                (Array.isArray(ma.assets) ? ma.assets : []).forEach(
-                    (asset: any) => {
-                        assetObj[toHex(asset.name)] = asset.quantity.toString();
-                    },
-                );
-                assetsObj[policyStr] = assetObj;
-            });
-
-            const addr = addressToString(output.address);
-            if (addr && addr.length > 8) {
-                const prev = addrDirs.get(addr);
-                addrDirs.set(
-                    addr,
-                    prev === "out" || prev === "both" ? "both" : "in",
-                );
+            const row = buildUtxoRowForOutput(txId, i, output);
+            if (row.address && row.address.length > 8) {
+                const prev = addrDirs.get(row.address);
+                addrDirs.set(row.address, prev === "out" || prev === "both" ? "both" : "in");
             }
-
-            const lovelace = output.value?.lovelaces?.toString() || "0";
-            const assetsJson =
-                Object.keys(assetsObj).length > 0
-                    ? JSON.stringify(assetsObj)
-                    : null;
-            const metadata = extractLedgerTxOutMetadata(output);
             mbOutputs.push({
                 outputIndex: i,
-                address: addr,
-                lovelace,
-                assetsJson,
-                datumHash: metadata.datumHash,
-                inlineDatumCbor: metadata.inlineDatumCbor,
-                scriptRefHash: metadata.scriptRefHash,
+                address: row.address,
+                lovelace: row.lovelace,
+                assetsJson: row.assetsJson,
+                datumHash: row.metadata.datumHash,
+                inlineDatumCbor: row.metadata.inlineDatumCbor,
+                scriptRefHash: row.metadata.scriptRefHash,
             });
-
-            const txOutJson = JSON.stringify({
-                address: addr,
-                amount: lovelace,
-                assets: assetsObj,
-                ...(metadata.datumHash
-                    ? { datum_hash: metadata.datumHash }
-                    : {}),
-                ...(metadata.inlineDatumCbor
-                    ? { inline_datum: metadata.inlineDatumCbor }
-                    : {}),
-                ...(metadata.scriptRefHash
-                    ? { reference_script_hash: metadata.scriptRefHash }
-                    : {}),
-                ...(metadata.scriptRefCbor
-                    ? { reference_script_cbor: metadata.scriptRefCbor }
-                    : {}),
-            });
-            // Same mapping as the JSON→columns helper used on restore, so a UTxO written
-            // here and the same UTxO restored by rollbackChainTo index identically.
-            const cols: TxOutColumns = txOutColumns({
-                address: addr,
-                amount: lovelace,
-                reference_script_hash: metadata.scriptRefHash ?? undefined,
-            });
-            return [utxoRef, txOutJson, txId, cols] as [string, string, string, TxOutColumns];
+            return [row.utxoRef, row.txOutJson, txId, row.cols] as [string, string, string, TxOutColumns];
         },
     );
 
@@ -2284,6 +2328,7 @@ export async function applyInvalidTransaction(
     indexCtx?: TxIndexCtx,
 ): Promise<void> {
     const db = client ?? sql;
+    await flushPendingUtxoWrites(db); // earlier txs' outputs must be visible to this tx's input lookups
     const body: any = txBody;
     const txId = txBody.hash.toString().toLowerCase();
     const refs: string[] = [];
@@ -2431,9 +2476,15 @@ export async function rollbackChainTo(
     // created output in place — mainnet slot 5753400).
     const goneHashes = ((await sql`SELECT hash FROM blocks WHERE slot > ${slot}`.values()) as unknown[][])
         .map((r) => String(r[0]).toLowerCase());
-    counts.deltasDeleted = await countQuery(
-        sql`SELECT COUNT(*) as c FROM utxo_deltas WHERE lower(hex(block_hash)) IN (SELECT hash FROM blocks WHERE slot > ${slot}) OR block_hash IN (SELECT hash FROM blocks WHERE slot > ${slot})`,
-    );
+    // Only the deltas of the gone blocks, through the block_hash index; the previous
+    // `lower(hex(block_hash)) IN (…)` form scanned the whole table (minutes on a
+    // 60 GB DB) — and a no-op rollback (nothing above `slot`) must not scan at all.
+    counts.deltasDeleted = 0;
+    for (const h of goneHashes) {
+        counts.deltasDeleted += await countQuery(
+            sql`SELECT COUNT(*) as c FROM utxo_deltas WHERE block_hash = ${Buffer.from(h, "hex")} OR block_hash = ${h}`,
+        );
+    }
 
     logger.rollback(
         `Pre-rollback to slot ${slot}: blocksDeleted=${counts.blocksDeleted}, headersDeleted=${counts.headersDeleted}, deltasDeleted=${counts.deltasDeleted}`,
@@ -2481,6 +2532,10 @@ export async function rollbackChainTo(
         }
         // fee / cert / withdrawal: no UTxO table change on reverse (best-effort)
     }
+    // upsertUtxoRow only queues (batched apply path): write the restored outputs now.
+    // Without this the 2026-09-05 preview rollback "restored" 30 outputs that never
+    // reached the table and the re-applied block halted on missing inputs.
+    await flushPendingUtxoWrites(sql);
 
     await sql.begin(async (tx) => {
         // MiniBF projections first (same txn as ledger deletes)
@@ -2846,6 +2901,7 @@ export async function applyByronTxPayload(
     client?: SqlClient,
 ): Promise<void> {
     const db = client ?? sql;
+    await flushPendingUtxoWrites(db); // earlier payloads' outputs must be visible to this one's input lookups
     // Common shapes: { transaction, witness }, { body, witness }, or nested .tx
     const tx = entry?.transaction ?? entry?.tx ?? entry?.body ?? entry;
     if (!tx || typeof tx !== "object") {
@@ -2964,6 +3020,7 @@ export async function applyByronTxPayload(
         );
         await upsertUtxoRow(db, utxoRef, txOutJson, txId, txOutColumns({ address, amount }));
     }
+    await flushPendingUtxoWrites(db); // Byron payloads are few per block; standalone callers (tests, scripts) expect rows immediately
 }
 
 // Re-export MiniBF projection schema/writer/queries for HTTP handlers

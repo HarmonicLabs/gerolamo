@@ -28,7 +28,21 @@ export interface RequiredWitnesses {
 const hex = (h: any): string => String(h?.toString?.() ?? h ?? "").toLowerCase();
 
 /** Parse a stored address; null when it is not a Shelley or Byron address. */
+/** Parsed-address cache: the same address strings recur across a block's inputs and outputs; parsing bech32/base58 through ledger-ts cost ~5 % of the apply thread. */
+const parsedAddressCache = new Map<string, Address | ByronAddress | null>();
+const PARSED_ADDRESS_CACHE_MAX = 20_000;
+
 export function parseStoredAddress(addr: string): Address | ByronAddress | null {
+    if (!addr) return null;
+    const hit = parsedAddressCache.get(addr);
+    if (hit !== undefined) return hit;
+    const parsed = parseStoredAddressUncached(addr);
+    if (parsedAddressCache.size >= PARSED_ADDRESS_CACHE_MAX) parsedAddressCache.delete(parsedAddressCache.keys().next().value!);
+    parsedAddressCache.set(addr, parsed);
+    return parsed;
+}
+
+function parseStoredAddressUncached(addr: string): Address | ByronAddress | null {
     try {
         if (!addr) return null;
         if (addr.startsWith("addr") || addr.startsWith("stake")) {

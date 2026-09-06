@@ -232,7 +232,7 @@ export async function headerParser(
     rollForward: Uint8Array,
 ): Promise<ParsedHeader | null> {
     // ERA directly from Multiplxer ChainSyncRollForward the ERA Enum starts at 0.
-    const data = ChainSyncRollForward.fromCbor(toHex(rollForward));
+    const data = ChainSyncRollForward.fromCbor(rollForward); // bytes in: no hex round trip (was ~2 % of the main thread)
     // logger.debug("Header Parser Data: ", data.data);
 
     if (

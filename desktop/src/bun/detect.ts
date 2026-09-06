@@ -1,7 +1,7 @@
 import { which } from "bun";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { homedir } from "node:os";
+import { availableParallelism, cpus, homedir } from "node:os";
 import { hasStartEntry, packageVersion, resolveRepoRoot } from "./paths";
 import type { DetectResult } from "../shared/types";
 
@@ -61,6 +61,7 @@ export async function detectInstallation(preferredRepo?: string | null): Promise
       repoPath,
       repoVersion: repoPath ? packageVersion(repoPath) : null,
       hasStartEntry: hasEntry,
+      hostCores: hostCoreCount(),
       error: ok
         ? null
         : !bunPath
@@ -77,7 +78,17 @@ export async function detectInstallation(preferredRepo?: string | null): Promise
       repoPath: null,
       repoVersion: null,
       hasStartEntry: false,
+      hostCores: hostCoreCount(),
       error: err?.message ?? String(err),
     };
+  }
+}
+
+/** Logical cores as the node itself counts them (`validation.workers: "auto"` = this many). */
+export function hostCoreCount(): number {
+  try {
+    return typeof availableParallelism === "function" ? availableParallelism() : Math.max(1, cpus().length);
+  } catch {
+    return 0;
   }
 }

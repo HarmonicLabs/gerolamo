@@ -1,3 +1,6 @@
+diff --git a/node_modules/@harmoniclabs/ouroboros-miniprotocols-ts/.bun-tag-674ee7686d264466 b/.bun-tag-674ee7686d264466
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@harmoniclabs/ouroboros-miniprotocols-ts/.bun-tag-fcaeef02baac1ccf b/.bun-tag-fcaeef02baac1ccf
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -53,6 +56,48 @@ index ecf0ddf7b0dd2fee4b7c6fc7e515662633e00aeb..76137d6efc5e324dde1a891b41b50c34
 +    return { messages: messages, rest: message };
  }
 +exports.unwrapMultiplexerMessagesRest = unwrapMultiplexerMessagesRest;
+diff --git a/dist/protocols/block-fetch/BlockFetchClient.js b/dist/protocols/block-fetch/BlockFetchClient.js
+index e332b687447524081093a5b7d4e9b7df92720db6..073962759a753b94050e0017eb48ec6415491c56 100644
+--- a/dist/protocols/block-fetch/BlockFetchClient.js
++++ b/dist/protocols/block-fetch/BlockFetchClient.js
+@@ -218,8 +218,25 @@ var BlockFetchClient = /** @class */ (function () {
+             while (offset < chunk.length) {
+                 var originalSTLimit = Error.stackTraceLimit;
+                 Error.stackTraceLimit = 0;
++                // Gerolamo patch: MsgBlock ([4, #6.24(block)]) is by far the most frequent
++                // message and used to be parsed into a full CborObj tree (every tx, every
++                // field) only to take the block bytes back out — ~10 % of a syncing node's
++                // main thread. Parse lazily: read the frame boundaries, then only the
++                // tagged byte string. Other messages take the original full parse.
++                var lazyBlock = undefined;
+                 try {
+-                    thing = cbor_1.Cbor.parseWithOffset(chunk);
++                    var lazy = cbor_1.Cbor.parseLazyWithOffset(chunk);
++                    var lazyArr = lazy.parsed;
++                    if (lazyArr && Array.isArray(lazyArr.array) && lazyArr.array.length >= 2 &&
++                        lazyArr.array[0].length === 1 && lazyArr.array[0][0] === 0x04) {
++                        var tagged = cbor_1.Cbor.parse(lazyArr.array[1]);
++                        var data = (tagged instanceof cbor_1.CborTag && tagged.tag === BigInt(24)) ? tagged.data : tagged;
++                        if (data instanceof cbor_1.CborBytes) {
++                            lazyBlock = data.bytes;
++                            thing = { offset: lazy.offset, parsed: undefined };
++                        }
++                    }
++                    if (lazyBlock === undefined) thing = cbor_1.Cbor.parseWithOffset(chunk);
+                 }
+                 catch (_a) {
+                     Error.stackTraceLimit = originalSTLimit;
+@@ -232,7 +249,9 @@ var BlockFetchClient = /** @class */ (function () {
+                 // }
+                 offset = thing.offset;
+                 try {
+-                    msg = (0, BlockFetchMessage_1.blockFetchMessageFromCborObj)(thing.parsed);
++                    msg = lazyBlock !== undefined
++                        ? new BlockFetchBlock_1.BlockFetchBlock({ blockData: lazyBlock })
++                        : (0, BlockFetchMessage_1.blockFetchMessageFromCborObj)(thing.parsed);
+                     // @ts-ignore Cannot assign to 'cborBytes' because it is a read-only property.ts(2540)
+                     msg.cborBytes = Uint8Array.prototype.slice.call(chunk, 0, offset);
+                     queque.unshift(msg);
 diff --git a/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js b/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js
 index eb8d430f559d290004caa89480a5f0d9b2eb5171..7c8bff19a496ac0e697a1932e5868d05758b9e96 100644
 --- a/dist/protocols/peer-sharing/PeerAddress/PeerAddressIPv6.js

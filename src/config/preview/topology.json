@@ -21,9 +21,107 @@
     ],
     "publicRoots": [
         {
-            "accessPoints": [],
+            "accessPoints": [
+                {
+                    "address": "preview1-node.play.dev.cardano.org",
+                    "port": 3001
+                },
+                {
+                    "address": "preview2-node.play.dev.cardano.org",
+                    "port": 3001
+                },
+                {
+                    "address": "preview3-node.play.dev.cardano.org",
+                    "port": 3001
+                },
+                {
+                    "address": "cf2r1.preview.pool.cardanofoundation.org",
+                    "port": 30002
+                },
+                {
+                    "address": "relay1.preview.blinklabs.cloud",
+                    "port": 3001
+                },
+                {
+                    "address": "relay2.preview.blinklabs.cloud",
+                    "port": 3001
+                },
+                {
+                    "address": "node1.cardano.gratis",
+                    "port": 6501
+                },
+                {
+                    "address": "node2.cardano.gratis",
+                    "port": 6502
+                },
+                {
+                    "address": "adaboy-preview-1c.gleeze.com",
+                    "port": 5000
+                },
+                {
+                    "address": "adaboy-preview-2c.gleeze.com",
+                    "port": 5000
+                },
+                {
+                    "address": "preview1.volcyada.com",
+                    "port": 6004
+                },
+                {
+                    "address": "preview3.volcyada.com",
+                    "port": 3001
+                },
+                {
+                    "address": "tn-preview.psilobyte.io",
+                    "port": 4201
+                },
+                {
+                    "address": "adact.preview.relay1.adacapital.io",
+                    "port": 3002
+                },
+                {
+                    "address": "preview.happystaking.io",
+                    "port": 3003
+                },
+                {
+                    "address": "relay.preview.cardanostakehouse.com",
+                    "port": 11000
+                },
+                {
+                    "address": "pre.adanaut.com",
+                    "port": 3002
+                },
+                {
+                    "address": "preview.leadstakepool.com",
+                    "port": 3001
+                },
+                {
+                    "address": "relay1.preview.stakepool.quebec",
+                    "port": 4000
+                },
+                {
+                    "address": "preview-r1.panl.org",
+                    "port": 3015
+                },
+                {
+                    "address": "preview-testnet-relay.junostakepool.com",
+                    "port": 4521
+                },
+                {
+                    "address": "relay1.afica.io",
+                    "port": 3001
+                },
+                {
+                    "address": "r1.pv.mrbee.io",
+                    "port": 3101
+                },
+                {
+                    "address": "relay.test.lidonation.com",
+                    "port": 3010
+                }
+            ],
             "advertise": false
         }
     ],
-    "useLedgerAfterSlot": 116812831
+    "useLedgerAfterSlot": 116812831,
+    "_comment": "publicRoots: preview pool relays from src/config/preview/peer-snapshot.json (cardano-node's big-ledger-peer snapshot), TCP-reachable on 2026-09-05. Seeds the governor's cold set so targetHot (3) is reached; bootstrapPeers is IOG's public relay."
 }

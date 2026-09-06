@@ -45,6 +45,8 @@ export type DetectResult = {
   repoPath: string | null;
   repoVersion: string | null;
   hasStartEntry: boolean;
+  /** Logical cores of this machine, from the Bun side (the WebKit webview caps navigator.hardwareConcurrency at 8). */
+  hostCores?: number;
   error: string | null;
 };
 

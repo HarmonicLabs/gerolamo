@@ -1,5 +1,5 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
-import { applyByronTxPayload, applyInvalidTransaction, applyTransaction, type SqlClient } from "../db";
+import { applyByronTxPayload, applyInvalidTransaction, applyTransaction, type SqlClient, flushPendingUtxoWrites } from "../db";
 import { logger } from "../utils/logger";
 import { sql } from "../sql";
 import {
@@ -35,6 +35,7 @@ export async function applyBlock(
         for (const entry of payloads) {
             await applyByronTxPayload(entry, blockHash, client);
         }
+        await flushPendingUtxoWrites(client ?? sql);
         return;
     }
 
@@ -51,4 +52,5 @@ export async function applyBlock(
         else await applyTransaction(txBody, blockHash, client, ctx);
         txIndex++;
     }
+    await flushPendingUtxoWrites(client ?? sql); // multi-row writes of this block's UTxO rows and deltas
 }

@@ -17,7 +17,7 @@ import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "../utils/logger";
-import { evaluateBlockRules } from "./rules/blockRules";
+import { evaluateBlockRules, type BlockRuleOutcome } from "./rules/blockRules";
 import type { ValidationPool } from "./workers/ValidationPool";
 import type { EpochBodyParams } from "./epochParams";
 
@@ -751,6 +751,10 @@ export interface BlockValidationContext {
     slot: bigint;
     /** Worker pool for witness signatures; null runs them inline. */
     pool: ValidationPool | null;
+    /** Witness verdicts precomputed off the apply path (see ValidationPool.verifyBlockWitnesses). */
+    preVerified?: boolean[] | null;
+    /** Rule outcome computed ahead of time by a worker (ValidationPool.evaluateBlockRules); null = evaluate here. */
+    ruleOutcome?: BlockRuleOutcome | null;
 }
 
 /** Rule reports (checks this node cannot yet enforce exactly) are logged sparsely. */
@@ -772,7 +776,7 @@ export async function validateBlock(
 ): Promise<boolean> {
     if (ctx) {
         const genesis = block.era >= 2 ? await getCachedShelleyGenesis(config) : null;
-        const outcome = await evaluateBlockRules(block, { config, pool: ctx.pool, params, genesis, slot: ctx.slot });
+        const outcome = ctx.ruleOutcome ?? await evaluateBlockRules(block, { config, pool: ctx.pool, params, genesis, slot: ctx.slot, preVerified: ctx.preVerified ?? null });
         if (outcome.failures.length) {
             logger.error(`Block body validation failed at slot ${ctx.slot} (era ${block.era}, ${outcome.txs} tx): ${outcome.failures.slice(0, 5).join(" | ")}${outcome.failures.length > 5 ? ` | +${outcome.failures.length - 5} more` : ""}`);
             return false;

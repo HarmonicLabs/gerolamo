@@ -1,0 +1,64 @@
+diff --git a/dist/hex.js b/dist/hex.js
+index e567c58a3221e3686e12d17655b4d8a7078351b7..ceb37b8f85597097628f908a6b387e8df06718f1 100644
+--- a/dist/hex.js
++++ b/dist/hex.js
+@@ -2,32 +2,44 @@
+ Object.defineProperty(exports, "__esModule", { value: true });
+ exports.fromHex = exports.toHex = void 0;
+ var isUint8Array_1 = require("./isUint8Array.js");
++// Gerolamo patch: table-driven hex. The original built an array of padStart'ed
++// strings and joined it (toHex) and validated byte pairs with Array.includes
++// (fromHex); together they were ~20 % of a syncing node's main thread.
++var HEX = new Array(256);
++for (var i = 0; i < 256; i++) HEX[i] = (i < 16 ? "0" : "") + i.toString(16);
++var VAL = new Int16Array(128).fill(-1);
++for (var c = 0; c < 10; c++) VAL[48 + c] = c;
++for (var c = 0; c < 6; c++) { VAL[97 + c] = 10 + c; VAL[65 + c] = 10 + c; }
+ function toHex(buff) {
+     if (!(0, isUint8Array_1.isUint8Array)(buff))
+         throw new TypeError('toHex expects an `Uint8Array`;');
+-    var strArr = new Array(buff.length);
+-    buff.forEach(function (b, i) { return strArr[i] = b.toString(16).padStart(2, '0'); });
+-    return strArr.join('');
++    var n = buff.length;
++    if (n > 64 && typeof Buffer !== "undefined") return Buffer.from(buff.buffer, buff.byteOffset, n).toString("hex");
++    var out = "";
++    for (var i = 0; i < n; i++) out += HEX[buff[i]];
++    return out;
+ }
+ exports.toHex = toHex;
+-var hexChars = Object.freeze(Array.from("0123456789abcdef"));
+ function isLowerCaseHex(str) {
+-    return Array.from(str).every(function (ch) { return hexChars.includes(ch); });
++    for (var i = 0; i < str.length; i++) {
++        var ch = str.charCodeAt(i);
++        if (!((ch >= 48 && ch <= 57) || (ch >= 97 && ch <= 102))) return false;
++    }
++    return true;
+ }
+ function fromHex(str) {
+     if (typeof str !== "string")
+         throw new TypeError('fromHex expects an hexadecimal string;');
+-    str = str.toLowerCase();
+-    str = str.length % 2 === 0 ? str : '0' + str;
++    if (str.length % 2 !== 0) str = '0' + str;
+     var len = str.length / 2;
+-    var arr = new Array(len);
+-    for (var i = 0; i < len; i++) {
+-        var i2 = i * 2;
+-        var byte = str.substring(i2, i2 + 2);
+-        if (!isLowerCaseHex(byte))
+-            throw new TypeError('fromHex expects an hexadecimal string; input was: ' + str);
+-        arr[i] = parseInt("0x" + byte);
++    var out = new Uint8Array(len);
++    for (var i = 0, j = 0; i < len; i++, j += 2) {
++        var hi = str.charCodeAt(j), lo = str.charCodeAt(j + 1);
++        var h = hi < 128 ? VAL[hi] : -1, l = lo < 128 ? VAL[lo] : -1;
++        if (h < 0 || l < 0)
++            throw new TypeError('fromHex expects an hexadecimal string; input was: ' + str.toLowerCase());
++        out[i] = (h << 4) | l;
+     }
+-    return new Uint8Array(arr);
++    return out;
+ }
+ exports.fromHex = fromHex;

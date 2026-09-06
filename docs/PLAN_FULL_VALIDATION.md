@@ -674,3 +674,80 @@ profile → Phase 2 → Phase 3 → Phase 4. Status log at the bottom of this fi
   certificates and signed registration transaction byte-identical to
   cardano-cli; keygen/opcert/register exercised against the live preview node.
   Waiting on preview reaching the tip (epoch ~427 of 1411) to fund and register.
+- 2026-09-05 20:45 UTC mainnet run 2 entered Shelley (slot 4 492 800) on the
+  fixed code: Praos headers validate, no halt, epoch 208 parameters equal
+  Koios, η0(208) = 1a3be38b… (the Shelley genesis nonce). The clean-state
+  pots/params/stake/rewards comparison for 208–215 runs once the tip passes
+  epoch 216 (slot 7 948 800).
+- 2026-09-05 21:20 UTC Sync pipeline: (a) header throttle hysteresis reduced
+  from two ranges to one batch (`headerResumeBelow`), and partial ranges are
+  not flushed while the pause is ours, so the worker pool no longer alternates
+  2 s bursts with 4 s idle; (b) every Shelley+ block's witness signatures are
+  now verified by a worker as soon as the range arrives
+  (`ValidationPool.verifyBlockWitnesses`, `BlockWitnessJob`), and the apply
+  loop takes the verdicts instead of waiting on a per-block round trip
+  (`preVerified` in the rule context). Mainnet Shelley: main-thread
+  blk.validate 8.4 → 2.7 ms/block, main thread 50 % → 76 % busy,
+  58.9 → 77 blocks/s (+31 %); GC helpers ≈ 5 % of a core. Tests:
+  blockWitnessJob.test.ts (verdicts equal the inline path, tampered
+  signature fails the same index).
+- 2026-09-05 21:30 UTC mainnet run 2 stopped at the user's request (tip
+  6 470 904, epoch 212; DB kept, 23.5 GB) to put the machine behind preview.
+  The 208–215 clean-state comparison resumes when mainnet is restarted.
+- 2026-09-05 22:30 UTC CPU profile of the preview applier (`bun --cpu-prof`,
+  4 min): the hot leaves were not ledger rules but (a) the hex encoder in
+  @harmoniclabs/uint8array-utils (array-of-padStart + join, ~15 %), (b) full
+  CBOR parsing of every BlockFetch MsgBlock in the miniprotocols client just to
+  take the block bytes out (~10 %), (c) Bun.SQL row-by-row INSERT plumbing
+  (~25 % inclusive), (d) re-parsing stored bech32 addresses per tx (~7 %).
+  Fixes: Bun patches for uint8array-utils (table-driven hex; equivalence test
+  src/utils/fastHex.test.ts) and ouroboros-miniprotocols-ts (lazy MsgBlock
+  decode); batched multi-row UTxO/delta writes flushed at tx starts and block
+  end (`flushPendingUtxoWrites`, 11× cheaper per row); parsed-address caches;
+  ChainSync header bytes passed without a hex round trip. Preview at epoch
+  ~463 went from ~20 to 34 blocks/s; the applier is now download-bound
+  (3 hot peers, 3 ranges in flight) with the main thread at ~50 %.
+- 2026-09-05 Preview topology seeded with 24 reachable pool relays from the
+  peer snapshot (publicRoots) so the governor reaches its hot target (was one
+  peer); `/stats` gained a Resources panel (CPU, memory, blocks/s over 5/10
+  min, fed by the new lightweight `GET /resources`).
+- 2026-09-05 22:38 UTC preview halted at 41735103 after a rollback: the
+  batched-write change had turned the rollback's spend restore into a queued,
+  never-flushed write (bug 51). Fixed (flush in rollbackChainTo and
+  ensureOrphanedDeltasReverted, regression test); the lost outputs were
+  rebuilt from the creating blocks with `scripts/repair-missing-inputs.ts`,
+  looping per halted block until the tip passed the rolled-back window.
+- 2026-09-05 23:30 UTC preview fetch concurrency raised (parallelRanges 3→6,
+  targetHot 3→6, targetWarm 6→10 in src/config/preview/config.json):
+  34 → 87.5 blocks/s at epoch ~524, main thread 76 % busy, 6 ranges in
+  flight, the applier no longer starves. Remaining serial-stage ideas:
+  tx-rule evaluation and Plutus shadow in workers, per-block range verify,
+  index writes off the apply path.
+- 2026-09-05 23:45 UTC both mainnet validation databases deleted at the
+  user's request (disk at 86 %); the desktop instance's mainnet DB is the
+  only mainnet copy. The 208–215 clean-state comparison will need a fresh
+  genesis sync when mainnet validation resumes.
+- 2026-09-06 00:30 UTC Transaction rules pipelined: the Shelley+ block rules
+  split into a database gather (`gatherShelleyBlockInputs`: resolved inputs,
+  registered pools, reward balances) and a pure evaluation
+  (`blockRulesPure.ts`, no SQL import so workers can load it). While block N
+  applies, block N+1's rules run on a worker (`ValidationPool.evaluateBlockRules`)
+  against inputs adjusted with N's effects (`shelleyBlockOverlay`: outputs
+  created/spent, pools registered); skipped at epoch boundaries and when both
+  blocks withdraw from the same reward account. Worker and main-thread
+  outcomes equal on a 30-tx fixture; 86 tests pass.
+- 2026-09-06 01:14 UTC preview stalled at 51361220: a mint map with duplicate
+  policy keys that ledger-ts refused to decode (bug 52); fixed in the vendored
+  ledger-ts 0.5.7 with a fixture test. The no-op rollback that followed took
+  minutes because the rollback counted deltas with a full-table scan; it now
+  uses the block-hash index and skips when nothing is above the slot. Parse
+  failures now dump the block bytes like validation failures do.
+- 2026-09-06 01:35 UTC A/B of the pipelined rules on preview (epochs 586–597,
+  light Babbage blocks, rules ≈ 1.9 ms/block inline): inline 76.7 blocks/s at
+  9.8 ms main-thread CPU per block; ahead-of-time 65.9 blocks/s at 11.4 ms.
+  Worker compute was 2 ms but results waited ~20 ms for the main thread to turn
+  its event loop, and posting the job (structured clone of the resolved inputs)
+  cost more than the rules it removed. Left opt-in (GEROLAMO_RULES_AHEAD=1),
+  code and tests kept. The design that should pay: workers resolve inputs
+  themselves over a read-only SQLite connection (WAL readers), so the main
+  thread ships only block bytes and the small overlay.

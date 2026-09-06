@@ -240,6 +240,22 @@ function statsHtmlPage(port: number, network: string): string {
   .bar { height:6px; background:var(--b); border-radius:3px; margin-top:8px; overflow:hidden; }
   .bar > div { height:100%; width:0; background:var(--a); border-radius:3px; transition:width .6s ease; }
   .panels { display:grid; grid-template-columns:1.1fr 1fr 1fr; gap:12px; }
+  .res { margin:12px 0; }
+  .res .head { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:8px; color:var(--m); font-size:12px; }
+  .res .head b { color:var(--t); font-size:13px; font-weight:650; }
+  .res .win button { background:transparent; color:var(--m); border:1px solid var(--b); border-radius:4px; padding:2px 8px; font:11px ui-monospace,SFMono-Regular,Menlo,monospace; cursor:pointer; margin-left:4px; }
+  .res .win button.on { color:var(--a); border-color:rgba(88,166,255,.45); background:rgba(88,166,255,.08); }
+  .res .grid3 { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:12px; }
+  @media (max-width:980px) { .res .grid3 { grid-template-columns:1fr; } }
+  .chart .t { display:flex; justify-content:space-between; gap:8px; color:var(--m); font-size:11px; text-transform:uppercase; letter-spacing:.04em; }
+  .chart .t span:last-child { color:var(--t); text-transform:none; letter-spacing:0; font:12px ui-monospace,SFMono-Regular,Menlo,monospace; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chart svg { width:100%; height:96px; display:block; margin-top:6px; background:#0d1117; border:1px solid var(--b); border-radius:6px; }
+  .chart .lg { display:flex; justify-content:space-between; gap:8px; margin-top:4px; color:var(--m); font-size:10px; }
+  .chart .lg i { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:5px; vertical-align:middle; }
+  .chart .foot { display:flex; justify-content:space-between; gap:8px; margin-top:6px; color:var(--m); font-size:10px; }
+  .chart .foot code { font-size:10px; }
+  .pb { height:6px; background:var(--b); border-radius:3px; overflow:hidden; margin-top:6px; }
+  .pb > div { height:100%; width:0; background:var(--a); border-radius:3px; transition:width .6s ease; }
   @media (max-width:980px) { .panels { grid-template-columns:1fr; } }
   .panel-title { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--m); margin:0 0 10px; font-weight:600; }
   .tier { margin:0 0 12px; }
@@ -337,6 +353,15 @@ Subtitle = recentErrors count (top 8)."><div class="k">Failed peers</div><div cl
 hot ≥ valency (filled / with-valency).
 Empty topology accessPoints → hot=0
 until peers are listed. Demote blocked at floor."><div class="k">LR valency</div><div class="v" id="lrN">—</div><div class="s" id="lrNote">localRoot groups</div></div>
+  </section>
+
+  <section class="res card" data-tooltip="Resources — one sample every 2 s from GET /resources (process CPU/RSS/heap, host CPU/memory, blocks applied per second). The window buttons show the last 5 or 10 minutes; the browser keeps the samples.">
+    <div class="head"><b>Resources</b><span id="resMeta">—</span><span class="win">window <button id="win5" class="on">5 min</button><button id="win10">10 min</button> <span id="resSpan"></span></span></div>
+    <div class="grid3">
+      <div class="chart"><div class="t"><span>CPU</span><span id="cpuHead">—</span></div><svg id="cpuSvg" viewBox="0 0 600 96" preserveAspectRatio="none"></svg><div class="lg"><span><span id="cpuAgo">—</span></span><span><i style="background:#00b3ff"></i>node cores <code id="cpuNode">—</code> <i style="background:#ff8a00"></i>host <code id="cpuHost">—</code></span></div><div class="foot"><span>node share of machine</span><code id="cpuShare">—</code></div><div class="pb"><div id="cpuBar"></div></div></div>
+      <div class="chart"><div class="t"><span>Memory</span><span id="memHead">—</span></div><svg id="memSvg" viewBox="0 0 600 96" preserveAspectRatio="none"></svg><div class="lg"><span><span id="memAgo">—</span></span><span><i style="background:#00e676"></i>node RSS <code id="memRss">—</code> <i style="background:#9b59b6"></i>JS heap <code id="memHeap">—</code></span></div><div class="foot"><span>node share of machine · <span id="memHostPct">—</span></span><code id="memShare">—</code></div><div class="pb"><div id="memBar"></div></div><div class="foot"><span>JS heap <code id="memHeapDetail">—</code></span><span>native / buffers <code id="memNative">—</code></span><span>chain DB on disk <code id="memDb">—</code></span></div></div>
+      <div class="chart"><div class="t"><span>Blocks / s</span><span id="bpsHead">—</span></div><svg id="bpsSvg" viewBox="0 0 600 96" preserveAspectRatio="none"></svg><div class="lg"><span><span id="bpsAgo">—</span></span><span><i style="background:#ff2d55"></i>applied <code id="bpsNow">—</code></span></div></div>
+    </div>
   </section>
 
   <section class="panels">
@@ -617,6 +642,81 @@ async function tick() {
     el("updated").textContent = " · " + String(e.message || e);
   }
 }
+// ── Resources panel: 2 s samples, 10 min ring, SVG line charts (mirrors the desktop TimeSeries) ──
+const RES_MAX = 300, RES_EVERY = 2000;
+const resHist = [];
+let resWin = 5;
+const fmtB = (n) => n == null || !isFinite(n) ? "—" : n < 1024 ? n + " B" : n < 1048576 ? (n / 1024).toFixed(1) + " KB" : n < 1073741824 ? (n / 1048576).toFixed(1) + " MB" : (n / 1073741824).toFixed(2) + " GB";
+const fmtP = (v, d) => v == null || !isFinite(v) ? "—" : v.toFixed(d == null ? 0 : d) + "%";
+function resShown() { const cut = Date.now() - resWin * 60000; return resHist.filter((x) => x.t >= cut); }
+function resAgo(list) { if (list.length < 2) return "—"; const s = Math.round((list[list.length - 1].t - list[0].t) / 1000); return s < 90 ? s + " s ago" : Math.round(s / 60) + " min ago"; }
+function pathFor(vals, yMax, W, H) {
+  const n = vals.length; if (n < 2) return "";
+  let d = ""; for (let i = 0; i < n; i++) { const v = vals[i]; if (v == null || !isFinite(v)) continue; const x = (i / (n - 1)) * W; const y = H - 1 - (Math.min(v, yMax) / yMax) * (H - 2); d += (d ? " L" : "M") + x.toFixed(1) + " " + y.toFixed(1); }
+  return d;
+}
+function drawChart(svgId, lines, minMax) {
+  const svg = el(svgId); if (!svg) return; const W = 600, H = 96;
+  let yMax = minMax; for (const l of lines) for (const v of l.values) if (v != null && isFinite(v) && v > yMax) yMax = v;
+  yMax *= 1.05;
+  let out = "";
+  for (const f of [0.25, 0.5, 0.75]) { const y = (H - 1 - f * (H - 2)).toFixed(1); out += '<line x1="0" x2="' + W + '" y1="' + y + '" y2="' + y + '" stroke="#e6edf3" stroke-opacity="0.08" stroke-width="1" vector-effect="non-scaling-stroke"/>'; }
+  lines.forEach((l, i) => { const d = pathFor(l.values, yMax, W, H); if (!d) return; if (i === 0) out += '<path d="' + d + ' L' + W + ' ' + H + ' L0 ' + H + ' Z" fill="' + l.color + '" fill-opacity="0.12" stroke="none"/>'; out += '<path d="' + d + '" fill="none" stroke="' + l.color + '" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>'; });
+  svg.innerHTML = out;
+}
+function renderResources() {
+  const list = resShown(); if (!list.length) return;
+  const last = list[list.length - 1]; const p = last.p, sy = last.s;
+  const cpus = sy && sy.cpus ? sy.cpus : 1;
+  const nodeCores = p && p.cpuPercent != null ? p.cpuPercent / 100 : null;
+  el("resSpan").textContent = "· showing " + resAgo(list).replace(" ago", "") + " · one sample per 2 s";
+  el("resMeta").textContent = (p ? "pid " + p.pid + " · " : "") + (sy ? cpus + " cores · " + (sy.platform || "") + "/" + (sy.arch || "") + " · " + (sy.runtime || "") : "");
+  // CPU
+  el("cpuHead").textContent = "node " + (nodeCores == null ? "—" : nodeCores.toFixed(2)) + " of " + cpus + " cores · host " + fmtP(sy && sy.cpuPercent);
+  el("cpuNode").textContent = nodeCores == null ? "—" : nodeCores.toFixed(2) + " cores";
+  el("cpuHost").textContent = sy && sy.cpuPercent != null ? fmtP(sy.cpuPercent) + " (" + (sy.cpuPercent / 100 * cpus).toFixed(1) + " cores)" : "—";
+  const share = nodeCores == null ? null : nodeCores / cpus * 100;
+  el("cpuShare").textContent = fmtP(share, 1) + (sy && sy.loadAvg ? " · load " + sy.loadAvg.map((x) => Number(x).toFixed(1)).join(" / ") : "");
+  el("cpuBar").style.width = Math.min(100, share || 0).toFixed(1) + "%";
+  el("cpuAgo").textContent = resAgo(list);
+  drawChart("cpuSvg", [
+    { color: "#00b3ff", values: list.map((x) => x.p && x.p.cpuPercent != null ? x.p.cpuPercent / 100 : null) },
+    { color: "#ff8a00", values: list.map((x) => x.s && x.s.cpuPercent != null ? x.s.cpuPercent / 100 * (x.s.cpus || cpus) : null) },
+  ], 2);
+  // Memory
+  const rss = p ? p.rssBytes : null, tot = sy ? sy.totalMemBytes : null;
+  el("memHead").textContent = "node " + fmtB(rss) + " · host " + fmtB(sy && sy.usedMemBytes) + " / " + fmtB(tot);
+  el("memRss").textContent = fmtB(rss); el("memHeap").textContent = fmtB(p && p.heapUsedBytes);
+  el("memHostPct").textContent = "host " + fmtP(tot ? sy.usedMemBytes / tot * 100 : null) + " used";
+  const mshare = rss != null && tot ? rss / tot * 100 : null;
+  el("memShare").textContent = fmtP(mshare, 1); el("memBar").style.width = Math.min(100, mshare || 0).toFixed(1) + "%";
+  el("memHeapDetail").textContent = p && p.heapUsedBytes != null ? fmtB(p.heapUsedBytes) + " / " + fmtB(p.heapTotalBytes) : "—";
+  el("memNative").textContent = fmtB(p && p.externalBytes); el("memDb").textContent = fmtB(last.db);
+  el("memAgo").textContent = resAgo(list);
+  drawChart("memSvg", [
+    { color: "#00e676", values: list.map((x) => x.p ? x.p.rssBytes : null) },
+    { color: "#9b59b6", values: list.map((x) => x.p ? x.p.heapUsedBytes : null) },
+  ], 512 * 1048576);
+  // Blocks / s
+  el("bpsHead").textContent = last.bps == null ? "—" : last.bps.toFixed(0) + " blocks/s · " + (last.ph == null ? "—" : fmt(last.ph)) + " headers waiting";
+  el("bpsNow").textContent = last.bps == null ? "—" : last.bps.toFixed(0) + " blocks/s";
+  el("bpsAgo").textContent = resAgo(list);
+  drawChart("bpsSvg", [{ color: "#ff2d55", values: list.map((x) => x.bps) }], 10);
+}
+async function sampleResources() {
+  try {
+    const r = await fetch("/resources", { cache: "no-store" }); if (!r.ok) return;
+    const d = await r.json();
+    resHist.push({ t: d.ts || Date.now(), p: d.process, s: d.system, bps: d.blocksPerSec, ph: d.pendingHeaders, db: d.dbBytes });
+    while (resHist.length > RES_MAX) resHist.shift();
+    renderResources();
+  } catch (_) {}
+}
+el("win5").onclick = () => { resWin = 5; el("win5").className = "on"; el("win10").className = ""; renderResources(); };
+el("win10").onclick = () => { resWin = 10; el("win10").className = "on"; el("win5").className = ""; renderResources(); };
+sampleResources();
+setInterval(sampleResources, RES_EVERY);
+
 function connectWs() {
   let ws;
   try {
@@ -767,6 +867,31 @@ export async function startPeerBlockServer(
                         headers: { "Content-Type": "application/json" },
                     },
                 );
+            }
+            if (url.pathname === "/resources") {
+                // 2 s resource samples for the Resources panel: process + host + apply rate + DB size.
+                try {
+                    const r = sampleResources();
+                    const snap = typeof manager?.getSyncSnapshot === "function" ? serializeSync(manager.getSyncSnapshot()) : null;
+                    let dbBytes: number | null = null;
+                    try {
+                        const { statSync } = await import("node:fs");
+                        dbBytes = 0;
+                        for (const suf of ["", "-wal", "-shm"]) { try { dbBytes += statSync(String(config.dbPath) + suf).size; } catch { /* absent */ } }
+                    } catch { /* no fs */ }
+                    const body = {
+                        ts: Date.now(),
+                        process: r.process,
+                        system: r.system,
+                        blocksPerSec: snap ? Number((snap as any).blocksPerSec ?? 0) : null,
+                        pendingHeaders: snap ? Number((snap as any).pendingHeaders ?? 0) : null,
+                        tipSlot: (await getMaxSlot()).toString(),
+                        dbBytes,
+                    };
+                    return new Response(JSON.stringify(body), { headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } });
+                } catch (e: any) {
+                    return new Response(JSON.stringify({ error: e?.message ?? String(e) }), { status: 500, headers: { "Content-Type": "application/json" } });
+                }
             }
             if (url.pathname === "/metrics") {
                 try {

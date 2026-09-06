@@ -1,3 +1,8 @@
+import { evaluateShelleyBlockWithInputs, type BlockRuleOutcome } from "../rules/blockRulesPure";
+import type { ResolvedUtxo } from "../rules/resolvedUtxo";
+import type { EpochBodyParams } from "../epochParams";
+import { collectShelleyWitnesses } from "../rules/witnesses";
+import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_224, blake2b_256 } from "@harmoniclabs/crypto";
 import { blockFetchHeaderIdentity, headerParser } from "../blockHeaderParser";
@@ -5,7 +10,7 @@ import { verifyBlockBodyHash } from "../bodyHash";
 import { verifyByronBlockSignature, type ByronBlockSignatureCheck } from "../byron/ByronCrypto";
 import { validateHeader } from "../BlockHeaderValidator";
 import { setEpochNetwork } from "../../utils/epochFromSlotCalculations";
-import type { WitnessVerifyJob } from "./witnessJob";
+import { runWitnessVerifyJob, type WitnessItem, type WitnessVerifyJob } from "./witnessJob";
 
 /**
  * The unit of CPU work handed to a validation worker (or run inline):
@@ -192,7 +197,7 @@ export interface RangeVerifyResult {
     identities: RangeIdentity[];
 }
 
-export type PoolJob = HeaderValidationJob | RangeVerifyJob | WitnessVerifyJob;
+export type PoolJob = HeaderValidationJob | RangeVerifyJob | WitnessVerifyJob | BlockWitnessJob | BlockRulesJob;
 
 /**
  * Copy into a fresh ArrayBuffer before transferring: a Node Buffer's `.slice()` is a
@@ -246,4 +251,107 @@ export function praosLeaderValue(vrfOutput: Uint8Array): Uint8Array {
     tagged[0] = 0x4c; // "L"
     tagged.set(vrfOutput, 1);
     return new Uint8Array(blake2b_256(tagged));
+}
+
+// ───────────────────────── block witnesses (whole block, off the apply path) ─────────────────────────
+
+/** Verify every vkey/bootstrap witness of one Shelley+ block from its BlockFetch bytes. */
+export interface BlockWitnessJob {
+    kind: "blockWitnesses";
+    /** `[era, block]` bytes. */
+    block: Uint8Array;
+}
+
+export interface BlockWitnessResult {
+    /** One verdict per witness item in `collectShelleyWitnesses` order over all txs; null = not verified here (Byron, undecodable). */
+    ok: boolean[] | null;
+    count: number;
+    reason?: string;
+}
+
+export function isBlockWitnessJob(job: unknown): job is BlockWitnessJob {
+    return !!job && (job as any).kind === "blockWitnesses" && (job as any).block instanceof Uint8Array;
+}
+
+/**
+ * Same items, same order as `evaluateShelleyBlock` builds them (body hash per tx,
+ * then `collectShelleyWitnesses`), so the apply path can take the verdicts
+ * as-is when the counts agree and skip its own round trip to the pool.
+ */
+export function runBlockWitnessJob(job: BlockWitnessJob): BlockWitnessResult {
+    try {
+        const meb: any = MultiEraBlock.fromCbor(job.block);
+        if (Number(meb.era) < 2) return { ok: null, count: 0, reason: "byron" };
+        const b: any = meb.block;
+        const bodies: any[] = b.transactionBodies ?? [];
+        const wits: any[] = b.transactionWitnessSets ?? [];
+        const items: WitnessItem[] = [];
+        for (let i = 0; i < bodies.length; i++) {
+            const bodyHashHex = String(bodies[i].hash?.toString?.() ?? "");
+            const bodyHash = bodyHashHex ? fromHex(bodyHashHex) : new Uint8Array(blake2b_256(bodies[i].toCborBytes()));
+            items.push(...collectShelleyWitnesses(bodyHash, wits[i]).items);
+        }
+        if (items.length === 0) return { ok: [], count: 0 };
+        return { ok: runWitnessVerifyJob({ kind: "witnesses", items }).ok, count: items.length };
+    } catch (err) {
+        return { ok: null, count: 0, reason: err instanceof Error ? err.message : String(err) };
+    }
+}
+
+// ───────────────────────── block rules (pure part, off the apply thread) ─────────────────────────
+
+/**
+ * Evaluate a Shelley+ block's transaction rules in a worker. The main thread
+ * resolves what the block reads from the ledger (inputs, pools, reward
+ * balances) and ships it with the block bytes; Maps/Sets/BigInts cross the
+ * worker boundary by structured clone.
+ */
+export interface BlockRulesJob {
+    kind: "blockRules";
+    /** `[era, block]` bytes. */
+    block: Uint8Array;
+    slot: string;
+    params: EpochBodyParams | null;
+    genesis: unknown;
+    config: { network?: string; networkMagic?: number; byronGenesisFile?: string };
+    resolved: Map<string, ResolvedUtxo>;
+    pools: Set<string>;
+    rewardBalances: Map<string, bigint> | null;
+    preVerified: boolean[] | null;
+    /** Date.now() when the main thread posted the job (latency accounting). */
+    postedAt?: number;
+}
+
+export interface BlockRulesResult {
+    outcome: BlockRuleOutcome | null;
+    reason?: string;
+    /** Worker-side timings (ms): block parse and rule evaluation. */
+    parseMs?: number;
+    evalMs?: number;
+    /** ms between the main thread posting the job and the worker starting it. */
+    queueMs?: number;
+    /** Date.now() when the worker finished (delivery latency = receipt − finishedAt). */
+    finishedAt?: number;
+}
+
+export function isBlockRulesJob(job: unknown): job is BlockRulesJob {
+    return !!job && (job as any).kind === "blockRules" && (job as any).block instanceof Uint8Array;
+}
+
+export async function runBlockRulesJob(job: BlockRulesJob): Promise<BlockRulesResult> {
+    try {
+        const t0 = performance.now();
+        const queueMs = job.postedAt ? Date.now() - job.postedAt : undefined;
+        const meb: any = MultiEraBlock.fromCbor(job.block);
+        if (Number(meb.era) < 2) return { outcome: null, reason: "byron" };
+        const t1 = performance.now();
+        const outcome = await evaluateShelleyBlockWithInputs(
+            meb,
+            { config: job.config, pool: null, params: job.params, genesis: job.genesis, slot: BigInt(job.slot), preVerified: job.preVerified },
+            { resolved: job.resolved, pools: job.pools, rewardBalances: job.rewardBalances ?? undefined },
+        );
+        return { outcome, parseMs: t1 - t0, evalMs: performance.now() - t1, queueMs, finishedAt: Date.now() };
+    } catch (err) {
+        return { outcome: null, reason: err instanceof Error ? err.message : String(err) };
+    }
 }

@@ -7,7 +7,7 @@ published to npm yet. They are committed so a fresh clone installs with plain
 | Tarball | Source repo |
 |---|---|
 | `harmoniclabs-kes-*.tgz` | https://github.com/HarmonicLabs/kes-ts (pure-TS KES verify; 0.1.0-dev1 adds `setEd25519Verify`) |
-| `harmoniclabs-cardano-ledger-ts-*.tgz` | HarmonicLabs/cardano-ledger-ts (ships `dist/`; 0.5.5 adds `ByronAddress.fromRedeemPublicKey`; 0.5.6 fixes MIR certificate decoding — `fromCborObj` accepts the whole `[6, [source, destination]]` the dispatcher passes) |
+| `harmoniclabs-cardano-ledger-ts-*.tgz` | HarmonicLabs/cardano-ledger-ts (ships `dist/`; 0.5.5 adds `ByronAddress.fromRedeemPublicKey`; 0.5.6 fixes MIR certificate decoding — `fromCborObj` accepts the whole `[6, [source, destination]]` the dispatcher passes; 0.5.7 decodes multi-asset maps with duplicate policy / asset-name keys the way the Haskell ledger does before protocol 9 — later entry wins — instead of rejecting the block) |
 | `harmoniclabs-shared-cardano-mempool-ts-*.tgz` | HarmonicLabs shared mempool |
 
 `package.json` references them as `"file:vendor/<name>.tgz"`. The pack script

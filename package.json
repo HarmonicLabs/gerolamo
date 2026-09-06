@@ -30,7 +30,7 @@
     "dependencies": {
         "@blockfrost/blockfrost-js": "^6.1.0",
         "@harmoniclabs/buildooor": "^0.1.21",
-        "@harmoniclabs/cardano-ledger-ts": "file:vendor/harmoniclabs-cardano-ledger-ts-0.5.6.tgz",
+        "@harmoniclabs/cardano-ledger-ts": "file:vendor/harmoniclabs-cardano-ledger-ts-0.5.7.tgz",
         "@harmoniclabs/cardano-math-ts": "^0.0.5",
         "@harmoniclabs/cbor": "^1.6.6",
         "@harmoniclabs/crypto": "^0.3.0",
@@ -53,6 +53,7 @@
     },
     "patchedDependencies": {
         "@harmoniclabs/ouroboros-miniprotocols-ts@0.0.5-dev7": "patches/@harmoniclabs%2Fouroboros-miniprotocols-ts@0.0.5-dev7.patch",
-        "@harmoniclabs/plutus-machine@2.1.3": "patches/@harmoniclabs%2Fplutus-machine@2.1.3.patch"
+        "@harmoniclabs/plutus-machine@2.1.3": "patches/@harmoniclabs%2Fplutus-machine@2.1.3.patch",
+        "@harmoniclabs/uint8array-utils@1.0.4": "patches/@harmoniclabs%2Fuint8array-utils@1.0.4.patch"
     }
 }

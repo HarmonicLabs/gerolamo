@@ -156,6 +156,7 @@ const ControlCenter: Component = () => {
         ok: false,
         bunPath: null,
         bunVersion: null,
+        hostCores: 0,
         repoPath: null,
         repoVersion: null,
         hasStartEntry: false,
@@ -1102,6 +1103,7 @@ const ControlCenter: Component = () => {
                     setN2cSocket={setN2cSocket}
                     skipApply={skipApply()}
                     setSkipApply={setSkipApply}
+                    hostCores={detectInfo()?.hostCores ?? 0}
                     settings={settings()}
                     patchSettings={patchSettings}
                     onPickDb={() => void pick("db")}

@@ -1,3 +1,4 @@
+import type { BlockWitnessResult } from "./workers/validationJob";
 import type { TicknResult } from "../utils/nonceEvolver";
 import { nonceFactsOf } from "../utils/nonceReplay";
 import { logger } from "../utils/logger";
@@ -49,6 +50,7 @@ import {
     storeEpochNonce,
     gcVolatile,
     countBlocksAfterSlot,
+    discardPendingUtxoWrites,
 } from "../db";
 import { applyBlock } from "./BlockApplication";
 import { type ChainCandidate, evaluateChains } from "./chainSelection";
@@ -82,6 +84,8 @@ import { CandidateSet, type PeerAgreement, type PeerRole } from "./CandidateSet"
 import { RangeMismatch, RangeScheduler, type RangeSchedulerStats } from "./RangeScheduler";
 import { ValidationPool, resolveWorkerCount } from "./workers/ValidationPool";
 import { getEpochBodyParams, type EpochBodyParams } from "./epochParams";
+import { applyOverlay, gatherShelleyBlockInputs, shelleyBlockOverlay, shelleyBlockReads, type BlockOverlay, type BlockRuleOutcome } from "./rules/blockRules";
+import type { BlockRulesResult } from "./workers/validationJob";
 import { ApplyProfile, type ProfileSnapshot } from "./applyProfile";
 import { resolveValidationPolicy } from "./validationPolicy";
 
@@ -112,6 +116,19 @@ export class BodyValidationFailure extends Error {
     constructor(readonly slot: bigint, readonly hash: string, readonly detail: string) {
         super(`Block body validation failed at slot ${slot} hash=${hash} (strict; ${detail})`);
         this.name = "BodyValidationFailure";
+    }
+}
+
+/**
+ * A block our libraries cannot decode. It already passed the header-hash, body-hash and
+ * peer-agreement checks, i.e. it is the block the network accepted and the Haskell
+ * nodes decoded — so this is OUR decoder's bug (e.g. bug 52: duplicate mint policy
+ * keys), never bad data from the peer. Halts the sync like a strict rule failure.
+ */
+export class BlockDecodeFailure extends BodyValidationFailure {
+    constructor(slot: bigint, hash: string, readonly cause: string) {
+        super(slot, hash, `undecodable by our ledger library: ${cause}`);
+        this.name = "BlockDecodeFailure";
     }
 }
 
@@ -228,6 +245,8 @@ export class ConsensusOrchestrator {
     private readonly dbMutations = new SerializedMutationQueue();
     /** Header identity computed while verifying a fetched range, reused by the applier (decode once). */
     private readonly verifiedIdentities = new WeakMap<BlockFetchBlock, ReturnType<typeof headerIdentityOfBlock>>();
+    /** Witness verdicts per fetched block, started when the range arrives so the apply loop never waits on the pool per block. */
+    private readonly preWitness = new WeakMap<BlockFetchBlock, Promise<BlockWitnessResult>>();
 
     constructor(
         config: GerolamoConfig,
@@ -1060,6 +1079,13 @@ export class ConsensusOrchestrator {
                     // rules) is wrong. Terminating peers would only hide that, so stop applying
                     // and say so loudly. The scheduler stays poisoned on purpose.
                     this.halted = { slot: err.slot.toString(), hash: err.hash, reason: err.message, since: Date.now() };
+                    if (err instanceof BlockDecodeFailure) {
+                        logger.error(
+                            `SYNC HALTED: ${err.message}. The block's header and body hashes verified and peers agree on it, ` +
+                                `so our ledger library cannot decode a real block. Peers are not at fault; the ledger is intact. ` +
+                                `Fix the decoder (the block is in GEROLAMO_FAILED_BLOCK_DIR) and restart; no resync needed.`,
+                        );
+                    } else
                     logger.error(
                         `SYNC HALTED: ${err.message}. The local ledger is inconsistent with the chain ` +
                             `(missing or extra UTxOs). Peers are not at fault. Fix: wipe the chain DB and resync from genesis.`,
@@ -1149,6 +1175,11 @@ export class ConsensusOrchestrator {
         for (let i = 0; i < blocks.length; i++) {
             const id = r.identities[i]!;
             this.verifiedIdentities.set(blocks[i]!, { era: id.era, hash: fromHex(id.hashHex), rawHeaderBytes: id.rawHeader });
+            if (id.era >= 2) {
+                // Shelley+: every witness signature of the block verified in parallel across the
+                // pool while earlier ranges apply; the apply loop reads the verdicts (blk.prewit).
+                this.preWitness.set(blocks[i]!, pool.verifyBlockWitnesses(blocks[i]!.blockData).catch((): BlockWitnessResult => ({ ok: null, count: 0, reason: "worker failed" })));
+            }
         }
     }
 
@@ -1574,10 +1605,17 @@ export class ConsensusOrchestrator {
             // Far behind the tip (large target range) a partial range is only worth
             // flushing after a real stall; near the tip flush quickly for latency.
             const flushMs = n >= 16 ? 1000 : Math.max(20, Number(this.config.blockFetchBatch?.flushMs ?? 25) * 8);
-            this.rangeFlushTimer = setTimeout(() => {
-                this.rangeFlushTimer = null;
-                if (this.rangeBuffer.length > 0) this.flushRanges(1);
-            }, flushMs);
+            const arm = () => {
+                this.rangeFlushTimer = setTimeout(() => {
+                    this.rangeFlushTimer = null;
+                    if (this.rangeBuffer.length === 0) return;
+                    // A quiet buffer while we throttle the stream is not a stall: the tail
+                    // fills as soon as room opens, so keep waiting rather than cut a small range.
+                    if (n >= 16 && this.throttlingHeaders()) { arm(); return; }
+                    this.flushRanges(1);
+                }, flushMs);
+            };
+            arm();
         }
     }
 
@@ -1597,18 +1635,138 @@ export class ConsensusOrchestrator {
     }
 
     /**
+     * Header-stream throttle: below this many pending headers the primary's stream
+     * resumes. One batch of hysteresis (not two ranges): with two ranges the workers
+     * validated ~250 headers in a 2 s burst every 6 s and idled in between (CPU
+     * sawtooth, 2026-09-05); one batch keeps the stream and the pool busy evenly.
+     * Range sizes are protected separately: partial ranges are not flushed while
+     * the pause is ours (see flushRanges).
+     */
+    private headerResumeBelow(): number {
+        const batch = Math.max(1, Number(this.config.blockFetchBatch?.maxBlocks ?? 32));
+        return Math.max(1, this.headerLookahead() - Math.max(batch, Math.floor(this.maxRangeBlocks() / 4)));
+    }
+
+    /** True while we hold the header stream back (buffer near the cap), as opposed to a peer stall. */
+    private throttlingHeaders(): boolean {
+        return this.pendingHeaders.size >= this.headerResumeBelow();
+    }
+
+    /**
      * Block the primary's header stream while `headerLookahead` validated headers await
-     * bodies. With hysteresis: once the cap is hit, wait until two full ranges of room
-     * exist, otherwise headers trickle in as single ranges apply and every range cut
-     * from the buffer ends up small (seen as ~27-block ranges at a 128 target).
+     * bodies; resume once a batch of room exists (`headerResumeBelow`).
      */
     private async waitForHeaderRoom(peerKey: string): Promise<void> {
         const cap = this.headerLookahead();
         if (this.pendingHeaders.size < cap) return;
-        const resumeBelow = Math.max(1, cap - 2 * this.maxRangeBlocks());
+        const resumeBelow = this.headerResumeBelow();
         while (this.pendingHeaders.size > resumeBelow) {
             if (this.halted || this.stopping || this.candidates.primary() !== peerKey || !this.peerByKey(peerKey)) return;
             await new Promise((r) => setTimeout(r, 25));
+        }
+    }
+
+    /** Write a block we could not parse or validate to GEROLAMO_FAILED_BLOCK_DIR for offline replay. */
+    private dumpFailedBlock(bytes: Uint8Array, slot: bigint, why: string): void {
+        try {
+            const dir = process.env.GEROLAMO_FAILED_BLOCK_DIR ?? "./logs";
+            const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
+            mkdirSync(dir, { recursive: true });
+            writeFileSync(`${dir}/failed-block-${slot}.hex`, toHex(bytes));
+            logger.error(`Offending block (${why}) written to ${dir}/failed-block-${slot}.hex`);
+        } catch { /* best effort */ }
+    }
+
+    // ───────────────────── rules ahead of apply (pipelining) ─────────────────────
+
+    /** How many blocks ahead of the one being applied get their rules evaluated on workers. */
+    private static readonly RULES_AHEAD_DEPTH = 3;
+    /** Blocks parsed ahead of time (reused by the loop's parse step). */
+    private readonly parsedAheadMap = new WeakMap<BlockFetchBlock, MultiEraBlock>();
+    /** Ledger effects of parsed blocks (for the overlay of blocks not yet applied). */
+    private readonly overlayCache = new WeakMap<BlockFetchBlock, BlockOverlay>();
+    /** Rule outcomes running on workers, by block. */
+    private readonly rulesAheadMap = new WeakMap<BlockFetchBlock, Promise<BlockRulesResult>>();
+    /** Blocks that will never be evaluated ahead (epoch boundary): evaluated inline. */
+    private readonly rulesAheadNever = new WeakSet<BlockFetchBlock>();
+    private rulesAheadFailureLogged = false;
+    private shelleyGenesisCache: unknown | null = null;
+
+    private overlayOf(message: BlockFetchBlock, block: MultiEraBlock): BlockOverlay {
+        let o = this.overlayCache.get(message);
+        if (!o) { o = shelleyBlockOverlay(block); this.overlayCache.set(message, o); }
+        return o;
+    }
+
+    /**
+     * Evaluate the rules of blocks i+1 … i+DEPTH on workers while block i applies.
+     * Block j's ledger reads are resolved from the database now and adjusted with
+     * the effects of the not-yet-applied blocks i … j−1 (`shelleyBlockOverlay`:
+     * outputs created and spent, pools registered), so a worker sees the state
+     * the ledger will have. A block is left to inline evaluation when it starts a
+     * new epoch (rewards/params change at apply time) or withdraws from a reward
+     * account one of those blocks also withdraws from; the latter is retried once
+     * the conflicting block has been applied.
+     */
+    private async scheduleRulesAhead(blocks: BlockFetchBlock[], i: number, current: MultiEraBlock, currentEpoch: number, params: EpochBodyParams): Promise<void> {
+        const pool = this.pool;
+        if (!pool || pool.workerCount === 0) return;
+        // Opt-in (GEROLAMO_RULES_AHEAD=1). Measured 2026-09-06 on preview (light Babbage
+        // blocks, rules ≈ 1.9 ms/block): main-thread cost rose from 9.8 to 11.4 ms/block
+        // (structured-clone of the resolved inputs + result hand-off outweighed the
+        // rules moved out), 76.7 → 65.9 blocks/s. Worth it only once workers resolve
+        // inputs themselves through a read-only connection; kept for that step.
+        if (process.env.GEROLAMO_RULES_AHEAD !== "1") return;
+        const last = Math.min(i + ConsensusOrchestrator.RULES_AHEAD_DEPTH, blocks.length - 1);
+        for (let j = i + 1; j <= last; j++) {
+            const msg = blocks[j]!;
+            if (this.rulesAheadMap.has(msg) || this.rulesAheadNever.has(msg)) continue;
+            try {
+                const identity = this.verifiedIdentities.get(msg);
+                if (!identity || identity.era < 2) { this.rulesAheadNever.add(msg); continue; }
+                let next = this.parsedAheadMap.get(msg);
+                if (!next) {
+                    let parsed: MultiEraBlock | null = null;
+                    try { parsed = (await blockParser(msg)) ?? null; } catch { /* the apply loop reports and dumps it */ }
+                    if (!parsed || !(parsed instanceof MultiEraBlock)) { this.rulesAheadNever.add(msg); break; }
+                    next = parsed;
+                    this.parsedAheadMap.set(msg, next);
+                }
+                const nextSlot = BigInt(getHeaderSlot(next.block.header));
+                if (Number(calculatePreProdCardanoEpoch(Number(nextSlot))) !== currentEpoch) { this.rulesAheadNever.add(msg); break; }
+                // effects of blocks i … j−1, in order
+                const overlays: BlockOverlay[] = [this.overlayOf(blocks[i]!, current)];
+                let complete = true;
+                for (let k = i + 1; k < j; k++) {
+                    const pk = this.parsedAheadMap.get(blocks[k]!);
+                    if (!pk) { complete = false; break; }
+                    overlays.push(this.overlayOf(blocks[k]!, pk));
+                }
+                if (!complete) break;
+                const reads = shelleyBlockReads(next);
+                if (reads.wdCreds.some((c) => overlays.some((o) => o.withdrawnCreds.has(c)))) continue; // retried after the conflicting block applies
+                let inputs = await gatherShelleyBlockInputs(next);
+                for (const o of overlays) inputs = applyOverlay(inputs, o);
+                const pre = this.preWitness.get(msg);
+                const preVerified = pre ? (await pre).ok : null;
+                if (this.shelleyGenesisCache == null) this.shelleyGenesisCache = await getShelleyGenesisConfig(this.config);
+                this.rulesAheadMap.set(msg, pool.evaluateBlockRules({
+                    kind: "blockRules",
+                    block: msg.blockData,
+                    slot: nextSlot.toString(),
+                    params,
+                    genesis: this.shelleyGenesisCache,
+                    config: { network: this.config.network, networkMagic: Number(this.config.networkMagic), byronGenesisFile: this.config.byronGenesisFile },
+                    resolved: inputs.resolved,
+                    pools: inputs.pools,
+                    rewardBalances: inputs.rewardBalances ?? null,
+                    preVerified,
+                    postedAt: Date.now(),
+                }).catch((err): BlockRulesResult => ({ outcome: null, reason: err instanceof Error ? err.message : String(err) })));
+            } catch (err) {
+                if (!this.rulesAheadFailureLogged) { this.rulesAheadFailureLogged = true; logger.warn("Block rules ahead-of-time scheduling failed; evaluating inline:", err); }
+                return;
+            }
         }
     }
 
@@ -1697,6 +1855,7 @@ export class ConsensusOrchestrator {
 
     /** Drop in-memory state derived from applied blocks after a range's transaction rolled back. */
     private afterFailedRange(): void {
+        discardPendingUtxoWrites(); // queued rows belonged to the rolled-back transaction
         this.lastBlockNo = null; // re-read from the DB
         this.nonceSnapshotDue = null;
         this.nonceEvolver?.reset();
@@ -1722,9 +1881,21 @@ export class ConsensusOrchestrator {
             const pending = this.pendingHeaders.get(pt.hash);
             // Headers from a primary switch were validated as verifier headers; no pending entry.
             const tParse = performance.now();
-            const multiEraBlock = await blockParser(blockMessage);
+            let multiEraBlock: MultiEraBlock | null | undefined = this.parsedAheadMap.get(blockMessage);
+            this.parsedAheadMap.delete(blockMessage);
+            if (!multiEraBlock) {
+                try {
+                    multiEraBlock = await blockParser(blockMessage);
+                } catch (err) {
+                    // Identity and body hash already checked: the bytes are the real block, so a
+                    // decode failure is our library's. Keep the bytes and halt (never blame the peer).
+                    this.dumpFailedBlock(blockMessage.blockData, pt.slot, "decode");
+                    throw new BlockDecodeFailure(pt.slot, pt.hash, err instanceof Error ? err.message : String(err));
+                }
+            }
             if (!multiEraBlock || !(multiEraBlock instanceof MultiEraBlock)) {
-                throw new Error(`Block parse failed at slot ${pt.slot} hash=${pt.hash}`);
+                this.dumpFailedBlock(blockMessage.blockData, pt.slot, "decode");
+                throw new BlockDecodeFailure(pt.slot, pt.hash, "parser returned no block");
             }
             const blockHeader = multiEraBlock.block.header;
             const identity = this.verifiedIdentities.get(blockMessage) ?? headerIdentityOfBlock(blockMessage.blockData);
@@ -1764,7 +1935,26 @@ export class ConsensusOrchestrator {
                 await this.profile.timeAsync("blk.epoch", () => this.onEpochStart(blockEpoch));
                 epochParams = await this.profile.timeAsync("blk.params", () => getEpochBodyParams(this.config, blockEpoch));
             }
-            const valid = await this.profile.timeAsync("blk.validate", () => validateBlock(multiEraBlock, this.config, epochParams, { slot: blockSlot, pool: this.pool }));
+            const pre = this.preWitness.get(blockMessage);
+            const preVerified = pre ? (await this.profile.timeAsync("blk.prewit", () => pre)).ok : null;
+            // Rules of this block, if a worker evaluated them while the previous block applied.
+            let ruleOutcome: BlockRuleOutcome | null = null;
+            const aheadPromise = this.rulesAheadMap.get(blockMessage);
+            if (aheadPromise) {
+                this.rulesAheadMap.delete(blockMessage);
+                const r = await this.profile.timeAsync("blk.rules.wait", () => aheadPromise);
+                if (r.parseMs != null) this.profile.add("blk.rules.wparse", r.parseMs);
+                if (r.evalMs != null) this.profile.add("blk.rules.weval", r.evalMs);
+                if (r.queueMs != null) this.profile.add("blk.rules.queue", r.queueMs);
+                if (r.finishedAt != null) this.profile.add("blk.rules.deliver", Math.max(0, Date.now() - r.finishedAt));
+                if (r.outcome) ruleOutcome = r.outcome;
+                else if (r.reason && r.reason !== "byron" && !this.rulesAheadFailureLogged) { this.rulesAheadFailureLogged = true; logger.warn(`Block rules ahead-of-time failed (${r.reason}); evaluating inline`); }
+            }
+            // Start the rules of the next blocks on workers now (overlapping this block's apply).
+            if (i + 1 < blocks.length && !isByron && epochParams) {
+                await this.profile.timeAsync("blk.rules.prep", () => this.scheduleRulesAhead(blocks, i, multiEraBlock, blockEpoch, epochParams!));
+            }
+            const valid = await this.profile.timeAsync("blk.validate", () => validateBlock(multiEraBlock, this.config, epochParams, { slot: blockSlot, pool: this.pool, preVerified, ruleOutcome }));
             if (!valid && bodyPolicy === "strict") {
                 // Keep the offending block for offline replay (scripts/validate-stored-block.ts).
                 try {

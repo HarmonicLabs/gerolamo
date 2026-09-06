@@ -5,6 +5,10 @@ import {
     runHeaderValidationJob,
     runRangeVerifyJob,
     type PoolJob,
+    isBlockWitnessJob,
+    runBlockWitnessJob,
+    isBlockRulesJob,
+    runBlockRulesJob,
 } from "./validationJob";
 import { isWitnessVerifyJob, runWitnessVerifyJob } from "./witnessJob";
 
@@ -29,6 +33,14 @@ self.onmessage = async (ev: MessageEvent<{ id: number; job: PoolJob }>) => {
         }
         if (isWitnessVerifyJob(job)) {
             self.postMessage({ id, result: runWitnessVerifyJob(job) });
+            return;
+        }
+        if (isBlockWitnessJob(job)) {
+            self.postMessage({ id, result: runBlockWitnessJob(job) });
+            return;
+        }
+        if (isBlockRulesJob(job)) {
+            self.postMessage({ id, result: await runBlockRulesJob(job) });
             return;
         }
         if (isRangeVerifyJob(job)) {

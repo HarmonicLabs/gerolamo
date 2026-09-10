@@ -5,7 +5,8 @@ import { blake2b_256 } from "@harmoniclabs/crypto";
  * Verified vs preprod snapshots + external η0 (epochs 4–7):
  *   bnonce = blake2b_256(proofHash)
  *   ηv' = ηv ⋆ bnonce
- *   ηc' = ηv' if s + StabilityWindow < firstSlotNext else ηc
+ *   ηc' = ηv' if s + window < firstSlotNext else ηc
+ *         (window = StabilityWindow 3k/f; RandomnessStabilisationWindow 4k/f from Conway, pv ≥ 9)
  *   TICKN: η0' = ηc ⋆ ηh  (ηe Neutral = identity)
  *   ηh for next boundary = prevHash of last block of ended epoch (csLabNonce)
  *   ηv/ηc NEVER re-equalized to η0
@@ -20,6 +21,7 @@ import {
     prevHashToNonce,
     ticknNewEpochNonce,
     stabilityWindowSlots,
+    nonceFreezeWindowSlots,
     isBeforeNonceFreeze,
 } from "./calcEpochNonce";
 import {
@@ -60,14 +62,20 @@ export class NonceEvolver {
     private nBeforeFreeze = 0;
     private lastPrevHash: Uint8Array | null = null;
     private readonly stabilityWindow: number;
+    private readonly securityParam: number;
+    private readonly activeSlotsCoeff: number;
+    /** Protocol major version in force per epoch (monotonic); decides the freeze window (3k/f, Conway 4k/f). */
+    private readonly protocolMajorByEpoch = new Map<number, number>();
     private readonly genesis: ShelleyGenesisConfig;
     private active = false;
 
     constructor(genesis: ShelleyGenesisConfig) {
         this.genesis = genesis;
+        this.securityParam = Number(genesis.securityParam ?? 2160);
+        this.activeSlotsCoeff = Number(genesis.activeSlotsCoeff ?? 0.05);
         this.stabilityWindow = stabilityWindowSlots(
-            Number(genesis.securityParam ?? 2160),
-            Number(genesis.activeSlotsCoeff ?? 0.05),
+            this.securityParam,
+            this.activeSlotsCoeff,
         );
         this.etaV = new Uint8Array(32);
         this.etaC = new Uint8Array(32);
@@ -85,6 +93,30 @@ export class NonceEvolver {
 
     getStabilityWindow(): number {
         return this.stabilityWindow;
+    }
+
+    /**
+     * Record the protocol major version the ledger runs during `epoch` (from the
+     * epoch's protocol parameters, not from block headers, which announce the
+     * issuer's supported version). Conway (≥ 9) freezes the candidate nonce
+     * 4k/f slots before the epoch ends instead of 3k/f.
+     */
+    setProtocolMajor(epoch: number, protocolMajor: number | null | undefined): void {
+        if (protocolMajor == null || !Number.isFinite(Number(protocolMajor))) return;
+        this.protocolMajorByEpoch.set(Number(epoch), Number(protocolMajor));
+    }
+
+    /** Freeze window for blocks of `epoch`: the version of the latest known epoch ≤ `epoch` (versions never decrease). */
+    freezeWindowFor(epoch: number): number {
+        let best = -1;
+        let major: number | null = null;
+        for (const [e, m] of this.protocolMajorByEpoch) {
+            if (e <= epoch && e > best) {
+                best = e;
+                major = m;
+            }
+        }
+        return nonceFreezeWindowSlots(this.securityParam, this.activeSlotsCoeff, major);
     }
 
     /**
@@ -178,7 +210,7 @@ export class NonceEvolver {
         );
         // UPDN
         this.etaV = seedCombine(this.etaV, bnonce);
-        if (isBeforeNonceFreeze(s, firstNext, this.stabilityWindow)) {
+        if (isBeforeNonceFreeze(s, firstNext, this.freezeWindowFor(this.epoch))) {
             this.etaC = new Uint8Array(this.etaV);
             this.nBeforeFreeze++;
         }
@@ -230,7 +262,7 @@ export class NonceEvolver {
     peekNextEpochNonceHex(currentSlot: bigint | number): string | null {
         if (!this.active) return null;
         const firstNext = BigInt(getFirstSlotOfEpoch(this.epoch + 1, this.genesis));
-        if (isBeforeNonceFreeze(BigInt(currentSlot), firstNext, this.stabilityWindow)) return null;
+        if (isBeforeNonceFreeze(BigInt(currentSlot), firstNext, this.freezeWindowFor(this.epoch))) return null;
         const etaH = this.etaH ?? new Uint8Array(0);
         return toHex(ticknNewEpochNonce(this.etaC, etaH));
     }

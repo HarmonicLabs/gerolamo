@@ -6,7 +6,7 @@
  * Ancillary UTxO extract remains blocked (A2) — see src/state/mithril.ts.
  */
 
-export type MithrilNetwork = "preprod" | "mainnet";
+export type MithrilNetwork = "preprod" | "preview" | "mainnet";
 
 /** Engine for mithril-bootstrap: pure TypeScript (production) or the external mithril-client binary. */
 export type MithrilEngine = "ts" | "bin";
@@ -90,6 +90,20 @@ export type MithrilBootstrapOptions = {
     limitChunks?: number;
     /** Download ancillary (not applied — A2 blocked). */
     includeAncillary?: boolean;
+    /** Store the certified blocks only (block store for a local relay); no ledger apply. */
+    blocksOnly?: boolean;
+    /**
+     * Snapshot bootstrap: verify the ancillary manifest signature, store the certified blocks
+     * (implies blocksOnly and includeAncillary), then import the UTxO tables and the
+     * NewEpochState into the ledger tables (import-utxo + import-state).
+     */
+    ledgerState?: boolean;
+    /** Ancillary verification key (hex-of-JSON, path or URL); default: the network's published key. */
+    ancillaryVkey?: string;
+    /** Progress JSON for the dashboard (default `<downloadDir>/progress.json`). */
+    progressFile?: string;
+    /** Parallel chunk downloads (default 8). */
+    downloadConcurrency?: number;
 };
 
 export type MithrilBootstrapResult = {

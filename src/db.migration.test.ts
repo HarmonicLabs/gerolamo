@@ -53,3 +53,23 @@ describe("applyCertificates follows the validator's certificate table", () => {
         expect((await getStakeByCredentials([cred(3)])).length).toBe(1);
     });
 });
+
+describe("certificate order within one transaction", () => {
+    const hex28 = (b: number) => b.toString(16).padStart(2, "0").repeat(28);
+    const credObj = (b: number) => ({ type: 0, hash: { toBuffer: () => new Uint8Array(28).fill(b), toString: () => hex28(b) } });
+    const blockHash = new Uint8Array(32).fill(9);
+    const ctx = { slot: 60215405, epoch: 696, txIndex: 0 };
+
+    test("deregister, register, vote-delegate in one tx keeps the new DRep delegation (bug 103: preview tx 190fdc6e…)", async () => {
+        const DREP = "3d".repeat(28);
+        await applyCertificates([{ certType: 0, stakeCredential: credObj(0x2a) }], blockHash, undefined, ctx);
+        await applyCertificates([
+            { certType: 1, stakeCredential: credObj(0x2a) },
+            { certType: 0, stakeCredential: credObj(0x2a) },
+            { certType: 9, stakeCredential: credObj(0x2a), drep: { drepType: 0, hash: { toString: () => DREP } } },
+        ], blockHash, undefined, ctx);
+        expect((await getStakeByCredentials([new Uint8Array(28).fill(0x2a)])).length).toBe(1);
+        const rows = (await sql`SELECT drep_hash FROM gov_drep_delegations WHERE stake_key = ${hex28(0x2a)}`.values()) as unknown[][];
+        expect(rows.map((r) => String(r[0]))).toEqual([DREP]);
+    });
+});

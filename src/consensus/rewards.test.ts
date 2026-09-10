@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { computeEpochRewards, type RewardsInput } from "./rewards";
+import { computeEpochRewards, leaderShare, memberShare, type RewardsInput } from "./rewards";
 
 const params = { rhoNum: 3n, rhoDen: 1000n, tauNum: 1n, tauDen: 5n, a0Num: 3n, a0Den: 10n, nOpt: 150n, dNum: 0n, dDen: 1n, protocolMajor: 7 };
 
@@ -12,6 +12,16 @@ describe("computeEpochRewards", () => {
         expect(out.rewardPot).toBe(3_000_000_000n + 1_000n);
         expect(out.treasuryDelta).toBe((3_000_001_000n) / 5n);
         expect(out.unclaimed).toBe(out.rewardPot - out.treasuryDelta);
+    });
+    test("η·ρ·reserves is floored once, as a single rational (preview epoch 1391: two nested floors lose 1 lovelace)", () => {
+        // reserves at the start of epoch 1392, 2989 pool blocks of 4320 expected, ρ = 0.003
+        const out = computeEpochRewards({
+            reserves: 7_695_253_745_555_323n, fees: 0n, totalStake: 1n, activeStake: 1n,
+            totalBlocks: 2989n, expectedBlocks: 4320n, params, pools: [], registered: new Set(),
+        });
+        expect(out.rewardPot).toBe((7_695_253_745_555_323n * 3n * 2989n) / (1000n * 4320n));
+        expect(out.rewardPot).toBe(15_972_995_448_239n);
+        expect(out.reservesDelta).toBe(-out.rewardPot + out.unclaimed);
     });
     test("one pool with all the stake and full performance earns the pot minus treasury; cost and margin go to the operator", () => {
         const stake = 100_000_000n;
@@ -70,5 +80,18 @@ describe("unregistered reward accounts across the Babbage prefilter fork", () =>
         expect(out.unclaimed).toBe(out.rewardPot - out.treasuryDelta);
         const withBlocks = computeEpochRewards({ reserves: 10_000_000_000n, fees: 0n, totalStake: stake, activeStake: stake, totalBlocks: 5n, expectedBlocks: 0n, params: dHigh, pools: [{ ...pool, blocks: 5n }], registered: new Set(["op", "m"]) });
         expect(withBlocks.paid.size).toBe(2);
+    });
+});
+
+describe("pool reward split (bug 97)", () => {
+    test("the leader share is one floor over the exact rational, not a floored margin plus a floored owner share", () => {
+        // f − c = 1000, m = 2/3, owner/stake = 7/10: exact 1000·(2/3 + 1/3·7/10) = 900; floor(666.67) + floor(334·0.7) = 899
+        expect(leaderShare(1500n, 500n, 2n, 3n, 700n, 1000n)).toBe(500n + 900n);
+        expect(leaderShare(400n, 500n, 2n, 3n, 700n, 1000n)).toBe(400n); // below cost: everything to the operator
+    });
+    test("a member share is one floor too: ⌊(f − c)(1 − m)·t/σ⌋", () => {
+        // 1000·(1/3)·(1/2) = 166.67 → 166; the old remainder split gave ⌊334/2⌋ = 167
+        expect(memberShare(1500n, 500n, 2n, 3n, 500n, 1000n)).toBe(166n);
+        expect(memberShare(400n, 500n, 2n, 3n, 500n, 1000n)).toBe(0n);
     });
 });

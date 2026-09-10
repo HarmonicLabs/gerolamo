@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BabbageHeader, MultiEraHeader } from "@harmoniclabs/cardano-ledger-ts";
@@ -138,4 +138,42 @@ describe("BlockProducer", () => {
         const c2 = new BlockProducer(files, fakeNode({ now: slotStartMs(FIRST, "preview") }, 10n, []));
         await expect(c2.start()).rejects.toThrow(/expired|KES period/);
     }, 60_000);
+});
+
+describe("greeting transaction", () => {
+    test("the first forged block on a network carries the greeting once; later blocks and restarts do not repeat it", async () => {
+        const { buildWithMinFee, generateKeyPair, messageMetadata, txId } = await import("./operator");
+        const { Cbor } = await import("@harmoniclabs/cbor");
+        const pay = generateKeyPair(new Uint8Array(32).fill(3));
+        const greeting = buildWithMinFee({
+            inputs: [{ txHash: new Uint8Array(32).fill(9), index: 0 }], outputs: [{ address: new Uint8Array(57).fill(1), lovelace: 5_000_000n }], changeIndex: 0,
+            certificates: [], auxiliaryData: messageMetadata(["Gerolamo was here!"]), minFeeA: 44n, minFeeB: 155381n, keys: [pay],
+        });
+        let built = 0;
+        const dir = mkdtempSync(join(tmpdir(), "gerolamo-producer-greet-"));
+        const clock = { now: slotStartMs(FIRST, "preview") + 100 };
+        const adopted: Uint8Array[] = [];
+        const node = fakeNode(clock, 300n, adopted);
+        node.greetingTx = async () => { built++; return { hash: txId(greeting.body), bytes: greeting.tx }; };
+        const producer = new BlockProducer(keyFiles(dir), node);
+        await producer.start();
+        producer.stop();
+        const leaders = leaderSlotsForEpoch({ epoch: EPOCH, nonceHex, sigma: { num: 1n, den: 1n }, activeSlotsCoeff: 0.05, vrf: (producer as any).vrf, network: "preview", fromSlot: FIRST, toSlot: FIRST + 300n }).map((l) => l.slot);
+        const txCount = (block: Uint8Array): number => { const top: any = Cbor.parse(block); const blk = top.array[1]; return blk.array[1].array.length; };
+        for (const s of leaders.slice(0, 2)) { clock.now = slotStartMs(s, "preview") + 50; await (producer as any).onSlot(s, clock.now); }
+        expect(adopted.length).toBe(2);
+        expect(txCount(adopted[0]!)).toBe(1); // the greeting
+        expect(txCount(adopted[1]!)).toBe(0); // once only
+        expect(built).toBe(1);
+        const state = JSON.parse(readFileSync(keyFiles(dir).stateFile!, "utf8"));
+        expect(state.greeted).toBe("preview");
+        // a restart reads the state back: no second greeting
+        const again = new BlockProducer(keyFiles(dir), node);
+        await again.start(); again.stop();
+        clock.now = slotStartMs(leaders[2]!, "preview") + 50; await (again as any).onSlot(leaders[2]!, clock.now);
+        expect(adopted.length).toBe(3);
+        expect(txCount(adopted[2]!)).toBe(0);
+        expect(built).toBe(1);
+        rmSync(dir, { recursive: true, force: true });
+    });
 });

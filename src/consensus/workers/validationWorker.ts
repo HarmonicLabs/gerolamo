@@ -20,6 +20,9 @@ import { isWitnessVerifyJob, runWitnessVerifyJob } from "./witnessJob";
  * Message in : { id, job: HeaderValidationJob | RangeVerifyJob }   (byte buffers transferred)
  * Message out: { id, result } | { id, error }                       (rawHeader buffers transferred)
  */
+const sharedParams = new Map<number, NonNullable<import("./validationJob").BlockRulesJob["params"]>>();
+const sharedGenesis = new Map<number, unknown>();
+
 declare const self: Worker;
 
 self.onmessage = async (ev: MessageEvent<{ id: number; job: PoolJob }>) => {
@@ -40,6 +43,9 @@ self.onmessage = async (ev: MessageEvent<{ id: number; job: PoolJob }>) => {
             return;
         }
         if (isBlockRulesJob(job)) {
+            // Params/genesis arrive once per worker under an id (BlockRulesJob.paramsId); keep them.
+            if (job.paramsId != null) { if (job.params) sharedParams.set(job.paramsId, job.params); else job.params = sharedParams.get(job.paramsId) ?? null; }
+            if (job.genesisId != null) { if (job.genesis != null) sharedGenesis.set(job.genesisId, job.genesis); else job.genesis = sharedGenesis.get(job.genesisId) ?? null; }
             self.postMessage({ id, result: await runBlockRulesJob(job) });
             return;
         }

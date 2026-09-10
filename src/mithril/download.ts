@@ -385,6 +385,10 @@ export async function downloadImmutableRange(opts: {
     /** Skip complete on-disk trios (default true). */
     skipIfPresent?: boolean;
     log?: (msg: string) => void;
+    /** Parallel chunk downloads (default 1); the packs are ~100 KB each, so 8 is a sane default for a full chain. */
+    concurrency?: number;
+    /** Called after every chunk (done so far, total, chunk number) — for progress files and logs. */
+    onProgress?: (done: number, total: number, chunkNo: number) => void;
 }): Promise<{
     immutableDir: string;
     downloaded: number[];
@@ -405,14 +409,30 @@ export async function downloadImmutableRange(opts: {
     const skipped: number[] = [];
     let immutableDir = "";
     const skipIfPresent = opts.skipIfPresent !== false;
+    const total = to - from + 1;
+    const concurrency = Math.max(1, Math.min(total, Math.trunc(opts.concurrency ?? 1)));
+    const results = new Map<number, { immutableDir: string; skipped: boolean }>();
+    let next = from;
+    let done = 0;
+    const worker = async (): Promise<void> => {
+        for (;;) {
+            const n = next++;
+            if (n > to) return;
+            const r = await downloadImmutableChunk({
+                template,
+                chunkNo: n,
+                downloadDir: opts.downloadDir,
+                skipIfPresent,
+                log: opts.log,
+            });
+            results.set(n, { immutableDir: r.immutableDir, skipped: r.skipped });
+            done++;
+            opts.onProgress?.(done, total, n);
+        }
+    };
+    await Promise.all(Array.from({ length: concurrency }, worker));
     for (let n = from; n <= to; n++) {
-        const r = await downloadImmutableChunk({
-            template,
-            chunkNo: n,
-            downloadDir: opts.downloadDir,
-            skipIfPresent,
-            log: opts.log,
-        });
+        const r = results.get(n)!;
         immutableDir = r.immutableDir;
         if (r.skipped) skipped.push(n);
         else downloaded.push(n);

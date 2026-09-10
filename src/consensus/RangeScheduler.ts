@@ -94,6 +94,16 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
     }
 
     /**
+     * Blocks of the range that will be applied after the one applying now, when its
+     * download (and verification) has completed; null otherwise. Lets the applier's
+     * rules lookahead run across range boundaries instead of draining at each one.
+     */
+    peekNextBlocks(): Blk[] | null {
+        const job = this.jobs.get(this.nextApplySeq + 1);
+        return job?.blocks ?? null;
+    }
+
+    /**
      * Queue one range. Resolves `scheduled` when a download slot is taken
      * (back-pressure for the header stream) and `applied` when `onRange`
      * finished for this range.

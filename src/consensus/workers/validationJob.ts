@@ -40,6 +40,12 @@ export interface HeaderValidationJob {
      * the main thread and use the returned key hashes.
      */
     byronProtocolMagic?: number;
+    /**
+     * A Shelley+ header whose epoch has no nonce in `noncesByEpoch` is not rejected:
+     * KES / op-cert / structure are verified now and the result carries `vrfDeferred`;
+     * the caller re-validates the VRF and the leader rule once the nonce is known.
+     */
+    deferVrfWithoutNonce?: boolean;
 }
 
 export interface HeaderValidationConfig {
@@ -59,6 +65,8 @@ export interface HeaderValidationResult {
     isEbb: boolean;
     prevHashHex: string | null;
     rawHeader: Uint8Array;
+    /** VRF proofs not checked (no nonce yet, `deferVrfWithoutNonce`); the leader rule is pending too. */
+    vrfDeferred?: boolean;
     /** Byron main blocks, when `byronProtocolMagic` was given. */
     byron?: ByronBlockSignatureCheck;
     /** Shelley+ headers: what the main-thread leader rules need (hex / bytes). */
@@ -138,9 +146,11 @@ export async function runHeaderValidationJob(job: HeaderValidationJob): Promise<
         };
     }
     let nonceHex = job.nonceHex;
+    let vrfDeferred = false;
     if (job.noncesByEpoch && !parsed.isByron) {
         nonceHex = job.noncesByEpoch[String(parsed.epoch)] ?? "";
-        if (!nonceHex) {
+        if (!nonceHex && job.deferVrfWithoutNonce) vrfDeferred = true;
+        else if (!nonceHex) {
             return { ...summarize(parsed), ok: false, reason: `no epoch nonce supplied for epoch ${parsed.epoch}` };
         }
     }
@@ -148,7 +158,7 @@ export async function runHeaderValidationJob(job: HeaderValidationJob): Promise<
     let ok = false;
     let reason: string | undefined;
     try {
-        ok = await validateHeader(parsed.multiEraHeader, nonce, job.config);
+        ok = await validateHeader(parsed.multiEraHeader, nonce, job.config, vrfDeferred ? { skipVrf: true } : undefined);
         if (!ok) reason = "header validation failed";
     } catch (err) {
         ok = false;
@@ -167,7 +177,7 @@ export async function runHeaderValidationJob(job: HeaderValidationJob): Promise<
         }
     }
     const shelley = ok && !parsed.isByron ? shelleyFacts(parsed.era, parsed.multiEraHeader) : undefined;
-    return { ...summarize(parsed), ok, reason, ...(byron ? { byron } : {}), ...(shelley ? { shelley } : {}) };
+    return { ...summarize(parsed), ok, reason, ...(vrfDeferred ? { vrfDeferred } : {}), ...(byron ? { byron } : {}), ...(shelley ? { shelley } : {}) };
 }
 
 // ───────────────────────── fetched-range verification ─────────────────────────
@@ -193,6 +203,8 @@ export interface RangeVerifyResult {
     /** First offending block and why, when `!ok`. */
     index?: number;
     reason?: string;
+    /** On a header-hash mismatch: the hash of the block the peer served instead. */
+    gotHash?: string;
     /** Identities of the blocks verified so far (all of them when `ok`). */
     identities: RangeIdentity[];
 }
@@ -231,7 +243,7 @@ export function runRangeVerifyJob(job: RangeVerifyJob): RangeVerifyResult {
             const id = blockFetchHeaderIdentity(bytes);
             const got = toHex(id.hash).toLowerCase();
             if (got !== want) {
-                return { ok: false, index: i, reason: `header hash ${got} ≠ advertised ${want}`, identities };
+                return { ok: false, index: i, reason: `header hash ${got} ≠ advertised ${want}`, gotHash: got, identities };
             }
             const body = verifyBlockBodyHash(bytes);
             if (!body.ok) {
@@ -318,6 +330,15 @@ export interface BlockRulesJob {
     pools: Set<string>;
     rewardBalances: Map<string, bigint> | null;
     preVerified: boolean[] | null;
+    /**
+     * Epoch parameters and genesis are the same objects for every block of an epoch; cloning them
+     * (cost models, genesis JSON) into every job was 8 % of the applier thread. The pool sends
+     * them once per worker under an id and null afterwards; the worker keeps them by id.
+     */
+    paramsId?: number;
+    genesisId?: number;
+    /** See BlockRuleContext.phase; ahead-of-time jobs run "rules", the detached Plutus job "shadow". */
+    phase?: "rules" | "shadow" | "both";
     /** Date.now() when the main thread posted the job (latency accounting). */
     postedAt?: number;
 }
@@ -347,7 +368,7 @@ export async function runBlockRulesJob(job: BlockRulesJob): Promise<BlockRulesRe
         const t1 = performance.now();
         const outcome = await evaluateShelleyBlockWithInputs(
             meb,
-            { config: job.config, pool: null, params: job.params, genesis: job.genesis, slot: BigInt(job.slot), preVerified: job.preVerified },
+            { config: job.config, pool: null, params: job.params, genesis: job.genesis, slot: BigInt(job.slot), preVerified: job.preVerified, phase: job.phase ?? "both" },
             { resolved: job.resolved, pools: job.pools, rewardBalances: job.rewardBalances ?? undefined },
         );
         return { outcome, parseMs: t1 - t0, evalMs: performance.now() - t1, queueMs, finishedAt: Date.now() };

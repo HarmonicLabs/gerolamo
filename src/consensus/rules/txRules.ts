@@ -16,7 +16,7 @@ import { evalNativeScript, nativeScriptTreeOf } from "./nativeScript";
 import { parseStoredAddress, requiredWitnesses } from "./requiredSigners";
 import { ByronAddress, Script } from "@harmoniclabs/cardano-ledger-ts";
 import { evaluateAlonzoRules } from "./alonzoRules";
-import { bodyOutputBytes, scriptLanguageOfCbor, witnessScriptHashes } from "./scriptDataHash";
+import { bodyOutputBytes, scriptLanguageOfCbor, witnessScriptHashes, type PlutusLanguage } from "./scriptDataHash";
 
 /** Flip once a from-genesis run on the final reward rules shows no withdrawal disagreement. */
 export const WITHDRAWALS_STRICT = false;
@@ -269,10 +269,15 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
     if (missingRoots.length) failures.push(`missing bootstrap witness for ${missingRoots.length} Byron address(es)`);
 
     const provided = new Map<string, { kind: "native" | "plutus"; script: any }>();
+    /** Plutus language per script hash (witness set or reference script): V3 spends may omit the datum. */
+    const plutusLanguages = new Map<string, PlutusLanguage>();
     const ws = tx.witnessSet ?? {};
     for (const s of (ws.nativeScripts ?? []) as any[]) provided.set(hex(s.hash), { kind: "native", script: s });
-    for (const key of ["plutusV1Scripts", "plutusV2Scripts", "plutusV3Scripts"]) {
-        for (const s of (ws[key] ?? []) as any[]) provided.set(hex(s.hash), { kind: "plutus", script: s });
+    for (const [key, lang] of [["plutusV1Scripts", 1], ["plutusV2Scripts", 2], ["plutusV3Scripts", 3]] as const) {
+        for (const s of (ws[key] ?? []) as any[]) {
+            provided.set(hex(s.hash), { kind: "plutus", script: s });
+            plutusLanguages.set(hex(s.hash), lang);
+        }
     }
     // The ledger hashes witness scripts over their bytes as given (a double CBOR wrap
     // included); add those hashes from the original witness-set bytes.
@@ -280,6 +285,7 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
     if (wsBytes) {
         for (const [h, w] of witnessScriptHashes(wsBytes)) {
             if (!provided.has(h)) provided.set(h, { kind: w.kind, script: w.kind === "native" ? (ws.nativeScripts ?? []).find((n: any) => hex(n.hash) === h) ?? null : null });
+            if (w.kind === "plutus" && w.language && !plutusLanguages.has(h)) plutusLanguages.set(h, w.language);
         }
     }
     // reference scripts carried by spent or referenced outputs
@@ -301,6 +307,10 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
                 }
             }
             provided.set(u.referenceScriptHash, isNative ? { kind: "native", script: native } : { kind: "plutus", script: null });
+            if (!isNative && refCbor) {
+                const lang = scriptLanguageOfCbor(refCbor);
+                if (lang && !plutusLanguages.has(u.referenceScriptHash)) plutusLanguages.set(u.referenceScriptHash, lang);
+            }
         }
     }
     const timelock = { signers: tx.provenKeys, validFrom: body.validityIntervalStart ?? null, validTo: body.ttl ?? null };
@@ -345,6 +355,7 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
             witnessSet: ws,
             resolved: tx.resolved,
             plutusScripts,
+            plutusLanguages,
             nativeScripts: nativeScriptHashes,
             params: {
                 collateralPercent: tx.params.collateralPercent,

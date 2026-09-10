@@ -1,4 +1,4 @@
-import type { BlockWitnessResult } from "./workers/validationJob";
+import type { BlockWitnessResult, HeaderValidationResult } from "./workers/validationJob";
 import type { TicknResult } from "../utils/nonceEvolver";
 import { nonceFactsOf } from "../utils/nonceReplay";
 import { logger } from "../utils/logger";
@@ -10,7 +10,7 @@ import {
     headerParser,
     type HeaderSummary,
 } from "./blockHeaderParser";
-import { validateBlock } from "./BlockBodyValidator";
+import { validateBlock, recordPlutusShadow } from "./BlockBodyValidator";
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import {
     BlockFetchBlock,
@@ -28,6 +28,7 @@ import type {
 } from "../network/PeerClient";
 import {
     applyTransaction,
+    blockExists,
     getBlockByHash,
     getBlockBySlot,
     getBlockListRowByHash,
@@ -40,6 +41,9 @@ import {
     getEpochNonceState,
     getMaxSlot,
     getMaxBlockNo,
+    blockAtSlot,
+    blockHashesAbove,
+    VOLATILE_GC_K,
     setBulkSyncIndexSkip,
     getRecentBlockHeaders,
     getValidBlocksBefore,
@@ -51,7 +55,7 @@ import {
     gcVolatile,
     countBlocksAfterSlot,
     discardPendingUtxoWrites,
-} from "../db";
+    resetRecentOutputs, dropPointerStakeForConway } from "../db";
 import { applyBlock } from "./BlockApplication";
 import { type ChainCandidate, evaluateChains } from "./chainSelection";
 import {
@@ -63,16 +67,20 @@ import { getShelleyGenesisConfig } from "../utils/paths";
 import { NonceEvolver } from "../utils/nonceEvolver";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { emitTip } from "../network/liveEvents";
-import { LeaderChecker } from "./rules/leaderCheck";
-import { applyPendingMir, noteBlockMade, poolsMissingFromSnapshot, promotePendingPoolParams, refreshPotSnapshot, refundPoolDeposits, retirePoolsAtEpochDetailed, seedGenesisDelegs, setOpcertCounter, takeStakeSnapshot } from "../db/leaderState";
+import { LeaderChecker, type LeaderVerdict } from "./rules/leaderCheck";
+import { applyPendingMir, noteBlockMade, poolsMissingFromSnapshot, promotePendingPoolParams, refreshPotSnapshot, creditRegisteredAccounts, refundPoolDeposits, retirePoolsAtEpochDetailed, seedGenesisDelegs, setOpcertCounter, takeStakeSnapshot } from "../db/leaderState";
 import { deriveNextEpochParams } from "./pparams";
 import { runEpochRewards } from "./epochRewards";
-import { ratifyAndEnact, seedGovernance } from "./governance/state";
+import { enactPending, ratifyForNext, seedGovernance } from "./governance/state";
 import { applyEraGenesis, diffRawParams, eraGenesisFilesFor, repairLocalEpochParams } from "./pparams";
-import { creditRewards, updateRewardPots } from "../db/leaderState";
+import { creditRewards, resetOpcertCounterCache, updateRewardPots } from "../db/leaderState";
 import { epochParamsFromGenesis, readEpochParamsRaw, readEpochParamsSource, storeEpochParams } from "./epochParams";
 import { firstSlotOfEpoch, shelleyStartEpoch } from "../utils/epochFromSlotCalculations";
 import { prevHashToNonce } from "../utils/calcEpochNonce";
+import { mergeCostModels, type RawCostModels } from "./governance/costModelUpdate";
+import { SHADOW_SAMPLE_EVERY } from "./rules/plutusEval";
+import type { UtxoRow } from "../db/rulesQueries";
+import { pruneLedgerJournal, setApplyBlock, withJournalingOff } from "../db/ledgerJournal";
 import { blake2b_224 } from "@harmoniclabs/crypto";
 import { assertBlockRangeMatches } from "./blockRange";
 import { splitEraBlock } from "./bodyHash";
@@ -84,7 +92,7 @@ import { CandidateSet, type PeerAgreement, type PeerRole } from "./CandidateSet"
 import { RangeMismatch, RangeScheduler, type RangeSchedulerStats } from "./RangeScheduler";
 import { ValidationPool, resolveWorkerCount } from "./workers/ValidationPool";
 import { getEpochBodyParams, type EpochBodyParams } from "./epochParams";
-import { applyOverlay, gatherShelleyBlockInputs, shelleyBlockOverlay, shelleyBlockReads, type BlockOverlay, type BlockRuleOutcome } from "./rules/blockRules";
+import { applyOverlays, gatherShelleyBlockInputs, shelleyBlockOverlay, shelleyBlockReads, type BlockOverlay, type BlockRuleOutcome } from "./rules/blockRules";
 import type { BlockRulesResult } from "./workers/validationJob";
 import { ApplyProfile, type ProfileSnapshot } from "./applyProfile";
 import { resolveValidationPolicy } from "./validationPolicy";
@@ -104,8 +112,17 @@ interface RangePt {
 interface PendingHeader {
     item: RollForwardBatchItem;
     parsedHeader: HeaderSummary;
-    /** Epoch η0 hex; empty for Byron. */
+    /** Epoch η0 hex; empty for Byron, and empty while the VRF check is deferred. */
     nonce: string;
+    /** VRF proofs / leader rule not verified yet: `verifyDeferredVrf` clears it before the block applies. */
+    vrfDeferred?: boolean;
+}
+
+/** A header accepted with its VRF check postponed until its epoch's nonce is derivable. */
+interface DeferredVrfHeader {
+    item: RollForwardBatchItem;
+    peerKey: string;
+    slot: bigint;
 }
 
 export type BodyValidationPolicy = "soft" | "strict";
@@ -195,6 +212,25 @@ export class ConsensusOrchestrator {
     private readonly appliedRecently = new Set<string>();
     private readonly appliedRecentlyOrder: string[] = [];
     private static readonly APPLIED_LRU_SIZE = 8192;
+    private static readonly LEADER_VERDICT_LRU = 16384;
+    /** Longest a header batch waits for the applier to make the next epoch's nonce derivable. */
+    private static readonly NONCE_HOLD_MAX_MS = 15 * 60_000;
+    private readonly nonceHoldWarnedAt = new Map<number, number>();
+    /**
+     * Headers of an epoch whose nonce is not derivable yet are accepted with their VRF /
+     * leader checks deferred (KES, op-cert and chaining verified now), so bodies keep
+     * flowing to the applier instead of the header stream stalling at every boundary
+     * (bug 69: ~30 s per epoch). Opt-out: GEROLAMO_DEFER_VRF=0 falls back to holding.
+     */
+    private static readonly DEFER_VRF = process.env.GEROLAMO_DEFER_VRF !== "0";
+    private readonly deferredVrf = new Map<number, Map<string, DeferredVrfHeader>>(); // epoch → header hash → header
+    private readonly deferredVrfRuns = new Map<number, Promise<void>>();
+    private readonly deferredVrfFailed = new Set<string>();
+    private readonly deferredVrfLogged = new Set<number>();
+    private lastDeferredVrfKick = 0;
+    /** Leader-rule verdicts by header hash (see processRollForwardBatch). */
+    private readonly leaderVerdicts = new Map<string, Awaited<ReturnType<LeaderChecker["check"]>>>();
+    private readonly leaderVerdictOrder: string[] = [];
     /** Per-peer candidate fragments + primary/verifier roles (multi-peer honesty). */
     readonly candidates = new CandidateSet({ depth: 2160 });
     /** Parallel BlockFetch across agreeing peers, ordered apply. */
@@ -307,10 +343,16 @@ export class ConsensusOrchestrator {
             if (start) {
                 // ηh carried into this epoch: the previous hash of the last block of epoch − 1.
                 const firstSlot = Number(firstSlotOfEpoch(epoch));
-                const last = await getLastBlockBefore(firstSlot);
-                const etaHHex = last?.prevHash ? toHex(prevHashToNonce(fromHex(last.prevHash))) : null;
+                // A snapshot-imported state (import-state) is the evolver's state at start_slot,
+                // with ηh recorded: replay only the headers after it.
+                const fromSlot = start.startSlot != null ? start.startSlot + 1 : firstSlot;
+                let etaHHex = start.startSlot != null ? start.labHex : null;
+                if (etaHHex == null) {
+                    const last = await getLastBlockBefore(firstSlot);
+                    etaHHex = last?.prevHash ? toHex(prevHashToNonce(fromHex(last.prevHash))) : null;
+                }
                 evolver.bootstrap(epoch, eta0Hex, { etaVHex: start.etaVHex, etaCHex: start.etaCHex, etaHHex });
-                const n = await this.replayStoredHeaders(evolver, firstSlot, tipSlot);
+                const n = await this.replayStoredHeaders(evolver, fromSlot, tipSlot);
                 logger.info(`NonceEvolver restored from the epoch ${epoch} start state and ${n} stored header(s)${etaHHex ? " (ηh from the previous epoch's last block)" : ""}`);
             } else {
                 // No epoch-start state (DB from before it was recorded, or the first Shelley
@@ -336,12 +378,71 @@ export class ConsensusOrchestrator {
     }
 
     /** UPDN every stored Shelley+ block in [fromSlot, toSlot] into `evolver`; TICKNs on the way persist their η0 and start state. */
+    private readonly protocolMajorCache = new Map<number, number>();
+    /** Withdrawals and deposit refunds decided at this boundary, credited after its snapshot (bug 95). */
+    private pendingBoundaryCredits: { withdrawals: Map<string, bigint>; refunds: Map<string, bigint> } | null = null;
+
+    /**
+     * Bug 91: payouts reach registered accounts only; the unclaimed part stays in (withdrawals)
+     * or goes to (deposit refunds) the treasury, as in the Conway EPOCH rule.
+     */
+    private async applyBoundaryCredits(epoch: number): Promise<void> {
+        const credits = this.pendingBoundaryCredits;
+        this.pendingBoundaryCredits = null;
+        if (!credits) return;
+        try {
+            if (credits.withdrawals.size) {
+                const w = await creditRegisteredAccounts(sql, credits.withdrawals);
+                if (w.credited > 0n) await updateRewardPots(sql, { reserves: 0n, treasury: -w.credited, resetFees: false });
+                if (w.unclaimed > 0n) logger.info(`Epoch ${epoch} governance: ${w.unclaimed} lovelace of treasury withdrawals unclaimed (account(s) not registered: ${w.unregistered.map((a) => a.slice(0, 12) + "…").join(", ")})`);
+            }
+            if (credits.refunds.size) {
+                const r = await creditRegisteredAccounts(sql, credits.refunds);
+                if (r.unclaimed > 0n) {
+                    await updateRewardPots(sql, { reserves: 0n, treasury: r.unclaimed, resetFees: false });
+                    logger.info(`Epoch ${epoch} governance: ${r.unclaimed} lovelace of deposits to the treasury (return account(s) not registered: ${r.unregistered.map((a) => a.slice(0, 12) + "…").join(", ")})`);
+                }
+            }
+            // The epoch's pot record must show the treasury after these moves (Koios' epoch
+            // treasury includes the EPOCH rule's withdrawals and unclaimed deposits).
+            if (credits.withdrawals.size || credits.refunds.size) await refreshPotSnapshot(sql, epoch);
+        } catch (err) {
+            logger.warn(`Epoch ${epoch}: boundary credits failed:`, err);
+        }
+    }
+
+    /** Protocol major version in force during `epoch` (stored epoch parameters), or null when not yet known. */
+    private async protocolMajorForEpoch(epoch: number): Promise<number | null> {
+        const cached = this.protocolMajorCache.get(epoch);
+        if (cached !== undefined) return cached;
+        try {
+            const raw = await readEpochParamsRaw(epoch);
+            const major = raw?.protocol_major_ver;
+            if (major == null || !Number.isFinite(Number(major))) return null;
+            this.protocolMajorCache.set(epoch, Number(major));
+            return Number(major);
+        } catch {
+            return null;
+        }
+    }
+
+    /** Tell the evolver which protocol version `epoch` runs (Conway freezes the candidate nonce at 4k/f, not 3k/f). */
+    private async primeEvolverProtocol(evolver: NonceEvolver, epoch: number): Promise<void> {
+        evolver.setProtocolMajor(epoch, await this.protocolMajorForEpoch(epoch));
+    }
+
     private async replayStoredHeaders(evolver: NonceEvolver, fromSlot: number, toSlot: number): Promise<number> {
         let n = 0;
         if (toSlot < fromSlot) return 0;
+        let pvEpoch = -1;
         for await (const row of storedBlocksInSlotRange(fromSlot, toSlot)) {
             const f = nonceFactsOf(row);
             if (!f) continue;
+            const e = Number(epochForSlot(f.slot));
+            if (e !== pvEpoch) {
+                pvEpoch = e;
+                await this.primeEvolverProtocol(evolver, e);
+            }
             const tickns = evolver.processBlock(f.slot, f.bnonce, f.prevHash);
             for (const t of tickns) await this.recordTickn(t);
             n++;
@@ -400,6 +501,7 @@ export class ConsensusOrchestrator {
             if (!bnonce) return; // Byron / missing VRF
 
             const prevHash = getHeaderPrevHash(header as any);
+            await this.primeEvolverProtocol(evolver, epoch);
             const tickns = evolver.processBlock(slot, bnonce, prevHash);
             for (const t of tickns) await this.recordTickn(t);
 
@@ -480,6 +582,127 @@ export class ConsensusOrchestrator {
     }
 
     /** η0 of `epoch` from the evolver's frozen candidate (headers ahead of the boundary block), or null. */
+    /** Slot-leader rule for one validated header, memoised per hash (every verifier re-delivers every header). */
+    private async leaderCheck(r: HeaderValidationResult, checker: Awaited<ReturnType<ConsensusOrchestrator["ensureLeaderChecker"]>>): Promise<LeaderVerdict> {
+        const tLeader = performance.now();
+        const leaderKey = r.hashHex.toLowerCase();
+        let v = this.leaderVerdicts.get(leaderKey);
+        if (!v) {
+            v = await checker!.check({ era: r.era, slot: BigInt(r.slot), epoch: r.epoch, ...r.shelley! });
+            this.leaderVerdicts.set(leaderKey, v);
+            this.leaderVerdictOrder.push(leaderKey);
+            while (this.leaderVerdictOrder.length > ConsensusOrchestrator.LEADER_VERDICT_LRU) {
+                const old = this.leaderVerdictOrder.shift();
+                if (old) this.leaderVerdicts.delete(old);
+            }
+            this.profile.add("hdr.leader", performance.now() - tLeader);
+        } else {
+            this.profile.add("hdr.leader.hit", performance.now() - tLeader);
+        }
+        if (v.ok && v.reports.length) {
+            this.leaderReports += v.reports.length;
+            if (this.leaderReports <= 20 || this.leaderReports % 500 === 0) {
+                logger.info(`Leader rule report at slot ${r.slot}: ${v.reports.join(" | ")} (reports so far: ${this.leaderReports})`);
+            }
+        }
+        return v;
+    }
+
+    /** Remember the headers of a batch whose VRF check was deferred, per epoch. */
+    private noteDeferredVrf(peerKey: string, items: RollForwardBatchItem[], parsed: HeaderSummary[]): void {
+        for (let i = 0; i < parsed.length; i++) {
+            const p = parsed[i]!;
+            if (!p.vrfDeferred) continue;
+            let m = this.deferredVrf.get(p.epoch);
+            if (!m) { m = new Map(); this.deferredVrf.set(p.epoch, m); }
+            m.set(toHex(p.blockHeaderHash).toLowerCase(), { item: items[i]!, peerKey, slot: p.slot });
+            if (!this.deferredVrfLogged.has(p.epoch)) {
+                this.deferredVrfLogged.add(p.epoch);
+                logger.info(`Epoch ${p.epoch} nonce not derivable yet: accepting its headers with the VRF / leader check deferred (KES, op-cert and chaining verified now)`);
+            }
+        }
+    }
+
+    /** Start verifying deferred headers as soon as their epoch's nonce can be derived (cheap check, at most every 500 ms). */
+    private maybeKickDeferredVrf(): void {
+        if (this.deferredVrf.size === 0) return;
+        const now = Date.now();
+        if (now - this.lastDeferredVrfKick < 500) return;
+        this.lastDeferredVrfKick = now;
+        for (const epoch of [...this.deferredVrf.keys()].sort((a, b) => a - b)) {
+            if (this.deferredVrfRuns.has(epoch)) continue;
+            void this.peekLocalNonce(epoch).then((eta0) => {
+                if (eta0 && this.deferredVrf.has(epoch) && !this.deferredVrfRuns.has(epoch)) void this.verifyDeferredVrf(epoch).catch(() => undefined);
+            }).catch(() => undefined);
+            break; // one epoch at a time, in order
+        }
+    }
+
+    /**
+     * Verify the VRF proofs and the leader rule of every header of `epoch` accepted with the
+     * check deferred. Memoised per epoch; waits (bounded) for the nonce when called early.
+     * Failures mark the header (the applier refuses it) and terminate the peer that sent it.
+     */
+    private verifyDeferredVrf(epoch: number): Promise<void> {
+        let run = this.deferredVrfRuns.get(epoch);
+        if (run) return run;
+        run = (async () => {
+            const headers = this.deferredVrf.get(epoch);
+            if (!headers || headers.size === 0) { this.deferredVrf.delete(epoch); return; }
+            const t0 = performance.now();
+            let eta0 = await this.getEpochNonce(epoch);
+            while (!eta0 && !this.stopping && performance.now() - t0 < ConsensusOrchestrator.NONCE_HOLD_MAX_MS) {
+                await new Promise<void>((r) => setTimeout(r, 250));
+                eta0 = await this.getEpochNonce(epoch);
+            }
+            if (!eta0) throw new Error(`epoch ${epoch} nonce still not derivable after ${Math.round((performance.now() - t0) / 1000)} s; ${headers.size} deferred header(s) cannot be verified`);
+            const pool = this.pool;
+            if (!pool) return;
+            const entries = [...headers.entries()];
+            this.deferredVrf.delete(epoch);
+            const checker = await this.ensureLeaderChecker();
+            let failed = 0;
+            const CHUNK = 256;
+            for (let i = 0; i < entries.length; i += CHUNK) {
+                const chunk = entries.slice(i, i + CHUNK);
+                const results = await pool.validateAll(chunk.map(([, h]) => ({
+                    rollForward: h.item.rollForwardCborBytes,
+                    nonceHex: "",
+                    noncesByEpoch: { [String(epoch)]: eta0! },
+                    config: { networkMagic: this.config.networkMagic, shelleyGenesisFile: this.config.shelleyGenesisFile, network: getEpochNetwork() },
+                })));
+                for (let j = 0; j < results.length; j++) {
+                    const r = results[j]!, [hash, h] = chunk[j]!;
+                    let reason: string | null = r.ok ? null : (r.reason ?? "invalid");
+                    if (!reason && r.shelley && checker) {
+                        const v = await this.leaderCheck(r, checker);
+                        if (!v.ok) reason = v.reason ?? "leader rule failed";
+                    }
+                    if (reason) {
+                        failed++;
+                        this.deferredVrfFailed.add(hash);
+                        this.pendingHeaders.delete(hash);
+                        const peer = this.peerByKey(h.peerKey);
+                        const msg = `Deferred header check failed at slot ${h.slot} hash=${hash}: ${reason}`;
+                        if (peer) { try { this.terminateMalicious(peer, msg); } catch { /* terminateMalicious throws to abort the caller's batch */ } }
+                        else logger.error(`${msg} (peer ${h.peerKey} already gone)`);
+                        continue;
+                    }
+                    const pending = this.pendingHeaders.get(hash);
+                    if (pending) { pending.nonce = eta0!; pending.vrfDeferred = false; }
+                }
+            }
+            logger.info(`Epoch ${epoch}: verified the VRF / leader rule of ${entries.length} deferred header(s) in ${Math.round(performance.now() - t0)} ms${failed ? `, ${failed} failed` : ""}`);
+            this.profile.add("hdr.vrf.deferred", performance.now() - t0);
+        })();
+        this.deferredVrfRuns.set(epoch, run);
+        run.catch((err) => logger.error(`Deferred VRF verification for epoch ${epoch} failed:`, err)).finally(() => {
+            // keep the memo while headers of this epoch can still arrive deferred; drop it once none remain
+            if (!this.deferredVrf.has(epoch)) setTimeout(() => this.deferredVrfRuns.delete(epoch), 60_000);
+        });
+        return run;
+    }
+
     private async peekLocalNonce(epoch: number): Promise<string | null> {
         await this.ensureEvolverAtTip();
         const evolver = this.nonceEvolver;
@@ -549,9 +772,14 @@ export class ConsensusOrchestrator {
                 logger.error(`Epoch ${epoch} is the first Shelley epoch but the config carries no valid shelleyGenesisHash (η0 = Shelley genesis hash); from-genesis sync cannot proceed`);
                 return null;
             }
-            logger.warn(
-                `Epoch ${epoch} nonce not derivable yet (applied tip slot ${await getMaxSlot()}, evolver ${evolver?.isActive() ? `epoch ${evolver.getEpoch()}` : "inactive"}); the header batch waits for the applier instead of an external value`,
-            );
+            // held batches poll every 250 ms: say it once per 30 s per epoch
+            const lastWarn = this.nonceHoldWarnedAt.get(epoch) ?? 0;
+            if (Date.now() - lastWarn > 30_000) {
+                this.nonceHoldWarnedAt.set(epoch, Date.now());
+                logger.warn(
+                    `Epoch ${epoch} nonce not derivable yet (applied tip slot ${await getMaxSlot()}, evolver ${evolver?.isActive() ? `epoch ${evolver.getEpoch()}` : "inactive"}); the header batch waits for the applier instead of an external value`,
+                );
+            }
             return null;
         }
         if (external) {
@@ -623,6 +851,9 @@ export class ConsensusOrchestrator {
 
     /** Pending ranges/headers/fragments are void after the chain moved backwards. */
     private afterRollback(): void {
+        this.deferredRollback = null;
+        resetOpcertCounterCache(); // the journal restored opcert_counters; the cache must follow
+        resetRecentOutputs(); // outputs of the rolled-back blocks are gone from the database
         // ηv/ηc are only valid for the chain they were computed on: rebuild from stored headers.
         this.nonceEvolver?.reset();
         this.lastBlockNo = null; // heights past the rollback point are gone
@@ -632,6 +863,8 @@ export class ConsensusOrchestrator {
         this.lastPrimaryByronHeaderHash = null;
         this.scheduler?.reset("rollback");
         this.candidates.reset();
+        this.deferredVrf.clear();
+        this.deferredVrfFailed.clear();
     }
 
     private forgetApplied(): void {
@@ -644,7 +877,7 @@ export class ConsensusOrchestrator {
         const h = hashHex.toLowerCase();
         if (this.appliedRecently.has(h)) return true;
         try {
-            if (await getBlockByHash(h)) {
+            if (await blockExists(h)) { // existence only: getBlockByHash fetched the whole block blob per header
                 this.rememberApplied(h);
                 return true;
             }
@@ -782,12 +1015,11 @@ export class ConsensusOrchestrator {
             const next = this.candidates.bestSuccessor();
             this.lastAccepted = null; // re-anchor the contiguity check on the DB tip
             if (next) {
+                const anchored = this.candidates.agreement(next)?.status;
                 this.candidates.setPrimary(next);
                 logger.warn(`Primary ${peerKey} left; ${next} promoted to primary`);
-                // Its stream is wherever it got to as a verifier — usually ahead of what we
-                // applied. Restart it from our DB tip so no block between is skipped.
                 const succ = this.peerByKey(next);
-                if (succ) void succ.restartChainSync("promoted to primary; re-anchor on DB tip");
+                if (succ) void this.anchorPromotedPrimary(succ, next, anchored === "agrees" || anchored === "ahead", "promoted to primary; re-anchor on DB tip");
             } else {
                 logger.warn(`Primary ${peerKey} left; no verifier available, next hot peer becomes primary`);
             }
@@ -853,6 +1085,22 @@ export class ConsensusOrchestrator {
      * epoch arrived and take the stake snapshot that decides leaders one epoch
      * later. Runs inside the range's transaction.
      */
+    private lastYieldAt = 0;
+
+    /**
+     * Give the event loop a real turn every ~25 ms of applying. SQLite queries
+     * resolve as microtasks, so a range of blocks would otherwise run as one
+     * unbroken chain and HTTP handlers (explorer, dashboards, mini-Blockfrost)
+     * wait for the whole range; they read from their own connection, so running
+     * them mid-transaction is safe.
+     */
+    private async yieldToEventLoop(): Promise<void> {
+        const now = performance.now();
+        if (now - this.lastYieldAt < 25) return;
+        this.lastYieldAt = now;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
     private lastWorkerHeaps: number[] | null = null;
     private workerHeapTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -898,6 +1146,18 @@ export class ConsensusOrchestrator {
         } catch (err) {
             logger.warn(`Epoch ${epoch}: MIR application failed:`, err);
         }
+        try {
+            // Bug 93: the Babbage→Conway translation drops pointer-address stake before the
+            // hard-fork boundary's own snapshot (Koios: the snapshot taken at preview 646 already
+            // excludes it; replay 4 dropped it after that snapshot and was 35 553 ADA high there).
+            const major = await this.protocolMajorForEpoch(epoch), prevMajor = await this.protocolMajorForEpoch(epoch - 1);
+            if (major != null && major >= 9 && prevMajor != null && prevMajor < 9) {
+                const dropped = await dropPointerStakeForConway(sql);
+                logger.info(`Epoch ${epoch}: Conway translation — pointer-address stake dropped (${dropped.outputs} output(s), ${dropped.lovelace} lovelace)`);
+            }
+        } catch (err) {
+            logger.warn(`Epoch ${epoch}: pointer stake drop failed:`, err);
+        }
         const snap = await takeStakeSnapshot(sql, epoch);
         try {
             const missing = await poolsMissingFromSnapshot(epoch);
@@ -930,6 +1190,9 @@ export class ConsensusOrchestrator {
         this.lastAppliedEpoch = epoch;
         this.leaderChecker?.invalidate();
         logger.info(`Epoch ${epoch} begins: stake snapshot taken (${snap.pools} pools, ${snap.total} lovelace active), ${retired} pool(s) retired, ${(performance.now() - t0).toFixed(0)} ms`);
+        // The ledger sets up the epoch's DRep pulser here: this boundary's snapshot, this epoch's parameters.
+        await this.governanceRatify(epoch);
+        await this.applyBoundaryCredits(epoch);
     }
 
     /**
@@ -961,19 +1224,30 @@ export class ConsensusOrchestrator {
             }
             if (this.conwayGenesis) await seedGovernance(sql, this.conwayGenesis, epoch);
             const already = (await sql`SELECT 1 FROM gov_enacted WHERE epoch = ${epoch}`.values()) as unknown[][];
-            const result = await ratifyAndEnact(sql, epoch, prev ?? {});
-            if (result.withdrawals.size) {
-                const paid = await creditRewards(sql, result.withdrawals);
-                await updateRewardPots(sql, { reserves: 0n, treasury: -paid, resetFees: false });
-            }
-            if (result.refunds.size) await creditRewards(sql, result.refunds);
-            if (result.enacted.length || result.expired.length) {
-                logger.info(`Epoch ${epoch} governance: enacted [${result.enacted.join(", ")}], expired ${result.expired.length}, withdrawals ${result.withdrawals.size}, refunds ${result.refunds.size}${already.length ? " (re-run)" : ""}`);
+            const result = await enactPending(sql, epoch);
+            // Bug 95: the ledger takes this boundary's stake snapshot before crediting the
+            // withdrawals and refunds (Conway EPOCH: SNAP on the old state, refunds in dState'),
+            // so they are paid after the snapshot and the DRep tally (applyBoundaryCredits).
+            this.pendingBoundaryCredits = { withdrawals: result.withdrawals, refunds: result.refunds };
+            if (result.enacted.length || result.expired.length || result.dropped.length) {
+                logger.info(`Epoch ${epoch} governance: enacted [${result.enacted.join(", ")}], expired ${result.expired.length}, dropped ${result.dropped.length}, withdrawals ${result.withdrawals.size}, refunds ${result.refunds.size}${already.length ? " (re-run)" : ""}`);
             }
             return result;
         } catch (err) {
             logger.warn(`epoch ${epoch} governance boundary failed:`, err);
             return null;
+        }
+    }
+
+    private async governanceRatify(epoch: number): Promise<void> {
+        try {
+            const raw = await readEpochParamsRaw(epoch);
+            if (!raw || Number(raw.protocol_major_ver ?? 0) < 9) return; // pre-Conway
+            const has = (await sql`SELECT 1 FROM gov_state WHERE id = 1`.values()) as unknown[][];
+            if (!has.length) return;
+            await ratifyForNext(sql, epoch, raw, epoch);
+        } catch (err) {
+            logger.warn(`epoch ${epoch} governance ratification failed:`, err);
         }
     }
 
@@ -987,7 +1261,12 @@ export class ConsensusOrchestrator {
             const startEpoch = Number(shelleyStartEpoch());
             if (epoch <= startEpoch) {
                 const g = epochParamsFromGenesis(epoch, genesis);
-                await storeEpochParams(epoch, { ...g.raw, epoch }, "genesis");
+                const seeded: Record<string, unknown> = { ...g.raw, epoch };
+                // A network whose Shelley genesis already sits in Alonzo or later (preview: 6) never
+                // crosses the era transition that merges the Alonzo/Conway genesis files; merge them
+                // here so every derived record is complete without the startup repair (bug 86).
+                await applyEraGenesis(seeded, 0, eraGenesisFilesFor(this.config));
+                await storeEpochParams(epoch, seeded, "genesis");
                 logger.info(`Protocol parameters for epoch ${epoch} seeded from the Shelley genesis`);
                 return;
             }
@@ -996,7 +1275,10 @@ export class ConsensusOrchestrator {
             const quorum = Number(genesis.updateQuorum ?? 5);
             const { raw } = await deriveNextEpochParams(prev, epoch, quorum);
             if (Object.keys(enacted).length) {
-                Object.assign(raw, enacted);
+                const { cost_models: cmUpdate, ...rest } = enacted as Record<string, unknown> & { cost_models?: RawCostModels };
+                Object.assign(raw, rest);
+                // Conway replaces only the languages the action names; the others carry over.
+                if (cmUpdate) raw.cost_models = mergeCostModels(raw.cost_models, cmUpdate);
                 logger.info(`Protocol parameters for epoch ${epoch}: governance enactment applied (${Object.keys(enacted).join(", ")})`);
             }
             await applyEraGenesis(raw, Number(prev.protocol_major_ver ?? 0), eraGenesisFilesFor(this.config));
@@ -1168,6 +1450,17 @@ export class ConsensusOrchestrator {
         if (!r.ok) {
             const i = r.index ?? 0;
             const want = points[i];
+            // A slot battle: the peer switched to the other block of that slot between our header
+            // observation and the body fetch, and served the block it now holds. Not bad data — a
+            // retryable range failure (open item 15: preview 2026-09-10, two honest relays held
+            // cold for an hour each time).
+            if (r.gotHash && want) {
+                const inFragments = this.candidates.knownAtSlot(want.slot, r.gotHash);
+                const ours = inFragments ? null : await blockAtSlot(want.slot);
+                const known = inFragments || ours?.hash?.toLowerCase() === r.gotHash.toLowerCase() || this.recentlyRolledBack.has(r.gotHash.toLowerCase());
+                if (known) throw new Error(`peer ${peerKey} served the competing block ${r.gotHash.slice(0, 12)}… of slot ${want.slot} (asked for ${want.hash.slice(0, 12)}…): branch switch, retrying elsewhere`);
+                logger.warn(`Range from ${peerKey}: block ${r.gotHash.slice(0, 12)}… at slot ${want.slot} is unknown to every fragment (${this.candidates.snapshot().peers.map((p) => `${p.key}:${p.tipHash?.slice(0, 8) ?? "?"}@${p.tipSlot ?? "?"}`).join(" ")}), ours ${ours?.hash?.slice(0, 12) ?? "∅"}`);
+            }
             throw new RangeMismatch(
                 `peer ${peerKey} block ${i} (slot ${want?.slot} hash=${want?.hash}): ${r.reason ?? "verification failed"}`,
             );
@@ -1208,24 +1501,83 @@ export class ConsensusOrchestrator {
             const peerKey = peer.peerKey;
             let role = this.candidates.roleOf(peerKey);
             if (!role) role = this.registerHotPeer(peerKey);
+            // The stream this batch came from: a ChainSync restart (promotion, re-anchor) makes
+            // it stale, and a stale batch must not keep holding the peer's serialized queue.
+            const generation = peer.chainSyncGeneration;
 
             // 1) epoch range from the first and last header only (two parses per batch instead
             //    of one per header; the workers parse each header once, for validation).
             const tParse = performance.now();
-            const first = await headerParser(items[0]!.rollForwardCborBytes);
-            const last = items.length > 1 ? await headerParser(items[items.length - 1]!.rollForwardCborBytes) : first;
+            let first = await headerParser(items[0]!.rollForwardCborBytes);
+            let last = items.length > 1 ? await headerParser(items[items.length - 1]!.rollForwardCborBytes) : first;
             if (!first || !last) throw new Error(`Header parse failed for peer ${peerId}`);
             this.profile.add("hdr.parse", performance.now() - tParse);
+
+            // A batch entirely behind our applied tip is a re-stream (a peer joining from an old
+            // intersection): headers we already hold need no validation, and a header that
+            // differs from ours at a slot deeper than k is a dead fork, not misbehaviour. Validating
+            // them re-ran the leader check against the live pool registry (the epoch's snapshot is
+            // pruned after three epochs) and held an honest verifier as malicious for a pool that
+            // had retired since (bug 87, preview slot 18 687 204).
+            const appliedTip = await getMaxSlot();
+            if (last.slot <= appliedTip && appliedTip > 0n) {
+                // height from the indexed tip row: MAX(block_no) scans the table (seconds), and at
+                // the tip every re-anchored peer's first batch takes this path
+                const tipBlockNo = (await blockAtSlot(appliedTip))?.blockNo ?? 0;
+                const kept: RollForwardBatchItem[] = [];
+                let held = 0, dead = 0;
+                for (const it of items) {
+                    const ph = await headerParser(it.rollForwardCborBytes);
+                    if (!ph) { kept.push(it); continue; }
+                    const ours = await blockAtSlot(ph.slot);
+                    if (!ours) { kept.push(it); continue; }
+                    if (ours.hash === toHex(ph.blockHeaderHash).toLowerCase()) { held++; continue; }
+                    if (tipBlockNo - ours.blockNo >= VOLATILE_GC_K) { dead++; continue; }
+                    kept.push(it);
+                }
+                if (held || dead) logger.debug(`${peerKey}: re-streamed batch behind our tip — ${held} header(s) we hold, ${dead} on a fork deeper than k, ${kept.length} to validate`);
+                if (kept.length === 0) return;
+                items = kept;
+                first = (await headerParser(items[0]!.rollForwardCborBytes))!;
+                last = items.length > 1 ? (await headerParser(items[items.length - 1]!.rollForwardCborBytes))! : first;
+            }
 
             // 2) nonces (main thread: DB / network) — one lookup per epoch the batch spans
             const tNonce = performance.now();
             const noncesByEpoch: Record<string, string> = {};
+            const deferEpochs = new Set<number>();
             const shelleyEpochs = [first, last].filter((p) => !p.isByron).map((p) => p.epoch);
             if (shelleyEpochs.length > 0) {
                 const lo = Math.min(...shelleyEpochs);
                 const hi = Math.max(...shelleyEpochs);
                 for (let e = lo; e <= hi; e++) {
-                    const eta0 = await this.getEpochNonce(e);
+                    let eta0 = await this.getEpochNonce(e);
+                    if (!eta0 && ConsensusOrchestrator.DEFER_VRF && await this.localNonceAuthoritative(e)) {
+                        // Not derivable yet (applied tip more than 4k/f slots before the boundary):
+                        // validate everything but the VRF now, verify the VRF once the nonce exists.
+                        deferEpochs.add(e);
+                        continue;
+                    }
+                    // The batch reaches into an epoch whose nonce the applier has not derived yet
+                    // (candidate nonce not frozen: the applied tip is more than 4k/f slots before
+                    // the boundary). Hold the batch — ChainSync back-pressure — instead of dropping
+                    // the peer: on preview the drop cascaded into one hot peer and 2 blocks/s.
+                    const tHold = performance.now();
+                    while (!eta0 && !this.stopping && peer.chainSyncGeneration === generation && !peer.isTerminated && performance.now() - tHold < ConsensusOrchestrator.NONCE_HOLD_MAX_MS) {
+                        await new Promise<void>((r) => setTimeout(r, 250));
+                        eta0 = await this.getEpochNonce(e);
+                    }
+                    if (eta0 && performance.now() - tHold > 250) this.profile.add("hdr.nonce.hold", performance.now() - tHold);
+                    if (!eta0 && (peer.chainSyncGeneration !== generation || peer.isTerminated)) {
+                        // The stream restarted while we held its batch (a verifier promoted to
+                        // primary re-anchors on the DB tip): the new stream re-sends what matters.
+                        // Holding on would block the peer's queue — the restarted stream's headers
+                        // wait behind this batch, the applier waits for those headers (preview
+                        // epochs 1149 and 1170: the promoted primary went silent for good).
+                        logger.info(`Held header batch from ${peerId} dropped: its ChainSync stream was ${peer.isTerminated ? "terminated" : "restarted"} while waiting for the epoch ${e} nonce`);
+                        this.profile.add("hdr.nonce.hold", performance.now() - tHold);
+                        return;
+                    }
                     if (!eta0) {
                         throw new Error(
                             `Missing epoch nonce for epoch ${e} (headers ${first.slot}..${last.slot} from ${peerId})`,
@@ -1246,6 +1598,7 @@ export class ConsensusOrchestrator {
                     rollForward: item.rollForwardCborBytes,
                     nonceHex: "",
                     noncesByEpoch,
+                    deferVrfWithoutNonce: deferEpochs.size > 0,
                     // Byron block signatures verify on the workers when OBFT is configured;
                     // Byron protocolMagic equals the network magic on every Cardano network.
                     byronProtocolMagic: this.config.byronGenesisFile ? Number(this.config.networkMagic) : undefined,
@@ -1266,20 +1619,12 @@ export class ConsensusOrchestrator {
                     if (role === "verifier") this.terminateMalicious(peer, msg);
                     throw new Error(msg);
                 }
-                if (r.shelley && checker) {
-                    const tLeader = performance.now();
-                    const v = await checker.check({ era: r.era, slot: BigInt(r.slot), epoch: r.epoch, ...r.shelley });
-                    this.profile.add("hdr.leader", performance.now() - tLeader);
+                if (r.shelley && checker && !r.vrfDeferred) {
+                    const v = await this.leaderCheck(r, checker);
                     if (!v.ok) {
                         const msg = `Header leader rule failed at slot ${r.slot} hash=${r.hashHex}: ${v.reason}`;
                         if (role === "verifier") this.terminateMalicious(peer, msg);
                         throw new Error(msg);
-                    }
-                    if (v.reports.length) {
-                        this.leaderReports += v.reports.length;
-                        if (this.leaderReports <= 20 || this.leaderReports % 500 === 0) {
-                            logger.info(`Leader rule report at slot ${r.slot}: ${v.reports.join(" | ")} (reports so far: ${this.leaderReports})`);
-                        }
                     }
                 }
                 parsed.push({
@@ -1295,9 +1640,11 @@ export class ConsensusOrchestrator {
                         ? { byronSig: { issuerKeyHash: r.byron.issuerKeyHash, signerKeyHash: r.byron.signerKeyHash } }
                         : {}),
                     ...(r.shelley ? { shelley: r.shelley } : {}),
+                    ...(r.vrfDeferred ? { vrfDeferred: true } : {}),
                 });
                 nonces.push(r.isByron ? "" : noncesByEpoch[String(r.epoch)] ?? "");
             }
+            if (deferEpochs.size) this.noteDeferredVrf(peerKey, items, parsed);
 
             // 4) adoption — the only cross-peer critical section. The role is re-read
             //    under the lock: a primary switch may have happened while validating.
@@ -1379,18 +1726,42 @@ export class ConsensusOrchestrator {
                 await this.switchPrimaryAfterOutvote(outvote.slot!, outvote.hash!, outvote.by!);
                 return;
             }
-            this.terminateMalicious(
-                peer,
-                `diverges from primary at slot ${verdict.slot}: peer=${verdict.peerHash} primary=${verdict.primaryHashes.join("|") || "∅"}`,
-            );
+            // A divergence inside the volatile window is a fork candidate, not misbehaviour: the
+            // primary may be the outlier (preview slot 122 174 111: the primary served a losing
+            // block after its own RollBackward, two verifiers carried the canonical one and were
+            // each held cold before they could outvote it — bug 88). Hold the verifier; convict
+            // only when the fork point is settled (k deep) and our chain does not carry its block.
+            const settledBelow = (await getMaxSlot()) - BigInt(this.candidates.fragmentDepth);
+            if (verdict.slot <= settledBelow) {
+                const ours = await blockAtSlot(verdict.slot);
+                if (ours && ours.hash === verdict.peerHash.toLowerCase()) { this.candidates.clearDivergence(peerKey); continue; } // the fork went its way; we followed
+                this.terminateMalicious(
+                    peer,
+                    `diverges from the settled chain at slot ${verdict.slot}: peer=${verdict.peerHash} ours=${ours?.hash ?? "∅"}`,
+                );
+            }
+            const heldKey = `${peerKey}@${verdict.slot}`;
+            if (!this.heldDivergences.has(heldKey)) {
+                this.heldDivergences.add(heldKey);
+                logger.info(`Verifier ${peerKey} diverges from primary ${this.candidates.primary() ?? "?"} at slot ${verdict.slot} (peer=${verdict.peerHash.slice(0, 12)}… primary=${verdict.primaryHashes.map((h) => h.slice(0, 12) + "…").join("|") || "∅"}); held as a fork candidate until settled or outvoted`);
+            }
+            break; // nothing more to compare from this peer until the fork resolves
         }
         this.maybePromoteFasterVerifier();
     }
 
+    /** Verifier@slot divergences already logged (held, not convicted). */
+    private readonly heldDivergences = new Set<string>();
+    /** Hashes of blocks our own rollbacks removed (a peer still serving one is on the other side of a fork, not lying). */
+    private readonly recentlyRolledBack = new Set<string>();
+
     /** Validated headers a verifier must lead the primary by before it is promoted for throughput. */
     private static readonly SPEED_PROMOTION_LEAD = 1024;
-    private static readonly SPEED_PROMOTION_COOLDOWN_MS = 60_000;
+    private static readonly SPEED_PROMOTION_COOLDOWN_MS = 300_000; // a re-anchored primary needs minutes to look fast again; 60 s ping-ponged two peers
     private lastSpeedPromotionAt = 0;
+    private static readonly PRIMARY_IDLE_FOR_PROMOTION_MS = 5_000;
+    /** Last time the primary delivered a header batch (speed promotion only when it goes quiet). */
+    private lastPrimaryHeaderAt = Date.now();
 
     /**
      * Header rate is per connection, so the primary's relay caps the whole sync (plan
@@ -1409,7 +1780,16 @@ export class ConsensusOrchestrator {
         if (this.pendingHeaders.size >= this.headerLookahead() / 2) return;
         const now = Date.now();
         if (now - this.lastSpeedPromotionAt < ConsensusOrchestrator.SPEED_PROMOTION_COOLDOWN_MS) return;
+        // A verifier is only "faster" if the primary has actually gone quiet: verifiers are not
+        // subject to the header cap, so a lead alone is normal while the primary is throttled.
+        if (now - this.lastPrimaryHeaderAt < ConsensusOrchestrator.PRIMARY_IDLE_FOR_PROMOTION_MS) return;
         const oldKey = this.candidates.primary();
+        // A local root (a relay on this host, e.g. the Mithril block store) is never the slow side:
+        // its stream is throttled by our own applier, and verifiers on the public network then look
+        // "ahead". Keep it primary (preview replay 2026-09-07: promoted away three times in an hour).
+        // Unless it has run dry: a block store serving a certified chain ends at the certificate's
+        // tip (preview 2026-09-07: the node sat at slot 122 087 503 with public verifiers ahead).
+        if (oldKey && this.peerByKey(oldKey)?.source === "localRoot" && now - this.lastPrimaryHeaderAt < ConsensusOrchestrator.LOCAL_ROOT_IDLE_FOR_PROMOTION_MS) return;
         const pick = this.candidates.fasterAgreeingVerifier(ConsensusOrchestrator.SPEED_PROMOTION_LEAD);
         if (!oldKey || !pick) return;
         const next = this.peerByKey(pick.key);
@@ -1418,12 +1798,36 @@ export class ConsensusOrchestrator {
         logger.warn(
             `Verifier ${pick.key} agrees with primary ${oldKey} through slot ${pick.primaryTipSlot} and is ${pick.lead} validated headers ahead; promoting it to primary for throughput`,
         );
+        const anchored = this.candidates.agreement(pick.key)?.status;
         this.candidates.setPrimary(pick.key);
         this.lastAccepted = null; // re-anchor the contiguity check on the DB tip
         this.lastPrimaryByronHeaderHash = null;
         // Pending headers / queued ranges from the old primary stay valid (same chain);
         // the new primary's re-stream skips them as duplicates and continues past them.
-        void next.restartChainSync("promoted to primary for throughput; re-anchor on DB tip");
+        void this.anchorPromotedPrimary(next, pick.key, anchored === "agrees" || anchored === "ahead", "promoted to primary for throughput; re-anchor on DB tip");
+    }
+
+    /**
+     * Bring a verifier just promoted to primary into position. Its stream is wherever it got to
+     * as a verifier. Restarting ChainSync from our DB tip is the general answer, but a restart
+     * must first drain every pipelined RequestNext, and at the tip each of those is answered
+     * only by the next block: a verifier resumed at our tip and promoted a second later had 29
+     * outstanding (preview 2026-09-10 12:12 UTC) — ten minutes without a block applied, while
+     * three other peers were ahead. When the verifier agreed with the chain we applied, its
+     * fragment past our tip is exactly what the primary would re-stream: hand those points to
+     * the scheduler and keep its stream (the outvote switch has done the same since bug 73).
+     */
+    private async anchorPromotedPrimary(peer: PeerClient, key: string, anchored: boolean, reason: string): Promise<void> {
+        const outstanding = peer.chainSyncInFlight;
+        if (!anchored || outstanding <= 1) { void peer.restartChainSync(reason); return; }
+        const tipSlot = await getMaxSlot();
+        const points = this.candidates.fragmentOf(key).filter((p) => p.slot > tipSlot);
+        logger.info(`Primary ${key}: keeping its stream (${outstanding} replies outstanding; ${points.length} header(s) past our tip ${tipSlot} handed to the scheduler)`);
+        const rangeBlocks = this.maxRangeBlocks();
+        for (let i = 0; i < points.length; i += rangeBlocks) {
+            const chunk = points.slice(i, i + rangeBlocks).map((p) => ({ slot: p.slot, hash: p.hash }));
+            this.ensureScheduler().submit(chunk).applied.catch(() => undefined);
+        }
     }
 
     /**
@@ -1446,15 +1850,19 @@ export class ConsensusOrchestrator {
         this.lastPrimaryByronHeaderHash = null;
         this.lastAccepted = null;
         this.scheduler?.reset("primary outvoted");
+        // The outvoted primary stays connected as a verifier: in a slot battle it may have served
+        // the block that wins (preview 2026-09-10 02:03 and 04:03 UTC, both times the "outvoted"
+        // primary carried the canonical block). If its branch is really dead, the settled-chain
+        // rule convicts it once the fork point is k deep; if ours was the dead one, it re-agrees.
         this.candidates.setPrimary(successor);
-        if (oldKey) {
-            const old = this.peerByKey(oldKey);
-            if (old) old.terminate(`malicious: outvoted at slot ${slot} (served ${this.candidates.agreement(oldKey)?.tipHash ?? "?"}, quorum on ${hash})`);
-            this.candidates.removePeer(oldKey);
-        }
-        // Undo everything from the fork slot on; the new primary's fragment refills it.
+        if (oldKey) logger.warn(`Primary ${oldKey} demoted to verifier (served ${this.candidates.agreement(oldKey)?.tipHash?.slice(0, 12) ?? "?"}… at slot ${slot})`);
+        // Undo everything from the fork slot on; the new primary's fragment refills it. The quorum
+        // already proves the fork, so roll back now: handleRollBack without the fork point's hash
+        // only *deferred* the rollback, the successor's range then failed the contiguity check
+        // against our outvoted block, and the node sat on a dead one-block fork for hours
+        // (preview slot 122 077 808, 2026-09-06 22:30 UTC).
         const rollbackTo = slot > 0n ? slot - 1n : 0n;
-        await this.handleRollBack({ blockHeader: { slotNumber: rollbackTo } });
+        await this.rollbackOurChainTo(rollbackTo, `primary outvoted at slot ${slot}`);
         const points = this.candidates.fragmentOf(successor).filter((p) => p.slot >= slot);
         const rangeBlocks = this.maxRangeBlocks();
         for (let i = 0; i < points.length; i += rangeBlocks) {
@@ -1473,6 +1881,24 @@ export class ConsensusOrchestrator {
     ): Promise<void> {
         const peerKey = peer.peerKey;
         if (this.halted) return; // strict validation stopped the applier; nothing more is applied
+        this.lastPrimaryHeaderAt = Date.now();
+        if (this.deferredRollback && parsed.length > 0) {
+            const d = this.deferredRollback;
+            const first = parsed[0]!;
+            const firstHash = toHex(first.blockHeaderHash).toLowerCase();
+            const ours = this.pendingHeaders.has(firstHash) || await this.isAlreadyApplied(firstHash);
+            if (ours) {
+                this.deferredRollback = null;
+                logger.rollback(`Deferred rollback to slot ${d.slot} cancelled: the peer re-streams our own chain (slot ${first.slot})`);
+            } else if (d.hash && first.prevHashHex && first.prevHashHex.toLowerCase() === d.hash && first.slot > d.slot) {
+                // A block we do not hold extends the rollback point: the peer's chain forks off ours there.
+                this.deferredRollback = null;
+                await this.rollbackOurChainTo(d.slot, `fork confirmed by ${peerKey}`);
+            } else if (first.slot > d.slot) {
+                // Neither our block nor a child of the rollback point: leave the contiguity check to it.
+                this.deferredRollback = null;
+            }
+        }
         const points: RangePt[] = [];
         let skippedDuplicates = 0;
         let prevByronHashInBatch: string | null = null;
@@ -1504,9 +1930,37 @@ export class ConsensusOrchestrator {
                 }
                 // Slots strictly increase along a chain (Shelley+; Byron shares the EBB slot).
                 if (expectedPrevSlot != null && expectedPrevSlot > 0n && parsedHeader.slot <= expectedPrevSlot) {
-                    this.terminateMalicious(peer, `header at slot ${parsedHeader.slot} does not advance past its parent at slot ${expectedPrevSlot}`);
+                    // A header at or before our tip's slot whose parent is a block we hold is the other
+                    // side of a fork (a lost slot battle: same slot, same parent, another hash). Our
+                    // branch goes, k-guarded; the peer is honest. Preview slot 122 077 808 banned every
+                    // peer here for hours because the fork's parent was never looked up.
+                    const prevHex = parsedHeader.prevHashHex.toLowerCase();
+                    const parent = this.lastAccepted?.hash?.toLowerCase() === prevHex ? null : await getBlockByHash(prevHex);
+                    const parentSlot = parent ? BigInt(Array.isArray(parent) ? parent[2] : parent.slot) : null;
+                    if (parentSlot != null && parentSlot < parsedHeader.slot && await this.rollbackOurChainTo(parentSlot, `fork at slot ${parsedHeader.slot} from ${peerKey} (parent ${prevHex.slice(0, 12)}…)`)) {
+                        this.pendingHeaders.clear();
+                        expectedPrev = prevHex;
+                        expectedPrevSlot = parentSlot;
+                    } else {
+                        this.terminateMalicious(peer, `header at slot ${parsedHeader.slot} does not advance past its parent at slot ${expectedPrevSlot}`);
+                    }
                 }
                 if (expectedPrev && parsedHeader.prevHashHex.toLowerCase() !== expectedPrev.toLowerCase()) {
+                    // The header extends a block we already hold (pending or applied), just not the
+                    // stream position: a late reply from before a ChainSync restart that slipped past
+                    // the drain (seen at every promotion on preview, 2026-09-06). It is on our chain,
+                    // so drop the rest of the batch; the new stream re-sends these headers in order.
+                    // Restarting here looped: restart → late reply → restart, at 0 blocks/s.
+                    const prevHex = parsedHeader.prevHashHex.toLowerCase();
+                    // Far beyond the stream position (more than a lookahead of slots): a verifier-era
+                    // header of a just-promoted peer, whose predecessor may lie past our pending window.
+                    const anchorSlot = expectedPrevSlot ?? (await getMaxSlot());
+                    const farAhead = parsedHeader.slot > anchorSlot + BigInt(this.headerLookahead()) * 20n;
+                    if (farAhead || this.pendingHeaders.has(prevHex) || await this.isAlreadyApplied(prevHex)) {
+                        this.profile.add("hdr.late.drop", parsed.length - i);
+                        logger.debug(`Primary ${peerKey}: header at slot ${parsedHeader.slot} ${farAhead ? "is far beyond the stream position" : "chains onto a block we hold but not onto the stream position"}; dropping ${parsed.length - i} late header(s)`);
+                        break;
+                    }
                     logger.warn(
                         `Primary ${peerKey} header at slot ${parsedHeader.slot} does not chain onto our tip (prev ${parsedHeader.prevHashHex.slice(0, 12)}… ≠ ${expectedPrev.slice(0, 12)}…); restarting its ChainSync from the DB tip`,
                     );
@@ -1559,7 +2013,7 @@ export class ConsensusOrchestrator {
                 }
             }
 
-            this.pendingHeaders.set(headerHashHex, { item: items[i]!, parsedHeader, nonce: nonces[i]! });
+            this.pendingHeaders.set(headerHashHex, { item: items[i]!, parsedHeader, nonce: nonces[i]!, ...(parsedHeader.vrfDeferred ? { vrfDeferred: true } : {}) });
             points.push({ slot: parsedHeader.slot, hash: headerHashHex });
             this.lastAccepted = { slot: parsedHeader.slot, hash: headerHashHex };
         }
@@ -1567,7 +2021,12 @@ export class ConsensusOrchestrator {
         if (skippedDuplicates > 0) {
             logger.debug(`Skipped ${skippedDuplicates} already-applied/pending header(s) from ${peerKey}`);
         }
-        if (points.length === 0) return;
+        if (points.length === 0) {
+            if (skippedDuplicates === parsed.length && parsed.length > 0 && this.scheduler?.stats().queued === 0 && this.scheduler?.stats().inFlight === 0) {
+                logger.info(`Primary ${peerKey} re-streamed ${parsed.length} header(s) we already hold (slots ${parsed[0]!.slot}..${parsed[parsed.length - 1]!.slot}); pending ${this.pendingHeaders.size}, range buffer ${this.rangeBuffer.length}, scheduler idle`);
+            }
+            return;
+        }
 
         // Ranges are cut from a buffer so their size follows the distance to the tip
         // (large far behind, single blocks at the tip) instead of the header batch size.
@@ -1575,7 +2034,13 @@ export class ConsensusOrchestrator {
         const lastPoint = points[points.length - 1]!;
         const lastParsed = parsed[parsed.length - 1]!;
         this.rangeBuffer.push(...points);
-        this.flushRanges(rangeSizeFor(lastItem.tip, lastPoint.slot, lastParsed.isByron, this.maxRangeBlocks()));
+        const targetSize = rangeSizeFor(lastItem.tip, lastPoint.slot, lastParsed.isByron, this.maxRangeBlocks());
+        this.profile.add("rng.target", targetSize); // per-block average of the sizer's output (diagnostic)
+        if (targetSize !== this.lastRangeTarget) {
+            this.lastRangeTarget = targetSize;
+            logger.info(`Range target ${targetSize} blocks (peer tip ${lastItem.tip}, header slot ${lastPoint.slot}, buffered ${this.rangeBuffer.length})`);
+        }
+        this.flushRanges(targetSize);
     }
 
     private maxRangeBlocks(): number {
@@ -1612,7 +2077,10 @@ export class ConsensusOrchestrator {
                     // A quiet buffer while we throttle the stream is not a stall: the tail
                     // fills as soon as room opens, so keep waiting rather than cut a small range.
                     if (n >= 16 && this.throttlingHeaders()) { arm(); return; }
-                    this.flushRanges(1);
+                    // Flush the tail as one range, not one range per block: every range costs a
+                    // verify job, a transaction commit and a rules-pipeline restart (preview: 680
+                    // single-block ranges next to 150 full ones in four minutes).
+                    this.flushRanges(this.rangeBuffer.length);
                 }, flushMs);
             };
             arm();
@@ -1680,13 +2148,17 @@ export class ConsensusOrchestrator {
     // ───────────────────── rules ahead of apply (pipelining) ─────────────────────
 
     /** How many blocks ahead of the one being applied get their rules evaluated on workers. */
-    private static readonly RULES_AHEAD_DEPTH = 3;
+    private static readonly RULES_AHEAD_DEPTH = 16;
+    /** A local root stays primary through applier back-pressure; only this long without a header means it has nothing more. */
+    private static readonly LOCAL_ROOT_IDLE_FOR_PROMOTION_MS = 60_000;
     /** Blocks parsed ahead of time (reused by the loop's parse step). */
     private readonly parsedAheadMap = new WeakMap<BlockFetchBlock, MultiEraBlock>();
     /** Ledger effects of parsed blocks (for the overlay of blocks not yet applied). */
     private readonly overlayCache = new WeakMap<BlockFetchBlock, BlockOverlay>();
     /** Rule outcomes running on workers, by block. */
     private readonly rulesAheadMap = new WeakMap<BlockFetchBlock, Promise<BlockRulesResult>>();
+    /** Stored UTxO rows the rules stage read for a block; the applier spends from them (blk.apply reads fewer rows). */
+    private readonly spentRowsAheadMap = new WeakMap<BlockFetchBlock, Map<string, UtxoRow>>();
     /** Blocks that will never be evaluated ahead (epoch boundary): evaluated inline. */
     private readonly rulesAheadNever = new WeakSet<BlockFetchBlock>();
     private rulesAheadFailureLogged = false;
@@ -1703,10 +2175,9 @@ export class ConsensusOrchestrator {
      * Block j's ledger reads are resolved from the database now and adjusted with
      * the effects of the not-yet-applied blocks i … j−1 (`shelleyBlockOverlay`:
      * outputs created and spent, pools registered), so a worker sees the state
-     * the ledger will have. A block is left to inline evaluation when it starts a
-     * new epoch (rewards/params change at apply time) or withdraws from a reward
-     * account one of those blocks also withdraws from; the latter is retried once
-     * the conflicting block has been applied.
+     * the ledger will have (created and spent outputs, registered pools, emptied
+     * reward accounts). A block is left to inline evaluation when it starts a new
+     * epoch (rewards/params change at apply time).
      */
     private async scheduleRulesAhead(blocks: BlockFetchBlock[], i: number, current: MultiEraBlock, currentEpoch: number, params: EpochBodyParams): Promise<void> {
         const pool = this.pool;
@@ -1716,24 +2187,27 @@ export class ConsensusOrchestrator {
         // (structured-clone of the resolved inputs + result hand-off outweighed the
         // rules moved out), 76.7 → 65.9 blocks/s. Worth it only once workers resolve
         // inputs themselves through a read-only connection; kept for that step.
-        if (process.env.GEROLAMO_RULES_AHEAD !== "1") return;
+        if (process.env.GEROLAMO_RULES_AHEAD === "0") return; // opt-out: on by default since the 2026-09-06 A/B (37 → 89 blocks/s on preview Conway blocks)
         const last = Math.min(i + ConsensusOrchestrator.RULES_AHEAD_DEPTH, blocks.length - 1);
         for (let j = i + 1; j <= last; j++) {
             const msg = blocks[j]!;
-            if (this.rulesAheadMap.has(msg) || this.rulesAheadNever.has(msg)) continue;
+            if (this.rulesAheadMap.has(msg)) continue;
+            if (this.rulesAheadNever.has(msg)) { this.profile.add("rules.skip.never", 1); continue; }
             try {
                 const identity = this.verifiedIdentities.get(msg);
-                if (!identity || identity.era < 2) { this.rulesAheadNever.add(msg); continue; }
+                if (!identity || identity.era < 2) { this.profile.add("rules.skip.identity", 1); this.rulesAheadNever.add(msg); continue; }
                 let next = this.parsedAheadMap.get(msg);
                 if (!next) {
                     let parsed: MultiEraBlock | null = null;
+                    const tP = performance.now();
                     try { parsed = (await blockParser(msg)) ?? null; } catch { /* the apply loop reports and dumps it */ }
-                    if (!parsed || !(parsed instanceof MultiEraBlock)) { this.rulesAheadNever.add(msg); break; }
+                    this.profile.add("blk.rules.prep.parse", performance.now() - tP);
+                    if (!parsed || !(parsed instanceof MultiEraBlock)) { this.profile.add("rules.skip.parse", 1); this.rulesAheadNever.add(msg); break; }
                     next = parsed;
                     this.parsedAheadMap.set(msg, next);
                 }
                 const nextSlot = BigInt(getHeaderSlot(next.block.header));
-                if (Number(calculatePreProdCardanoEpoch(Number(nextSlot))) !== currentEpoch) { this.rulesAheadNever.add(msg); break; }
+                if (Number(calculatePreProdCardanoEpoch(Number(nextSlot))) !== currentEpoch) { this.profile.add("rules.skip.epoch", 1); this.rulesAheadNever.add(msg); break; }
                 // effects of blocks i … j−1, in order
                 const overlays: BlockOverlay[] = [this.overlayOf(blocks[i]!, current)];
                 let complete = true;
@@ -1742,16 +2216,23 @@ export class ConsensusOrchestrator {
                     if (!pk) { complete = false; break; }
                     overlays.push(this.overlayOf(blocks[k]!, pk));
                 }
-                if (!complete) break;
-                const reads = shelleyBlockReads(next);
-                if (reads.wdCreds.some((c) => overlays.some((o) => o.withdrawnCreds.has(c)))) continue; // retried after the conflicting block applies
+                if (!complete) { this.profile.add("rules.skip.incomplete", 1); break; }
+                // Withdrawals from an account an in-flight block also withdraws from are handled by
+                // the overlay (the balance is exactly zero afterwards); preview epochs 890–905 had
+                // 17 % of blocks falling back to inline evaluation over this.
+                const tG = performance.now();
                 let inputs = await gatherShelleyBlockInputs(next);
-                for (const o of overlays) inputs = applyOverlay(inputs, o);
+                inputs = applyOverlays(inputs, overlays);
+                if (inputs.rows) this.spentRowsAheadMap.set(msg, inputs.rows);
+                this.profile.add("blk.rules.prep.gather", performance.now() - tG);
+                // The witness verdict comes from a worker; waiting for it here cost the applier
+                // 4 ms per block (2026-09-06). Post the rules job when it lands instead — the
+                // result still arrives far ahead of the applier (deliver lead ~130 ms).
                 const pre = this.preWitness.get(msg);
-                const preVerified = pre ? (await pre).ok : null;
                 if (this.shelleyGenesisCache == null) this.shelleyGenesisCache = await getShelleyGenesisConfig(this.config);
-                this.rulesAheadMap.set(msg, pool.evaluateBlockRules({
-                    kind: "blockRules",
+                const tPost = performance.now();
+                const job = {
+                    kind: "blockRules" as const,
                     block: msg.blockData,
                     slot: nextSlot.toString(),
                     params,
@@ -1760,9 +2241,24 @@ export class ConsensusOrchestrator {
                     resolved: inputs.resolved,
                     pools: inputs.pools,
                     rewardBalances: inputs.rewardBalances ?? null,
-                    preVerified,
+                    preVerified: null as boolean[] | null,
                     postedAt: Date.now(),
-                }).catch((err): BlockRulesResult => ({ outcome: null, reason: err instanceof Error ? err.message : String(err) })));
+                };
+                const verdict: Promise<boolean[] | null> = pre ? pre.then((r) => r.ok, () => null) : Promise.resolve(null);
+                this.rulesAheadMap.set(msg, verdict
+                    .then((preVerified) => pool.evaluateBlockRules({ ...job, preVerified, postedAt: Date.now(), phase: "rules" }))
+                    .catch((err): BlockRulesResult => ({ outcome: null, reason: err instanceof Error ? err.message : String(err) })));
+                this.profile.add("blk.rules.prep.post", performance.now() - tPost);
+                // Plutus shadow evaluation is diagnostics nobody waits on: its own job on a general
+                // worker, results folded into the running totals when they arrive.
+                // Sampled here (one block in SHADOW_SAMPLE_EVERY) so unsampled blocks cost no second
+                // structured clone of the inputs; the job then evaluates every redeemer it carries.
+                const hasRedeemers = ((next.block as any).transactionWitnessSets ?? []).some((w: any) => (w?.redeemers?.length ?? 0) > 0);
+                if (hasRedeemers && Number(next.era) >= 5 && (this.shadowBlockCounter++ % SHADOW_SAMPLE_EVERY) === 0) {
+                    pool.evaluateBlockRules({ ...job, preVerified: null, phase: "shadow" })
+                        .then((r) => { if (r.outcome) { recordPlutusShadow(r.outcome); for (const rep of r.outcome.reports) if (rep.includes("plutus shadow:")) logger.warn(`Plutus shadow at slot ${nextSlot}: ${rep}`); } })
+                        .catch(() => undefined);
+                }
             } catch (err) {
                 if (!this.rulesAheadFailureLogged) { this.rulesAheadFailureLogged = true; logger.warn("Block rules ahead-of-time scheduling failed; evaluating inline:", err); }
                 return;
@@ -1847,7 +2343,7 @@ export class ConsensusOrchestrator {
         if (setBulkSyncIndexSkip(shouldSkip)) {
             logger.warn(
                 shouldSkip
-                    ? `Forward index (MiniBF) paused: ${behind} slots behind the tip; run scripts/backfill-minibf.mjs after catch-up`
+                    ? `Forward index (MiniBF) paused: ${behind} slots behind the tip; run scripts/explorer-backfill.ts over the paused range after catch-up`
                     : `Forward index (MiniBF) resumed: ${behind} slots behind the tip`,
             );
         }
@@ -1867,7 +2363,51 @@ export class ConsensusOrchestrator {
     }
 
     /** The per-block loop of `applyRange`; runs inside the range's transaction. */
+    private lastRangeTarget = -1;
+    /**
+     * Roll our chain back to `slot` (every block after it is deleted) and reset the caches that
+     * mirror the applied chain. Refuses, and reports, a rollback deeper than k.
+     */
+    private async rollbackOurChainTo(slot: bigint, why: string): Promise<boolean> {
+        const depth = await countBlocksAfterSlot(slot);
+        if (depth === 0) return true;
+        const k = await this.securityParamK();
+        if (depth > k) {
+            logger.error(`Refusing rollback to slot ${slot} (${why}): it would discard ${depth} blocks (> k=${k})`);
+            return false;
+        }
+        for (const h of await blockHashesAbove(slot)) { this.recentlyRolledBack.add(h); if (this.recentlyRolledBack.size > 256) this.recentlyRolledBack.delete(this.recentlyRolledBack.values().next().value!); }
+        const counts = await this.dbMutations.run(() => rollbackChainTo(slot));
+        logger.rollback(`Rollback to slot ${slot} (${why}): ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`);
+        this.nonceEvolver?.reset();
+        this.epochNonceCache.clear();
+        this.lastByronTipHash = null;
+        this.forgetApplied();
+        this.byronObft = null;
+        this.byronObftInit = null;
+        this.afterRollback();
+        return true;
+    }
+
+    /** A primary's RollBackward waiting for its next headers to show whether our chain must move (see handleRollBack). */
+    private deferredRollback: { slot: bigint; hash: string | null; peerKey: string | null; depth: number } | null = null;
+    private shadowBlockCounter = 0;
+    private lookaheadCache: { base: BlockFetchBlock[]; next: BlockFetchBlock[]; joined: BlockFetchBlock[] } | null = null;
+
+    /** `blocks` extended with the next downloaded range when the rules window would otherwise run past the end. */
+    private lookaheadBlocks(blocks: BlockFetchBlock[], i: number): BlockFetchBlock[] {
+        if (i + ConsensusOrchestrator.RULES_AHEAD_DEPTH < blocks.length) return blocks;
+        const next = this.scheduler?.peekNextBlocks() ?? null;
+        if (!next || next.length === 0) return blocks;
+        const c = this.lookaheadCache;
+        if (c && c.base === blocks && c.next === next) return c.joined;
+        const joined = blocks.concat(next);
+        this.lookaheadCache = { base: blocks, next, joined };
+        return joined;
+    }
+
     private async applyRangeBlocks(points: RangePt[], blocks: BlockFetchBlock[], fetchedFrom: string): Promise<void> {
+        this.profile.add("rng.blocks", blocks.length); // average = blocks per range
         const bodyPolicy = this.resolveBodyPolicy();
         this.updateIndexSkip(points[0]!);
         // Chain continuity: every applied block must extend the applied chain (the DB tip
@@ -1876,9 +2416,19 @@ export class ConsensusOrchestrator {
         // rule bug; undefined = not yet anchored on the DB tip.
         let expectedPrev: string[] | null | undefined = undefined;
         for (let i = 0; i < points.length; i++) {
+            await this.yieldToEventLoop();
             const pt = points[i]!;
             const blockMessage = blocks[i]!;
-            const pending = this.pendingHeaders.get(pt.hash);
+            let pending = this.pendingHeaders.get(pt.hash);
+            if (pending?.vrfDeferred) {
+                // Its epoch's nonce is derivable by now (the applier is at or past the freeze point):
+                // verify the VRF proofs and the leader rule of every deferred header of that epoch.
+                await this.profile.timeAsync("blk.vrf.deferred", () => this.verifyDeferredVrf(pending!.parsedHeader.epoch));
+                pending = this.pendingHeaders.get(pt.hash);
+                if (!pending || pending.vrfDeferred || this.deferredVrfFailed.has(pt.hash.toLowerCase())) {
+                    throw new Error(`block ${pt.hash.slice(0, 12)}…@${pt.slot}: header VRF / leader check ${this.deferredVrfFailed.has(pt.hash.toLowerCase()) ? "failed" : "still pending"} after the epoch nonce became known; re-anchoring on the DB tip`);
+                }
+            }
             // Headers from a primary switch were validated as verifier headers; no pending entry.
             const tParse = performance.now();
             let multiEraBlock: MultiEraBlock | null | undefined = this.parsedAheadMap.get(blockMessage);
@@ -1911,7 +2461,9 @@ export class ConsensusOrchestrator {
             }
             const blockEpoch = Number(calculatePreProdCardanoEpoch(Number(blockSlot)));
 
-            if (await this.profile.timeAsync("blk.dedupe", () => this.isAlreadyApplied(blockHash))) {
+            // A block with a pending header was not applied when its header was accepted, and only
+            // this loop applies blocks: the DB lookup is needed only for headerless ranges (primary switch).
+            if (!pending && await this.profile.timeAsync("blk.dedupe", () => this.isAlreadyApplied(blockHash))) {
                 this.pendingHeaders.delete(pt.hash);
                 expectedPrev = [blockHash.toLowerCase()];
                 continue;
@@ -1932,7 +2484,8 @@ export class ConsensusOrchestrator {
             // Ledger body rules (per-epoch parameters when available).
             let epochParams: EpochBodyParams | null = null;
             if (!isByron) {
-                await this.profile.timeAsync("blk.epoch", () => this.onEpochStart(blockEpoch));
+                // Boundary work is not journaled (see ledgerJournal.ts): rollbacks never cross it.
+                await this.profile.timeAsync("blk.epoch", () => withJournalingOff(sql as any, () => this.onEpochStart(blockEpoch)));
                 epochParams = await this.profile.timeAsync("blk.params", () => getEpochBodyParams(this.config, blockEpoch));
             }
             const pre = this.preWitness.get(blockMessage);
@@ -1940,9 +2493,14 @@ export class ConsensusOrchestrator {
             // Rules of this block, if a worker evaluated them while the previous block applied.
             let ruleOutcome: BlockRuleOutcome | null = null;
             const aheadPromise = this.rulesAheadMap.get(blockMessage);
+            if (!aheadPromise && !isByron) this.profile.add("blk.rules.inline", 1); // count of blocks evaluated on the main thread
             if (aheadPromise) {
                 this.rulesAheadMap.delete(blockMessage);
+                const tWait = performance.now();
                 const r = await this.profile.timeAsync("blk.rules.wait", () => aheadPromise);
+                const waited = performance.now() - tWait;
+                if (waited > 10) this.profile.add("blk.rules.wait.gt10", waited); // how much of the wait is a few slow results
+                else if (waited > 1) this.profile.add("blk.rules.wait.1to10", waited);
                 if (r.parseMs != null) this.profile.add("blk.rules.wparse", r.parseMs);
                 if (r.evalMs != null) this.profile.add("blk.rules.weval", r.evalMs);
                 if (r.queueMs != null) this.profile.add("blk.rules.queue", r.queueMs);
@@ -1951,8 +2509,11 @@ export class ConsensusOrchestrator {
                 else if (r.reason && r.reason !== "byron" && !this.rulesAheadFailureLogged) { this.rulesAheadFailureLogged = true; logger.warn(`Block rules ahead-of-time failed (${r.reason}); evaluating inline`); }
             }
             // Start the rules of the next blocks on workers now (overlapping this block's apply).
-            if (i + 1 < blocks.length && !isByron && epochParams) {
-                await this.profile.timeAsync("blk.rules.prep", () => this.scheduleRulesAhead(blocks, i, multiEraBlock, blockEpoch, epochParams!));
+            // Near the end of the range the window continues into the next downloaded range,
+            // so the pipeline no longer drains at every range boundary (ranges are 32–256 blocks).
+            const lookahead = this.lookaheadBlocks(blocks, i);
+            if (i + 1 < lookahead.length && !isByron && epochParams) {
+                await this.profile.timeAsync("blk.rules.prep", () => this.scheduleRulesAhead(lookahead, i, multiEraBlock, blockEpoch, epochParams!));
             }
             const valid = await this.profile.timeAsync("blk.validate", () => validateBlock(multiEraBlock, this.config, epochParams, { slot: blockSlot, pool: this.pool, preVerified, ruleOutcome }));
             if (!valid && bodyPolicy === "strict") {
@@ -1972,11 +2533,16 @@ export class ConsensusOrchestrator {
 
             if (this.lastBlockNo == null) this.lastBlockNo = await getMaxBlockNo();
             const blockNo = isEbb ? null : ++this.lastBlockNo;
+            const knownInputs = this.spentRowsAheadMap.get(blockMessage);
+            this.spentRowsAheadMap.delete(blockMessage);
+            await setApplyBlock(sql as any, blockHeaderHash); // journal this block's state writes
             await this.profile.timeAsync("blk.apply", () => applyBlock(multiEraBlock.block as MultiEraBlock["block"], blockSlot, blockHeaderHash, undefined, blockNo, {
                 epoch: blockEpoch,
                 era: multiEraBlock.era,
+                knownInputs,
                 govActionLifetime: epochParams?.raw?.gov_action_lifetime != null ? Number(epochParams.raw.gov_action_lifetime) : undefined,
             }));
+            await setApplyBlock(sql as any, null);
             if (!isByron) {
                 // Operational certificate counters follow the applied chain.
                 try {
@@ -2055,6 +2621,7 @@ export class ConsensusOrchestrator {
             this.pendingHeaders.delete(pt.hash);
             if (++this.volatileDbGcCounter % ConsensusOrchestrator.VOLATILE_GC_EVERY_BLOCKS === 0) {
                 const gc = await this.profile.timeAsync("blk.gc", () => gcVolatile());
+                await pruneLedgerJournal(sql as any).catch(() => 0);
                 if (gc.blocks || gc.headers) logger.debug(`Volatile GC removed ${gc.blocks} block(s), ${gc.headers} header(s)`);
             }
 
@@ -2077,6 +2644,7 @@ export class ConsensusOrchestrator {
                     points.length,
                 );
             this.profile.add("blk.emit", performance.now() - tEmit);
+            this.maybeKickDeferredVrf();
         }
     }
 
@@ -2195,23 +2763,20 @@ export class ConsensusOrchestrator {
                     }
                     return { rolledBack: false };
                 }
-                const counts = await this.dbMutations.run(() => rollbackChainTo(pointSlot));
-                logger.rollback(
-                    `Unconditional tip rollback to slot ${pointSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`,
-                );
-                this.nonceEvolver?.reset();
-                this.epochNonceCache.clear();
-                this.lastByronTipHash = null;
-                this.forgetApplied();
-                this.byronObft = null;
-                this.byronObftInit = null;
-                this.afterRollback();
-                return {
-                    rolledBack: true,
-                    fromSlot: currentTip.slotNumber,
-                    toSlot: pointSlot,
-                    counts,
-                };
+                // A RollBackward only moves the peer's read pointer. Whether *our* chain has to
+                // move is decided by what follows: headers that are our own blocks mean the
+                // peer is re-streaming our chain (a positioning rollback that slipped past the
+                // intersect check — two restarts in one second did that on preview and 164 valid
+                // blocks were deleted, then re-applied onto certificate state that rollbacks do
+                // not revert); a header extending the rollback point with a block we do not
+                // hold is a fork, and the rollback runs then (acceptPrimaryHeaders).
+                const rawHash: unknown = (point.blockHeader as { hash?: unknown } | undefined)?.hash;
+                const pointHash = rawHash instanceof Uint8Array ? toHex(rawHash).toLowerCase()
+                    : typeof (rawHash as { toBuffer?: () => Uint8Array } | undefined)?.toBuffer === "function" ? toHex((rawHash as { toBuffer: () => Uint8Array }).toBuffer()).toLowerCase()
+                    : typeof rawHash === "string" ? rawHash.toLowerCase() : null;
+                this.deferredRollback = { slot: pointSlot, hash: pointHash, peerKey: fromPeer?.peerKey ?? null, depth };
+                logger.rollback(`Primary RollBackward to slot ${pointSlot} (${depth} block(s) behind our tip) deferred until its next headers show a fork`);
+                return { rolledBack: false };
             }
         } catch (error) {
             logger.error("Error in handleRollBack:", error);

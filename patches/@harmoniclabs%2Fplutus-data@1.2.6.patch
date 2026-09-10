@@ -1,0 +1,87 @@
+diff --git a/node_modules/@harmoniclabs/plutus-data/.bun-tag-87a2c9ecc7ed0762 b/.bun-tag-87a2c9ecc7ed0762
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-data/.bun-tag-88fe2ef67429078d b/.bun-tag-88fe2ef67429078d
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/Data.js b/dist/Data.js
+index fde4b35d226c69e993df81d17a76ca9a06d5dc2d..30759128f953c3c92e7b141da711576fe80f12c5 100644
+--- a/dist/Data.js
++++ b/dist/Data.js
+@@ -50,7 +50,9 @@ function eqData(a, b) {
+             }));
+     }
+     if (aProto === DataList_1.DataList.prototype) {
+-        return (a.list.every(function (elem, idx) { return eqData(elem, b.list[idx]); }));
++        // lengths first: `every` over the shorter list called a prefix equal (gerolamo patch)
++        return (a.list.length === b.list.length &&
++            a.list.every(function (elem, idx) { return eqData(elem, b.list[idx]); }));
+     }
+     if (aProto === DataI_1.DataI.prototype) {
+         return (a.int === b.int);
+diff --git a/dist/toCbor.js b/dist/toCbor.js
+index c9b70b1720bfd2ab11884a8b1b1db846ca735d23..d429ecd88831fe6a9508ae5c6ea542d422eb2855 100644
+--- a/dist/toCbor.js
++++ b/dist/toCbor.js
+@@ -42,7 +42,8 @@ function dataToCborObj(data) {
+                 v: dataToCborObj(pair.snd)
+             };
+         }), {
+-            indefinite: data.map.length > 0
++            // Plutus `encodeData (Map es)` writes a definite-length map (gerolamo patch; was indefinite)
++            indefinite: false
+         });
+     }
+     if (data instanceof DataList_1.DataList) {
+@@ -52,32 +53,35 @@ function dataToCborObj(data) {
+     }
+     if (data instanceof DataI_1.DataI) {
+         var n = data.int;
+-        return (n < 0 ?
+-            new cbor_1.CborNegInt(n) :
+-            new cbor_1.CborUInt(n));
++        // beyond 64 bits: CBOR bignum (tag 2 / tag 3 with the magnitude bytes), as the ledger encodes them (gerolamo patch)
++        var LIMIT = BigInt("18446744073709551616");
++        if (n >= BigInt(0))
++            return n < LIMIT ? new cbor_1.CborUInt(n) : new cbor_1.CborUInt(n, undefined, chunkedBytes(positiveIntegerToBytes(n)));
++        return n >= -LIMIT ? new cbor_1.CborNegInt(n) : new cbor_1.CborNegInt(n, undefined, chunkedBytes(positiveIntegerToBytes(-BigInt(1) - n)));
+     }
+     if (data instanceof DataB_1.DataB) {
+         var bytes = data.bytes.toBuffer();
+         // definite length only if length <= 64
+         if (bytes.length <= 64)
+             return new cbor_1.CborBytes(bytes);
+-        var ptr = 64;
+-        var fst = Uint8Array.prototype.slice.call(bytes, 0, ptr);
+-        var chunks = [];
+-        var chunkSize = 0;
+-        var chunkEnd = 0;
+-        while (ptr < bytes.length) {
+-            chunkSize = Math.min(64, bytes.length - ptr);
+-            chunkEnd = ptr + chunkSize;
+-            chunks.push(Uint8Array.prototype.slice.call(bytes, ptr, chunkEnd));
+-            ptr = chunkEnd;
+-        }
+-        // indefinite length bytes
+-        return new cbor_1.CborBytes(fst, chunks);
++        // indefinite-length bytes in 64-byte chunks (`5f 5840 … ff`), as Plutus encodes them. The
++        // cbor 1.6 constructor takes the chunk list as its first argument (gerolamo patch: the old
++        // `(first, rest)` call dropped every chunk after the first).
++        return chunkedBytes(bytes);
+     }
+     throw new Error("'dataToCborObj' did not match any possible Data constructor");
+ }
+ exports.dataToCborObj = dataToCborObj;
++/** Bytes as Plutus serialises them: definite up to 64 bytes, else indefinite-length 64-byte chunks (also for bignum magnitudes). */
++function chunkedBytes(bytes) {
++    if (bytes.length <= 64)
++        return new cbor_1.CborBytes(bytes);
++    var chunks = [];
++    for (var ptr = 0; ptr < bytes.length; ptr += 64) {
++        chunks.push(new cbor_1.CborBytes(Uint8Array.prototype.slice.call(bytes, ptr, Math.min(bytes.length, ptr + 64))));
++    }
++    return new cbor_1.CborBytes(chunks);
++}
+ function dataToCbor(data) {
+     return cbor_1.Cbor.encode(dataToCborObj(data));
+ }

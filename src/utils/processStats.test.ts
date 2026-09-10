@@ -29,7 +29,7 @@ describe("processStats", () => {
             { user: 100, nice: 0, sys: 50, idle: 850, irq: 0 },
             { user: 0, nice: 0, sys: 0, idle: 1000, irq: 0 },
         ];
-        const sample = createSystemCpuSampler(() => times);
+        const sample = createSystemCpuSampler(() => times, 0);
         times = [
             { user: 600, nice: 0, sys: 50, idle: 850, irq: 0 }, // +500 busy
             { user: 0, nice: 0, sys: 0, idle: 1500, irq: 0 }, // +500 idle

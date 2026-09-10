@@ -48,3 +48,18 @@ describe("era genesis parameter merges", () => {
         expect(conwayGenesisRaw({ committeeMinSize: 7 }, null).committee_min_size).toBe(7);
     });
 });
+
+describe("era genesis merge keeps applied cost models", () => {
+    test("an existing PlutusV1 model (an applied update) is not overwritten by the Alonzo genesis; missing languages are filled (bug 86)", async () => {
+        const { mkdtempSync, writeFileSync } = await import("node:fs"); const { join } = await import("node:path"); const { tmpdir } = await import("node:os");
+        const dir = mkdtempSync(join(tmpdir(), "gerolamo-era-"));
+        const alonzo = join(dir, "alonzo.json"); writeFileSync(alonzo, JSON.stringify({ costModels: { PlutusV1: { "addInteger-cpu-arguments-intercept": 197209 } }, executionPrices: { prMem: { numerator: 577, denominator: 10000 }, prSteps: { numerator: 721, denominator: 10000000 } }, maxTxExUnits: { exUnitsMem: 1, exUnitsSteps: 1 }, maxBlockExUnits: { exUnitsMem: 1, exUnitsSteps: 1 }, maxValueSize: 1, collateralPercentage: 1, maxCollateralInputs: 1, lovelacePerUTxOWord: 1 }));
+        const raw: Record<string, unknown> = { protocol_major_ver: 6, cost_models: { PlutusV1: [205665, 812], PlutusV2: [1, 2] } };
+        await applyEraGenesis(raw, 0, { alonzo, conway: null });
+        expect((raw.cost_models as any).PlutusV1).toEqual([205665, 812]);
+        expect((raw.cost_models as any).PlutusV2).toEqual([1, 2]);
+        const empty: Record<string, unknown> = { protocol_major_ver: 6, cost_models: {} };
+        await applyEraGenesis(empty, 0, { alonzo, conway: null });
+        expect(Object.keys((empty.cost_models as any).PlutusV1 ?? {}).length).toBeGreaterThan(0);
+    });
+});

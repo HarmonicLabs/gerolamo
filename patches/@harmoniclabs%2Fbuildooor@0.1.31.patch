@@ -1,0 +1,125 @@
+diff --git a/node_modules/@harmoniclabs/buildooor/.bun-tag-7795de7a73c1cc6d b/.bun-tag-7795de7a73c1cc6d
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/toOnChain/getSpendingPurposeData.js b/dist/toOnChain/getSpendingPurposeData.js
+index 079525c6779fd140792309e2d0475b11a5e32ef8..ab661e14ffb42fe1dddca43e098f97e14bc000b7 100644
+--- a/dist/toOnChain/getSpendingPurposeData.js
++++ b/dist/toOnChain/getSpendingPurposeData.js
+@@ -53,10 +53,10 @@ function getScriptInfoData(rdmr, tx, version, datum) {
+         var stakeAddr = (_d = (_c = tx.withdrawals) === null || _c === void 0 ? void 0 : _c.map[rdmr.index]) === null || _d === void 0 ? void 0 : _d.rewardAccount;
+         if (stakeAddr === undefined)
+             throw new Error("invalid stake credentials for rewarding redeemer " + rdmr.index.toString());
+-        purposeArgs = [
+-            cardano_ledger_ts_1.Credential.script(new cardano_ledger_ts_1.StakeValidatorHash(stakeAddr.credentials))
+-                .toData(version)
+-        ];
++        var rewardCred = cardano_ledger_ts_1.Credential.script(new cardano_ledger_ts_1.StakeValidatorHash(stakeAddr.credentials))
++            .toData(version);
++        // V1/V2 Rewarding carries a StakingCredential (StakingHash cred = Constr 0); V3 the Credential itself.
++        purposeArgs = [version === "v3" ? rewardCred : new plutus_data_1.DataConstr(0, [rewardCred])];
+     }
+     else if (tag === cardano_ledger_ts_1.TxRedeemerTag.Cert) {
+         ctorIdx = 3;
+diff --git a/dist/toOnChain/getTxInfos.d.ts b/dist/toOnChain/getTxInfos.d.ts
+index 860d3ad0a41739d114cc0b174e5cb4c514b900aa..2ca5a8fc8c7e3ad28f51e5fbd3e5a9b6394a60ba 100644
+--- a/dist/toOnChain/getTxInfos.d.ts
++++ b/dist/toOnChain/getTxInfos.d.ts
+@@ -1,7 +1,7 @@
+ import { GenesisInfos } from "../TxBuilder/GenesisInfos.js";
+ import { Data } from "@harmoniclabs/plutus-data";
+ import { Tx } from "@harmoniclabs/cardano-ledger-ts";
+-export declare function getTxInfos(transaction: Tx, genesisInfos: GenesisInfos | undefined): {
++export declare function getTxInfos(transaction: Tx, genesisInfos: GenesisInfos | undefined, options?: { upperBoundClosed?: boolean }, ): {
+     v1: Data | undefined;
+     v2: Data | undefined;
+     v3: Data;
+diff --git a/dist/toOnChain/getTxInfos.js b/dist/toOnChain/getTxInfos.js
+index 18f9aa807a0b1b947ecf67ed2e2152170e63306e..e107f9f03708e427a5f9da07dbbcf5509538e86f 100644
+--- a/dist/toOnChain/getTxInfos.js
++++ b/dist/toOnChain/getTxInfos.js
+@@ -14,7 +14,12 @@ function sortUTxO(a, b) {
+     // else order by tx id
+     return ord;
+ }
+-function getTxInfos(transaction, genesisInfos) {
++// The ledger's TxInfo.redeemers is a Map keyed by redeemer pointer (tag, index): spend, mint,
++// cert, reward, vote, propose — not the order the witness set happened to list them in.
++function ledgerOrderedRedeemers(rdmrs) {
++    return rdmrs.slice().sort(function (a, b) { return (a.tag - b.tag) || (a.index - b.index); });
++}
++function getTxInfos(transaction, genesisInfos, options) {
+     var _a, _b, _c, _d, _e, _f, _g, _h, _j, _k, _l, _m, _o, _p, _q, _r, _s, _t, _u, _v, _w, _x, _y, _z;
+     var tx = transaction.body, witnesses = transaction.witnesses;
+     function redeemerToDataPair(rdmr, version) {
+@@ -25,7 +30,7 @@ function getTxInfos(transaction, genesisInfos) {
+     var feeData = cardano_ledger_ts_1.Value.lovelaces(tx.fee).toData();
+     var mintData = ((_b = tx.mint) !== null && _b !== void 0 ? _b : cardano_ledger_ts_1.Value.lovelaces(0)).toData();
+     var mintDataNoLovelaces = new plutus_data_1.DataMap(mintData.map.slice(1));
+-    var intervalData = (0, getTxIntervalData_1.getTxIntervalData)(tx.validityIntervalStart, tx.ttl, genesisInfos);
++    var intervalData = (0, getTxIntervalData_1.getTxIntervalData)(tx.validityIntervalStart, tx.ttl, genesisInfos, options === null || options === void 0 ? void 0 : options.upperBoundClosed);
+     var sigsData = new plutus_data_1.DataList((_d = (_c = tx.requiredSigners) === null || _c === void 0 ? void 0 : _c.map(function (sig) { return sig.toData(); })) !== null && _d !== void 0 ? _d : []);
+     var datumsData = new plutus_data_1.DataMap((_f = (_e = witnesses.datums) === null || _e === void 0 ? void 0 : _e.map(function (dat) {
+         return new plutus_data_1.DataPair(new plutus_data_1.DataB((0, plutus_data_1.hashData)(dat)), dat);
+@@ -84,7 +89,7 @@ function getTxInfos(transaction, genesisInfos) {
+             // signatories
+             sigsData,
+             // redeemers
+-            new plutus_data_1.DataMap((_s = (_r = witnesses.redeemers) === null || _r === void 0 ? void 0 : _r.map(function (rdmr) { return redeemerToDataPair(rdmr, "v2"); })) !== null && _s !== void 0 ? _s : []),
++            new plutus_data_1.DataMap((_s = (_r = witnesses.redeemers) === null || _r === void 0 ? void 0 : ledgerOrderedRedeemers(_r).map(function (rdmr) { return redeemerToDataPair(rdmr, "v2"); })) !== null && _s !== void 0 ? _s : []),
+             // datums
+             datumsData,
+             // id
+@@ -115,7 +120,7 @@ function getTxInfos(transaction, genesisInfos) {
+         // signatories
+         sigsData,
+         // redeemers
+-        new plutus_data_1.DataMap((_z = (_y = witnesses.redeemers) === null || _y === void 0 ? void 0 : _y.map(function (rdmr) { return redeemerToDataPair(rdmr, "v3"); })) !== null && _z !== void 0 ? _z : []),
++        new plutus_data_1.DataMap((_z = (_y = witnesses.redeemers) === null || _y === void 0 ? void 0 : ledgerOrderedRedeemers(_y).map(function (rdmr) { return redeemerToDataPair(rdmr, "v3"); })) !== null && _z !== void 0 ? _z : []),
+         // datums
+         datumsData,
+         // id
+diff --git a/dist/toOnChain/getTxIntervalData.d.ts b/dist/toOnChain/getTxIntervalData.d.ts
+index 95e2107b5a28f75dcea87d1a6311a8a29407106f..45d81f256de70c762f2415ad19979f8638484e14 100644
+--- a/dist/toOnChain/getTxIntervalData.d.ts
++++ b/dist/toOnChain/getTxIntervalData.d.ts
+@@ -16,4 +16,4 @@ export declare function POSIXToSlot(unixTime: number, gInfos: NormalizedGenesisI
+  * @returns
+  */
+ export declare function slotToPOSIX(slot: number, gInfos: NormalizedGenesisInfos): number;
+-export declare function getTxIntervalData(startSlot: bigint | undefined, ttlSlot: bigint | undefined, geneisInfos: GenesisInfos | undefined): DataConstr;
++export declare function getTxIntervalData(startSlot: bigint | undefined, ttlSlot: bigint | undefined, geneisInfos: GenesisInfos | undefined, upperBoundClosed?: boolean): DataConstr;
+diff --git a/dist/toOnChain/getTxIntervalData.js b/dist/toOnChain/getTxIntervalData.js
+index 3316110ca9c6fa6c411eeef19ef53b4e9beeafcf..e10fabb3a045fbb7f82d8a3e8249678ee4337573 100644
+--- a/dist/toOnChain/getTxIntervalData.js
++++ b/dist/toOnChain/getTxIntervalData.js
+@@ -29,7 +29,11 @@ function slotToPOSIX(slot, gInfos) {
+     return gInfos.systemStartPosixMs + msAfterBegin;
+ }
+ exports.slotToPOSIX = slotToPOSIX;
+-function getTxIntervalData(startSlot, ttlSlot, geneisInfos) {
++// `upperBoundClosed`: the ledger translates the ttl as an exclusive bound from protocol
++// version 9 (Conway) on; before that both finite bounds were inclusive. Missing bounds
++// (NegInf / PosInf) are always inclusive. The lower bound is always inclusive.
++function getTxIntervalData(startSlot, ttlSlot, geneisInfos, upperBoundClosed) {
++    if (upperBoundClosed === void 0) { upperBoundClosed = false; }
+     geneisInfos = geneisInfos ? (0, GenesisInfos_1.normalizedGenesisInfos)(geneisInfos) : undefined;
+     var lowerBoundData = undefined;
+     if (startSlot === undefined) {
+@@ -69,7 +73,7 @@ function getTxIntervalData(startSlot, ttlSlot, geneisInfos) {
+             // bound
+             lowerBoundData,
+             // inclusive
+-            new plutus_data_1.DataConstr(0, []) // PDataBool; True
++            new plutus_data_1.DataConstr(1, []) // PDataBool; True
+         ]),
+         // to
+         new plutus_data_1.DataConstr(// PBound
+@@ -78,7 +82,7 @@ function getTxIntervalData(startSlot, ttlSlot, geneisInfos) {
+             // bound
+             upperBoundData,
+             // inclusive
+-            new plutus_data_1.DataConstr(0, []) // PDataBool; True
++            new plutus_data_1.DataConstr((endSlot === undefined || upperBoundClosed) ? 1 : 0, []) // PDataBool
+         ]),
+     ]);
+ }

@@ -120,15 +120,19 @@ describe("CandidateSet agreement", () => {
         expect(cs.observe("v", { slot: 21600n, hash: h("m") }).kind).toBe("agree");
     });
 
-    test("a block at a slot the primary skipped inside its window is a fork", () => {
+    test("a block at a slot the primary has no header for inside its window is no verdict", () => {
+        // The window is kept in arrival order and a re-anchored primary replays older slots,
+        // so a missing slot is ours to explain, not the verifier's (preview 2026-09-06 held
+        // honest relays cold over canonical blocks). The fork shows at the next shared slot.
         const cs = new CandidateSet();
         cs.addPeer("p");
         cs.addPeer("v");
         cs.observe("p", { slot: 1n, hash: h("a") });
         cs.observe("p", { slot: 3n, hash: h("c") });
         const verdict = cs.observe("v", { slot: 2n, hash: h("b") });
-        expect(verdict.kind).toBe("divergent");
-        expect(cs.agreement("v")!.divergence!.primaryHashes).toEqual([]);
+        expect(verdict.kind).toBe("unmatched");
+        expect(cs.agreement("v")!.divergence).toBeNull();
+        expect(cs.observe("v", { slot: 3n, hash: h("not-c") }).kind).toBe("divergent");
     });
 
     test("duplicate observations are ignored", () => {
@@ -273,5 +277,56 @@ describe("CandidateSet lagging verifiers", () => {
         expect(cs.noteAgreedBehind("v", 5n)).toBe(true);
         expect(cs.agreement("v")).toMatchObject({ status: "agrees", agreedAtSlot: 5n, lagSlots: 9n });
         expect(cs.agreement("p")!.lagSlots).toBeNull();
+    });
+
+    test("a slot the primary has no header for inside its window is not a fork", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("p");
+        cs.addPeer("v", "verifier");
+        // primary window built out of order (verifier-era points, then a re-anchor replay)
+        cs.observe("p", { slot: 100n, hash: h("p100") });
+        cs.observe("p", { slot: 80n, hash: h("p80") }); // replayed older slot
+        cs.observe("p", { slot: 120n, hash: h("p120") });
+        expect(cs.observe("v", { slot: 110n, hash: h("v110") }).kind).toBe("unmatched");
+        expect(cs.agreement("v")!.status).not.toBe("divergent");
+        expect(cs.divergentPeers()).toEqual([]);
+        // a differing hash at a shared slot is still a fork
+        expect(cs.observe("v", { slot: 120n, hash: h("other120") }).kind).toBe("divergent");
+        expect(cs.divergentPeers()).toEqual(["v"]);
+    });
+});
+
+describe("fork point and outvote (bug 88)", () => {
+    test("two verifiers diverging at the same fork point at different times outvote the primary; later mismatches keep the fork point; adoption clears it", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("P"); cs.addPeer("A"); cs.addPeer("B");
+        const H = (n: number) => n.toString(16).padStart(64, "0");
+        for (let i = 1; i <= 5; i++) cs.observe("P", { slot: BigInt(i), hash: H(i) });
+        // A forks at slot 3 and continues on its branch
+        cs.observe("A", { slot: 1n, hash: H(1) }); cs.observe("A", { slot: 2n, hash: H(2) });
+        expect(cs.observe("A", { slot: 3n, hash: H(103) }).kind).toBe("divergent");
+        const later = cs.observe("A", { slot: 4n, hash: H(104) });
+        expect(later.kind).toBe("divergent"); expect((later as any).slot).toBe(3n); // fork point kept
+        expect(cs.primaryOutvoted(2).outvoted).toBe(false);
+        // B, on the same branch, arrives later at a different point
+        cs.observe("B", { slot: 3n, hash: H(103) }); cs.observe("B", { slot: 4n, hash: H(104) }); cs.observe("B", { slot: 5n, hash: H(105) });
+        const o = cs.primaryOutvoted(2);
+        expect(o.outvoted).toBe(true); expect(o.slot).toBe(3n); expect(o.hash).toBe(H(103));
+        // the primary reorganises onto the verifiers' branch: divergence clears on agreement
+        cs.setPrimary("A");
+        expect(cs.primaryOutvoted(2).outvoted).toBe(false);
+    });
+});
+
+describe("slot battles", () => {
+    test("a competing block announced by any peer at a slot is known", () => {
+        const c = new CandidateSet();
+        c.addPeer("p"); c.addPeer("v");
+        c.observe("p", { slot: 10n, hash: "aa".repeat(32) });
+        c.observe("v", { slot: 10n, hash: "bb".repeat(32) });
+        expect(c.knownAtSlot(10n, "AA".repeat(32))).toBe(true);
+        expect(c.knownAtSlot(10n, "bb".repeat(32))).toBe(true);
+        expect(c.knownAtSlot(10n, "cc".repeat(32))).toBe(false);
+        expect(c.knownAtSlot(11n, "aa".repeat(32))).toBe(false);
     });
 });

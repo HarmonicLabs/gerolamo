@@ -1,4 +1,5 @@
 import os from "node:os";
+import { readFileSync } from "node:fs";
 
 /**
  * Resource usage of this node process and of the host, for `/metrics`.
@@ -55,17 +56,40 @@ export function createProcessCpuSampler(
 type CpuTimes = { user: number; nice: number; sys: number; idle: number; irq: number };
 
 /** Host CPU: aggregate (non-idle) / total tick delta across cores. */
+/** Aggregate CPU ticks from /proc/stat (one small read) — `os.cpus()` walks /proc per core and re-reads the model (≈ 25 ms on 20 cores, 2 % of the applier at 5 s intervals). */
+function hostCpuTimes(): CpuTimes[] {
+    try {
+        const line = readFileSync("/proc/stat", "utf8").split("\n")[0] ?? "";
+        const f = line.trim().split(/\s+/);
+        if (f[0] === "cpu" && f.length >= 5) {
+            const n = (i: number) => Number(f[i] ?? 0);
+            // user nice system idle iowait irq softirq steal
+            return [{ user: n(1), nice: n(2), sys: n(3), idle: n(4) + n(5), irq: n(6) + n(7) + n(8) }];
+        }
+    } catch { /* not Linux */ }
+    return os.cpus().map((c) => c.times);
+}
+
 export function createSystemCpuSampler(
-    cpus: () => CpuTimes[] = () => os.cpus().map((c) => c.times),
+    cpus: () => CpuTimes[] = hostCpuTimes,
+    minIntervalMs = 5000,
 ): () => number | null {
     let last = sum(cpus());
+    let lastAt = Date.now();
+    let lastValue: number | null = null;
     return () => {
+        // `os.cpus()` walks /proc for every core (≈ 25 ms on 20 cores): every /metrics poll
+        // paid it on the applier thread (1.4 % of it). Sample at most every few seconds.
+        const now = Date.now();
+        if (now - lastAt < minIntervalMs) return lastValue;
+        lastAt = now;
         const cur = sum(cpus());
         const total = cur.total - last.total;
         const idle = cur.idle - last.idle;
         last = cur;
-        if (total <= 0) return null;
-        return round1(Math.max(0, Math.min(100, ((total - idle) / total) * 100)));
+        if (total <= 0) return null; // no ticks elapsed: nothing to report
+        lastValue = round1(Math.max(0, Math.min(100, ((total - idle) / total) * 100)));
+        return lastValue;
     };
 }
 
@@ -101,11 +125,18 @@ export function processResources(cpuPercent: number | null): ProcessResources {
     };
 }
 
+let cachedCpuModel: string | null | undefined;
+/** Read once: `os.cpus()[0].model` re-populates every core's entry from /proc on each access. */
+function cpuModel(): string | null {
+    if (cachedCpuModel === undefined) cachedCpuModel = os.cpus()[0]?.model?.trim() || null;
+    return cachedCpuModel;
+}
+
 export function systemResources(cpuPercent: number | null): SystemResources {
     const total = os.totalmem();
     const free = os.freemem();
     const [l1, l5, l15] = os.loadavg();
-    const model = os.cpus()[0]?.model?.trim() || null;
+    const model = cpuModel();
     const bunVersion = (globalThis as { Bun?: { version?: string } }).Bun?.version;
     return {
         cpus: cpuCount(),

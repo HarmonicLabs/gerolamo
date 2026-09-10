@@ -94,3 +94,23 @@ describe("operator tooling vs cardano-cli conway 11", () => {
         expect(() => buildWithMinFee({ inputs: [{ txHash: new Uint8Array(32), index: 0 }], outputs: [{ address: addr, lovelace: 1000n }], changeIndex: 0, certificates: [], minFeeA: 44n, minFeeB: 155_381n, keys: [pay] })).toThrow(/cover the fee/);
     });
 });
+
+describe("message metadata", () => {
+    test("the auxiliary data hash goes into body key 7 and the data into the transaction's fourth element", async () => {
+        const { Cbor, CborMap, CborUInt, CborBytes, CborArray } = await import("@harmoniclabs/cbor");
+        const { blake2b_256 } = await import("@harmoniclabs/crypto");
+        const { buildWithMinFee, generateKeyPair, messageMetadata } = await import("./operator");
+        const aux = messageMetadata(["Gerolamo was here!"]);
+        const built = buildWithMinFee({
+            inputs: [{ txHash: new Uint8Array(32).fill(7), index: 1 }], outputs: [{ address: new Uint8Array(57).fill(2), lovelace: 3_000_000n }], changeIndex: 0,
+            certificates: [], auxiliaryData: aux, minFeeA: 44n, minFeeB: 155381n, keys: [generateKeyPair(new Uint8Array(32).fill(5))],
+        });
+        const body = Cbor.parse(built.body) as InstanceType<typeof CborMap>;
+        const key7 = body.map.find((e) => e.k instanceof CborUInt && e.k.num === 7n)?.v as InstanceType<typeof CborBytes>;
+        expect(Buffer.from(key7.bytes).toString("hex")).toBe(Buffer.from(blake2b_256(Cbor.encode(aux).toBuffer())).toString("hex"));
+        const tx = Cbor.parse(built.tx) as InstanceType<typeof CborArray>;
+        expect(tx.array.length).toBe(4);
+        expect(Buffer.from(Cbor.encode(tx.array[3]!).toBuffer()).toString("hex")).toBe(Buffer.from(Cbor.encode(aux).toBuffer()).toString("hex"));
+        expect(() => messageMetadata(["x".repeat(65)])).toThrow();
+    });
+});

@@ -100,29 +100,46 @@ export function pointerFromAddressBytes(raw: Uint8Array): { slot: number; txIx: 
 }
 
 const BECH32_CHARS = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
-function bech32Polymod(values: number[]): number {
-    const G = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
-    let chk = 1;
-    for (const v of values) {
-        const b = chk >>> 25;
-        chk = ((chk & 0x1ffffff) << 5) ^ v;
-        for (let i = 0; i < 5; i++) if ((b >> i) & 1) chk ^= G[i]!;
+/** bech32 (BIP-173) encoding of `bytes` under `hrp`. Typed-array implementation: the library
+ * encoder (`encodeBech32`, bit strings + reduce/padStart) was 9 % of the applier on dense blocks. */
+const BECH32_CODES = new Uint8Array([...BECH32_CHARS].map((c) => c.charCodeAt(0)));
+const hrpExpansions = new Map<string, Uint8Array>();
+function hrpExpansion(hrp: string): Uint8Array {
+    let e = hrpExpansions.get(hrp);
+    if (!e) {
+        e = new Uint8Array(hrp.length * 2 + 1);
+        for (let i = 0; i < hrp.length; i++) { e[i] = hrp.charCodeAt(i) >> 5; e[hrp.length + 1 + i] = hrp.charCodeAt(i) & 31; }
+        hrpExpansions.set(hrp, e);
     }
-    return chk >>> 0;
+    return e;
 }
-/** bech32 (BIP-173) encoding of `bytes` under `hrp`; used for the address forms ledger-ts cannot re-encode (pointer). */
 export function bech32Encode(hrp: string, bytes: Uint8Array): string {
-    const words: number[] = [];
-    let acc = 0, bits = 0;
-    for (const b of bytes) {
-        acc = (acc << 8) | b; bits += 8;
-        while (bits >= 5) { bits -= 5; words.push((acc >> bits) & 31); }
+    const exp = hrpExpansion(hrp);
+    const nWords = Math.ceil((bytes.length * 8) / 5);
+    // polymod runs over hrp expansion + data words + six zero words
+    const seq = new Uint8Array(exp.length + nWords + 6);
+    seq.set(exp);
+    let acc = 0, bits = 0, k = exp.length;
+    for (let i = 0; i < bytes.length; i++) {
+        acc = ((acc << 8) | bytes[i]!) & 0x1fff; bits += 8;
+        while (bits >= 5) { bits -= 5; seq[k++] = (acc >> bits) & 31; }
     }
-    if (bits > 0) words.push((acc << (5 - bits)) & 31);
-    const hrpExp = [...hrp].map((c) => c.charCodeAt(0) >> 5).concat([0], [...hrp].map((c) => c.charCodeAt(0) & 31));
-    const pm = bech32Polymod(hrpExp.concat(words, [0, 0, 0, 0, 0, 0])) ^ 1;
-    const checksum = Array.from({ length: 6 }, (_, i) => (pm >> (5 * (5 - i))) & 31);
-    return hrp + "1" + words.concat(checksum).map((w) => BECH32_CHARS[w]).join("");
+    if (bits > 0) seq[k++] = (acc << (5 - bits)) & 31;
+    let chk = 1;
+    for (let i = 0; i < seq.length; i++) {
+        const b = chk >>> 25;
+        chk = ((chk & 0x1ffffff) << 5) ^ seq[i]!;
+        if (b & 1) chk ^= 0x3b6a57b2;
+        if (b & 2) chk ^= 0x26508e6d;
+        if (b & 4) chk ^= 0x1ea119fa;
+        if (b & 8) chk ^= 0x3d4233dd;
+        if (b & 16) chk ^= 0x2a1462b3;
+    }
+    const pm = (chk ^ 1) >>> 0;
+    const out = new Uint8Array(nWords + 6);
+    for (let i = 0; i < nWords; i++) out[i] = BECH32_CODES[seq[exp.length + i]!]!;
+    for (let i = 0; i < 6; i++) out[nWords + i] = BECH32_CODES[(pm >> (5 * (5 - i))) & 31]!;
+    return hrp + "1" + String.fromCharCode.apply(null, out as unknown as number[]);
 }
 
 /** Full bech32 of a Shelley address from its raw bytes (mainnet/testnet from the header nibble). */
@@ -130,3 +147,16 @@ export function shelleyAddressBech32(raw: Uint8Array): string {
     return bech32Encode((raw[0]! & 0x0f) === 1 ? "addr" : "addr_test", raw);
 }
 
+
+/**
+ * Typed hex of a reward account given as a ledger-ts `StakeAddress` (type on the address, bare
+ * hash in `credentials`), a `Credential`, or a hash: `01` + hash for a script, the hash for a key.
+ * A pool's reward account and a proposal's return account arrive as stake addresses (bugs 84, 85).
+ */
+export function rewardAccountTypedHex(ra: any): string {
+    const hash = String(ra?.credentials?.hash?.toString?.() ?? ra?.credentials?.toString?.() ?? ra?.hash?.toString?.() ?? "").toLowerCase();
+    if (!/^[0-9a-f]{56}$/.test(hash)) return typedCredHexOf(ra?.credentials) ?? typedCredHexOf(ra) ?? hash;
+    const t = ra?.type;
+    const isScript = t === "script" || t === 1 || (typeof t === "string" && t.toLowerCase().includes("script")) || credTypeOf(ra?.credentials) === 1;
+    return typedCredHex(isScript ? 1 : 0, hash);
+}

@@ -6,6 +6,7 @@ import { N2NChainSyncHost } from "./N2NChainSyncHost";
 import { N2NHandshakeResponder } from "./N2NHandshakeResponder";
 import { N2NKeepAliveHost } from "./N2NKeepAliveHost";
 import { N2NPeerSharingHost, type SharePeersProvider } from "./N2NPeerSharingHost";
+import { N2NTxSubmissionHost, type TxSubmissionMempool } from "./N2NTxSubmissionHost";
 import type { RelayChainStore } from "./RelayChainStore";
 import { SqliteRelayChainStore } from "./SqliteRelayChainStore";
 
@@ -22,6 +23,8 @@ export interface N2NServerOptions {
     store?: RelayChainStore;
     /** Peers to hand out on MsgShareRequest. Omit to answer with an empty list. */
     sharePeers?: SharePeersProvider;
+    /** Pull the connecting peers' transactions into this mempool (block producers). Omit to ignore tx-submission. */
+    mempool?: TxSubmissionMempool;
 }
 
 export interface N2NServerHandle {
@@ -40,6 +43,7 @@ interface ActiveClient {
     blockFetch?: N2NBlockFetchHost;
     keepAlive?: N2NKeepAliveHost;
     peerSharing?: N2NPeerSharingHost;
+    txSubmission?: N2NTxSubmissionHost;
     handshakeTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -128,6 +132,7 @@ function attachClient(
         client.blockFetch?.dispose();
         client.keepAlive?.dispose();
         client.peerSharing?.dispose();
+        if (client.txSubmission) { const st = client.txSubmission.stats; if (st.announced) log.info(`N2N ${peer} tx-submission: ${st.announced} announced, ${st.fetched} fetched, ${st.accepted} accepted, ${st.rejected} rejected`); client.txSubmission.dispose(); }
         try {
             if (!mplexer.isClosed()) mplexer.close({ closeSocket: false });
         } catch {
@@ -148,6 +153,7 @@ function attachClient(
             });
             client.keepAlive = new N2NKeepAliveHost(mplexer);
             client.peerSharing = new N2NPeerSharingHost(mplexer, options.sharePeers ?? (() => []));
+            if (options.mempool) client.txSubmission = new N2NTxSubmissionHost(mplexer, { mempool: options.mempool, peer });
             log.info(`N2N handshake ok ${peer} version=${versionNumber}`);
         },
         onRefused: () => {
@@ -187,6 +193,7 @@ async function stopServer(
         client.blockFetch?.dispose();
         client.keepAlive?.dispose();
         client.peerSharing?.dispose();
+        client.txSubmission?.dispose();
         try {
             client.mplexer.close({ closeSocket: false });
         } catch {

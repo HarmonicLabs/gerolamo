@@ -1,17 +1,41 @@
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-24d42911c5e4338e b/.bun-tag-24d42911c5e4338e
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-282363136f5342ae b/.bun-tag-282363136f5342ae
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-2a0d8b1eec261f6a b/.bun-tag-2a0d8b1eec261f6a
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-2c5b74783e27304 b/.bun-tag-2c5b74783e27304
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-4643c719138adca8 b/.bun-tag-4643c719138adca8
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-911bdc38213795cb b/.bun-tag-911bdc38213795cb
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-915142c23e8b924a b/.bun-tag-915142c23e8b924a
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-9c5090e7c1304823 b/.bun-tag-9c5090e7c1304823
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-cf90f422e46d2a6b b/.bun-tag-cf90f422e46d2a6b
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-ec900cdb29ad50ae b/.bun-tag-ec900cdb29ad50ae
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-fdb756ca119bb966 b/.bun-tag-fdb756ca119bb966
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/dist/BnCEK/BnCEK.js b/dist/BnCEK/BnCEK.js
-index 9e6c1209fab79cbc6ff9aeeb09b3696ddb4510a7..86271814b3092e33ea68be45d82314b0eb241a91 100644
+index 9e6c1209fab79cbc6ff9aeeb09b3696ddb4510a7..679100dd737fa229a4d86dcb9bcc2487a2328029 100644
 --- a/dist/BnCEK/BnCEK.js
 +++ b/dist/BnCEK/BnCEK.js
-@@ -54,20 +54,21 @@ var findFirstSetBit_1 = require("./impl/findFirstSetBit.js");
+@@ -54,23 +54,29 @@ var findFirstSetBit_1 = require("./impl/findFirstSetBit.js");
  var readBit_1 = require("./impl/readBit.js");
  var writeBit_1 = require("./impl/writeBit.js");
  function intToSize(n) {
@@ -39,12 +63,240 @@ index 9e6c1209fab79cbc6ff9aeeb09b3696ddb4510a7..86271814b3092e33ea68be45d82314b0
 +    return BigInt(Math.floor((len - 1) / 8) + 1);
  }
  function strToSize(str) {
-     return bsToSize((0, uint8array_utils_1.fromUtf8)(str));
+-    return bsToSize((0, uint8array_utils_1.fromUtf8)(str));
++    // Plutus `ExMemoryUsage Text`: memoryUsage (T.unpack text) — one unit per character (code
++    // point), not the byte/8 words of a bytestring (gerolamo patch: appendString / equalsString /
++    // encodeUtf8 were charged 1/8 per character; preview slot 15 926 694 ran 20 M cpu under).
++    var n = 0;
++    for (var _ of str) n++;
++    return BigInt(n);
+ }
+ ;
+ var BLS_G1_SIZE = BigInt(48);
+@@ -323,6 +329,34 @@ var BnCEK = /** @class */ (function () {
+     }
+     ;
+     BnCEK.prototype.eval = function (bn) {
++        // GEROLAMO_BUILTIN_TRACE=1: one line per saturated builtin call (diagnostic, gerolamo patch)
++        if (process.env.GEROLAMO_BUILTIN_TRACE === "1") {
++            var out = this._evalInner(bn);
++            var show = function (v) { try {
++                var c = v && v.value !== undefined ? v.value : v;
++                if (typeof c === "bigint") return String(c);
++                if (typeof c === "boolean") return String(c);
++                if (c && typeof c.toString === "function" && c.constructor && c.constructor.name === "ByteString") return "#" + c.toString().slice(0, 64);
++                if (typeof c === "string") return JSON.stringify(c.slice(0, 40));
++                if (Array.isArray(c)) return "Array(" + c.length + ")" + (c.length ? "[" + show(c[0]) + (c.length > 1 ? ", …" : "") + "]" : "");
++                if (c && c.constructor) {
++                    var n = c.constructor.name;
++                    if (n === "DataList") return "DataList(" + c.list.length + ")";
++                    if (n === "DataMap") return "DataMap(" + c.map.length + ")";
++                    if (n === "DataConstr") return "DataConstr(" + String(c.constr) + "," + c.fields.length + ")";
++                    if (n === "DataI") return "DataI(" + String(c.int) + ")";
++                    if (n === "DataB") return "DataB(#" + c.bytes.toString().slice(0, 32) + ")";
++                    if (n === "Pair") return "Pair(" + show(c.fst) + ", " + show(c.snd) + ")";
++                    return n;
++                }
++                return String(c);
++            } catch (e) { return "?"; } };
++            console.error("BUILTIN " + uplc_1.UPLCBuiltinTag[bn.tag] + "(" + bn.args.map(show).join(", ") + ") -> " + (out && out.constructor && out.constructor.name === "CEKError" ? "ERROR " + out.message : show(out)));
++            return out;
++        }
++        return this._evalInner(bn);
++    };
++    BnCEK.prototype._evalInner = function (bn) {
+         switch (bn.tag) {
+             case uplc_1.UPLCBuiltinTag.addInteger: return this.addInteger.apply(this, __spreadArray([], __read(bn.args), false));
+             case uplc_1.UPLCBuiltinTag.subtractInteger: return this.subtractInteger.apply(this, __spreadArray([], __read(bn.args), false));
+@@ -569,9 +603,13 @@ var BnCEK = /** @class */ (function () {
+         var _a = getInt(a);
+         if (_a === undefined)
+             return new CEKError_1.CEKError("consByteString :: not Int", { a: a });
+-        if (_a < 0)
++        if (this.consByteStringWraps) {
++            // Plutus V1/V2: `BS.cons (fromIntegral n)` — the byte is n modulo 256 (gerolamo patch)
++            _a = ((_a % BigInt(256)) + BigInt(256)) % BigInt(256);
++        }
++        else if (_a < 0)
+             return new CEKError_1.CEKError("consByteString :: negative byte");
+-        if (_a >= BigInt(256))
++        else if (_a >= BigInt(256))
+             return new CEKError_1.CEKError("consByteString :: UInt8 overflow");
+         var _b = getBS(b);
+         if (_b === undefined)
+@@ -784,7 +822,12 @@ var BnCEK = /** @class */ (function () {
+             mem: f.mem.at(sk, sm, ss),
+             cpu: f.cpu.at(sk, sm, ss)
+         });
+-        return constOrErr(function () { return CEKConst_1.CEKConst.bool((0, crypto_1.verifyEd25519Signature_sync)(sBytes, m.toBuffer(), kBytes)); });
++        return constOrErr(function () {
++            var ok = (0, crypto_1.verifyEd25519Signature_sync)(sBytes, m.toBuffer(), kBytes);
++            // GEROLAMO_ED25519_TRACE=1: print every verification (diagnostic, gerolamo patch)
++            if (process.env.GEROLAMO_ED25519_TRACE === "1") console.error("ED25519 " + JSON.stringify({ ok: ok, pk: (0, uint8array_utils_1.toHex)(kBytes), msg: (0, uint8array_utils_1.toHex)(m.toBuffer()), sig: (0, uint8array_utils_1.toHex)(sBytes) }));
++            return CEKConst_1.CEKConst.bool(ok);
++        });
+     };
+     BnCEK.prototype.appendString = function (a, b) {
+         var _a = getStr(a);
+diff --git a/dist/CEKHeap/index.js b/dist/CEKHeap/index.js
+index 4743b3c00b323dc482ea99b7ddbf217492b5a52d..1eb2eee59bfcc128afda69e3cef0806042337dd6 100644
+--- a/dist/CEKHeap/index.js
++++ b/dist/CEKHeap/index.js
+@@ -11,12 +11,13 @@ var CEKHeap = /** @class */ (function () {
+         return new CEKHeap(this._heap.map(function (uplc) { return uplc.clone(); }));
+     };
+     CEKHeap.prototype.add = function (varValue) {
+-        var alreadyPresent = this._heap.findIndex(function (heapValue) { return (0, CEKValue_1.eqCEKValue)(heapValue, varValue); });
+-        if (alreadyPresent < 0) {
+-            this._heap.push(Object.freeze(varValue));
+-            return this._heap.length - 1;
+-        }
+-        return alreadyPresent;
++        // No deduplication (gerolamo patch). The original scanned the whole heap with a deep
++        // equality on every variable binding — O(heap) per binding — and any false positive of
++        // that equality bound the variable to an *older* value: `eqData` called an empty list
++        // equal to a non-empty one, so a Plutarch validator read the reference inputs where it
++        // asked for the outputs (preview slot 15 926 694) and "failed" a block the chain accepted.
++        this._heap.push(Object.freeze(varValue));
++        return this._heap.length - 1;
+     };
+     CEKHeap.prototype.get = function (idx) {
+         if (idx < 0 || idx >= this._heap.length || idx !== Math.round(idx))
+diff --git a/dist/Machine/BuiltinCosts/BuiltinCosts.d.ts b/dist/Machine/BuiltinCosts/BuiltinCosts.d.ts
+index 9a7c40500d13e550c07e9ebf5a567f6ffffaf545..a4bcc1a61e5a55766a2682cc4fcc2b2ad53bee86 100644
+--- a/dist/Machine/BuiltinCosts/BuiltinCosts.d.ts
++++ b/dist/Machine/BuiltinCosts/BuiltinCosts.d.ts
+@@ -9,3 +9,5 @@ export type BuiltinCostsOf<Tag extends UPLCBuiltinTag> = Tag extends UPLCBuiltin
+ export declare function costModelV1ToBuiltinCosts(costmdls: AnyV1CostModel): <Tag extends UPLCBuiltinTag>(tag: Tag) => BuiltinCostsOf<Tag>;
+ export declare function costModelV2ToBuiltinCosts(costmdls: AnyV2CostModel): <Tag extends UPLCBuiltinTag>(tag: Tag) => BuiltinCostsOf<Tag>;
+ export declare function costModelV3ToBuiltinCosts(costmdls: AnyV3CostModel): <Tag extends UPLCBuiltinTag>(tag: Tag) => BuiltinCostsOf<Tag>;
++
++export declare function legacyIntegerCosts(named: Record<string, any>, base: (tag: number) => any): (tag: number) => any;
+diff --git a/dist/Machine/BuiltinCosts/BuiltinCosts.js b/dist/Machine/BuiltinCosts/BuiltinCosts.js
+index 51f2aaee5d75291c15d87a5bcc6bc962ec8ff6b8..0a0a242545135679de33172778b4a0826b9e57ad 100644
+--- a/dist/Machine/BuiltinCosts/BuiltinCosts.js
++++ b/dist/Machine/BuiltinCosts/BuiltinCosts.js
+@@ -11,18 +11,18 @@ var __assign = (this && this.__assign) || function () {
+     return __assign.apply(this, arguments);
+ };
+ Object.defineProperty(exports, "__esModule", { value: true });
+-exports.costModelV3ToBuiltinCosts = exports.costModelV2ToBuiltinCosts = exports.costModelV1ToBuiltinCosts = void 0;
++exports.legacyIntegerCosts = exports.costModelV3ToBuiltinCosts = exports.costModelV2ToBuiltinCosts = exports.costModelV1ToBuiltinCosts = void 0;
+ var uplc_1 = require("@harmoniclabs/uplc");
+ var costFunctions_1 = require("./costFunctions.js");
+ var cardano_costmodels_ts_1 = require("@harmoniclabs/cardano-costmodels-ts");
+ var obj_utils_1 = require("@harmoniclabs/obj-utils");
+ var assert_1 = require("../../utils/assert.js");
+ function costModelV1ToBuiltinCosts(costmdls) {
+-    return costModelV3ToBuiltinCosts((0, cardano_costmodels_ts_1.costModelV1ToFakeV3)(__assign({}, costmdls)));
++    return legacyIntegerCosts((0, cardano_costmodels_ts_1.toCostModelV1)(costmdls), costModelV3ToBuiltinCosts((0, cardano_costmodels_ts_1.costModelV1ToFakeV3)(__assign({}, costmdls))));
+ }
+ exports.costModelV1ToBuiltinCosts = costModelV1ToBuiltinCosts;
+ function costModelV2ToBuiltinCosts(costmdls) {
+-    return costModelV3ToBuiltinCosts((0, cardano_costmodels_ts_1.costModelV2ToFakeV3)(__assign({}, costmdls)));
++    return legacyIntegerCosts((0, cardano_costmodels_ts_1.toCostModelV2)(costmdls), costModelV3ToBuiltinCosts((0, cardano_costmodels_ts_1.costModelV2ToFakeV3)(__assign({}, costmdls))));
+ }
+ exports.costModelV2ToBuiltinCosts = costModelV2ToBuiltinCosts;
+ function costModelV3ToBuiltinCosts(costmdls) {
+@@ -55,7 +55,8 @@ function costModelV3ToBuiltinCosts(costmdls) {
+                 break;
+             case uplc_1.UPLCBuiltinTag.multiplyInteger:
+                 return readonly({
+-                    cpu: new costFunctions_1.Linear2InBothAdd(BigInt(costs["multiplyInteger-cpu-arguments-intercept"]), BigInt(costs["multiplyInteger-cpu-arguments-slope"])),
++                    // Plutus V3 (cost model C): `multiplied_sizes`; V1/V2 use added sizes, see legacyIntegerCosts.
++                    cpu: new costFunctions_1.Linear2InBothMult(BigInt(costs["multiplyInteger-cpu-arguments-intercept"]), BigInt(costs["multiplyInteger-cpu-arguments-slope"])),
+                     mem: new costFunctions_1.Linear2InBothAdd(BigInt(costs["multiplyInteger-memory-arguments-intercept"]), BigInt(costs["multiplyInteger-memory-arguments-slope"]))
+                 });
+                 break;
+@@ -169,7 +170,8 @@ function costModelV3ToBuiltinCosts(costmdls) {
+                 break;
+             case uplc_1.UPLCBuiltinTag.verifyEd25519Signature:
+                 return readonly({
+-                    cpu: new costFunctions_1.Linear3InZ(BigInt(costs["verifyEd25519Signature-cpu-arguments-intercept"]), BigInt(costs["verifyEd25519Signature-cpu-arguments-slope"])),
++                    // linear in the message (second argument), every language (gerolamo patch: was the signature)
++                    cpu: new costFunctions_1.Linear3InY(BigInt(costs["verifyEd25519Signature-cpu-arguments-intercept"]), BigInt(costs["verifyEd25519Signature-cpu-arguments-slope"])),
+                     mem: new costFunctions_1.FixedCost(BigInt(costs["verifyEd25519Signature-memory-arguments"]))
+                 });
+                 break;
+@@ -595,3 +597,34 @@ function costModelV3ToBuiltinCosts(costmdls) {
+     });
+ }
+ exports.costModelV3ToBuiltinCosts = costModelV3ToBuiltinCosts;
++/**
++ * Plutus V1/V2 cost the integer builtins with older models than V3 (cost model C), and the
++ * fake-V3 conversion drops their division parameters in favour of V3 defaults. Given the
++ * language's own named parameters, return a lookup that serves the V1/V2 models for the
++ * four division builtins (constant above the diagonal, otherwise intercept + slope * x * y;
++ * memory max(minimum, x - y)) and defers to `base` for everything else. multiplyInteger is
++ * multiplied sizes in every version on chain today (checked against aiken's evaluator).
++ */
++function legacyIntegerCosts(named, base) {
++    var overrides = {};
++    function ro(costs) {
++        var result = {};
++        (0, obj_utils_1.defineReadOnlyProperty)(result, "mem", costs.mem);
++        (0, obj_utils_1.defineReadOnlyProperty)(result, "cpu", costs.cpu);
++        return result;
++    }
++    var divs = [["divideInteger", uplc_1.UPLCBuiltinTag.divideInteger], ["quotientInteger", uplc_1.UPLCBuiltinTag.quotientInteger], ["remainderInteger", uplc_1.UPLCBuiltinTag.remainderInteger], ["modInteger", uplc_1.UPLCBuiltinTag.modInteger]];
++    for (var i = 0; i < divs.length; i++) {
++        var name = divs[i][0], tag = divs[i][1];
++        if (named[name + "-cpu-arguments-model-arguments-intercept"] == null) continue;
++        overrides[tag] = ro({
++            cpu: new costFunctions_1.XGtEqOrConst(BigInt(named[name + "-cpu-arguments-constant"]), new costFunctions_1.Linear2InBothMult(BigInt(named[name + "-cpu-arguments-model-arguments-intercept"]), BigInt(named[name + "-cpu-arguments-model-arguments-slope"]))),
++            mem: new costFunctions_1.Linear2InBothSub(BigInt(named[name + "-memory-arguments-intercept"]), BigInt(named[name + "-memory-arguments-slope"]), BigInt(named[name + "-memory-arguments-minimum"]))
++        });
++    }
++    return function (tag) {
++        return (0, obj_utils_1.hasOwn)(overrides, tag) ? overrides[tag] : base(tag);
++    };
++}
++exports.legacyIntegerCosts = legacyIntegerCosts;
++
+diff --git a/dist/Machine/BuiltinCosts/costFunctions.js b/dist/Machine/BuiltinCosts/costFunctions.js
+index 0b9457e573b491cdf7d3d3e6dc3a4685e970eab9..a854b25f272bee14b03e11b8b2280f1e83712064 100644
+--- a/dist/Machine/BuiltinCosts/costFunctions.js
++++ b/dist/Machine/BuiltinCosts/costFunctions.js
+@@ -247,7 +247,7 @@ var ConstYOrLinearZ = /** @class */ (function (_super) {
+ exports.ConstYOrLinearZ = ConstYOrLinearZ;
+ /**
+  * function in the form of
+- * c00 + c10*x + c01*y + c20*x*x + c11*x*y + c02 * y
++ * c00 + c10*x + c01*y + c20*x*x + c11*x*y + c02*y*y
+  */
+ var BaseDoubleQuadratic = /** @class */ (function () {
+     function BaseDoubleQuadratic(c00, c01, c02, c10, c11, c20) {
+@@ -272,7 +272,7 @@ var ConstMinOrQuadratic2InXY = /** @class */ (function (_super) {
+         if (x < y)
+             return this.constant;
+         var _a = this, c00 = _a.c00, c01 = _a.c01, c02 = _a.c02, c10 = _a.c10, c11 = _a.c11, c20 = _a.c20, minimum = _a.minimum;
+-        var real = c00 + c10 * x + c01 * y + c20 * x * x + c11 * x * y + c02 * y;
++        var real = c00 + c10 * x + c01 * y + c20 * x * x + c11 * x * y + c02 * y * y;
+         return real < minimum ? minimum : real;
+     };
+     ;
 diff --git a/dist/Machine/Machine.js b/dist/Machine/Machine.js
-index ad96077c883f0a7ae2971b84287259abcd0460d0..980cea2c8c33801d6ca8fd86fe863c241c263779 100644
+index ad96077c883f0a7ae2971b84287259abcd0460d0..7b139e7150cfd44a77f5ad81ae86a56bf0c52752 100644
 --- a/dist/Machine/Machine.js
 +++ b/dist/Machine/Machine.js
-@@ -78,6 +78,45 @@ var Machine = /** @class */ (function () {
+@@ -61,7 +61,15 @@ var Machine = /** @class */ (function () {
+             isV2 ? (0, cardano_costmodels_ts_1.costModelV2ToFakeV3)(costmodel) :
+                 isV1 ? (0, cardano_costmodels_ts_1.costModelV1ToFakeV3)(costmodel) :
+                     cardano_costmodels_ts_1.defaultV3Costs; // never; we throw before
+-        (0, obj_utils_1.defineReadOnlyHiddenProperty)(this, "getBuiltinCostFuction", (0, BuiltinCosts_1.costModelV3ToBuiltinCosts)(costs));
++        var builtinCosts = (0, BuiltinCosts_1.costModelV3ToBuiltinCosts)(costs);
++        // Plutus V1/V2 builtin semantics: consByteString takes the byte modulo 256; V3 fails on values outside 0..255 (gerolamo patch).
++        this.consByteStringWraps = !isV3;
++        // V1/V2 integer builtins keep their own (pre cost-model-C) models; the fake-V3 view lost them.
++        if (isV2 && !isV3)
++            builtinCosts = (0, BuiltinCosts_1.legacyIntegerCosts)((0, cardano_costmodels_ts_1.toCostModelV2)(costmodel), builtinCosts);
++        else if (isV1 && !isV3 && !isV2)
++            builtinCosts = (0, BuiltinCosts_1.legacyIntegerCosts)((0, cardano_costmodels_ts_1.toCostModelV1)(costmodel), builtinCosts);
++        (0, obj_utils_1.defineReadOnlyHiddenProperty)(this, "getBuiltinCostFuction", builtinCosts);
+         (0, obj_utils_1.defineReadOnlyHiddenProperty)(this, "machineCosts", (0, MachineCosts_1.costModelToMachineCosts)(costs));
+     }
+     Machine.evalSimple = function (_term, srcmap) {
+@@ -78,6 +86,45 @@ var Machine = /** @class */ (function () {
          var has_src = typeof srcmap === "object" && srcmap !== null;
          // new budget for each call
          var budget = new ExBudget_1.ExBudget({ mem: 0, cpu: 0 });
@@ -90,3 +342,26 @@ index ad96077c883f0a7ae2971b84287259abcd0460d0..980cea2c8c33801d6ca8fd86fe863c24
          var spend = budget.add.bind(budget);
          var logs = [];
          var machineCosts = this.machineCosts;
+@@ -94,6 +141,7 @@ var Machine = /** @class */ (function () {
+             });
+         }
+         var bnCEK = new BnCEK_1.BnCEK(getBuiltinCostFuction, budget, logs);
++        bnCEK.consByteStringWraps = !!this.consByteStringWraps; // V1/V2 builtin semantics (gerolamo patch)
+         var frames = new CEKFrames_1.CEKFrames();
+         var steps = new CEKSteps_1.CEKSteps();
+         var heap = new CEKHeap_1.CEKHeap();
+@@ -342,8 +390,13 @@ var Machine = /** @class */ (function () {
+                 }
+                 if (topFrame.func instanceof uplc_1.Lambda ||
+                     topFrame.func instanceof CEKLambda_1.CEKLambda) {
++                    // The lambda's captured environment must not be extended in place: a lambda
++                    // bound to a variable and applied more than once would see the previous
++                    // argument shift every de Bruijn index (gerolamo patch; the right-application
++                    // branch above already clones). preview slot 15 926 694: `unListData` received
++                    // the earlier list and a Plutarch validator "failed" where the chain accepted it.
+                     var _env = topFrame.func instanceof CEKLambda_1.CEKLambda ?
+-                        topFrame.func.env :
++                        topFrame.func.env.clone() :
+                         new CEKEnv_1.CEKEnv(heap);
+                     _env.push(v);
+                     steps.push(new CEKSteps_1.ComputeStep(topFrame.func.body, _env));

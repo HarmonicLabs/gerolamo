@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Address, Credential, StakeCredentials } from "@harmoniclabs/cardano-ledger-ts";
 import { initSql, sql } from "../sql";
-import { ensureInitialized, ensureTypedStakeKeys, stakeKeyOfAddress } from "../db";
+import { ensureInitialized, ensureTypedStakeKeys, stakeKeyOfAddress, stakeKeyOfRawAddress } from "../db";
 import { recordPoolRegistration, takeStakeSnapshot } from "./leaderState";
 import { bech32HeaderByte, headerStakeIsScript, typedCredHex } from "./stakeCred";
 
@@ -28,6 +28,17 @@ describe("stake credentials are (type, hash)", () => {
         expect(stakeKeyOfAddress(scriptAddr)).toBe(`01${HASH}`);
         expect(headerStakeIsScript(bech32HeaderByte(scriptAddr)!)).toBe(true);
         expect(headerStakeIsScript(bech32HeaderByte(keyAddr)!)).toBe(false);
+    });
+    test("the raw-bytes derivation agrees with the string form", () => {
+        const keyRaw = new Uint8Array(Address.fromString(keyAddr).toBytes());
+        const scriptRaw = new Uint8Array(Address.fromString(scriptAddr).toBytes());
+        expect(stakeKeyOfRawAddress(keyRaw)).toBe(HASH);
+        expect(stakeKeyOfRawAddress(scriptRaw)).toBe(`01${HASH}`);
+        const enterprise = new Uint8Array(Address.testnet(Credential.keyHash(PAY)).toBytes());
+        expect(stakeKeyOfRawAddress(enterprise)).toBeNull();
+        expect(stakeKeyOfAddress(Address.testnet(Credential.keyHash(PAY)).toString())).toBeNull();
+        expect(stakeKeyOfRawAddress(null)).toBeNull();
+        expect(stakeKeyOfRawAddress(new Uint8Array(57).fill(0x40))).toBeNull(); // pointer type 4
         expect(typedCredHex(1, HASH)).toBe(`01${HASH}`);
     });
 

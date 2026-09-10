@@ -1,3 +1,4 @@
+import { startExplorerIndexer, stopExplorerIndexer } from "../db/minibf/explorerIndexer";
 import * as path from "node:path/posix";
 
 import {
@@ -12,11 +13,12 @@ import { backfillBlockHeights, countGenesisUtxoRegistry, ensureInitialized, getM
 import { getByronGenesisConfig } from "../utils/paths";
 import { byronGenesisUtxos, countFundedGenesisEntries } from "../consensus/byron/genesisUtxo";
 import { populateEpochState } from "../state/blockfrost";
-import { logger } from "../utils/logger";
+import { LogLevel, logger } from "../utils/logger";
 import { startPeerBlockServer } from "./peerBlockServer";
 import { closeSql, getSqlFilename, initSql } from "../sql";
 import { startN2CServer, type N2CServerHandle } from "./n2c";
 import { startN2NServer, type N2NServerHandle } from "./n2n";
+import { GlobalSharedMempool } from "./SharedMempool";
 import { resolveN2NConfig } from "./n2n/config";
 import { listShareablePeers, setInboundN2NStatusProvider } from "./peerManager";
 import { resolveNodeRole } from "./nodeRole";
@@ -222,6 +224,7 @@ export async function start() {
     }
 
     logger.setLogConfig(config.logs);
+    logger.info(`Log level ${LogLevel[logger.logLevel] ?? logger.logLevel} (config.logs); validation workers log at INFO unless GEROLAMO_HEADER_TRACE=1`);
     logger.info("Configuration loaded successfully.");
     logger.info(`Database path: ${config.dbPath}`);
     if (config.tuiEnabled) {
@@ -237,6 +240,8 @@ export async function start() {
 
     logger.info("Initializing database...");
     await ensureInitialized();
+    // Explorer projection (mb_* tables) in its own file, written by a worker (GEROLAMO_EXPLORER_WORKER=0 → inline).
+    await startExplorerIndexer(config.dbPath);
     await backfillBlockHeights();
     logger.info("Database initialized and ready.");
 
@@ -280,9 +285,14 @@ export async function start() {
 
     await initPeerManager(config);
     logger.info("Peer manager started.");
+    logger.info("Starting peer block server...");
+
+    await startPeerBlockServer(config, createHttpPeerManager());
     if (config.producer) {
         // Block producer: forges when this pool leads a slot; blocks go through the node's own
         // strict validation (adoptLocalBlock) and are served to relays by the inbound N2N hosts.
+        // After the HTTP server: computing a leader schedule takes minutes and /metrics must not
+        // wait for it (2026-09-10 06:14 UTC: 3.5 minutes without a status endpoint).
         try {
             const { startBlockProducer } = await import("../pool/startBlockProducer");
             await startBlockProducer(config);
@@ -290,10 +300,6 @@ export async function start() {
             logger.error("Block producer failed to start (node keeps running as a relay):", err);
         }
     }
-
-    logger.info("Starting peer block server...");
-
-    await startPeerBlockServer(config, createHttpPeerManager());
     logger.info("Peer block server started.");
 
     let n2nHandle: N2NServerHandle | undefined;
@@ -307,6 +313,8 @@ export async function start() {
             handshakeTimeoutMs: config.n2n.handshakeTimeoutMs,
             idleTimeoutMs: config.n2n.idleTimeoutMs,
             sharePeers: (amount) => listShareablePeers(amount),
+            // Pull connecting peers' transactions into the shared mempool (fills the blocks we forge).
+            mempool: GlobalSharedMempool.getInstance(),
         });
         logger.info(
             `Inbound N2N ready: ${n2nHandle.host}:${n2nHandle.port}`,
@@ -367,6 +375,7 @@ export async function start() {
             logger.error("N2C shutdown error:", err);
         }
         try {
+            await stopExplorerIndexer(); // flush the projection queue before the ledger closes
             await closeSql(); // checkpoint + close: no -wal left to recover on the next start
         } catch (err) {
             logger.error("DB close error:", err);

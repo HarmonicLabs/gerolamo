@@ -49,6 +49,8 @@ export interface TipInfo {
   hash: string;
   epoch: number;
   era: number;
+  /** Epoch of the estimated network tip (the sync target); absent from older servers. */
+  targetEpoch?: number;
 }
 
 export interface SyncInfo {
@@ -57,8 +59,64 @@ export interface SyncInfo {
   startedAt: string;
 }
 
+/** Progress of a Mithril bootstrap running outside the node (scripts/dashboard-server.ts --mithril-progress). */
+export interface MithrilInfo {
+  phase: "certificate" | "download" | "apply" | "done" | "error";
+  network: string;
+  snapshotHash?: string;
+  snapshotEpoch?: number;
+  beacon?: number;
+  certificateVerified?: boolean;
+  chunk?: number;
+  chunks?: number;
+  downloadedChunks?: number;
+  appliedChunks?: number;
+  blocks?: number;
+  lastSlot?: number;
+  lastEpoch?: number;
+  ratePerSec?: number;
+  etaSec?: number | null;
+  db?: string;
+  blocksOnly?: boolean;
+  startedAt: string;
+  updatedAt: string;
+  message?: string;
+  /** Set once the bootstrap finished: the node's replay of the certified chain, or live beyond it. */
+  replay?: { phase: "replay" | "live"; certifiedSlot: number; certifiedEpoch?: number; tipSlot: number; percent: number; label: string } | null;
+}
+
+/** Block producer stats as the node reports them on /metrics (null when the node does not forge). */
+export interface ProducerStats {
+  poolId: string;
+  vrfKeyHash: string;
+  opcert: { counter: string; kesPeriod: string };
+  kesEvolution: number;
+  scheduledEpochs: number[];
+  leaderSlotsKnown: number;
+  nextLeaderSlot: string | null;
+  forged: number;
+  lastForgedSlot: string | null;
+  lastError: string | null;
+  dryRun: boolean;
+}
+
+/** What the dashboard server read from the node's own /metrics (absent from older servers). */
+export interface NodeSection {
+  nodeUp: boolean;
+  role: "data" | "relay" | "producer" | null;
+  inbound: { listening: boolean; host: string | null; port: number | null; clients: number } | null;
+  hotPeers: number | null;
+  version?: string | null;
+  producer: ProducerStats | null;
+  /** Seconds until the next leader slot (negative: passed), from the network clock. */
+  nextLeaderInSec: number | null;
+}
+
 export interface NodeStatus {
   tip: TipInfo;
+  node?: NodeSection | null;
+  /** Present while a Mithril bootstrap is running or just finished. */
+  mithril?: MithrilInfo | null;
   sync: SyncInfo;
   uptime: number;
   network: string;

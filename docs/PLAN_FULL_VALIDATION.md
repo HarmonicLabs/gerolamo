@@ -751,3 +751,581 @@ profile → Phase 2 → Phase 3 → Phase 4. Status log at the bottom of this fi
   code and tests kept. The design that should pay: workers resolve inputs
   themselves over a read-only SQLite connection (WAL readers), so the main
   thread ships only block bytes and the small overlay.
+- 2026-09-06 02:36 UTC preview entered Conway (epoch 646: era 7, protocol
+  9.0, Conway genesis parameters merged, Praos headers pass) and halted on the
+  first governance proposal: the library never decoded body keys 19–22
+  (bug 53). Fixed in vendored ledger-ts 0.5.8 with full governance decoders;
+  this also makes the existing proposal/vote recording code live for the first
+  time, so governance ratification on preview is now actually exercised.
+- 2026-09-06 02:44 UTC preview halted on the first PlutusV3 transaction
+  (bug 54: V3 language view padded to 350 entries by the cost-models library;
+  now encoded from the 251-entry parameter list). Vote recorder fixed. Conway
+  governance decoding, proposal deposits, V3 language views and the vote/proposal
+  tables are all exercised for the first time from here on.
+- 2026-09-06 02:50 UTC preview rejected the whole of epoch 647 (bug 55: the nonce
+  freeze window is 4k/f from Conway, we used 3k/f). Verified by recomputing the
+  epoch 647 nonce from stored headers against Koios; fixed in the evolver with a
+  per-epoch protocol version. The node looped restore → reject → drop peer for
+  20 minutes and marked good relays malicious, so an all-headers-fail epoch start
+  should probably halt like a body failure does (open item).
+- 2026-09-06 03:38 UTC preview halted at slot 57454191 (bug 56: witness datum
+  slicer ignored the Conway set tag 258 → "datum not in the witness set"). Fixed
+  with a fixture test; the same unwrapping now covers witness scripts. Also this
+  window: HTTP GET handlers moved to a read-only SQLite connection
+  (`withReadOnlyConnection`), Blockfrost `/blocks/{number}` now means height with
+  `/blocks/slot/{n}` added, genesis-funded inputs resolve from the genesis registry.
+- 2026-09-06 04:00 UTC explorer/mini-Blockfrost latency while syncing traced to
+  three causes and fixed: (1) GET handlers queued on the writer connection behind
+  range transactions → read-only connection; (2) the applier's SQLite awaits resolve
+  as microtasks, so a range ran as one unbroken chain → `yieldToEventLoop` every 25 ms;
+  (3) `hex(block_hash) = ?` in tx counts/listings and COUNT(*) on 17 M-row index
+  tables scanned whole tables (a minute cold) → primary-key probes and MAX(rowid).
+- 2026-09-06 04:20 UTC preview halted at slot 58809651 (bug 57: datum-less
+  PlutusV3 spend rejected; CIP-69 makes the datum optional for V3). Fixed with
+  per-script language tracking. Three Conway halts in the first 40 epochs of the
+  era (54–57); each fixed from the dumped block within the hour.
+- 2026-09-06 04:38 UTC preview halted at slot 61206431 (bug 58: list-form redeemer
+  duplicates are legal under Conway too). Also: leader-rule verdicts cached by header
+  hash (85 % of checks were repeats from verifier peers; was half the main thread).
+- 2026-09-06 04:52 UTC rules-ahead A/B on preview Conway blocks (epochs 712–720):
+  off 37 blocks/s at 3 cores, on 89 blocks/s at 4 cores; main-thread blk.validate
+  2.3 → 0.1 ms. Now on by default (GEROLAMO_RULES_AHEAD=0 opts out). The earlier
+  "no win" measurement was on light early-era blocks.
+- 2026-09-06 05:02 UTC preview halted at slot 63616305 (bug 59: an enacted cost-model
+  change was lost because the libraries drop lists with negative entries). First
+  governance-enacted parameter change on preview handled end to end after the fix.
+- 2026-09-06 05:17 UTC preview halted at slot 64848165 (bug 60: UpdateCommittee
+  threshold decode, ledger-ts 0.5.9). Applier now spends from the rows the rules
+  stage read (`knownInputs`), reading only in-range outputs from the UTxO set; the
+  bulk DELETE count guards against stale rows.
+- 2026-09-06 05:30 UTC known-inputs apply live: blk.apply 3.0 → 1.6 ms per block,
+  preview 89 → 102 blocks/s at epoch ~760. ledger-ts 0.5.10.
+- 2026-09-06 05:56 UTC preview halted at slot 68390403 (bug 61: language view included
+  an unneeded reference script). Profiling showed the applier's remaining stall was the
+  Plutus shadow evaluation inside the ahead-of-time rules job (374 of 17,664 blocks waited
+  ~120 ms each); shadow evaluation now runs as its own detached job on a general worker
+  (`phase: "shadow"`), the ahead job runs `phase: "rules"`. Rules lookahead now spans
+  range boundaries (depth 6). Range sizer output logged (`Range target …`) to explain the
+  ~46-block ranges seen despite a 256 target.
+- 2026-09-06 06:06 UTC preview halted at slot 68911489 ("languages none": proposing
+  purpose missing from the needed-script set) — fixed with voting/proposing purposes
+  and a witness-set fallback. Idle range flush now emits the tail as one range instead
+  of single-block ranges (680 of 830 ranges were singles).
+- 2026-09-06 06:20 UTC main-thread budget per block on preview epochs 795–805 (13 ms
+  wall): apply 2.9, epoch boundary amortised 1.8, rules gather 1.0, insert 0.4, small
+  stages 0.8, ~3.6 unlabeled (worker message plumbing, network decode, GC), plus 1.4 ms
+  idle waiting for slow rules results (heavy blocks after light ones). Changes: rules
+  window 6 → 16, shadow jobs sampled on the main thread (one structured clone less per
+  Plutus block). Remaining levers, largest first: epoch-boundary SQL (13 % on preview,
+  amortises 10× better on mainnet), the gather on a worker-side read-only connection
+  (~8 %), MiniBF index writes inside apply.
+- 2026-09-06 06:30 UTC Plutus shadow: with evaluation detached, the per-redeemer budget
+  goes back to 2 s and one Plutus block in ten is sampled (supervisor defaults). Budget
+  and decoding gaps are now reported as skips (`note`), not as verdict mismatches — the
+  earlier "77 mismatches" on preview were all 100 ms timeouts.
+- 2026-09-06 07:55 UTC preview throughput collapse (bug 62): peers dropped on
+  "Missing epoch nonce" and on false divergence verdicts left one hot peer. Held
+  batches and a non-verdict for missing slots; per-header logging to debug.
+- 2026-09-06 08:10 UTC after the peer fixes the applier was still at 2 blocks/s: inline
+  rules evaluation ran Plutus shadow on the main thread (2 s budget) for the 80 % of
+  blocks the ahead scheduler skipped over withdrawal conflicts. Inline path is rules-only
+  now; the overlay zeroes withdrawn reward accounts so those blocks are scheduled ahead.
+  Skip reasons are counted (`rules.skip.*`). Real Plutus finding to follow up: on several
+  V3 transactions our evaluator's memory use exceeds the declared budget by ~50–80 units
+  (reported as verdict mismatches; the chain accepted them) — a cost-model accounting gap.
+- 2026-09-06 08:20 UTC preview at 0 blocks/s from a promotion loop: a verifier promoted
+  to primary re-anchors, a late reply from its old stream (already past the drain, tagged
+  with the new generation) fails the contiguity check, the stream restarts, the other peer
+  looks 1600 headers ahead and is promoted back a minute later. Fix: a header whose
+  predecessor we hold is dropped as a late reply (`hdr.late.drop`), not a restart; speed
+  promotion cooldown 1 → 5 min.
+- 2026-09-06 08:30 UTC bug 63: a false unconditional rollback of 164 blocks, then a halt
+  on re-apply because certificate state is not rolled back. Rollbacks from the primary
+  are now deferred until the next headers show a fork. Open: journal non-UTxO ledger
+  state per block so real fork rollbacks revert it too (before mainnet).
+- 2026-09-06 08:35 UTC preview halted at slot 78658821 (bug 64: script-address collateral
+  on a script-free transaction required its script). Collateral contributes key witnesses only.
+- 2026-09-06 08:45 UTC promotion churn closed out: late headers far beyond the stream
+  position are dropped even when their predecessor is past our pending window, and speed
+  promotion requires the primary to have been quiet for 5 s (a verifier lead alone is
+  normal while the primary is throttled by the header cap).
+- 2026-09-06 09:20 UTC ledger journal live (PLAN_LEDGER_INTEGRITY.md workstream A):
+  non-UTxO state writes are journaled per block by triggers and undone on rollback;
+  boundary-crossing rollbacks are refused. Next: B (pot drift ~150 ppm/epoch), C (Plutus
+  +1453 cpu).
+- 2026-09-06 11:10 UTC preview at epoch 1057; pots 0 ppm vs Koios for epochs 1051–1057
+  (1054: −146 ppm, one epoch, under investigation) — workstream B acceptance holding.
+- 2026-09-06 12:20 UTC bugs 66/67 (PLAN_LEDGER_INTEGRITY.md C): the Plutus mismatches were
+  the evaluator's V1/V2 division costs (V3 defaults substituted), a `c02·y` typo in the V3
+  quadratic, V3 multiplyInteger sizes, and two script-context encodings (interval closures,
+  V1/V2 stake credential). Reference tooling in tools/uplc-ref; contexts identical to aiken's.
+- 2026-09-06 11:51 UTC preview halted at slot 94710858 (epoch 1096): the chain's
+  max_tx_ex_mem rose to 16.5 M by governance and we never enacted it (bug 68: committee
+  updates required a committee vote; Conway governance-group parameters not decoded).
+  Governance rules fixed, byte-level parameter decoder, `scripts/repair-governance.ts`
+  applied at epoch 1096 (statuses, enactments, committee, pointers, refunds, params), restarted.
+- 2026-09-06 13:35 UTC preview stalled 45 min at slot 98358104 (epoch 1138, 40 %): every
+  peer's header batch crossed the epoch-1139 boundary before the nonce was derivable and
+  was held whole, so the blocks the applier needed to reach the freeze point were never
+  requested (bug 69). Batches are now split at the boundary (headers before it are
+  validated and fetched first, the rest held); the hold warning is throttled to 30 s.
+- 2026-09-06 13:36 UTC preview halted at slot 98785139 (bug 70: pool relay with a port and
+  no address rejected by ledger-ts). Vendored ledger-ts 0.5.12 accepts it; restarted.
+- 2026-09-06 14:35 UTC second boundary stall (epoch 1148→1149, 30 min): the split alone did not
+  get the pre-boundary blocks fetched; forced range flush after the pre-boundary part, slot
+  ranges logged, restarted (bug 69 addendum).
+- 2026-09-06 15:10 UTC third boundary stall (epoch 1170): root cause found — a promoted
+  primary's restarted stream queued behind its own held verifier batch. Held batches now
+  abort on stream restart/termination. Restarted.
+- 2026-09-06 15:40 UTC UI: the epoch badge shows "current / target" while syncing in all
+  three surfaces — node's built-in /dashboard (`targetEpoch` in /metrics from the best peer
+  tip), the Solid web dashboard (`tip.targetEpoch` from dashboard-server, whose epoch math is
+  now per-network instead of preprod-only) and the desktop Control Center (clock epoch).
+- 2026-09-06 17:22 UTC preview halted at the epoch-1270 boundary: cost-model change enacted on
+  chain, not by us (bug 71: expired DReps counted in the tally denominator). Fixed with dormant
+  epoch tracking; restarted, boundary re-run.
+- 2026-09-06 17:45 UTC deferred VRF landed (bug 69 follow-up): headers of an epoch without a
+  derivable nonce are accepted with KES/op-cert/chaining checked and the VRF + leader rule
+  verified in bulk once the applier reaches the freeze point. Preview steady state 55 →
+  97 blocks/s, hold time 0, about 4 cores (the applier's serial ~10 ms/block is now the
+  next ceiling; a CPU profile of the main thread is the right tool from here).
+- 2026-09-06 18:10 UTC at ~97 blocks/s the main thread is saturated: /health latency 0.2–3 s,
+  one 17 s outlier (epoch-boundary work, ~6 s stake snapshot + rewards, blocks the loop; an
+  epoch now passes every ~45 s). The monitor's "slot 0" reports are those timeouts, not a
+  restart. Next perf items: boundary work off the main thread or chunked; applier ~10 ms/block.
+- 2026-09-06 18:40 UTC boundary cost found: `rewards` had no index on `stake_credentials`, so
+  every reward lookup scanned the table — 53 k payouts × 2 statements per boundary took
+  12–165 s (variance = page cache under host memory pressure). Unique index added, payouts and
+  payout records written as JSON-driven batch upserts, reward phases timed in the log.
+- 2026-09-06 19:30 UTC main-thread SQL profile (`GEROLAMO_SQL_PROFILE=1`, per-statement timing at
+  the `sql` proxy, top list every minute) after a Bun CPU profile showed 62 % of the main
+  thread inside synchronous SQLite: (1) two COUNT(*) queries per /metrics poll (215 + 101 ms,
+  every second) = a third of the thread → 30–60 s caches; (2) applied-block checks fetched the
+  whole block blob → existence-only query, skipped when the header is pending; (3) legacy
+  explorer dual-writes (tx_index / block_tx / address_tx) dropped, readers already prefer mb_*;
+  (4) explorer per-row inserts folded into one JSON statement per table (little gain: the cost
+  is B-tree page misses in huge tables, not statement count); (5) stake snapshot reads a
+  trigger-maintained `stake_balance` table (3.7 s → 0.8 s per boundary; verified equal to the
+  UTxO aggregate to the lovelace). Write counts from Bun include trigger changes: the strict
+  known-inputs check and the restore count now use RETURNING. Per-block main-thread SQL
+  ~11.6 → ~5.5 ms; preview ~100 blocks/s when the host is quiet.
+- 2026-09-06 20:30 UTC explorer projection moved to its own worker and database file
+  (`<db>.explorer.db`, src/db/minibf/explorerWorker.ts + explorerIndexer.ts): the applier posts
+  per-tx deltas in ledger order, the worker applies them and rollbacks, mini-Blockfrost reads
+  the explorer file (genesis-input join split into two queries). History is copied from the
+  ledger DB in the background, paused while the node bulk-syncs (>20 tx/s), spent marks
+  repaired after the copy. First deploy died on `BEGIN IMMEDIATE` (it also reserves the
+  attached ledger DB the applier holds → SQLITE_BUSY): deferred BEGIN + busy_timeout, the loop
+  survives errors. The ~20 min of blocks applied while that worker was dead have no explorer
+  rows in either DB (gap, slots ≈118.75M–119.49M; needs a backfill from blocks).
+  Rules-ahead prep no longer awaits the witness verdict on the main thread (4 ms/block).
+- 2026-09-06 20:35 UTC explorer gap backfilled (scripts/explorer-backfill.ts, 7 724 blocks / 10 653 txs
+  in 18 s with the node stopped); the history copy resumes from a saved position across
+  restarts; mini-Blockfrost verified against the explorer file for recent, old and gap
+  transactions. Preview at epoch 1411 of 1412.
+- 2026-09-06 20:35 UTC **PREVIEW AT TIP** (epoch 1412, slot 122 070 900) from genesis under strict
+  validation. Pots at tip: treasury −21 ppm/epoch relative, reserves −160 k ADA (−22 ppm): a fixed
+  leak of ≈480 ADA/epoch since the alignment at 1050 — our reward payouts exceed the chain's by
+  ≈1 000 ADA/epoch (chain returns undistributed rewards to reserves). verify-pots now also
+  prints the actual pot movements (the per-epoch "spikes" were deposit/donation flows that the
+  reward-cut column does not carry). Per-account comparison for epoch 1393 running.
+
+- 2026-09-06 23:00 UTC reward leak at the tip explained (bug 72): the formula is exact with the
+  chain's inputs (operator 30 282 766 458 and member 1 042 038 for perf epoch 1391 reproduced to the
+  lovelace); our inputs were stale — reward balances carry the excess of long-fixed bugs (+2.93 M ADA
+  over Koios' reward total), balances count as stake, so every snapshot total, every β and every
+  reward came out +0.13 %. Repair script `scripts/repair-reward-balances.ts` (Koios snapshots →
+  `epoch_stake_cred` 1410–1412, balances −= snapshot excess, pots = `totals`). Pot floor fixed
+  (single floor over η·ρ·reserves).
+- 2026-09-07 02:50 UTC found the node stalled since 22:30 UTC on a dead one-block fork (bug 73,
+  slot 122 077 808): outvote rollback only deferred, single-point FindIntersect, origin fallback
+  banning every honest peer. Fixed (immediate k-guarded rollback, multi-point intersect, no origin
+  fallback when resuming). The Claude session itself was OOM-killed meanwhile; the node's RSS stayed
+  ≈1 GB. Koios `pool_delegators_history` needs `order=stake_address.asc` to paginate (unordered pages
+  overlap: 15 416 of 69 985 rows lost on the largest preview pool).
+- 2026-09-07 03:35 UTC node back at the tip (epoch 1413) after two restarts with the bug-73 fixes; the
+  fork at 122 077 808 resolved by the node itself (1 block, 22 deltas, 5 journal updates undone).
+  Repair of bug 72 not applied yet: Koios quota spent (429) before snapshot 1412 and the balances
+  were fetched, and the session's permission classifier refused the DB-writing scripts — the
+  operator has to run `scripts/repair-reward-balances.ts … --apply` (node stopped) once Koios
+  answers again; see open item 10. New open item 11: Plutus shadow mismatches on one script family
+  since the 1413 boundary (costs shifted for builtins ≥ `d`).
+- 2026-09-07 04:45 UTC bug 74: V1/V2 cost-model arrays of 332 entries were read with V3 names by
+  the machine (language inferred from array length, V3 tested first) — since epoch 1270. Fixed in
+  `machinesFor` (named V1/V2 conversion, first 166/175 entries as aiken maps them), regression
+  test with the epoch-1413 cost models; node restarted 04:44 UTC. Official Blockfrost preview
+  (project id from the user) now feeds `repair-reward-balances.ts --blockfrost`; Blockfrost has
+  no `/epochs/1414/stakes` yet, so the balance phase waits for it (guard added; snapshots
+  1411/1412 dry-run from Blockfrost in progress).
+- 2026-09-07 05:45 UTC user decision: rebuild preview from a Mithril snapshot instead of repairing
+  the balances (the errors are historical state; a replay with the fixed code is the honest proof).
+  Mithril-fed full replay: `mithril-bootstrap --network preview --blocks-only` (preview aggregator
+  added; certificate chain walk needs > 128 hops — 8192 now; 8 parallel chunk downloads ≈ 10/s;
+  block store ≈ 20 chunks/s) fills `gerolamo-preview-chain/chain.db` with the certified chain
+  (epoch 1413, immutable file 28 260, 15.4 GB), `scripts/serve-chain.ts` serves it over N2N on
+  127.0.0.1:3101, and a fresh node in `gerolamo-preview-mithril/` (topology: that local root plus
+  the public roots) replays it under the normal full validation. Progress file
+  `mithril-preview/progress.json` → dashboard card (scripts/dashboard-server.ts
+  `--mithril-progress`, port 3050). Old preview DB (156 GB) to be wiped when the block store is
+  ready; the Koios/Blockfrost balance repair is dropped.
+- 2026-09-07 06:10 UTC Mithril progress surfaced everywhere: `mithril-bootstrap` writes
+  `<download-dir>/progress.json` (phase, chunks, blocks, rate, ETA); the node's `/metrics` and
+  `/stats` carry it when `GEROLAMO_MITHRIL_PROGRESS` names the file and add the replay state
+  ("replaying certified chain: slot x of y (N %)", then "live") from the DB tip; the web dashboard
+  (scripts/dashboard-server.ts `--mithril-progress`) shows the same card. The desktop app reads
+  `/metrics.mithril` (user wires its own card).
+- 2026-09-07 07:30 UTC cutover done: block store complete (4 638 662 blocks, slot 122 087 503,
+  23.3 GB; download 12 chunks/s, store 7.7 chunks/s, 1 h 38 min in total), old preview DB and
+  scratch DBs wiped (212 GB free), `serve-chain.ts` on 127.0.0.1:3101, fresh node in
+  `gerolamo-preview-mithril/` under the supervisor with `GEROLAMO_MITHRIL_PROGRESS`. Two snags:
+  the topology file needs `useLedgerAfterSlot` (validator rejects it otherwise) and the relay
+  script must not call `ensureInitialized()` on a block store (its once-per-database ledger
+  repairs scan the certificate history of every stored block — minutes of CPU for nothing).
+  The local root is dialed first at start; a restart was needed once because the hot set had
+  filled with public peers before the relay came up. First 30 000 blocks (Alonzo-era preview):
+  ≈190 blocks/s.
+- 2026-09-07 07:45 UTC per user: the explorer / mini-Blockfrost projection is not a priority
+  during the replay — `sync.skipIndexWhileBehind: true` in the fresh node's overlay pauses it
+  while > 1 epoch behind (paused at slot ≈ 2.4 M) and resumes near the tip; the gap gets
+  `scripts/explorer-backfill.ts` afterwards. Direction confirmed: ledger DB standalone, explorer
+  and Blockfrost share `preview.explorer.db` (already the layout).
+- 2026-09-07 07:50 UTC bug 75: our relay dropped the first > 64 KB block (mux segment length is
+  16-bit; no segmentation in the library's send) — `sendN2NResponder` now splits at 12 288 bytes.
+  Relay and node restarted; relay primary again at slot 2.9 M (epoch 33). The dashboard-server
+  monitor's "node unreachable" lines were a quoting bug in the monitor, replaced by a helper.
+- 2026-09-07 08:30 UTC profiling round on the local-relay replay (bugs 76/77): main-thread CPU
+  profile (3 min) attributed with `scripts/cpuprofile-top.ts --callers`: cbor eager assert
+  messages 8 %, WebSocket publish for nobody 2.7 %, leader math per header 2.6 %, candidate
+  BigInt sweep 4 %, main-thread UPLC decode 2 %, SQL run/prepare 6 % (left), bech32 address
+  strings for utxo rows 2 % (left: storage format), postMessage 1.9 % (left). Fixed the first
+  five, cut hot peers to 3 for the replay, gated the per-header DEBUG line. 31 → 57 blocks/s in
+  epochs 48–49. `bun --cpu-prof` itself balloons memory (15 GB in 4 min, 9.7 GB in 2 min):
+  windows ≤ 2 min, supervisor `GEROLAMO_BUN_FLAGS` passthrough, guard on RSS. Bun's heap
+  snapshot (SIGUSR2 summary) walks the whole heap — hourly is too often during a sync.
+- 2026-09-07 08:45 UTC SQL pass on the replay (bug 76, second part): per-transaction pot
+  updates → per block, opcert counter cache, debug-only reference-script count gated. Header
+  DEBUG spam gone (0 lines since 08:24; the log stopped growing). Rates on the same chain:
+  31 → 57 blocks/s (epochs 48–49) after the first pass; 131 blocks/s in epochs 52–59 before
+  the SQL pass. Next candidates left in the profile: UTxO row lookups (rules gather + apply),
+  bech32 address strings for utxo rows, worker postMessage payloads, per-block blockExists.
+- 2026-09-07 09:05 UTC SQL pass results (bug 76, second part): main-thread SQL 12.5 → 6.4 s per
+  minute, 164 k → 57 k statements. Spends are now served from the rules pre-read plus a
+  recent-outputs cache (60 000 entries, cleared on rollback): 69 632 known / 107 007 recent / 91
+  database lookups in the first minutes — the pre-read never held outputs of earlier in-flight
+  blocks (the overlay only deleted spent rows), so two thirds of preview spends hit a SELECT per
+  transaction. Left: the per-transaction DELETE … RETURNING (inherent unless batched per block),
+  the rules pre-read SELECT, one fee-pot UPDATE per block, block/header inserts.
+- 2026-09-07 09:00 UTC third applier pass (bug 76): per-block DELETE + one flush per block,
+  rules-job payload without the per-block copy of params/genesis (once per worker), bech32
+  address cache, `isHex` regex (ledger-ts vendored 0.5.13 — `bun patch` cannot target a
+  `file:` tarball; fixed in the sibling repo and repacked). Profile before this pass (epoch 95):
+  SQLite run 14 % + values 4.7 % + prepare 2 %, postMessage 8.4 %, bech32 6 %, blake2b 2.7 %,
+  isHex 2.3 %.
+- 2026-09-07 09:05 UTC after the third pass: 120–137 blocks/s in epochs 108–113 (local relay,
+  three hot peers, projection paused), apply 1.75 ms/block (was 2.6–3.4), validate 0.07 ms (was
+  2.8), rules prep 1.7 ms; spends served 124 678 known / 59 474 recent-cache / 267 database;
+  RSS 3.4–3.8 GB with 20 workers, no growth trend yet. Fresh CPU profile being taken for the
+  next targets (blake2b on the applier, mux/cbor copies, rules-job resolved-input maps).
+- 2026-09-07 09:12 UTC fourth profile (epoch ≈ 120, 112 s): SQLite layer ≈ 20 % (run 10 %,
+  values 3 %, prepare 2 %, template parse 1.5 %, bun:sql 1.7 % — one range is already one
+  transaction), worker postMessage 5 % (rules jobs 3.7 %: the resolved-input maps), CBOR parse
+  ≈ 5 % (needed once on the applier for gather + apply), blake2b 2.2 % (tx hashes), `os.cpus()`
+  1.4 % (every /metrics poll — throttled to one sample per 5 s), mux segment loop copying the
+  remainder per segment 1.1 % (subarray now, ouroboros patch). bech32, isHex, UPLC decode and
+  the cbor asserts are gone from the profile. Left on the table: send resolved inputs to the
+  rules workers in a compact form (or let workers read them), tx hashing on the workers.
+- 2026-09-07 09:16 UTC rate is now density-bound: 63 blocks/s at epoch 128 with 86 UTxO deltas
+  per block (15 per block at epoch 113, where it ran 120–137 blocks/s) — 4.4 ms apply per
+  block, ≈ 50 µs per delta. Heap: 703 MB JS heap / 4.7 GB RSS one hour into a process (parsed
+  in-flight blocks, recent-outputs cache, pending headers); leak check needs two summaries
+  from one undisturbed process — the node now runs without further restarts.
+- 2026-09-07 09:50 UTC synchronous SQL writer (bug 76, fourth pass): `src/sqlSync.ts` replaces
+  Bun.SQL on the writer — bun:sqlite prepared statements (LRU 512), no query object or promise
+  per statement, `${sql(list)}` lists longer than 8 bound as one JSON parameter through
+  `json_each` (a per-length `IN (?, ?, …)` text re-prepared a huge statement per block and
+  thrashed the cache: the first window ran 87 µs/delta against the 51 µs Bun.SQL baseline).
+  Measured: applier statement mix in isolation 0.77–0.92 ms → 0.30–0.43 ms per block-like
+  transaction; on the replay 604 µs (Bun.SQL, slots 10.69–11.98 M) → 450 µs (slots
+  12.10–13.10 M) of apply per KB of block, at lower density, which penalises the new number.
+  SQL is now 0.23 ms of the 1.94 ms apply per block (the rest is CBOR, hashing, bookkeeping).
+  Default now (`GEROLAMO_SYNC_SQL=0` restores Bun.SQL); 278 DB tests pass. Node relaunched
+  without `GEROLAMO_SQL_PROFILE`. The earlier four entries of today were stamped ~40 minutes
+  ahead of the clock and are corrected above.
+- 2026-09-07 11:10 UTC leak check, one undisturbed process (pid 3477122, hourly SIGUSR2 class
+  summaries 10:06 → 11:06, `scripts/heap-diff.ts`): main JS heap 107 → 105 MB, largest class
+  growth Uint8Array +2 MB, nothing else above 1 MB — no leak on the applier. RSS swings 3.6–5.2 GB
+  with the 20 worker heaps (0.8–1.6 GB) and the unaccounted native pool (2.0–2.9 GB), both
+  tracking the number of parsed blocks in flight at the current density; no upward trend over
+  65 minutes of five-minute samples. Replay at epoch 283 (20 %), 98 blocks/s.
+- 2026-09-07 14:45 UTC fifth applier pass (bug 76). At epoch ~500 (preview's dense dApp
+  period) the replay had dropped to 34 blocks/s with the applier saturated at ≈ 29 ms per
+  block (rules prep 7.9, apply 6.0, witness wait 5.75, the rest header handling and GC). CPU
+  profile (120 s, pid 3565155): `rememberRecentOutput` 11.5 % self + `stakeKeyOfAddress`
+  8.3 % self — both caches evicted with `map.delete(map.keys().next().value)`, and JSC keeps
+  deleted Map entries as tombstones a fresh iterator walks first: 37 µs per eviction at a
+  steady 60 000 entries (0.8 µs with a queue). `Address.fromString` for the stake key of every
+  output (bech32 `isBech32` indexOf 9.6 %, `decodeBase32` 8 %) ≈ 20 %: the output's raw
+  address bytes were already in hand. Fixed: `src/utils/boundedMap.ts` (queue eviction) for
+  the recent-outputs, stake-key and parsed-address caches; `stakeKeyOfRawAddress` reads the
+  stake part from the 57-byte address. Left: rules-job `postMessage` 9.4 % (a JSON string
+  clones no faster than the Map — measured), SQLite 5.2 %, bech32 *encoding* of output
+  addresses ≈ 9 % on cache misses (`buffToUint5Arr`, polymod), `applyOverlay` copying the
+  resolved map per block 2.6 %. Measured after the two fixes: 56.6 blocks/s over
+  14:46–14:50 UTC (33.6 before), apply 6.0 → 2.7 ms, rules prep 7.9 → 2.8 ms. Then the bech32
+  encoding: output address strings went through ledger-ts `toString` → the library's bit-string
+  encoder (32 µs per address); `bech32Encode` in db/stakeCred.ts is typed-array now (2.7 µs,
+  checked against ledger-ts for every address form on both networks) and every Shelley output
+  address is encoded from its raw bytes. The remaining "witness wait" (8 ms/block) is not the
+  worker: signature verification costs 11 ms of worker CPU per block here (13 signatures at
+  0.83 ms); it is other main-thread work (header batches, mux, GC) interleaving at that await.
+  Profile after those (pid 3570967, 116 s): SQLite `values` 15 % — the rules pre-read decoding
+  tx_out rows for inputs the recent-outputs map already held (chained spends) — now served
+  from the map (`spentRowsStats.preread`), with a known hit at apply also dropping the map
+  entry; `os.cpus()` 2 % (the sampler every 5 s plus the CPU model re-read from /proc on every
+  /metrics poll) — /proc/stat and a cached model; overlay copies folded into one per
+  scheduled block (`applyOverlays`). Left: CBOR parse ≈ 10 % (one parse per block on the
+  applier), `postMessage` 5 %, blake2b 3 % (tx hashes), header pipeline ≈ 4 %.
+  Observation: stopping the node while an epoch's VRF checks are deferred (nonce not yet
+  derivable) logs "Deferred VRF verification … failed: ValidationPool closed"; the headers
+  of that window were applied and are not re-verified after the restart. Harmless on the
+  Mithril-certified chain; for live sync the resume should re-run the deferred check.
+- 2026-09-07 15:10 UTC sixth pass measured: 77.2 blocks/s over 14:58–15:07 UTC (44 544
+  blocks; 33.6 at 14:21–14:36 in a slightly denser stretch, 56.6 after the fifth pass), apply
+  1.34 ms/block, rules prep 1.5 ms; the pre-read takes ~99 % of its rows from the
+  recent-outputs map (10 108 map / 24 SQLite in the first minute). Replay at 38 % (epoch 533);
+  the node runs on this build without further restarts.
+- 2026-09-07 16:20 UTC bug 78: the 15:56 UTC "range pipeline failed" (strict per-block delete
+  count 14 vs 13) was a transaction listing one input twice (slot 50 778 243); refs are
+  deduplicated per transaction now. The reset dropped the local relay for one re-dial and the
+  retry passed. Also on the log: 143 Plutus-shadow budget mismatches of one kind (our units a
+  little above the declared budget) — noted under open item 11. The 15:21–15:52 slowdown to
+  41 blocks/s was two Playwright Chromium GPU processes of another project saturating all 20
+  cores, not the node.
+- 2026-09-07 17:40 UTC Plutus shadow mismatches resolved (bugs 79, 80). Method: one transaction per
+  mismatch family through `scripts/shadow-tx.ts` (Koios quota back) with `GEROLAMO_PLUTUS_DUMP_DIR`,
+  `scripts/aiken-simulate.ts` + `tools/uplc-ref` (built; `eval-tx` reproduces every declared unit,
+  `eval-prog` costs *our* dumped program, `show-prog`, `eval-text` with result and logs), and
+  `scripts/data-diff.ts` on the two contexts. Context bugs: signatories unsorted, redeemers in
+  witness order, Rewarding purpose without StakingHash (buildooor patch). Machine bugs, found with
+  the new per-builtin harness (`scripts/builtin-cost-diff.ts`, 275 programs, budgets and results
+  vs aiken) and a builtin-call trace on both machines (env `GEROLAMO_BUILTIN_TRACE`,
+  `UPLC_BUILTIN_TRACE` in the vendored crate): heap deduplication by a buggy deep equality bound
+  variables to older values (also O(heap) per binding); lambda left-application mutated the
+  captured environment; string size in bytes/8 instead of characters; Ed25519 cost linear in the
+  wrong argument; consByteString V1/V2 wrap; serialiseData map/chunk/bignum encoding. All 12
+  families and the harness are exact now. Validity-interval upper bound: aiken's crate always emits
+  an open bound; the ledger closed it before protocol version 9 — kept ours (pv-dependent), it did
+  not affect any of these units.
+- 2026-09-07 17:35 UTC halt at slot 63 504 075 (first block of preview epoch 735): V3
+  `script_data_hash` mismatch right after our boundary enacted cost-model action 1f47f3cf…
+  Koios: ratified 735, enacted 736; epoch 735 still carries the 251-entry V3 model, 736 the
+  297-entry one. Bug 81: enactment is one epoch after ratification (pulser set up at E,
+  completed at E+1) — implemented as a pending record in gov_state; governance tests adapted
+  (13 pass). The failed range's transaction had rolled the 735 boundary back, so the node
+  simply redoes it with the fix. Also explains why the earlier from-genesis run never saw
+  this: it validated these epochs with externally fetched parameters.
+- 2026-09-07 18:40 UTC bug 82 (governance tally snapshot): our replay enacted the pv-10 hard
+  fork at 744, the chain at 743 (Koios: ratified 742). Recomputing the tally offline
+  (`scripts/gov-tally.ts`) with the boundary's own snapshot reproduces the chain (62 % vs 46 %
+  with the previous snapshot). The tally now runs after the snapshot with the epoch's
+  parameters; the pending result is enacted at the next boundary as before. Governance tests
+  13/13, broader suites 425/425. Every other enactment up to the current epoch matches Koios.
+- 2026-09-07 19:25 UTC bug 83: committee hot-key authorisations recorded only for current
+  members; preview's seven members added at 994/998 authorised at 993 and their votes were
+  dropped — parameter change 602d8572… (committee_min_size 3, chain: ratified 998 / enacted
+  999) never ratified by us. `gov_committee_auth` keeps authorisations apart from membership;
+  the seven were restored from stored blocks (scan of epochs 980–1002) with the node stopped.
+  It will ratify late (next boundary) — the records for 999–enactment get corrected afterwards.
+  Open item 13: 35b81b42… ratified by us at 962, by the chain at 963 (DRep 3/4 threshold);
+  per-credential snapshots are pruned, so the node now logs every tally for the next case.
+- 2026-09-07 21:10 UTC PREVIEW REBUILT FROM GENESIS TO THE TIP. The Mithril-fed replay (block
+  store served by the local relay, fresh node under strict validation, 05:42 → 21:07 UTC for
+  4.64 M blocks) reached the certified tip (slot 122 087 503, epoch 1413); the relay was
+  stopped, the local root removed from the topology, and the node caught up to the live tip
+  from the public roots within a minute. Bugs 78–83 were found and fixed on the way (duplicate
+  inputs, script context and machine, governance enactment timing, tally snapshot, committee
+  hot keys); every governance enactment agrees with Koios, two record sets corrected by hand.
+  The local-root promotion guard now yields after 60 s without a header (the block store ends
+  at the certificate). Next: pots/stake/rewards vs Koios for the epochs after the old proof.
+- 2026-09-07 22:10 UTC pots/stake/rewards vs Koios after the rebuild: treasury +12 ppm per
+  epoch, rewards −300 ppm per epoch, active stake −316 ppm at the tip. Traced (Koios
+  pool_list for every pool, delegator diffs, account_info via POST for script stake
+  addresses): 383 B of the 488 B gap in two pools, both script stake credentials whose stake is
+  entirely reward balance — a pool's script reward account never credited (bug 84) and a
+  script return account whose 100 000-ADA deposit refund went to its key twin (bug 85, ten such
+  refunds). The remainder is the compounding lag those seeds cause through the performance
+  term. Fixed both (`rewardAccountTypedHex`), 19 governance/pool tests pass. Dingo (Blink Labs)
+  does not compute rewards natively — it imports reward inputs from a snapshot — so no
+  reference there; Koios remains the oracle. Decision: a third from-genesis replay with the
+  fixes, in a second directory beside the running node, is the only route to an exact state.
+- 2026-09-07 22:15 UTC tip-sync note: at slot 122 162 229 the tip node rolled back one block
+  and followed the branch a second peer confirmed (chain agrees with Koios afterwards); the
+  peer that served the losing branch is held as malicious for `maliciousHoldMs` (1 h). A
+  short fork is not misbehaviour — on mainnet that hold would churn honest peers; tune the
+  hold (or exempt confirmed-fork losers) before production. Third replay at 0.7 % after 16 min,
+  same pace as the first.
+- 2026-09-07 22:50 UTC third replay halted at slot 894 594 (epoch 10, V1 script_data_hash):
+  bug 86 — the startup repair (run by my restart at epoch 10) merged the Alonzo genesis cost
+  models over the epoch-8 update because derived records were incomplete (preview starts at
+  protocol 6, so the era-transition merge never runs). Fixed both sides; replay 3 restarted from
+  scratch with the fix. This one was invisible in replay 1 only because of a lucky restart time.
+- 2026-09-08 00:10 UTC bug 87 (verifier re-streams validated before the duplicate check; leader
+  check on a pruned epoch fell back to the live registry). Fixed in the header batch path; the
+  replay keeps running (its primary is the relay), the tip node gets the build on restart.
+- 2026-09-08 01:00 UTC tip node observation (not resolved): relaunched at 00:01, within a
+  minute of the epoch-1414 boundary, it looped for 50 min — every ~30 s the primary's ChainSync
+  restart reported "drain timed out", the peer was dropped and the next verifier promoted (52
+  switches, no blocks applied, 760 slots behind). A second relaunch at 00:53 (same code apart
+  from an indexed height lookup in the bug-87 filter) is clean: no switches, at the tip. The
+  drain waits on the network pipeline's in-flight count, not on our batch processing. Cause
+  not established; suspect a boundary-time race in re-anchoring. Watch for recurrence at the
+  next live boundaries (every 24 h on preview, 00:00 UTC).
+- 2026-09-08 06:10 UTC bugs 89 and 90 from replay 3's epoch-962 tally: 35b81b42… ratified at 962
+  again (chain 963). Traced with Koios' DRep power history: at 962 the chain had ≈ 73.5 % yes
+  against our 93 % because its denominator holds ≈ 15 T of unvoted stake we never saw. Our DRep
+  distribution came from the pool stake snapshot, so credentials that delegate a vote but no
+  stake, and every proposal deposit, were missing (Koios 2 415 DReps / 146.8 T at 1048, ours
+  216 / 117.3 T). Bug 90: a per-boundary `epoch_drep_stake` snapshot from balances, rewards and
+  live deposits; bug 89 (found on the way): deregistration now drops the DRep delegation too.
+  Governance tests 8/8. Replay 3 keeps running on the old build (effect limited to that one
+  tally); records to correct by hand, proof on the next replay. Replay 3 at 06:10: epoch ≈ 1 060.
+- 2026-09-08 07:15 UTC bug 90 checked numerically on replay 3's live state (read-only, epoch
+  1343): the new query's amounts for the 26 DReps our activity filter keeps match Koios'
+  `drep_voting_power_history` to ≤ 11 ppm (18.42 T, 12.28 T, 0.30 T; one 0.5 T DRep −0.3 %,
+  mid-epoch drift). Koios lists power for expired DReps as well (115 T, 30 T, 20 T giants
+  expired at 814/692/1036 — the same expiry epochs we compute), which the ledger excludes.
+  The old database's always-abstain total (255 T vs 119 T) carries deregistered credentials'
+  stale delegations — bug 89's territory; gone on a fresh replay.
+- 2026-09-08 08:20 UTC replay 3 reached the certified tip 07:41 (9 h 06 from genesis). Not exact:
+  pots per-epoch exact from 1400 but treasury −504 k ADA (bug 91: deposit refunds to
+  unregistered return accounts belong to the treasury; also enacted withdrawals — fixed, with
+  bug 92: treasury donations never reached the treasury — fixed, tests 10/10). Stake ±2 ppm and
+  rewards +1.8 ppm at 1405–1412, and the DRep tally aside, everything traces to one thing:
+  whole credentials counted differently from the chain in some epochs (+35.5 k ADA from the
+  first Conway epoch, +700 k at 767, −400 k at 1014–1288, +4.8 M for the single epoch 1029);
+  each pool's reward error equals that epoch's total-stake error. Local relay and replay 3
+  stopped (DB kept for diagnostics, read-only); the tip node stays up. A Koios pool-history
+  sweep over all 386 pools is running to place each credential; then Koios `account_updates`
+  on the candidate credential gives the certificate we mishandle. Replay 4 after that.
+- 2026-09-08 08:45 UTC bug 93: the +35.5 k ADA from epoch 647 is the one preview output at a
+  pointer address (35 553 ADA, credential 0c90492b…) that Conway stops counting; dropped at the
+  Babbage→Conway boundary now (tests 2/2). Remaining unexplained stake differences: +700 k ADA
+  at 767, −400 k ADA at 1014–1288, +4.8 M ADA at 1029 only — sweep running.
+- 2026-09-08 09:30 UTC the sweep placed every remaining stake difference: all multiples of the
+  100 k ADA governance deposit. Multi-epoch deficits = proposals the chain dropped at an
+  enactment (orphans/siblings) that we kept to expiry (bug 94, `dropOrphans`); single-epoch
+  surpluses = refunds we credited before the boundary's snapshot while the ledger credits after
+  it (bug 95, `applyBoundaryCredits` after snapshot + DRep tally). A deposit does not count as
+  pool stake while the proposal lives (Koios account history of 104b7df27a…: −200 k the epoch
+  after submission), only as DRep stake (bug 90, unchanged). Governance tests 11/11, pointer 2/2,
+  rewards 7/7, db 3/3, tsc clean. Seven bugs from replay 3 (89–95); replay 4 next.
+- 2026-09-08 09:50 UTC replay 4 (started 08:15 from a wiped DB, same relay/topology, with
+  GEROLAMO_MITHRIL_PROGRESS): 538 k blocks after 5 480 s against replay 3's 1 000 k at the same
+  wall time. Every CPU phase is ≈ 2× slower (weval 5.5 vs 2.4 ms, apply 2.9 vs 1.6, deliver 147
+  vs 76), worker and applier alike, with load 22 on 20 cores and a Brave + headless Chrome using
+  ≈ 7 cores — machine contention, not the new boundary code (which runs once per epoch). ETA at
+  the tip slips from ≈ 17:30 towards 02:00 UTC if the load stays. Both preprod databases were
+  deleted on Mike's instruction (6.9 GB); 155 GB free.
+- 2026-09-08 13:05 UTC replay 4 crossed Conway: pointer stake dropped at 646 (35 553 ADA),
+  a 1 ADA donation credited at 647. verify-stake: 646 exact, 647 (snapshot 646) +35 553 ADA,
+  648 exact — the drop must precede the hard-fork boundary's snapshot; moved. Replay 4 keeps
+  going (every other fix still gets its proof); its only known residual is that one pool's
+  epoch-647 rewards at +75 ppm. Decide at the tip whether that needs replay 5 before the swap.
+- 2026-09-08 13:45 UTC replay 4 through 775: bug 91 fired at 707/728/736/743 (200 k + 3 × 100 k
+  ADA to the treasury), bug 92 at 647/697, bug 95 confirmed (767 now +5 ADA instead of
+  +700 k). Pots exact to < 1 ADA at 758; the per-epoch pot record lagged the deferred credits by
+  one boundary (record only; `refreshPotSnapshot` after `applyBoundaryCredits` now). The only
+  residual is the pointer-order slip at 646: credential 0c90492b… earned ≈ 12.3 ADA for
+  performance epoch 647 that the chain did not pay (+12.3 M lovelace of stake 650–690, +5.2 M
+  from 700), plus +75 ppm on that pool's other members for that one epoch.
+- 2026-09-08 14:50 UTC replay 4: 35b81b42… ratified 963 / enacted 964 = chain (bug 90 proved); donations at 882/907/943/969 match replay 3's small treasury gaps (bug 92).
+- 2026-09-08 15:25 UTC replay 4: bug 94 fired (26 dropped at 994, 4 at 998), stake at 996 within
+  6 ADA. New: bug 96 (delaying actions: the parameter change behind the 997 committee update
+  ratified one epoch early; chain 998/999) — fixed, tests 12/12. The pointer credential
+  0c90492b… delegates to pool cb8ccb08…: its 12.3 ADA of unearned epoch-647 rewards and the
+  −6 ADA on that pool's other members are the whole 646 residual.
+- 2026-09-08 15:40 UTC bug 97 (leader/member rounding: one floor over the exact rational; our
+  floored-margin split paid the operator 1 lovelace short on a third of the epochs). Probably
+  the −3.5 k lovelace stake residual seen since Babbage. Rewards tests 9/9. Replay 4 continues
+  for the remaining proof points (1096, 1270, 1291, 1330, 1361–1370, the tip); replay 5 with
+  bugs 93-order, 96 and 97 afterwards is the exactness run.
+- 2026-09-08 17:10 UTC replay 4 at the certified tip (8 h 48 from genesis under heavy machine
+  load): all checkpoints on the chain's epochs; pots −13 / −65 ADA, stake +64 ADA, rewards
+  within 0.03 ppm — exactly the three residuals fixed during the run (pointer order, bug 96,
+  bug 97). Replay 5 started 17:07 from a wiped DB on the current tree (nothing else changed);
+  ETA at the certified tip ≈ 02:00 UTC. If exact: swap the tip node onto it in the morning.
+- 2026-09-08 21:50 UTC replay 5 through 649: total active stake EXACT (to the lovelace) at
+  645, 646, 647 and 648 — the pointer drop now precedes the hard-fork snapshot, and the
+  −3.7 k lovelace residual carried since Babbage is gone (bug 97 rounding). First lovelace-exact
+  Conway snapshots in the project.
+- 2026-09-08 22:15 UTC replay 5 through 738: pots EXACT at 737 (reserves and treasury diff 0),
+  every per-epoch treasury delta 0 ppm including the deposit forfeits at 707/728/736 and the
+  donations at 715; stake exact at 730/736/737. Tip node untouched at the live tip.
+- 2026-09-09 00:20 UTC replay 5 exact through snapshot 999 (stake, pots, 997/998/999
+  governance = chain). At 1000 +100 k ADA: bug 98, a double refund of a proposal that expired and
+  was orphaned in the same boundary (the bug-94 sweep ran before the expiry marking). Fixed,
+  tests 13/13. Replay 5 continues to the tip as a scout for 1000–1413 under the new rules;
+  replay 6 (the exactness run) starts when it gets there, ≈ 03:00 UTC.
+- 2026-09-09 00:10 UTC tip node (old build + bugs 87/88) crossed the live 1415 boundary cleanly: no primary promotion, reward update and snapshot in 4 s. The 2026-09-08 00:01 churn loop did not recur (it followed a relaunch at the boundary; still unexplained, watch the next relaunch-at-boundary).
+- 2026-09-09 02:20 UTC replay 5 at the certified tip (9 h 05): exact through snapshot 999,
+  bug 98 only after (+109 k ADA stake, reserves −9.4 k ADA, rewards +36…73 ppm at 1405–1410);
+  all checkpoints 1096/1270/1291/1330/1361/1367/1370 on the chain's epochs. Replay 6 started
+  02:15 from a wiped DB (bug 98 fixed, nothing else changed); ETA ≈ 11:30 UTC. If exact: swap.
+- 2026-09-09 07:05 UTC replay 6 (started 02:15, bug 98 fixed): exact at 646–676 and 700, pots
+  exact at 706 (reserves −1 lovelace, being located). At 06:46:06 the applier hit SQLITE_BUSY
+  on a plain write (the sync writer had no busy_timeout; the only concurrent access was a
+  read-only verify-stake run), reset the range pipeline, re-anchored on the DB tip and promoted
+  a public verifier to primary; the relay reconnected as a verifier. No data lost (stake and
+  pots verified after). `PRAGMA busy_timeout = 10000` added to the sync client for the next
+  process; the running replay keeps going on the public primary at ≈ 170 blocks/s.
+- 2026-09-09 08:20 UTC replay 6 through 1048: stake exact at 999/1000/1001/1003/1010/1020/1030/1040, reserves and treasury diff 0 at 1040 (bug 98 confirmed: 999 'expired 4, dropped 0'); 997/998/999 and 1012/1013 on the chain's epochs. First replay exact past 1000.
+- 2026-09-09 09:50 UTC REPLAY 6 EXACT at the certified tip (7 h 29 from genesis): pots diff 0,
+  stake OK at every check, rewards 48/48 OK, all checkpoints on the chain's epochs. Ten ledger
+  bugs (89–98) between replay 3 and this one. Relay stopped; the node catches the live tip from
+  public peers, then its database replaces the tip node's (3035).
+- 2026-09-09 10:20 UTC SWAP DONE. Replay 6 caught the live tip from public peers (after the
+  local-root promotion bug 99 and the migration-marker bug 100 surfaced on its relaunch —
+  both fixed in the tree, state verified untouched), its live 1414 and 1415 boundaries were
+  exact, and its database replaced the tip node's: gerolamo-preview-mithril/preview.db is the
+  lovelace-exact ledger, node 3035 relaunched on it, dashboard 3050 relaunched, old 58 GB DB
+  deleted (153 GB free). gerolamo-preview-mithril2 keeps config/topology and the
+  replay3/4/5-history.db extracts for future proof replays. Next: preview pool registration.
+- 2026-09-09 21:50 UTC snapshot bootstrap phase C done: `import-state` decodes the Mithril
+  ancillary `state` (NewEpochState + Praos state) into our tables; verified table by table
+  against the replay-6 ledger at epoch 1415 (all boundary-frozen tables exact, see
+  PLAN_SNAPSHOT_BOOTSTRAP.md). The comparison with the node's own state found two more ledger
+  divergences — bug 101 (DRep unregistration must clear the delegations to it: 1 339 stale rows
+  in the live DB), bug 102 (DRep expiry is materialised at activity time) and bug 103 (certificate
+  effects of one tx applied out of order: one lost vote delegation) — all fixed with tests; the live database's stale rows and the epoch-1415 DRep distribution are corrected from
+  the snapshot and the tip node relaunched on the fixed code. Next: phase D (ancillary
+  signature, `mithril-bootstrap --ledger-state`), then phase E acceptance.
+- 2026-09-09 23:05 UTC phase D done (ancillary manifest verification, `mithril-bootstrap
+  --ledger-state`), phase E started: a fresh preview node (3036, gerolamo-preview-mithril2)
+  built in 8 minutes from the certified chunks plus the verified ancillary state at slot
+  122 316 253 is at the live tip under strict validation. Its 1416 and 1417 boundaries decide the
+  acceptance (Koios + the tip node's replay-6 database). Dashboard 3051.
+- 2026-09-10 00:45 UTC phase E, boundary 1416: after a rebuild of the imported database (the
+  importer's stake balances doubled on a repeated import — fixed), the snapshot-bootstrapped
+  node's 1416 boundary is identical to the tip node's: reward update for 1414 to the lovelace,
+  stake snapshot 1 543 271 529 766 798, pots, parameters, nonces, DRep stake, governance tallies.
+  The comparison exposed bug 104 on the *replay* side (rolled-back blocks stayed counted: 23
+  phantom blocks in 1415); both nodes corrected from their stored headers and relaunched on the
+  fix. Remaining acceptance: boundary 1417 (2026-09-11 ≈ 00:00 UTC) with Koios.
+- 2026-09-10 03:20 UTC preview pool registration started (PLAN_BLOCK_PRODUCTION.md): keys
+  generated in /media/bakon/data/cardano/gerolamo-preview-pool (pool id
+  8df215df1a762e84d826bae39516a424a76e81e649001a3f903eda12, VRF key hash a823dd1c…), operational
+  certificate issued from the tip node (counter 0, KES period 944). Waiting on two things only
+  Mike can do: fund payment.addr from the preview faucet, and forward a TCP port (3001) on the
+  router to this machine (public IP 50.202.37.130) so relays can pull our blocks — without inbound
+  reachability (or duplex on our outbound connections, not implemented) a forged block never
+  leaves this host.
+- 2026-09-10 05:00 UTC PREVIEW POOL REGISTERED: pool 8df215df… (stake registration, pool
+  registration, owner delegation) in tx 5beecbaf… at slot 122 359 348, recorded identically by
+  both nodes. Getting it there exposed three networking defects, all fixed and deployed on both
+  nodes: the shared mempool's buffer was never initialised (every local submit failed with
+  "insufficient space"), nothing ever sent tx-submission's MsgInit (peers never pulled our
+  transactions; the registration went through Koios in the end), and a ChainSync restart at
+  the tip dropped its peer after 30 s when the outstanding reply was the next block — both nodes
+  looped on that for 15 minutes without applying a block (the import node also sat on a losing
+  one-block fork and was rolled back by hand). Also in the tree: the once-per-network
+  "Gerolamo was here!" metadata transaction in the first forged block (PLAN_BLOCK_PRODUCTION.md).

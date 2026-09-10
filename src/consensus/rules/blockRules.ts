@@ -9,7 +9,7 @@ import { outputAddressString } from "../../utils/byronAddressString";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { readFileSync } from "node:fs";
-import { getUtxoRowsByRefs, registeredPools, rewardBalancesFor } from "../../db/rulesQueries";
+import { getUtxoRowsByRefs, registeredPools, rewardBalancesFor, type UtxoRow } from "../../db/rulesQueries";
 import { typedCredHexOf } from "../../db/stakeCred";
 import { getByronTxPayloads, isByronBlock } from "../../utils/eraAccessors";
 import type { EpochBodyParams } from "../epochParams";
@@ -26,19 +26,23 @@ import { collectByronWitnesses, collectShelleyWitnesses } from "./witnesses";
 import { shadowEvaluateTx } from "./plutusEval";
 
 import {
-    addressString, advanceResolved, applyOverlay, big, evaluateShelleyBlockWithInputs, feeSizeBytes, ruleParams, shelleyBlockOverlay, shelleyBlockReads, sliceLength, verifyItems,
+    addressString, advanceResolved, applyOverlay, applyOverlays, big, evaluateShelleyBlockWithInputs, feeSizeBytes, ruleParams, shelleyBlockOverlay, shelleyBlockReads, sliceLength, verifyItems,
     type BlockOverlay, type BlockRuleContext, type BlockRuleInputs, type BlockRuleOutcome,
 } from "./blockRulesPure";
 export {
-    applyOverlay, evaluateShelleyBlockWithInputs, feeSizeBytes, ruleParams, shelleyBlockOverlay, shelleyBlockReads,
+    applyOverlay, applyOverlays, evaluateShelleyBlockWithInputs, feeSizeBytes, ruleParams, shelleyBlockOverlay, shelleyBlockReads,
     type BlockOverlay, type BlockRuleContext, type BlockRuleInputs, type BlockRuleOutcome,
 } from "./blockRulesPure";
 
-async function resolveInputs(refs: Set<string>): Promise<Map<string, ResolvedUtxo>> {
-    const map = new Map<string, ResolvedUtxo>();
-    if (refs.size === 0) return map;
-    for (const row of await getUtxoRowsByRefs([...refs])) map.set(row.utxo_ref, resolvedFromRow(row));
-    return map;
+async function resolveInputs(refs: Set<string>): Promise<{ resolved: Map<string, ResolvedUtxo>; rows: Map<string, UtxoRow> }> {
+    const resolved = new Map<string, ResolvedUtxo>();
+    const rows = new Map<string, UtxoRow>();
+    if (refs.size === 0) return { resolved, rows };
+    for (const row of await getUtxoRowsByRefs([...refs])) {
+        resolved.set(row.utxo_ref, resolvedFromRow(row));
+        rows.set(row.utxo_ref, row);
+    }
+    return { resolved, rows };
 }
 
 let byronFeePolicy: { file: string; policy: { summand: bigint; multiplier: bigint } | null } | null = null;
@@ -67,8 +71,8 @@ export async function evaluateBlockRules(block: MultiEraBlock, ctx: BlockRuleCon
 /** Step 1: resolve inputs, pools and reward balances from the database (main thread). */
 export async function gatherShelleyBlockInputs(block: MultiEraBlock): Promise<BlockRuleInputs> {
     const { refs, poolIds, wdCreds } = shelleyBlockReads(block);
-    const [resolved, pools, rewardBalances] = await Promise.all([resolveInputs(refs), registeredPools(poolIds), rewardBalancesFor(wdCreds)]);
-    return { resolved, pools, rewardBalances };
+    const [{ resolved, rows }, pools, rewardBalances] = await Promise.all([resolveInputs(refs), registeredPools(poolIds), rewardBalancesFor(wdCreds)]);
+    return { resolved, pools, rewardBalances, rows };
 }
 
 
@@ -110,7 +114,7 @@ async function evaluateByronBlock(block: MultiEraBlock, ctx: BlockRuleContext): 
         }
         txs.push({ tx, witnesses, hash, refs: list });
     }
-    const resolved = await resolveInputs(refs);
+    const { resolved } = await resolveInputs(refs);
     // Same-block chaining: an input may be an earlier tx's output. Seed those
     // outputs up front (address + value) so witness roots can be matched, then
     // the per-tx pass below removes spent inputs as it goes.

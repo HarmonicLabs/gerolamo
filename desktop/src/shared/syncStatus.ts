@@ -158,6 +158,12 @@ export function epochBoundsAtSlot(
   };
 }
 
+/** The slot the network clock is at right now (the sync target), per network geometry. */
+export function networkTipSlotNow(network: GerolamoNetwork, nowMs = Date.now()): bigint {
+  const clock = NETWORK_CLOCKS[network];
+  return clock.slotOffset + BigInt(Math.max(0, Math.floor((nowMs - clock.systemStartMs) / 1000)));
+}
+
 export function deriveEpochProgress(
   tipSlot: bigint,
   networkTipSlot: bigint,
@@ -273,9 +279,7 @@ export function deriveGerolamoSyncStatus(
   network: GerolamoNetwork,
   nowMs = Date.now(),
 ): GerolamoSyncStatus {
-  const clock = NETWORK_CLOCKS[network];
-  const elapsedSlots = BigInt(Math.max(0, Math.floor((nowMs - clock.systemStartMs) / 1000)));
-  const networkTip = clock.slotOffset + elapsedSlots;
+  const networkTip = networkTipSlotNow(network, nowMs);
 
   let tip = 0n;
   try {

@@ -76,6 +76,19 @@ function mulDiv(a: bigint, num: bigint, den: bigint): bigint {
     return (a * num) / den;
 }
 
+/** Operator's share of a pool reward `f`: cost + ⌊(f − c)·(m + (1 − m)·owner/stake)⌋, one floor (Shelley `leaderRew`). */
+export function leaderShare(f: bigint, cost: bigint, marginNum: bigint, marginDen: bigint, ownerStake: bigint, poolStake: bigint): bigint {
+    if (f <= cost) return f;
+    if (poolStake <= 0n) return cost + ((f - cost) * marginNum) / marginDen;
+    return cost + ((f - cost) * (marginNum * poolStake + (marginDen - marginNum) * ownerStake)) / (marginDen * poolStake);
+}
+
+/** A member's share of a pool reward: ⌊(f − c)·(1 − m)·stake/poolStake⌋, one floor (Shelley `memberRew`). */
+export function memberShare(f: bigint, cost: bigint, marginNum: bigint, marginDen: bigint, memberStake: bigint, poolStake: bigint): bigint {
+    if (f <= cost || poolStake <= 0n) return 0n;
+    return ((f - cost) * (marginDen - marginNum) * memberStake) / (marginDen * poolStake);
+}
+
 export function computeEpochRewards(input: RewardsInput): RewardsOutput {
     const { params: p } = input;
     const dHigh = p.dNum * 5n >= p.dDen * 4n; // d ≥ 0.8
@@ -86,7 +99,9 @@ export function computeEpochRewards(input: RewardsInput): RewardsOutput {
         etaDen = input.expectedBlocks;
         if (etaNum > etaDen) { etaNum = 1n; etaDen = 1n; }
     }
-    const fromReserves = (((input.reserves * p.rhoNum) / p.rhoDen) * etaNum) / etaDen;
+    // `createRUpd`: deltaR1 = floor(min 1 η · ρ · reserves) — one floor over the exact rational
+    // (two nested floors come out 1 lovelace short on some inputs, e.g. preview epoch 1391).
+    const fromReserves = (input.reserves * p.rhoNum * etaNum) / (p.rhoDen * etaDen);
     const rewardPot = fromReserves + input.fees;
     const treasuryDelta = mulDiv(rewardPot, p.tauNum, p.tauDen);
     const R = rewardPot - treasuryDelta;
@@ -154,19 +169,19 @@ export function computeEpochRewards(input: RewardsInput): RewardsOutput {
                 }
             }
             if (poolReward <= 0n) continue;
-            // split: cost first, then margin, then proportional
-            const afterCost = poolReward > pool.cost ? poolReward - pool.cost : 0n;
-            const operatorMargin = poolReward > pool.cost ? mulDiv(afterCost, pool.marginNum, pool.marginDen) : 0n;
-            const forStake = afterCost - operatorMargin;
-            let operator = poolReward > pool.cost ? pool.cost + operatorMargin : poolReward;
-            if (pool.stake > 0n) operator += (forStake * pool.ownerStake) / pool.stake;
+            // Bug 97: leader and member shares are each ONE floor over the exact rational
+            // (Shelley rewardOnePool: leader = c + ⌊(f̂−c)(m + (1−m)·s/σ)⌋, member = ⌊(f̂−c)(1−m)·t/σ⌋).
+            // Flooring the margin first and redistributing the remainder paid the operator 1
+            // lovelace short and a member 1 long on some inputs (preview pool cb8ccb08…: 217 of
+            // 640 pre-Conway epochs −1 on its leader reward vs Koios).
+            const operator = leaderShare(poolReward, pool.cost, pool.marginNum, pool.marginDen, pool.ownerStake, pool.stake);
             const operatorCred = pool.rewardAccount;
             add(operatorCred, operator);
             const owners = new Set(pool.owners);
             let membersTotal = 0n;
             for (const m of pool.members) {
                 if (owners.has(m.credential)) continue; // paid through the operator's owner share
-                const share = pool.stake > 0n ? (forStake * m.stake) / pool.stake : 0n;
+                const share = memberShare(poolReward, pool.cost, pool.marginNum, pool.marginDen, m.stake, pool.stake);
                 if (share > 0n) {
                     add(m.credential, share);
                     membersTotal += share;

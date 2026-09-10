@@ -269,13 +269,75 @@ export function Main() {
      * Then optional processChunk apply into Gerolamo SQLite.
      */
     program
+        .command("extract")
+        .description("Parse-only extractor: immutable chunks → explorer (mb_*) database, no ledger rules (PLAN_SNAPSHOT_BOOTSTRAP)")
+        .requiredOption("--immutable-dir <dir>", "Directory with the .chunk/.primary/.secondary files")
+        .requiredOption("--explorer <path>", "Explorer SQLite file to write (created if missing)")
+        .option("--from-chunk <n>", "First chunk (inclusive)", (v) => parseInt(v, 10))
+        .option("--to-chunk <n>", "Last chunk (inclusive)", (v) => parseInt(v, 10))
+        .option("--workers <n>", "Decoder workers (default: cores − 2)", (v) => parseInt(v, 10))
+        .option("--finalize-only", "Only run the finalize pass (spent marks, input-side address rows, cursor)")
+        .option("--no-finalize", "Skip the finalize pass")
+        .action(async (o: any) => {
+            const { runExtract } = await import("./mithril/extract");
+            const r = await runExtract({
+                immutableDir: o.immutableDir, explorerPath: o.explorer, fromChunk: o.fromChunk, toChunk: o.toChunk, workers: o.workers,
+                finalizeOnly: !!o.finalizeOnly, noFinalize: o.finalize === false, log: (m) => console.log(m),
+            });
+            console.log(`extract: ${r.chunks} chunk(s), ${r.blocks} block(s), ${r.txs} tx(s), ${r.errors} error(s), finalized=${r.finalized}, ${r.seconds.toFixed(1)}s`);
+        });
+
+    program
+        .command("import-utxo")
+        .description("Snapshot bootstrap phase B: a Mithril ancillary `tables` file (utxohd-mem) → the utxo table of a database with our schema")
+        .requiredOption("--tables <path>", "ledger/<slot>/tables of the ancillary snapshot")
+        .requiredOption("--db <path>", "Target SQLite database (created with our schema if missing)")
+        .option("--limit <n>", "Import only the first n entries (testing)", (v) => parseInt(v, 10))
+        .option("--batch-size <n>", "Rows per transaction (default 5000)", (v) => parseInt(v, 10))
+        .action(async (o: any) => {
+            const { initSql } = await import("./sql");
+            const { ensureInitialized } = await import("./db");
+            initSql(o.db);
+            await ensureInitialized();
+            const { closeSql } = await import("./sql").then((m: any) => ({ closeSql: m.closeSql ?? (async () => {}) }));
+            await closeSql();
+            const { importUtxoFromTables } = await import("./mithril/importUtxo");
+            const r = await importUtxoFromTables({ tablesPath: o.tables, dbPath: o.db, limit: o.limit, batchSize: o.batchSize, log: (m) => console.log(m) });
+            console.log(`import-utxo: ${r.entries} entries, ${r.inserted} rows, ${r.errors} error(s), tags ${JSON.stringify(r.byTag)}, ${r.lovelace} lovelace, ${r.seconds.toFixed(1)}s`);
+        });
+
+    program
+        .command("import-state")
+        .description("Snapshot bootstrap phase C: a Mithril ancillary `state` file (NewEpochState + header state) → the ledger tables of a database with our schema")
+        .requiredOption("--state <path>", "ledger/<slot>/state of the ancillary snapshot")
+        .requiredOption("--db <path>", "Target SQLite database (created with our schema if missing)")
+        .option("--meta <path>", "ledger/<slot>/meta of the snapshot (records the node version)")
+        .action(async (o: any) => {
+            const { initSql } = await import("./sql");
+            const { ensureInitialized } = await import("./db");
+            initSql(o.db);
+            await ensureInitialized();
+            const { closeSql } = await import("./sql").then((m: any) => ({ closeSql: m.closeSql ?? (async () => {}) }));
+            await closeSql();
+            const { decodeLedgerSnapshot } = await import("./mithril/nesDecoder");
+            const { importLedgerState } = await import("./mithril/importState");
+            let nodeVersion: string | null = null;
+            if (o.meta) { try { nodeVersion = String(JSON.parse(await Bun.file(o.meta).text())?.cardano_node_version ?? "") || null; } catch { /* optional */ } }
+            const t0 = performance.now();
+            const snapshot = decodeLedgerSnapshot(await Bun.file(o.state).bytes());
+            console.log(`import-state: decoded epoch ${snapshot.epoch} slot ${snapshot.slot} in ${((performance.now() - t0) / 1000).toFixed(1)}s${nodeVersion ? ` (node ${nodeVersion})` : ""}`);
+            const r = importLedgerState({ dbPath: o.db, snapshot, nodeVersion, log: (m) => console.log(m) });
+            console.log(`import-state: done in ${r.seconds.toFixed(1)}s, ${r.warnings.length} warning(s)`);
+        });
+
+    program
         .command("mithril-bootstrap")
         .description(
             "Download/verify Mithril Cardano DB (pure-TS; external mithril-client binary optional), then optionally apply immutable chunks",
         )
         .option(
             "--network <name>",
-            "preprod | mainnet (selects aggregator + genesis vkey)",
+            "preprod | preview | mainnet (selects aggregator + genesis vkey)",
             process.env.NETWORK || "preprod",
         )
         .option(
@@ -334,6 +396,27 @@ export function Main() {
             "Also download ancillary ledger archive (probe only — UTxO extract still A2 blocked)",
         )
         .option(
+            "--progress-file <path>",
+            "Progress JSON for the dashboard (default <download-dir>/progress.json)",
+        )
+        .option(
+            "--download-concurrency <n>",
+            "Parallel chunk downloads (default 8)",
+            (v) => parseInt(v, 10),
+        )
+        .option(
+            "--blocks-only",
+            "Store the certified blocks only (block store for scripts/serve-chain.ts); no ledger apply",
+        )
+        .option(
+            "--ledger-state",
+            "Snapshot bootstrap: verify the ancillary manifest, store the certified blocks, import the UTxO set and the ledger state (implies --blocks-only --include-ancillary)",
+        )
+        .option(
+            "--ancillary-vkey <key>",
+            "Ancillary verification key (hex-of-JSON, file or URL; default: the network's published key)",
+        )
+        .option(
             "--db <path>",
             "SQLite path for apply (default: GEROLAMO_DB_PATH or .live/test.db)",
             process.env.GEROLAMO_DB_PATH || "./.live/test.db",
@@ -353,6 +436,11 @@ export function Main() {
                 toChunk?: number;
                 limitChunks?: number;
                 includeAncillary?: boolean;
+                blocksOnly?: boolean;
+                ledgerState?: boolean;
+                ancillaryVkey?: string;
+                progressFile?: string;
+                downloadConcurrency?: number;
                 db?: string;
             }) => {
                 const logger = new Logger({ logLevel: LogLevel.INFO });
@@ -368,6 +456,7 @@ export function Main() {
                             process.env.GEROLAMO_DB_PATH ||
                             "./.live/test.db",
                     );
+                    process.env.GEROLAMO_DB_PATH = dbPath; // names the store in the progress file too
                     initSql(dbPath);
                     logger.info(`DB: ${getSqlFilename()}`);
                     await ensureInitialized();
@@ -391,7 +480,12 @@ export function Main() {
                         fromChunk: options.fromChunk,
                         toChunk: options.toChunk,
                         limitChunks: options.limitChunks,
-                        includeAncillary: !!options.includeAncillary,
+                        includeAncillary: !!options.includeAncillary || !!options.ledgerState,
+                        blocksOnly: !!options.blocksOnly || !!options.ledgerState,
+                        ledgerState: !!options.ledgerState,
+                        ancillaryVkey: options.ancillaryVkey,
+                        progressFile: options.progressFile,
+                        downloadConcurrency: options.downloadConcurrency,
                     },
                     logger,
                 );

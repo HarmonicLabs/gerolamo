@@ -8,7 +8,7 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { NonceEvolver, type TicknResult } from "./nonceEvolver";
-import { getFirstSlotOfEpoch } from "./epochFromSlotCalculations";
+import { getFirstSlotOfEpoch, epochForSlot } from "./epochFromSlotCalculations";
 
 export interface StoredHeaderRow {
     slot: number;
@@ -46,16 +46,24 @@ export interface ReplayResult {
  * mixes in at the first boundary); when the rows cover the previous epoch it
  * is derived from them.
  */
-export function replayNonces(genesis: any, startEpoch: number, eta0Hex: string, rows: Iterable<StoredHeaderRow>, opts: { etaHHex?: string | null; etaVHex?: string; etaCHex?: string; stopAfterSlot?: bigint } = {}): ReplayResult {
+export function replayNonces(genesis: any, startEpoch: number, eta0Hex: string, rows: Iterable<StoredHeaderRow>, opts: { etaHHex?: string | null; etaVHex?: string; etaCHex?: string; protocolMajorForEpoch?: (epoch: number) => number | null | undefined; stopAfterSlot?: bigint } = {}): ReplayResult {
     const ev = new NonceEvolver(genesis);
     ev.bootstrap(startEpoch, eta0Hex, { etaHHex: opts.etaHHex ?? null, etaVHex: opts.etaVHex, etaCHex: opts.etaCHex });
     const ticks: TicknResult[] = [];
     let blocks = 0;
     const first = BigInt(getFirstSlotOfEpoch(startEpoch, genesis));
+    let pvEpoch = -1;
     for (const row of rows) {
         const f = nonceFactsOf(row);
         if (!f || f.slot < first) continue;
         if (opts.stopAfterSlot != null && f.slot > opts.stopAfterSlot) break;
+        if (opts.protocolMajorForEpoch) {
+            const e = Number(epochForSlot(f.slot));
+            if (e !== pvEpoch) {
+                pvEpoch = e;
+                ev.setProtocolMajor(e, opts.protocolMajorForEpoch(e));
+            }
+        }
         ticks.push(...ev.processBlock(f.slot, f.bnonce, f.prevHash));
         blocks++;
     }

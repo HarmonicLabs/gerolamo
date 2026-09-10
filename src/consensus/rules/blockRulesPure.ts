@@ -15,6 +15,7 @@ import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { typedCredHexOf } from "../../db/stakeCred";
 import type { EpochBodyParams } from "../epochParams";
+import type { UtxoRow } from "../../db/rulesQueries";
 import type { ValidationPool } from "../workers/ValidationPool";
 import { runWitnessVerifyJob, type WitnessItem } from "../workers/witnessJob";
 import { utxoRefOf, type ResolvedUtxo } from "./resolvedUtxo";
@@ -32,6 +33,12 @@ export interface BlockRuleContext {
     slot: bigint;
     /** Witness verdicts computed ahead of time by a worker (same items, same order); used when the count agrees. */
     preVerified?: boolean[] | null;
+    /**
+     * "rules": witnesses and ledger rules only (the applier waits on this); "shadow": only
+     * the Plutus shadow evaluation (fire-and-forget on a general worker; a 100 ms script
+     * budget held the applier for ~120 ms on 2 % of blocks); "both" (default): inline path.
+     */
+    phase?: "rules" | "shadow" | "both";
 }
 
 export interface BlockRuleOutcome {
@@ -158,6 +165,13 @@ export interface BlockRuleInputs {
     pools: Set<string>;
     /** Reward-account balances for the withdrawals in the block; undefined when reward pots are not tracked (withdrawal amounts then unchecked). */
     rewardBalances: Map<string, bigint> | undefined;
+    /**
+     * The stored UTxO rows behind `resolved` (only the refs the database held at gather
+     * time; outputs of in-flight blocks come from the overlay and have no row). The
+     * applier spends from these instead of reading the UTxO set a second time. Not sent
+     * to workers.
+     */
+    rows?: Map<string, UtxoRow>;
 }
 
 /** What a block reads from the ledger (refs, pool ids, withdrawal credentials). */
@@ -235,9 +249,48 @@ export function applyOverlay(inputs: BlockRuleInputs, prev: BlockOverlay): Block
     // created first, spent last: an output created and spent inside `prev` must not survive
     for (const [r, u] of prev.created) if (!resolved.has(r)) resolved.set(r, u);
     for (const r of prev.spent) resolved.delete(r);
+    let rows = inputs.rows;
+    if (rows && prev.spent.size) {
+        rows = new Map(rows);
+        for (const r of prev.spent) rows.delete(r);
+    }
     const pools = new Set(inputs.pools);
     for (const p of prev.poolsRegistered) pools.add(p);
-    return { resolved, pools, rewardBalances: inputs.rewardBalances };
+    // A withdrawal takes the whole reward balance and nothing refills it before the epoch
+    // boundary, so an account an in-flight block withdraws from is exactly empty for this one.
+    let rewardBalances = inputs.rewardBalances;
+    if (rewardBalances && prev.withdrawnCreds.size) {
+        rewardBalances = new Map(rewardBalances);
+        for (const c of prev.withdrawnCreds) if (rewardBalances.has(c)) rewardBalances.set(c, 0n);
+    }
+    return { resolved, pools, rewardBalances, rows };
+}
+
+/**
+ * `applyOverlay` for a sequence of in-flight blocks with one copy of each map instead of one
+ * per overlay (the lookahead applies up to RULES_AHEAD_DEPTH overlays per scheduled block;
+ * the copies were 2.6 % of the applier thread, 2026-09-07). Same result as folding
+ * `applyOverlay` over `prevs` in order.
+ */
+export function applyOverlays(inputs: BlockRuleInputs, prevs: readonly BlockOverlay[]): BlockRuleInputs {
+    if (prevs.length === 0) return inputs;
+    if (prevs.length === 1) return applyOverlay(inputs, prevs[0]!);
+    const resolved = new Map(inputs.resolved);
+    let rows = inputs.rows ? new Map(inputs.rows) : inputs.rows;
+    const pools = new Set(inputs.pools);
+    let rewardBalances = inputs.rewardBalances;
+    let balancesCopied = false;
+    for (const prev of prevs) {
+        for (const [r, u] of prev.created) if (!resolved.has(r)) resolved.set(r, u);
+        for (const r of prev.spent) resolved.delete(r);
+        if (rows && prev.spent.size) for (const r of prev.spent) rows.delete(r);
+        for (const p of prev.poolsRegistered) pools.add(p);
+        if (rewardBalances && prev.withdrawnCreds.size) {
+            if (!balancesCopied) { rewardBalances = new Map(rewardBalances); balancesCopied = true; }
+            for (const c of prev.withdrawnCreds) if (rewardBalances.has(c)) rewardBalances.set(c, 0n);
+        }
+    }
+    return { resolved, pools, rewardBalances, rows };
 }
 
 
@@ -264,8 +317,10 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
         perTx.push({ start: items.length, proves: c.proves, problems: c.problems });
         items.push(...c.items);
     }
-    const ok = ctx.preVerified && ctx.preVerified.length === items.length ? ctx.preVerified : await verifyItems(ctx.pool, items);
-    out.witnessesVerified = items.length;
+    const phase = ctx.phase ?? "both";
+    const ok = phase === "shadow" ? items.map(() => true)
+        : ctx.preVerified && ctx.preVerified.length === items.length ? ctx.preVerified : await verifyItems(ctx.pool, items);
+    out.witnessesVerified = phase === "shadow" ? 0 : items.length;
 
     // 3. rules per transaction
     const params = ruleParams(ctx.params, ctx.genesis, block.era, String(ctx.config?.network ?? "mainnet"));
@@ -298,7 +353,7 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
         const bodyLen = sliceLength(body), witLen = sliceLength(wits[i]);
         const auxLen = aux[i] ? sliceLength(aux[i]) : 1;
         const txSizeBytes = bodyLen != null && witLen != null && auxLen != null ? feeSizeBytes(bodyLen, witLen, auxLen) : null;
-        const r = evaluateTxRules({
+        const r = phase === "shadow" ? { failures: [] as string[], reports: [] as string[] } : evaluateTxRules({
             era: block.era,
             body,
             witnessSet: wits[i],
@@ -318,15 +373,19 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
             blockSteps += BigInt(rd.execUnits?.steps ?? rd.execUnits?.cpu ?? 0);
         }
         // Phase-2 shadow: run the scripts and compare with the block's verdict (never halts).
-        if (block.era >= 5 && r.failures.length === 0 && ((wits[i]?.redeemers ?? []) as any[]).length > 0) {
+        if (phase !== "rules" && block.era >= 5 && r.failures.length === 0 && ((wits[i]?.redeemers ?? []) as any[]).length > 0) {
             try {
-                const ev = await shadowEvaluateTx({ era: block.era, body, witnessSet: wits[i], bodyBytes: body.cborRef?.toBuffer?.() ?? null, witnessSetBytes: wits[i]?.cborRef?.toBuffer?.() ?? null, resolved, params: ctx.params, genesis: ctx.genesis, network: String(ctx.config?.network ?? "mainnet"), markedInvalid: invalid.has(i) });
+                const ev = await shadowEvaluateTx({ forceSample: phase === "shadow", era: block.era, body, witnessSet: wits[i], bodyBytes: body.cborRef?.toBuffer?.() ?? null, witnessSetBytes: wits[i]?.cborRef?.toBuffer?.() ?? null, resolved, params: ctx.params, genesis: ctx.genesis, network: String(ctx.config?.network ?? "mainnet"), markedInvalid: invalid.has(i) });
                 out.plutus.evaluated += ev.evaluated;
                 out.plutus.skipped += ev.skipped;
                 if (ev.mismatch) {
                     out.plutus.mismatches++;
                     out.reports.push(`tx[${i}]: plutus shadow: ${ev.mismatch}`);
-                    const key = ev.mismatch.replace(/[0-9a-f]{12,}…?/g, "X").replace(/\d+/g, "N").slice(0, 80);
+                }
+                if (ev.note) {
+                    // coverage gap (budget, decoding), not a verdict disagreement
+                    out.reports.push(`tx[${i}]: plutus shadow skipped: ${ev.note}`);
+                    const key = ev.note.replace(/[0-9a-f]{12,}…?/g, "X").replace(/\d+/g, "N").slice(0, 80);
                     out.plutus.skipReasons[key] = (out.plutus.skipReasons[key] ?? 0) + 1;
                 }
             } catch (err) {

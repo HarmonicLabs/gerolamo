@@ -88,6 +88,9 @@ function isGenesisDelegateIssuer(
     return false;
 }
 
+/** GEROLAMO_HEADER_TRACE=1: log every passed header (nine lines per header, from every hot peer — 22 000 lines a minute on a fast sync). */
+const HEADER_TRACE = process.env.GEROLAMO_HEADER_TRACE === "1";
+
 const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
     "1157920892373161954235709850086879078532699846656405640394575840079131296399360000000000000000000000000000000000",
 );
@@ -215,6 +218,7 @@ export class ValidatePostBabbageHeader {
         h: MultiEraHeader,
         nonce: Uint8Array,
         config: any,
+        options?: HeaderValidationOptions,
     ): Promise<boolean | null> {
         const genesis = await getCachedShelleyGenesis(config);
         if (!genesis) return false;
@@ -240,7 +244,7 @@ export class ValidatePostBabbageHeader {
         );
 
         const vrfInput = this.getVrfInput(header.body.slot, nonce);
-        const correctProof = this.verifyVrfProof(
+        const correctProof = options?.skipVrf ? true : this.verifyVrfProof(
             vrfInput,
             header.body.vrfResult.proofHash,
             header.body.vrfPubKey,
@@ -292,7 +296,9 @@ export class ValidatePostBabbageHeader {
         const issuerHex = toHex(issuer.toCborBytes());
         const passed = correctProof && verifyLeaderStake &&
             verifyOpCertValidity && verifyKES;
-        logger.info(
+        // Per-header result at debug: at info it was half of a 4 GB log (10 lines per header,
+        // every verifier re-delivers every header). Failures are reported by the caller.
+        if (!passed || HEADER_TRACE) (passed ? logger.debug : logger.info).call(logger,
             `Header validation ${
                 passed ? "PASSED" : "FAILED"
             } era=${h.era} slot=${header.body.slot}`,
@@ -437,6 +443,7 @@ export class ValidatePreBabbageHeader {
         h: MultiEraHeader,
         nonce: Uint8Array,
         config: any,
+        options?: HeaderValidationOptions,
     ): Promise<boolean | null> {
         const genesis = await getCachedShelleyGenesis(config);
         if (!genesis) return false;
@@ -457,14 +464,14 @@ export class ValidatePreBabbageHeader {
         const isKnownLeader = this.verifyKnownLeader(issuer, genesis);
 
         // Two VRFs per TPraos header, both proven under the pool's VRF key.
-        const leaderCorrect = this.verifyVrfProof(
+        const leaderCorrect = options?.skipVrf ? true : this.verifyVrfProof(
             this.getVrfInput(header.body.slot, nonce, "leader"),
             header.body.leaderVrfResult.proofHash,
             header.body.vrfPubKey,
             header.body.leaderVrfResult,
             "pre-babbage",
         );
-        const nonceCorrect = this.verifyVrfProof(
+        const nonceCorrect = options?.skipVrf ? true : this.verifyVrfProof(
             this.getVrfInput(header.body.slot, nonce, "nonce"),
             header.body.nonceVrfResult.proofHash,
             header.body.vrfPubKey,
@@ -516,7 +523,9 @@ export class ValidatePreBabbageHeader {
         const issuerHex = toHex(issuer.toCborBytes());
         const passed = correctProof && verifyLeaderStake &&
             verifyOpCertValidity && verifyKES;
-        logger.info(
+        // Per-header result at debug: at info it was half of a 4 GB log (10 lines per header,
+        // every verifier re-delivers every header). Failures are reported by the caller.
+        if (!passed || HEADER_TRACE) (passed ? logger.debug : logger.info).call(logger,
             `Header validation ${
                 passed ? "PASSED" : "FAILED"
             } era=${h.era} slot=${header.body.slot}`,
@@ -541,16 +550,26 @@ export class ValidatePreBabbageHeader {
 }
 
 // For backward compatibility, provide a function that chooses the validator
+export interface HeaderValidationOptions {
+    /**
+     * Skip the VRF proof checks (they need the epoch nonce). Used for headers of an epoch
+     * whose nonce the applier has not derived yet: KES, op-cert and structure are checked
+     * now, the VRF and the leader rule once the nonce is known (before the block is applied).
+     */
+    skipVrf?: boolean;
+}
+
 export async function validateHeader(
     h: MultiEraHeader,
     nonce: Uint8Array,
     config: any,
+    options?: HeaderValidationOptions,
 ): Promise<boolean> {
     // Byron (0 = EBB, 1 = main) has no VRF/KES; structural checks only.
     if (isByronEra(h.era)) return validateByronHeader(h, config);
     const validator = h.era >= 6
         ? new ValidatePostBabbageHeader()
         : new ValidatePreBabbageHeader();
-    const result = await validator.validate(h, nonce, config);
+    const result = await validator.validate(h, nonce, config, options);
     return result ?? false;
 }

@@ -1,7 +1,8 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
-import { applyByronTxPayload, applyInvalidTransaction, applyTransaction, type SqlClient, flushPendingUtxoWrites } from "../db";
+import { applyByronTxPayload, applyInvalidTransaction, applyTransaction, deleteBlockSpends, newBlockSpends, type KnownUtxoRow, type SqlClient, flushPendingUtxoWrites } from "../db";
 import { logger } from "../utils/logger";
 import { sql } from "../sql";
+import { addDonationToPot, addFeeToPot } from "../db/leaderState";
 import {
     getByronTxPayloads,
     getShelleyTxBodies,
@@ -25,15 +26,15 @@ export async function applyBlock(
     blockHash: Uint8Array,
     client?: SqlClient,
     blockHeight: number | null = null,
-    opts: { epoch?: number; govActionLifetime?: number; era?: number } = {},
+    opts: { epoch?: number; govActionLifetime?: number; era?: number; knownInputs?: Map<string, KnownUtxoRow> } = {},
 ): Promise<void> {
     if (isByronBlock(block as any)) {
         const payloads = getByronTxPayloads(block as any);
         if (payloads.length === 0) {
             return;
         }
-        for (const entry of payloads) {
-            await applyByronTxPayload(entry, blockHash, client);
+        for (const [txIndex, entry] of payloads.entries()) {
+            await applyByronTxPayload(entry, blockHash, client, { slot: Number(slot), txIndex, blockHeight });
         }
         await flushPendingUtxoWrites(client ?? sql);
         return;
@@ -46,11 +47,26 @@ export async function applyBlock(
     // Phase-2 failures marked by the producer: only their collateral is consumed.
     const invalid = new Set<number>((((block as any).invalidTransactions ?? []) as Array<number | bigint>).map((i) => Number(i)));
     let txIndex = 0;
+    const feeAcc = { total: 0n, donations: 0n };
+    const blockSpends = newBlockSpends();
     for (const txBody of txBodies) {
-        const ctx = { slot: slotNum, txIndex, blockHeight, epoch: opts.epoch, govActionLifetime: opts.govActionLifetime, era: opts.era };
+        const ctx = { slot: slotNum, txIndex, blockHeight, epoch: opts.epoch, govActionLifetime: opts.govActionLifetime, era: opts.era, knownInputs: opts.knownInputs, feeAcc, blockSpends };
         if (invalid.has(txIndex)) await applyInvalidTransaction(txBody, blockHash, client, ctx);
         else await applyTransaction(txBody, blockHash, client, ctx);
         txIndex++;
+    }
+    // Outputs first (a same-block spend needs its row), then one DELETE for every input of the block.
+    await flushPendingUtxoWrites(client ?? sql);
+    await deleteBlockSpends(client ?? sql, blockSpends);
+    if (feeAcc.total > 0n) {
+        // The block's fees, once (every transaction used to update the pot row itself).
+        const db = client ?? sql;
+        try {
+            await addFeeToPot(db, feeAcc.total);
+            if (feeAcc.donations > 0n) await addDonationToPot(db, feeAcc.donations);
+        } catch {
+            /* pots not initialised yet (pre-Shelley) */
+        }
     }
     await flushPendingUtxoWrites(client ?? sql); // multi-row writes of this block's UTxO rows and deltas
 }

@@ -150,6 +150,8 @@ export interface ParsedHeader {
 export type HeaderSummary = Omit<ParsedHeader, "multiEraHeader"> & {
     /** Shelley+ facts the main-thread leader rules consume (from the validation worker). */
     shelley?: { issuerHash: string; vrfKeyHash: string; leaderValue: Uint8Array; opcertCounter: number; opcertKesPeriod: number };
+    /** VRF proofs and the leader rule still to be checked (the epoch nonce was not derivable yet). */
+    vrfDeferred?: boolean;
 };
 
 function readUInt(bytes: Uint8Array, what: string): number {

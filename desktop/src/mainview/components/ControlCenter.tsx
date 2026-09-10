@@ -674,7 +674,15 @@ const ControlCenter: Component = () => {
                         <Badge variant="muted">{sync()!.eraName}</Badge>
                       </Show>
                       <Show when={sync()?.epoch != null}>
-                        <Badge variant="muted">Epoch {sync()!.epoch}</Badge>
+                        <Badge
+                          variant="muted"
+                          title={sync()?.epochProgress && !sync()!.epochProgress!.live ? `Applying epoch ${sync()!.epoch}; the network clock is in epoch ${sync()!.epochProgress!.clockEpoch} (${sync()!.epochProgress!.epochsBehind} behind)` : undefined}
+                        >
+                          Epoch {sync()!.epoch}
+                          <Show when={sync()?.epochProgress && !sync()!.epochProgress!.live}>
+                            <span class="text-text-muted"> / {sync()!.epochProgress!.clockEpoch}</span>
+                          </Show>
+                        </Badge>
                       </Show>
                       <Show when={sync()?.multiPeer?.mode}>
                         <Badge variant="muted">{sync()!.multiPeer!.mode} sync</Badge>

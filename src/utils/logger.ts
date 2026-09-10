@@ -443,7 +443,10 @@ export class Logger {
     }
 }
 
-export const logger = new Logger({ logLevel: LogLevel.DEBUG });
+// INFO by default: the node applies config.logs on the main thread, but validation workers
+// share this singleton unconfigured and printed nine DEBUG lines per header (22 000 lines a
+// minute, 17 GB a day, and the formatting on the applier's critical path).
+export const logger = new Logger({ logLevel: LogLevel.INFO });
 process.on("beforeExit", async () => await logger.flushAll());
 // No SIGINT/SIGTERM handlers here: they used to call process.exit(0) right after the
 // flush and cut the node's own shutdown (open range transaction, peers, workers) short.

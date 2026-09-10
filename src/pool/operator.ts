@@ -9,7 +9,7 @@
  * body keys 0 inputs, 1 outputs, 2 fee, 3 ttl, 4 certificates. Everything is
  * built with the node's CBOR copy; nothing here logs key material.
  */
-import { Cbor, CborArray, CborBytes, CborMap, CborNegInt, CborSimple, CborTag, CborText, CborUInt } from "@harmoniclabs/cbor";
+import { Cbor, CborArray, CborBytes, CborMap, CborNegInt, type CborObj, CborSimple, CborTag, CborText, CborUInt } from "@harmoniclabs/cbor";
 import { blake2b_224, blake2b_256, deriveEd25519PublicKey_sync, signEd25519_sync, verifyEd25519Signature_sync } from "@harmoniclabs/crypto";
 import { bech32Encode } from "../db/stakeCred";
 import { envelopeBytes, envelopeOfBytes, readTextEnvelope, type TextEnvelope } from "./keystore";
@@ -209,6 +209,14 @@ export interface TxBodyFields {
     /** invalid_hereafter (absolute slot), optional. */
     ttl?: bigint;
     certificates: CborArray[];
+    /** Auxiliary data (a metadata map); its hash goes into body key 7 and the data into the tx. */
+    auxiliaryData?: CborObj;
+}
+
+/** CIP-20 style message metadata: `{674: {"msg": [lines…]}}` (each line at most 64 bytes). */
+export function messageMetadata(lines: string[]): CborMap {
+    for (const l of lines) if (new TextEncoder().encode(l).length > 64) throw new Error("metadata message line longer than 64 bytes");
+    return new CborMap([{ k: new CborUInt(674n), v: new CborMap([{ k: new CborText("msg"), v: new CborArray(lines.map((l) => new CborText(l))) }]) }]);
 }
 
 export function encodeTxBody(f: TxBodyFields): Uint8Array {
@@ -220,6 +228,7 @@ export function encodeTxBody(f: TxBodyFields): Uint8Array {
     ];
     if (f.ttl != null) entries.push({ k: new CborUInt(3n), v: new CborUInt(f.ttl) });
     if (f.certificates.length) entries.push({ k: new CborUInt(4n), v: set(f.certificates) });
+    if (f.auxiliaryData) entries.push({ k: new CborUInt(7n), v: new CborBytes(new Uint8Array(blake2b_256(Cbor.encode(f.auxiliaryData).toBuffer()))) });
     return Cbor.encode(new CborMap(entries)).toBuffer();
 }
 
@@ -243,10 +252,10 @@ export function signTxBody(bodyBytes: Uint8Array, keys: KeyPair[]): VkeyWitness[
     return out.sort((a, b) => (hex(keyHash(a.vkey)) < hex(keyHash(b.vkey)) ? -1 : 1));
 }
 
-/** `[body, {0: #258([[vkey, sig]…])}, true, null]` — Conway transaction bytes. */
-export function encodeSignedTx(bodyBytes: Uint8Array, witnesses: VkeyWitness[]): Uint8Array {
+/** `[body, {0: #258([[vkey, sig]…])}, true, auxiliary_data | null]` — Conway transaction bytes. */
+export function encodeSignedTx(bodyBytes: Uint8Array, witnesses: VkeyWitness[], auxiliaryData?: CborObj): Uint8Array {
     const ws = new CborMap([{ k: new CborUInt(0n), v: set(witnesses.map((w) => new CborArray([new CborBytes(w.vkey), new CborBytes(w.signature)]))) }]);
-    return Cbor.encode(new CborArray([Cbor.parse(bodyBytes), ws, new CborSimple(true), new CborSimple(null)])).toBuffer();
+    return Cbor.encode(new CborArray([Cbor.parse(bodyBytes), ws, new CborSimple(true), auxiliaryData ?? new CborSimple(null)])).toBuffer();
 }
 
 export function verifyWitnesses(bodyBytes: Uint8Array, witnesses: VkeyWitness[]): boolean {
@@ -266,7 +275,7 @@ export function buildWithMinFee(fields: Omit<TxBodyFields, "fee"> & { changeInde
         if (outputs[fields.changeIndex]!.lovelace < 0n) throw new Error("change output cannot cover the fee");
         const body = encodeTxBody({ ...fields, outputs, fee });
         const witnesses = signTxBody(body, fields.keys);
-        const tx = encodeSignedTx(body, witnesses);
+        const tx = encodeSignedTx(body, witnesses, fields.auxiliaryData);
         const need = fields.minFeeA * BigInt(tx.length) + fields.minFeeB + (fields.feeMargin ?? 0n);
         if (need <= fee) return { body, tx, fee, witnesses };
         fee = need;

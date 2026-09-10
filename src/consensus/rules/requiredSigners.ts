@@ -15,6 +15,7 @@
 import { Address, ByronAddress, CredentialType, VoterKind } from "@harmoniclabs/cardano-ledger-ts";
 import type { ResolvedUtxo } from "./resolvedUtxo";
 import { utxoRefOf } from "./resolvedUtxo";
+import { BoundedMap } from "../../utils/boundedMap";
 
 export interface RequiredWitnesses {
     keyHashes: Set<string>;
@@ -29,15 +30,13 @@ const hex = (h: any): string => String(h?.toString?.() ?? h ?? "").toLowerCase()
 
 /** Parse a stored address; null when it is not a Shelley or Byron address. */
 /** Parsed-address cache: the same address strings recur across a block's inputs and outputs; parsing bech32/base58 through ledger-ts cost ~5 % of the apply thread. */
-const parsedAddressCache = new Map<string, Address | ByronAddress | null>();
-const PARSED_ADDRESS_CACHE_MAX = 20_000;
+const parsedAddressCache = new BoundedMap<string, Address | ByronAddress | null>(20_000);
 
 export function parseStoredAddress(addr: string): Address | ByronAddress | null {
     if (!addr) return null;
     const hit = parsedAddressCache.get(addr);
     if (hit !== undefined) return hit;
     const parsed = parseStoredAddressUncached(addr);
-    if (parsedAddressCache.size >= PARSED_ADDRESS_CACHE_MAX) parsedAddressCache.delete(parsedAddressCache.keys().next().value!);
     parsedAddressCache.set(addr, parsed);
     return parsed;
 }
@@ -134,14 +133,29 @@ function addStakeAddress(out: RequiredWitnesses, sa: any): void {
 export function requiredWitnesses(txBody: any, resolved: Map<string, ResolvedUtxo>): RequiredWitnesses {
     const out: RequiredWitnesses = { keyHashes: new Set(), scriptHashes: new Set(), bootstrapRoots: new Set(), problems: [] };
 
-    for (const list of [txBody.inputs, txBody.collateralInputs] as any[][]) {
-        for (const input of list ?? []) {
-            const ref = utxoRefOf(input);
-            if (!ref) continue;
-            const u = resolved.get(ref);
-            if (!u) continue; // "bad inputs" is its own rule
-            addAddressCredential(out, u.address, ref);
-        }
+    for (const input of (txBody.inputs ?? []) as any[]) {
+        const ref = utxoRefOf(input);
+        if (!ref) continue;
+        const u = resolved.get(ref);
+        if (!u) continue; // "bad inputs" is its own rule
+        addAddressCredential(out, u.address, ref);
+    }
+    // Collateral inputs need their *key* witnesses (witsVKeyNeeded covers inputs ∪ collateral)
+    // but never a script: scripts are needed for spending inputs only, and when Plutus runs
+    // a script-locked collateral is rejected by the collateral rule instead. A transaction
+    // with no redeemers may list a script-address collateral that is simply never consumed
+    // (preview slot 78658821, bug 64).
+    for (const input of (txBody.collateralInputs ?? []) as any[]) {
+        const ref = utxoRefOf(input);
+        if (!ref) continue;
+        const u = resolved.get(ref);
+        if (!u) continue;
+        const a = parseStoredAddress(u.address);
+        if (!a) continue;
+        if (a instanceof ByronAddress) { out.bootstrapRoots.add(hex(Buffer.from(a.rootHash).toString("hex"))); continue; }
+        const pc: any = (a as Address).paymentCreds;
+        const isScript = pc?.type === CredentialType.Script || pc?.type === "script" || pc?.type === 1;
+        if (!isScript) addCredential(out, pc);
     }
 
     for (const cert of (txBody.certs ?? []) as any[]) {

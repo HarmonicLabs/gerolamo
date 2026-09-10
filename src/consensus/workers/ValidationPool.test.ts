@@ -88,6 +88,7 @@ describe("ValidationPool.verifyRange", () => {
         expect(r.ok).toBe(false);
         expect(r.index).toBe(1);
         expect(r.reason).toContain("advertised");
+        expect(r.gotHash).toBe(expected[1]); // the served block's own hash, so a slot-battle branch switch can be told from bad data
     });
 
     test("a tampered body fails the body-hash check", async () => {

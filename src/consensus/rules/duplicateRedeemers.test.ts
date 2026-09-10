@@ -14,6 +14,6 @@ describe("effective redeemers before Conway", () => {
         const eff = effectiveRedeemers(raw, 6);
         expect(eff.length).toBe(1);
         expect(BigInt(eff[0].execUnits.mem)).toBe(3_322_788n);
-        expect(effectiveRedeemers(raw, 7).length).toBe(6);
+        expect(effectiveRedeemers(raw, 7).length).toBe(1); // the list form collapses in every era (preview slot 61206431 under Conway)
     });
 });

@@ -34,6 +34,7 @@ import {
     ensurePotSnapshotsTable,
     readPotSnapshot,
     recordPotSnapshot,
+    settleDonations,
 } from "../db/leaderState";
 import { rationalFromDecimal } from "./rules/overlay";
 
@@ -136,13 +137,16 @@ export async function runEpochRewards(epoch: number, genesis: any, shelleyStart:
         const cur = (await readRewardPots()) ?? pots;
         await recordPotSnapshot(sql, epoch, { reserves: cur.reserves, treasury: cur.treasury, feesCollected: cur.feePot });
         await updateRewardPots(sql, { reserves: 0n, treasury: 0n, resetFees: true });
+        await settleDonations(sql);
         return;
     }
     const perfEpoch = epoch - 2;
     // Idempotent across restarts: a boundary re-run must not move the pots twice.
     const done = (await sql`SELECT 1 FROM reward_epochs WHERE performance_epoch = ${perfEpoch}`.values()) as unknown[][];
     if (done.length) return;
+    const tBuild = performance.now();
     const built = await buildRewardInputs(epoch, genesis, shelleyStart, slotsPerEpoch);
+    const msBuild = Math.round(performance.now() - tBuild);
     if (!built) return;
     const { input, prevReserves: prevReservesUsed, fees, totalBlocks, expectedBlocks } = built;
     const out = computeEpochRewards(input);
@@ -150,13 +154,17 @@ export async function runEpochRewards(epoch: number, genesis: any, shelleyStart:
     let paidTotal = 0n;
     for (const v of out.paid.values()) paidTotal += v;
     // Rewards land now (boundary into `epoch`), as do the treasury cut and the reserves movement.
+    const tWrite = performance.now();
     await creditRewards(sql, out.paid);
     await recordRewardPayouts(sql, perfEpoch, out.paid);
     await recordPoolRewards(sql, perfEpoch, out.pools);
+    const msWrite = Math.round(performance.now() - tWrite);
     await updateRewardPots(sql, { reserves: out.reservesDelta, treasury: out.treasuryDelta, resetFees: false });
+    const donated = await settleDonations(sql); // bug 92: the epoch's treasury donations
+    if (donated > 0n) logger.info(`Epoch ${epoch}: ${donated} lovelace of treasury donations added to the treasury`);
     await recordRewardEpoch(sql, perfEpoch, { rewardPot: out.rewardPot, treasuryDelta: out.treasuryDelta, paid: paidTotal, unclaimed: out.unclaimed, pools: pools.length, accounts: out.paid.size });
     const cur = (await readRewardPots()) ?? pots;
     await recordPotSnapshot(sql, epoch, { reserves: cur.reserves, treasury: cur.treasury, feesCollected: cur.feePot });
     await updateRewardPots(sql, { reserves: 0n, treasury: 0n, resetFees: true });
-    logger.info(`Epoch ${epoch}: reward update for epoch ${perfEpoch} applied — pot ${out.rewardPot} (reserves ${prevReservesUsed}, fees ${fees}), treasury +${out.treasuryDelta} (forfeited ${out.forfeited}), ${paidTotal} to ${out.paid.size} account(s) across ${pools.length} pool(s) (${totalBlocks}/${expectedBlocks} blocks), ${out.unclaimed} unclaimed`);
+    logger.info(`Epoch ${epoch}: reward update for epoch ${perfEpoch} applied — pot ${out.rewardPot} (reserves ${prevReservesUsed}, fees ${fees}), treasury +${out.treasuryDelta} (forfeited ${out.forfeited}), ${paidTotal} to ${out.paid.size} account(s) across ${pools.length} pool(s) (${totalBlocks}/${expectedBlocks} blocks), ${out.unclaimed} unclaimed; inputs ${msBuild} ms, writes ${msWrite} ms`);
 }

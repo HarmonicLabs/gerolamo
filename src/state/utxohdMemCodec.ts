@@ -832,7 +832,13 @@ export function decodeTxOutValue(
         if (off + 32 > val.length) {
             return { ok: false, error: "dataHash32 truncated", off };
         }
-        const dataHash32Hex = bytesToHex(val.subarray(off, off + 32));
+        // DataHash32 is four Word64s packed host-endian (LE), like Addr28Extra: each word is
+        // reversed on the way back to the hash's bytes (2026-09-09: 988 preview snapshot
+        // outputs compared against the genesis replay with every 8-byte group mirrored).
+        const dh = Buffer.from(val.subarray(off, off + 32));
+        const dhBE = Buffer.alloc(32);
+        for (let w = 0; w < 4; w++) dhBE.writeBigUInt64BE(dh.readBigUInt64LE(w * 8), w * 8);
+        const dataHash32Hex = bytesToHex(dhBE);
         off += 32;
         return {
             ok: true,

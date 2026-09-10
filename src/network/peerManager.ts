@@ -109,6 +109,12 @@ export interface ProducerConfig {
     stateFile?: string;
     /** Log leadership without forging (read-only check against cardano-cli). */
     dryRun?: boolean;
+    /**
+     * Temporary: the first block Gerolamo forges on a network carries a transaction from this
+     * wallet with the metadata message "Gerolamo was here!" (CIP-20 label 674). Once per
+     * network, remembered in `stateFile`.
+     */
+    greeting?: { paymentSkeyFile: string; paymentAddress: string };
 }
 
 export interface GerolamoConfig {
@@ -464,6 +470,7 @@ async function connectWarm(
                 gov.detachClient(pKey);
             },
         );
+        peer.source = rec.source;
         const timeoutMs =
             config.peerGovernor?.connectTimeoutMs ?? DEFAULT_CONNECT_TIMEOUT_MS;
         await withTimeout(
@@ -557,11 +564,14 @@ async function promoteToHot(
  * Spec (network-design): hot→warm demotion keeps the bearer for keepalive / ΔQ.
  * ChainSync stops; socket + keepalive stay. Do NOT markFail (that cold-drops).
  */
-function demoteHotToWarm(rec: PeerRecord, gov: PeerGovernor): void {
-    // Never demote the chain driver. The newest hot peer is demoted first, and a verifier
-    // just promoted to primary for throughput is exactly that peer. One guard, here, so
-    // every demotion path (excess, silent, future ones) is covered.
-    if (rec.key === consensus?.primaryPeerKey()) return;
+function demoteHotToWarm(rec: PeerRecord, gov: PeerGovernor, opts: { allowPrimary?: boolean } = {}): void {
+    // Never demote the chain driver for excess: the newest hot peer is demoted first, and a
+    // verifier just promoted to primary for throughput is exactly that peer. A *silent* primary
+    // is different (bug 99): it has served nothing for `silentMs`, and demoting it lets
+    // unregisterHotPeer promote a successor — otherwise the node sits on a dead primary for
+    // ever (preview 2026-09-09: the local block store stopped at the certified tip and the
+    // node logged "Silent hot→warm 127.0.0.1:3101" every tick without moving).
+    if (rec.key === consensus?.primaryPeerKey() && !opts.allowPrimary) return;
     logger.info(`Hot→warm demotion ${rec.key} (${consensus?.roleOf(rec.key) ?? "no-role"})`);
     consensus?.unregisterHotPeer(rec.key);
     const client = clientsByKey.get(rec.key);
@@ -726,7 +736,7 @@ async function governorTick(
                 logger.info(
                     `Silent hot→warm ${rec.key} idleMs=${now - last}`,
                 );
-                demoteHotToWarm(rec, gov);
+                demoteHotToWarm(rec, gov, { allowPrimary: true });
             }
         }
 

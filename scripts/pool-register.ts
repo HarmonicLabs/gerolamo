@@ -7,7 +7,8 @@
  *       issue node.cert for the current KES period from the node's tip, bump node.counter
  *   bun scripts/pool-register.ts register --dir <pooldir> --node http://localhost:3035 \
  *       --pledge <lovelace> --cost <lovelace> --margin 0.01 --relay host:port [--relay ip:port …] \
- *       [--metadata-url URL --metadata-file FILE] [--skip-stake-reg] [--ttl 7200] [--submit]
+ *       [--metadata-url URL --metadata-file FILE] [--skip-stake-reg] [--pool-update] [--ttl 7200] [--submit]
+ *       (--pool-update: the pool is already registered, e.g. a relay change — no pool deposit)
  *       builds stake registration + pool registration + owner delegation, signs with payment,
  *       stake and cold keys, writes tx.signed (TextEnvelope) and optionally submits to the node.
  *
@@ -107,6 +108,7 @@ if (cmd === "keygen") {
     if (arg("metadata-url")) metadata = { url: arg("metadata-url")!, hash: poolMetadataHash(new Uint8Array(readFileSync(need("metadata-file")))) };
     const certs: CborArray[] = [];
     const skipStakeReg = arg("skip-stake-reg") === "true";
+    const poolUpdate = arg("pool-update") === "true"; // re-registration of a registered pool: same certificate, no deposit
     if (!skipStakeReg) certs.push(stakeRegistrationCert(stakeHash, keyDeposit));
     certs.push(poolRegistrationCert({
         operator: poolId, vrfKeyHash: Uint8Array.from(Buffer.from(vrfKeyHashOf(vrf.vkey), "hex")), pledge: BigInt(need("pledge")), cost,
@@ -117,7 +119,7 @@ if (cmd === "keygen") {
     const utxos = await nodeJson<Array<{ tx_hash: string; output_index: number; amount: Array<{ unit: string; quantity: string }> }>>(`/api/v0/addresses/${encodeURIComponent(addrText)}/utxos`);
     const usable = utxos.filter((u) => u.amount.every((a) => a.unit === "lovelace"));
     const total = usable.reduce((s, u) => s + BigInt(u.amount.find((a) => a.unit === "lovelace")?.quantity ?? "0"), 0n);
-    const deposits = (skipStakeReg ? 0n : keyDeposit) + poolDeposit;
+    const deposits = (skipStakeReg ? 0n : keyDeposit) + (poolUpdate ? 0n : poolDeposit);
     if (!usable.length || total <= deposits) { console.error(`payment address holds ${total} lovelace in ${usable.length} UTxO(s); needs more than the deposits ${deposits} plus fee. Fund ${addrText}`); process.exit(1); }
     const built = buildWithMinFee({
         inputs: usable.map((u) => ({ txHash: Uint8Array.from(Buffer.from(u.tx_hash, "hex")), index: u.output_index })),

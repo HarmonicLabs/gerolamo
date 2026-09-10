@@ -60,6 +60,7 @@ export async function ensureLeaderStateTables(): Promise<void> {
         fee_pot INTEGER NOT NULL,
         initialized_epoch INTEGER NOT NULL
     )`;
+    try { await sql`ALTER TABLE reward_pots ADD COLUMN donation_pot INTEGER NOT NULL DEFAULT 0`; } catch { /* exists */ }
     await sql`CREATE TABLE IF NOT EXISTS pending_rewards (
         pay_at INTEGER NOT NULL,
         stake_key TEXT NOT NULL,
@@ -229,6 +230,35 @@ export async function refundPoolDeposits(db: SqlClient, retired: RetiredPool[], 
     return { refunded, toTreasury };
 }
 
+/**
+ * Boundary payouts to reward accounts (governance deposit refunds, enacted treasury
+ * withdrawals): only registered accounts are credited; the rest is "unclaimed" and stays in /
+ * goes to the treasury (Conway EPOCH: `refunds = payout ∣ dom rewards`,
+ * `treasury = treasury − withdrawals + donations + unclaimed`). Bug 91: every refund was
+ * credited, so preview epoch 707 paid 200 k ADA of expired deposits to an unregistered return
+ * account that the chain sent to the treasury (728/736/743 one action each). Keys are typed
+ * credential hex; pots are the caller's business.
+ */
+export async function creditRegisteredAccounts(db: SqlClient, amounts: Map<string, bigint>): Promise<{ credited: bigint; unclaimed: bigint; unregistered: string[] }> {
+    let credited = 0n, unclaimed = 0n;
+    const unregistered: string[] = [];
+    if (amounts.size === 0) return { credited, unclaimed, unregistered };
+    const registered = await registeredStakeKeys();
+    const credit = new Map<string, bigint>();
+    for (const [account, amount] of amounts) {
+        if (amount <= 0n) continue;
+        if (registered.has(account.toLowerCase())) {
+            credit.set(account, (credit.get(account) ?? 0n) + amount);
+            credited += amount;
+        } else {
+            unclaimed += amount;
+            unregistered.push(account);
+        }
+    }
+    if (credit.size) await creditRewards(db, credit);
+    return { credited, unclaimed, unregistered };
+}
+
 export async function registeredPoolVrf(poolId: string): Promise<string | null> {
     const rows = (await sql`SELECT vrf_key_hash FROM pool_params WHERE pool_id = ${poolId.toLowerCase()}`.values()) as unknown[][];
     return rows[0]?.[0] == null ? null : String(rows[0][0]);
@@ -263,16 +293,36 @@ export async function opcertCounter(poolId: string): Promise<number | null> {
     return rows[0]?.[0] == null ? null : Number(rows[0][0]);
 }
 
+// Per-pool cache of the opcert counter row: read for every validated header and written for
+// every applied block (a SELECT and an upsert per block, ≈ 4 % of the applier's SQL time).
+// Rollbacks restore the table from the journal, so the orchestrator clears the cache then.
+const opcertCache = new Map<string, { counter: number; slot: number }>();
+export function resetOpcertCounterCache(): void { opcertCache.clear(); }
+
 /** Last applied operational-certificate counter of a pool and the slot of the block that set it. */
 export async function opcertCounterState(poolId: string): Promise<{ counter: number; slot: number } | null> {
-    const rows = (await sql`SELECT counter, slot FROM opcert_counters WHERE pool_id = ${poolId.toLowerCase()}`.values()) as unknown[][];
+    const key = poolId.toLowerCase();
+    const hit = opcertCache.get(key);
+    if (hit) return hit;
+    const rows = (await sql`SELECT counter, slot FROM opcert_counters WHERE pool_id = ${key}`.values()) as unknown[][];
     if (!rows.length || rows[0]?.[0] == null) return null;
-    return { counter: Number(rows[0][0]), slot: Number(rows[0][1] ?? 0) };
+    const state = { counter: Number(rows[0][0]), slot: Number(rows[0][1] ?? 0) };
+    opcertCache.set(key, state);
+    return state;
 }
 
+/**
+ * Record a block's opcert counter. Unchanged counter: nothing to write — the stored slot stays
+ * the block that first carried this counter, which is what the "headers after the block that
+ * set it" comparison in leaderCheck wants.
+ */
 export async function setOpcertCounter(db: SqlClient, poolId: string, counter: number, slot: number): Promise<void> {
-    await db`INSERT INTO opcert_counters (pool_id, counter, slot) VALUES (${poolId.toLowerCase()}, ${counter}, ${slot})
+    const key = poolId.toLowerCase();
+    const cur = opcertCache.get(key) ?? await opcertCounterState(key);
+    if (cur && cur.counter === counter) return;
+    await db`INSERT INTO opcert_counters (pool_id, counter, slot) VALUES (${key}, ${counter}, ${slot})
         ON CONFLICT(pool_id) DO UPDATE SET counter = excluded.counter, slot = excluded.slot`;
+    opcertCache.set(key, { counter, slot });
 }
 
 /**
@@ -302,11 +352,12 @@ export async function takeStakeSnapshot(db: SqlClient, takenAt: number): Promise
         WHERE d.cred_type IS NULL AND d.id = (SELECT MAX(d2.id) FROM delegations d2 WHERE d2.stake_credentials = d.stake_credentials AND d2.cred_type IS NULL)`;
     await db`INSERT OR REPLACE INTO epoch_stake_cred (taken_at, stake_key, pool_id, stake)
         SELECT ${takenAt}, t.stake_key, t.pool_id, SUM(x.amount) FROM (
-            SELECT u.stake_key AS stake_key, u.lovelace AS amount FROM utxo u WHERE u.stake_key IS NOT NULL
+            SELECT b.stake_key AS stake_key, b.lovelace AS amount FROM stake_balance b WHERE b.lovelace <> 0
             UNION ALL
             SELECT lower(hex(r.stake_credentials)), r.amount FROM rewards r
         ) x JOIN tmp_deleg_hex t ON t.stake_key = x.stake_key
-        GROUP BY t.stake_key, t.pool_id`;
+        GROUP BY t.stake_key, t.pool_id
+        HAVING SUM(x.amount) <> 0`; // the ledger's snapshot holds no zero-stake credential (a pool with none has no distribution entry)
     await db`INSERT OR REPLACE INTO epoch_pool_stake (taken_at, pool_id, stake)
         SELECT ${takenAt}, pool_id, SUM(stake) FROM epoch_stake_cred WHERE taken_at = ${takenAt} GROUP BY pool_id`;
     // Pool parameters as of this snapshot: rewards for the epoch this snapshot leads use
@@ -467,6 +518,24 @@ export async function addFeeToPot(db: SqlClient, fee: bigint): Promise<void> {
     await db`UPDATE reward_pots SET fee_pot = fee_pot + ${fee.toString()} WHERE id = 1`;
 }
 
+/**
+ * Treasury donations (Conway tx body field 22) accumulate during the epoch and join the
+ * treasury at the boundary (Conway EPOCH: `treasury = treasury − withdrawals + donations +
+ * unclaimed`). Bug 92: they were checked for value conservation and then dropped.
+ */
+export async function addDonationToPot(db: SqlClient, amount: bigint): Promise<void> {
+    if (amount <= 0n) return;
+    await db`UPDATE reward_pots SET donation_pot = donation_pot + ${amount.toString()} WHERE id = 1`;
+}
+
+/** Move the epoch's donations into the treasury; returns the amount moved. */
+export async function settleDonations(db: SqlClient): Promise<bigint> {
+    const rows = (await db`SELECT donation_pot FROM reward_pots WHERE id = 1`.values()) as unknown[][];
+    const donated = BigInt(String(rows[0]?.[0] ?? 0));
+    if (donated > 0n) await db`UPDATE reward_pots SET treasury = treasury + ${donated.toString()}, donation_pot = 0 WHERE id = 1`;
+    return donated;
+}
+
 export async function updateRewardPots(db: SqlClient, delta: { reserves: bigint; treasury: bigint; resetFees: boolean }): Promise<void> {
     if (delta.resetFees) await db`UPDATE reward_pots SET reserves = reserves + ${delta.reserves.toString()}, treasury = treasury + ${delta.treasury.toString()}, fee_pot = 0 WHERE id = 1`;
     else await db`UPDATE reward_pots SET reserves = reserves + ${delta.reserves.toString()}, treasury = treasury + ${delta.treasury.toString()} WHERE id = 1`;
@@ -530,15 +599,25 @@ export async function recordRewardEpoch(db: SqlClient, performanceEpoch: number,
 }
 
 /** Credit lovelace to reward accounts now (treasury withdrawals, deposit refunds). */
+/** Rows per statement when a payout is written as one JSON-driven upsert (53 k accounts per preview boundary). */
+const REWARD_BATCH = 8192;
+
 export async function creditRewards(db: SqlClient, amounts: Map<string, bigint>): Promise<bigint> {
     let total = 0n;
+    const entries: Array<[string, string]> = [];
     for (const [credHex, amount] of amounts) {
         if (amount <= 0n) continue;
-        const cred = Buffer.from(credHex, "hex");
-        const has = (await db`SELECT 1 FROM rewards WHERE stake_credentials = ${cred}`.values()) as unknown[][];
-        if (has.length) await db`UPDATE rewards SET amount = amount + ${amount.toString()} WHERE stake_credentials = ${cred}`;
-        else await db`INSERT INTO rewards (stake_credentials, amount) VALUES (${cred}, ${amount.toString()})`;
+        entries.push([credHex.toLowerCase(), amount.toString()]);
         total += amount;
+    }
+    // One upsert per batch instead of a SELECT + UPDATE/INSERT per account (which also
+    // scanned the table before idx_rewards_stake_credentials existed): 160 s → well under a
+    // second for a preview boundary. Amounts stay within SQLite's 64-bit integers.
+    for (let i = 0; i < entries.length; i += REWARD_BATCH) {
+        const json = JSON.stringify(Object.fromEntries(entries.slice(i, i + REWARD_BATCH)));
+        await db`INSERT INTO rewards (stake_credentials, amount)
+            SELECT unhex(j.key), CAST(j.value AS INTEGER) FROM json_each(${json}) AS j WHERE true
+            ON CONFLICT(stake_credentials) DO UPDATE SET amount = amount + excluded.amount`; // WHERE true: SQLite would read ON as a join clause
     }
     return total;
 }
@@ -587,9 +666,12 @@ export async function recordRewardPayouts(db: SqlClient, performanceEpoch: numbe
         pool_id TEXT,
         PRIMARY KEY (performance_epoch, stake_key)
     )`;
-    for (const [cred, amount] of paid) {
-        if (amount <= 0n) continue;
-        await db`INSERT OR REPLACE INTO reward_payouts (performance_epoch, stake_key, amount, kind, pool_id) VALUES (${performanceEpoch}, ${cred}, ${amount.toString()}, 'total', NULL)`;
+    const entries: Array<[string, string]> = [];
+    for (const [cred, amount] of paid) if (amount > 0n) entries.push([cred, amount.toString()]);
+    for (let i = 0; i < entries.length; i += REWARD_BATCH) {
+        const json = JSON.stringify(Object.fromEntries(entries.slice(i, i + REWARD_BATCH)));
+        await db`INSERT OR REPLACE INTO reward_payouts (performance_epoch, stake_key, amount, kind, pool_id)
+            SELECT ${performanceEpoch}, j.key, j.value, 'total', NULL FROM json_each(${json}) AS j`;
     }
 }
 

@@ -49,15 +49,22 @@ describe("explorer endpoints", () => {
         expect(page2.body.map((b: any) => [b.slot, b.height])).toEqual([[3, 4], [2, 3], [1, 2], [0, 1], [0, null]]);
     });
 
-    test("GET /blocks/latest, /blocks/{slot}, /blocks/height/{n}, previous and next", async () => {
+    test("GET /blocks/latest, /blocks/{number}, /blocks/height/{n}, /blocks/slot/{n}, previous and next", async () => {
         const latest = await get("/blocks/latest");
         expect(latest.body.height).toBe(6);
         expect(latest.body.previous_block).toBe(h(7));
         expect(latest.body.next_block).toBeNull();
         const bySlot = await get("/blocks/0");
-        expect(bySlot.body.height).toBe(1); // the main block, not the EBB
+        expect(bySlot.body.height).toBe(1); // no block has height 0: slot 0, the main block, not the EBB
+        const byNumber = await get("/blocks/3"); // Blockfrost: a number is the block height
+        expect(byNumber.body.height).toBe(3);
+        expect(byNumber.body.slot).toBe(2);
         const byHeight = await get("/blocks/height/3");
         expect(byHeight.body.slot).toBe(2);
+        const bySlotRoute = await get("/blocks/slot/2");
+        expect(bySlotRoute.body.height).toBe(3);
+        expect((await get("/blocks/slot/4")).status).toBe(404);
+        expect((await get("/blocks/3/txs")).status).toBe(200);
         const prev = await get(`/blocks/${h(8)}/previous?count=2`);
         expect(prev.body.map((b: any) => b.height)).toEqual([5, null]);
         const next = await get(`/blocks/${h(6)}/next?count=3`); // the EBB at 21600 → its main block, then the Shelley block

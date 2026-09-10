@@ -1,0 +1,106 @@
+diff --git a/dist/Cbor/index.js b/dist/Cbor/index.js
+index 84b40279c69dc5e29571baec2bdc6a375cb86b7f..4dcdcd98508a9b94860daa91631057308e577ce2 100644
+--- a/dist/Cbor/index.js
++++ b/dist/Cbor/index.js
+@@ -147,7 +147,7 @@ var CborEncoding = /** @class */ (function () {
+         }
+     };
+     CborEncoding.prototype.appendCborObjEncoding = function (cObj) {
+-        (0, assert_1.assert)((0, CborObj_1.isCborObj)(cObj), "expected 'CborObj' strict instance; got: " + cObj);
++        if (!(0, CborObj_1.isCborObj)(cObj)) (0, assert_1.assert)(false, "expected 'CborObj' strict instance; got: " + cObj);
+         var startOffset = this.length;
+         if (cObj instanceof CborUInt_1.CborUInt) {
+             (0, assert_1.assert)(cObj.num >= BigInt(0), "encoding invalid unsigned integer as CBOR");
+@@ -403,7 +403,7 @@ var Cbor = /** @class */ (function () {
+         if (parseOpts === void 0) { parseOpts = exports.defaultParseOptions; }
+         if (typeof cbor === "string")
+             cbor = (0, uint8array_utils_1.fromHex)(cbor);
+-        (0, assert_1.assert)((cbor instanceof Uint8Array) || cbor instanceof CborString_1.CborString, "in 'Cbor.parse' expected an instance of 'CborString' or a 'Uint8Array' as input; got: " + cbor);
++        if (!((cbor instanceof Uint8Array) || cbor instanceof CborString_1.CborString)) (0, assert_1.assert)(false, "in 'Cbor.parse' expected an instance of 'CborString' or a 'Uint8Array' as input; got: " + cbor);
+         var bytes = cbor instanceof CborString_1.CborString ?
+             cbor.toBuffer() :
+             cbor;
+@@ -675,7 +675,7 @@ var Cbor = /** @class */ (function () {
+     Cbor.parseLazyWithOffset = function (cbor) {
+         if (typeof cbor === "string")
+             cbor = (0, uint8array_utils_1.fromHex)(cbor);
+-        (0, assert_1.assert)((cbor instanceof Uint8Array) || CborString_1.CborString.isStrictInstance(cbor), "in 'Cbor.parse' expected an instance of 'CborString' or a 'Uint8Array' as input; got: " + cbor);
++        if (!((cbor instanceof Uint8Array) || CborString_1.CborString.isStrictInstance(cbor))) (0, assert_1.assert)(false, "in 'Cbor.parse' expected an instance of 'CborString' or a 'Uint8Array' as input; got: " + cbor);
+         var bytes = cbor instanceof CborString_1.CborString ?
+             cbor.toBuffer() :
+             cbor;
+diff --git a/dist/CborObj/CborArray.js b/dist/CborObj/CborArray.js
+index 3acd34673fbf1204bd0c0ab873e5329e099fee44..7f0c599da00befc8cd1306a65913fe63d757ca1a 100644
+--- a/dist/CborObj/CborArray.js
++++ b/dist/CborObj/CborArray.js
+@@ -21,8 +21,8 @@ var CborArray = /** @class */ (function () {
+     function CborArray(array, options, subCborRef) {
+         var _a;
+         this.subCborRef = subCborRef;
+-        (0, assert_1.assert)(Array.isArray(array) &&
+-            array.every(CborObj_1.isCborObj), "in 'CborArray' constructor: invalid input; got: " + array);
++        if (!(Array.isArray(array) &&
++            array.every(CborObj_1.isCborObj))) (0, assert_1.assert)(false, "in 'CborArray' constructor: invalid input; got: " + array);
+         var indefinite = (options === null || options === void 0 ? void 0 : options.indefinite) === true ? true : defaultOpts.indefinite;
+         this.addInfos = (_a = options === null || options === void 0 ? void 0 : options.addInfos) !== null && _a !== void 0 ? _a : (0, headerFollowingToAddInfos_1.headerFollowingToAddInfos)(array.length);
+         this.array = array;
+diff --git a/dist/CborObj/CborMap.js b/dist/CborObj/CborMap.js
+index 74f0632158f542032a1ab92b5c7fdd9e0bf7fdb2..7b4604a6bc76fd71cfd513d4d064f57bc1e09dd6 100644
+--- a/dist/CborObj/CborMap.js
++++ b/dist/CborObj/CborMap.js
+@@ -30,10 +30,10 @@ var CborMap = /** @class */ (function () {
+     function CborMap(map, options, subCborRef) {
+         var _a;
+         this.subCborRef = subCborRef;
+-        (0, assert_1.assert)(Array.isArray(map) &&
++        if (!(Array.isArray(map) &&
+             map.every(function (entry) { return ((0, obj_utils_1.isObject)(entry) &&
+                 (0, _1.isCborObj)(entry.k) &&
+-                (0, _1.isCborObj)(entry.v)); }), "in 'CborMap' constructor: invalid input; got: " + map);
++                (0, _1.isCborObj)(entry.v)); }))) (0, assert_1.assert)(false, "in 'CborMap' constructor: invalid input; got: " + map);
+         var indefinite = (options === null || options === void 0 ? void 0 : options.indefinite) === true ? true : defaultOpts.indefinite;
+         this.addInfos = (_a = options === null || options === void 0 ? void 0 : options.addInfos) !== null && _a !== void 0 ? _a : (0, headerFollowingToAddInfos_1.headerFollowingToAddInfos)(map.length);
+         this.map = map;
+diff --git a/dist/CborObj/CborObj.js b/dist/CborObj/CborObj.js
+index da6a254a50dd834098f1af26f8abaa8942fdfd3a..528b8015418ea3ff7e5b704608519676960d0dc0 100644
+--- a/dist/CborObj/CborObj.js
++++ b/dist/CborObj/CborObj.js
+@@ -57,7 +57,7 @@ function isRawCborObj(rawCborObj) {
+ }
+ exports.isRawCborObj = isRawCborObj;
+ function cborObjFromRaw(_rawCborObj) {
+-    (0, assert_1.assert)(isRawCborObj(_rawCborObj), "expected a vaild 'RawCborObj' as input; got: " + Object.keys(_rawCborObj));
++    if (!(isRawCborObj(_rawCborObj))) (0, assert_1.assert)(false, "expected a vaild 'RawCborObj' as input; got: " + Object.keys(_rawCborObj));
+     function _cborObjFromRaw(rawCborObj) {
+         if ((0, CborNegInt_1.isRawCborNegative)(rawCborObj))
+             return new CborNegInt_1.CborNegInt(rawCborObj.neg);
+diff --git a/dist/LazyCborObj/LazyCborArray.js b/dist/LazyCborObj/LazyCborArray.js
+index 446d12df9e529756b88bf3096b27e178480a06e8..94340f3bc10f6c40dd1f95eee766ae9a4cbf8395 100644
+--- a/dist/LazyCborObj/LazyCborArray.js
++++ b/dist/LazyCborObj/LazyCborArray.js
+@@ -19,8 +19,8 @@ var defaultOpts = Object.freeze({
+ });
+ var LazyCborArray = /** @class */ (function () {
+     function LazyCborArray(array, options) {
+-        (0, assert_1.assert)(Array.isArray(array) &&
+-            array.every(function (elem) { return elem instanceof Uint8Array; }), "in 'LazyCborArray' constructor: invalid input; got: " + array);
++        if (!(Array.isArray(array) &&
++            array.every(function (elem) { return elem instanceof Uint8Array; }))) (0, assert_1.assert)(false, "in 'LazyCborArray' constructor: invalid input; got: " + array);
+         var indefinite = __assign(__assign({}, defaultOpts), options).indefinite;
+         var _array = array;
+         Object.defineProperties(this, {
+diff --git a/dist/LazyCborObj/LazyCborMap.js b/dist/LazyCborObj/LazyCborMap.js
+index e461d0fc93a496f08dbceab9980093857f798eb4..c97c8071988b12302089624d95e291277dc716d5 100644
+--- a/dist/LazyCborObj/LazyCborMap.js
++++ b/dist/LazyCborObj/LazyCborMap.js
+@@ -25,8 +25,8 @@ function isLazyCborMapEntry(thing) {
+ exports.isLazyCborMapEntry = isLazyCborMapEntry;
+ var LazyCborMap = /** @class */ (function () {
+     function LazyCborMap(map, options) {
+-        (0, assert_1.assert)(Array.isArray(map) &&
+-            map.every(isLazyCborMapEntry), "in 'LazyCborMap' constructor: invalid input; got: " + map);
++        if (!(Array.isArray(map) &&
++            map.every(isLazyCborMapEntry))) (0, assert_1.assert)(false, "in 'LazyCborMap' constructor: invalid input; got: " + map);
+         var indefinite = __assign(__assign({}, defaultOpts), options).indefinite;
+         var _map = map;
+         Object.defineProperties(this, {

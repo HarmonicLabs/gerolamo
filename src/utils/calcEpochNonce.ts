@@ -121,6 +121,36 @@ export function stabilityWindowSlots(
     return Math.floor((3 * securityParam) / activeSlotsCoeff);
 }
 
+/** First protocol major version of the Conway era. */
+export const CONWAY_PROTOCOL_MAJOR = 9;
+
+/**
+ * RandomnessStabilisationWindow = 4k/f. From Conway (protocol major ≥ 9) the
+ * candidate nonce freezes this many slots before the epoch ends; earlier eras
+ * froze it at the 3k/f stability window. Verified on preview: the epoch 647
+ * nonce (the first computed under protocol 9) matches Koios only with 4k/f.
+ */
+export function randomnessStabilisationWindowSlots(
+    securityParam: number,
+    activeSlotsCoeff: number,
+): number {
+    if (!(securityParam > 0) || !(activeSlotsCoeff > 0)) {
+        return 172_800;
+    }
+    return Math.floor((4 * securityParam) / activeSlotsCoeff);
+}
+
+/** Slots before the next epoch at which UPDN stops updating ηc, for blocks of an epoch running `protocolMajor`. */
+export function nonceFreezeWindowSlots(
+    securityParam: number,
+    activeSlotsCoeff: number,
+    protocolMajor: number | null | undefined,
+): number {
+    return (protocolMajor ?? 0) >= CONWAY_PROTOCOL_MAJOR
+        ? randomnessStabilisationWindowSlots(securityParam, activeSlotsCoeff)
+        : stabilityWindowSlots(securityParam, activeSlotsCoeff);
+}
+
 /**
  * UPDN freeze: s + StabilityWindow < firstSlotNextEpoch (Haskell Updn.hs).
  * Equivalent: s < firstSlotNext − StabilityWindow.

@@ -1,0 +1,20 @@
+diff --git a/dist/credentials/StakeCredentials.js b/dist/credentials/StakeCredentials.js
+index 61b8d566a97c252bb326d1c89ea07d57c5b50682..9bd680078cf0a7fe24dfb28d71f76ed7ed96cf68 100644
+--- a/dist/credentials/StakeCredentials.js
++++ b/dist/credentials/StakeCredentials.js
+@@ -132,10 +132,11 @@ var StakeCredentials = /** @class */ (function () {
+             type: this.type === "stakeKey" ? Credential_1.CredentialType.KeyHash : Credential_1.CredentialType.Script,
+             hash: this.hash
+         }).toData(version);
+-        if (isOldVersion)
+-            return new plutus_data_1.DataConstr(0, // PStakingHash
+-            [credData]);
+-        return credData;
++        // `StakingCredential = StakingHash Credential | StakingPtr ...` in every Plutus
++        // version: the credential is always wrapped in the `StakingHash` constructor
++        // (gerolamo patch; fixed upstream in 0.5.11).
++        return new plutus_data_1.DataConstr(0, // PStakingHash
++        [credData]);
+     };
+     StakeCredentials.fromData = function (data) {
+         if (!(data instanceof plutus_data_1.DataConstr))

@@ -234,15 +234,39 @@ export class ValidationPool {
     evaluateBlockRules(job: BlockRulesJob): Promise<BlockRulesResult> {
         if (this.closed) return Promise.reject(new Error("ValidationPool closed"));
         if (this.workers.length === 0) return runBlockRulesJob(job);
-        const worker = this.leastLoadedWorker("rules");
+        // Shadow-only jobs are diagnostics nobody waits on: keep them off the reserved rules workers.
+        const worker = this.leastLoadedWorker(job.phase === "shadow" ? "general" : "rules");
         const weight = Math.max(2, Math.ceil(job.block.length / 8192));
         this.load.set(worker, (this.load.get(worker) ?? 0) + weight);
         const id = this.nextId++;
         return new Promise<BlockRulesResult>((resolve, reject) => {
             this.pending.set(id, { resolve, reject, worker, weight });
             const copy = fresh(job.block);
-            worker.postMessage({ id, job: { ...job, block: copy } }, [copy.buffer]);
+            // Send params/genesis once per worker (see BlockRulesJob.paramsId).
+            const ids = this.sharedIds(worker);
+            const paramsId = job.params ? this.idOf(job.params) : undefined;
+            const genesisId = job.genesis && typeof job.genesis === "object" ? this.idOf(job.genesis as object) : undefined;
+            const slim: BlockRulesJob = { ...job, block: copy, paramsId, genesisId };
+            if (paramsId != null && ids.params === paramsId) slim.params = null;
+            if (genesisId != null && ids.genesis === genesisId) slim.genesis = null;
+            if (paramsId != null) ids.params = paramsId;
+            if (genesisId != null) ids.genesis = genesisId;
+            worker.postMessage({ id, job: slim }, [copy.buffer]);
         });
+    }
+
+    private readonly objectIds = new WeakMap<object, number>();
+    private nextObjectId = 1;
+    private idOf(o: object): number {
+        let id = this.objectIds.get(o);
+        if (id == null) { id = this.nextObjectId++; this.objectIds.set(o, id); }
+        return id;
+    }
+    private readonly shared = new WeakMap<Worker, { params?: number; genesis?: number }>();
+    private sharedIds(w: Worker): { params?: number; genesis?: number } {
+        let s = this.shared.get(w);
+        if (!s) { s = {}; this.shared.set(w, s); }
+        return s;
     }
 
     /** Validate many jobs concurrently, preserving order. */

@@ -18,6 +18,9 @@ function findLibLmdb(): string {
         // System paths
         "/usr/lib/liblmdb.so",
         "/usr/lib/x86_64-linux-gnu/liblmdb.so",
+        // the runtime package (liblmdb0) ships only the versioned name; the dev package adds the symlink
+        "/usr/lib/x86_64-linux-gnu/liblmdb.so.0",
+        "/usr/lib/liblmdb.so.0",
         "/usr/local/lib/liblmdb.so",
     ];
 

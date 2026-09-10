@@ -105,7 +105,11 @@ class GlobalSharedMempool {
     ): GerolamoMempoolAdapter {
         if (!GlobalSharedMempool.instance) {
             const bufferSize = config.maxBytes ?? MempoolSize.kb256;
-            GlobalSharedMempool.buffer = new SharedArrayBuffer(bufferSize);
+            // `initMemory` writes the header (mutex, counters, free space); a bare
+            // SharedArrayBuffer reads as zero free space and every append fails with
+            // InsufficientSpace — the local txsubmit never reached a peer (preview pool
+            // registration, 2026-09-10 04:14 UTC).
+            GlobalSharedMempool.buffer = SharedMempool.initMemory(bufferSize as SupportedMempoolSize);
             // SharedMempoolArgs is empty in current package types; size comes from buffer.
             GlobalSharedMempool.instance = new GerolamoMempoolAdapter(
                 GlobalSharedMempool.buffer,

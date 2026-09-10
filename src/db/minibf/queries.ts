@@ -4,6 +4,7 @@
  */
 
 import { sql } from "../../sql";
+import { mbSql } from "./explorerIndexer";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
 function firstScalar(row: unknown): unknown {
@@ -63,7 +64,7 @@ export type MbIndexStats = {
 
 export async function getMbCursor(): Promise<MbCursor> {
     try {
-        const rows = await sql`
+        const rows = await mbSql()`
 			SELECT tip_slot, tip_hash, schema_version FROM mb_cursor WHERE id = 1 LIMIT 1
 		`.values();
         if (!rows?.length) {
@@ -91,7 +92,7 @@ export async function getMbTxByHash(txHash: string): Promise<MbTxRow | null> {
     const h = txHash.replace(/^0x/i, "").toLowerCase();
     // Prefer mb_tx; fallback legacy tx_index
     try {
-        const rows = await sql`
+        const rows = await mbSql()`
 			SELECT tx_hash, block_hash, slot, tx_index, fee, size,
 			       invalid_hereafter, invalid_before
 			FROM mb_tx WHERE tx_hash = ${h} LIMIT 1
@@ -221,11 +222,12 @@ function assetsToBfAmount(
 }
 
 /** Full IO from mb_tx_in/out when indexed; else empty arrays. */
+/** Inputs and outputs of an indexed tx. Inputs funded straight from genesis have no mb_tx_out row: their address and amount come from the genesis registry. */
 export async function getMbTxUtxos(txHash: string): Promise<MbTxIo> {
     const h = txHash.replace(/^0x/i, "").toLowerCase();
     const empty: MbTxIo = { inputs: [], outputs: [] };
     try {
-        const inRows = await sql`
+        const inRows = (await mbSql()`
 			SELECT i.prev_tx_hash, i.prev_output_index, i.input_index,
 			       o.address, o.lovelace, o.assets_json
 			FROM mb_tx_in i
@@ -233,7 +235,21 @@ export async function getMbTxUtxos(txHash: string): Promise<MbTxIo> {
 			  ON o.tx_hash = i.prev_tx_hash AND o.output_index = i.prev_output_index
 			WHERE i.tx_hash = ${h}
 			ORDER BY i.input_index ASC
-		`.values();
+		`.values()) as any[];
+        // Genesis inputs have no mb_tx_out row: resolve them from the ledger's genesis_utxo
+        // (a second query — the projection may live in its own database file).
+        const missing = inRows.filter((r) => (Array.isArray(r) ? r[3] : r.address) == null).map((r) => `${Array.isArray(r) ? r[0] : r.prev_tx_hash}:${Array.isArray(r) ? r[1] : r.prev_output_index}`);
+        if (missing.length) {
+            const g = (await sql`SELECT utxo_ref, address, lovelace FROM genesis_utxo WHERE utxo_ref IN ${sql(missing)}`.values()) as unknown[][];
+            const byRef = new Map(g.map((r) => [String(r[0]), r]));
+            for (const r of inRows) {
+                const ref = `${Array.isArray(r) ? r[0] : r.prev_tx_hash}:${Array.isArray(r) ? r[1] : r.prev_output_index}`;
+                const gr = byRef.get(ref);
+                if (!gr) continue;
+                if (Array.isArray(r)) { if (r[3] == null) r[3] = gr[1]; if (r[4] == null) r[4] = gr[2]; }
+                else { if (r.address == null) r.address = gr[1]; if (r.lovelace == null) r.lovelace = gr[2]; }
+            }
+        }
 
         const inputs = (inRows as any[]).map((r) => {
             const a = Array.isArray(r);
@@ -262,7 +278,7 @@ export async function getMbTxUtxos(txHash: string): Promise<MbTxIo> {
             };
         });
 
-        const outRows = await sql`
+        const outRows = await mbSql()`
 			SELECT tx_hash, output_index, address, lovelace, assets_json,
 			       datum_hash, inline_datum_cbor, script_ref_hash
 			FROM mb_tx_out WHERE tx_hash = ${h}
@@ -312,7 +328,7 @@ export async function getMbAddressTxs(
     const page = Math.max(opts?.page ?? 1, 1);
     const offset = (page - 1) * count;
     try {
-        const rows = await sql`
+        const rows = await mbSql()`
 			SELECT tx_hash, slot, direction FROM mb_address_tx
 			WHERE address = ${address}
 			ORDER BY slot DESC
@@ -379,11 +395,15 @@ export async function getMbBlockTxHashes(
         }
     }
     if (!/^[0-9A-F]+$/.test(hexKey) || hexKey.length % 2 !== 0) return [];
+    // block_hash is a 32-byte BLOB (older rows may hold hex text): probe the primary key with
+    // both forms instead of `hex(block_hash) = …`, which scanned the whole table.
+    const blobKey = Buffer.from(hexKey, "hex");
+    const textKey = hexKey.toLowerCase();
 
     try {
-        const rows = await sql`
+        const rows = await mbSql()`
 			SELECT tx_hash, tx_index FROM mb_block_tx
-			WHERE hex(block_hash) = ${hexKey}
+			WHERE block_hash = ${blobKey} OR block_hash = ${textKey}
 			ORDER BY tx_index ASC
 		`.values();
         if (rows?.length) {
@@ -403,7 +423,7 @@ export async function getMbBlockTxHashes(
     try {
         const rows = await sql`
 			SELECT tx_hash, tx_index FROM block_tx
-			WHERE hex(block_hash) = ${hexKey}
+			WHERE block_hash = ${blobKey} OR block_hash = ${textKey}
 			ORDER BY tx_index ASC
 		`.values();
         return (rows as any[]).map((r) => {
@@ -444,10 +464,12 @@ export async function getMbIndexStats(): Promise<MbIndexStats> {
     let mbAddressTx = 0;
     let cursorSlot = 0;
     try {
-        const r1 = await sql`SELECT COUNT(*) AS c FROM mb_tx`.values();
+        // Append-only tables: MAX(rowid) is the row count to within a rollback and costs one
+        // index probe, where COUNT(*) walked 17 M rows (a minute on a cold cache).
+        const r1 = await mbSql()`SELECT MAX(rowid) AS c FROM mb_tx`.values();
         const a1 = r1?.[0] as any;
         mbTx = Number(Array.isArray(a1) ? a1[0] : a1?.c ?? 0) || 0;
-        const r2 = await sql`SELECT COUNT(*) AS c FROM mb_address_tx`.values();
+        const r2 = await mbSql()`SELECT MAX(rowid) AS c FROM mb_address_tx`.values();
         const a2 = r2?.[0] as any;
         mbAddressTx = Number(Array.isArray(a2) ? a2[0] : a2?.c ?? 0) || 0;
         const cur = await getMbCursor();

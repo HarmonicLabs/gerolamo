@@ -33,6 +33,7 @@ export interface ProducerKeysConfig {
     opcertFile: string;
     stateFile?: string;
     dryRun?: boolean;
+    greeting?: { paymentSkeyFile: string; paymentAddress: string };
 }
 
 export interface ShelleyGenesisLike {
@@ -55,6 +56,12 @@ export interface ProducerNode {
     mempoolTxs(): Promise<Array<{ hash: Uint8Array; bytes: Uint8Array }>>;
     dropFromMempool(hashes: Uint8Array[]): Promise<void>;
     adopt(blockFetchBytes: Uint8Array): Promise<void>;
+    /**
+     * The one-off greeting transaction ("Gerolamo was here!") for the first block this pool
+     * forges on the network, built at forge time from the greeting wallet; null when the
+     * wallet is not configured or holds nothing usable.
+     */
+    greetingTx?(): Promise<{ hash: Uint8Array; bytes: Uint8Array } | null>;
     /** Leader schedule for an epoch (worker in production, in-process in tests). */
     schedule(input: { epoch: number; nonceHex: string; sigma: { num: bigint; den: bigint }; vrf: VrfKey }): Promise<LeaderSlot[]>;
     now?: () => number;
@@ -85,6 +92,8 @@ export class BlockProducer {
     private scheduling: Promise<void> | null = null;
     private ticker: SlotTicker | null = null;
     private lastForgedSlot: bigint | null = null;
+    /** Set once the greeting transaction has been in an adopted block on this network. */
+    private greeted = false;
     private forged = 0;
     private lastError: string | null = null;
     private forging = false;
@@ -149,6 +158,13 @@ export class BlockProducer {
                 if (!nonce) { if (e === epoch) logger.warn(`Block producer: η0 for epoch ${e} unknown yet`); continue; }
                 const sigma = await this.node.sigmaFor(e, this.poolId);
                 if (!sigma) { logger.warn(`Block producer: no stake snapshot for epoch ${e} yet`); continue; }
+                if (sigma.num === 0n) {
+                    // No stake in the snapshot that decides this epoch: no slot can be ours, and the
+                    // VRF pass over 86 400 slots (≈ 3.5 min on preview) would only delay startup.
+                    this.scheduled.add(e);
+                    logger.info(`Block producer: epoch ${e} schedule: no stake in its snapshot, 0 leader slot(s)`);
+                    continue;
+                }
                 const t0 = performance.now();
                 const slots = await this.node.schedule({ epoch: e, nonceHex: nonce, sigma, vrf: this.vrf });
                 for (const s of slots) this.leaderSlots.set(s.slot.toString(), s);
@@ -192,6 +208,12 @@ export class BlockProducer {
         const protocolVersion = await this.node.protocolVersion(epoch);
         const maxBody = await this.node.maxBlockBodySize(epoch);
         const txs: TxParts[] = [];
+        // Temporary: the first block on a network opens with "Gerolamo was here!" (once per network).
+        let greeting: TxParts | null = null;
+        if (!this.greeted && this.node.greetingTx) {
+            try { const g = await this.node.greetingTx(); if (g) { greeting = splitTx(g.hash, g.bytes); txs.push(greeting); } }
+            catch (err) { logger.warn(`Block producer: greeting transaction not built: ${(err as Error)?.message ?? err}`); }
+        }
         for (const t of await this.node.mempoolTxs()) {
             try { txs.push(splitTx(t.hash, t.bytes)); } catch { /* malformed: leave it, the mempool owner drops it */ }
         }
@@ -213,6 +235,7 @@ export class BlockProducer {
             }
             this.lastForgedSlot = slot;
             this.forged++;
+            if (greeting && attempt.included.includes(greeting)) { this.greeted = true; logger.info(`Block producer: "Gerolamo was here!" is in block ${blockNumber} (tx ${Buffer.from(greeting.hash).toString("hex").slice(0, 12)}…)`); }
             this.writeState(slot);
             if (attempt.included.length) await this.node.dropFromMempool(attempt.included.map((t) => t.hash)).catch(() => undefined);
             logger.info(`Block producer: forged block ${blockNumber} at slot ${slot} (${attempt.included.length} tx, ${forged.blockFetchBytes.length} bytes) hash ${Buffer.from(forged.headerHash).toString("hex").slice(0, 16)}… KES evolution ${forged.kesEvolution}`);
@@ -223,13 +246,17 @@ export class BlockProducer {
     private readState(): bigint | null {
         const f = this.cfg.stateFile;
         if (!f || !existsSync(f)) return null;
-        try { const j = JSON.parse(readFileSync(f, "utf8")); return j.lastForgedSlot != null ? BigInt(j.lastForgedSlot) : null; } catch { return null; }
+        try {
+            const j = JSON.parse(readFileSync(f, "utf8"));
+            this.greeted = j.greeted === this.node.network;
+            return j.lastForgedSlot != null ? BigInt(j.lastForgedSlot) : null;
+        } catch { return null; }
     }
 
     private writeState(slot: bigint): void {
         const f = this.cfg.stateFile;
         if (!f) return;
-        try { writeFileSync(f, JSON.stringify({ poolId: this.poolId, lastForgedSlot: slot.toString(), at: new Date().toISOString() }) + "\n"); } catch (err) { logger.warn("Block producer: could not persist state:", err); }
+        try { writeFileSync(f, JSON.stringify({ poolId: this.poolId, lastForgedSlot: slot.toString(), greeted: this.greeted ? this.node.network : null, at: new Date().toISOString() }) + "\n"); } catch (err) { logger.warn("Block producer: could not persist state:", err); }
     }
 }
 
@@ -239,6 +266,7 @@ export function nodeAdapter(opts: {
     nonceFor: (epoch: number) => Promise<string | null>;
     adopt: (bytes: Uint8Array) => Promise<unknown>;
     mempoolTxs: () => Promise<Array<{ hash: Uint8Array; bytes: Uint8Array }>>;
+    greetingTx?: () => Promise<{ hash: Uint8Array; bytes: Uint8Array } | null>;
     dropFromMempool: (hashes: Uint8Array[]) => Promise<void>;
 }): ProducerNode {
     return {
@@ -265,6 +293,7 @@ export function nodeAdapter(opts: {
             return s ? BigInt(s.counter) : null;
         },
         mempoolTxs: opts.mempoolTxs,
+        greetingTx: opts.greetingTx,
         dropFromMempool: opts.dropFromMempool,
         adopt: async (b) => { await opts.adopt(b); },
         schedule: scheduleInWorker,

@@ -126,6 +126,7 @@ export async function processChunk(
     chunkNo: number,
     logger: Logger,
     client?: import("../db").SqlClient,
+    opts: { blocksOnly?: boolean } = {},
 ): Promise<ProcessChunkResult> {
     assert(isAbsolute(dir));
 
@@ -186,9 +187,11 @@ export async function processChunk(
                 const isEbb = identity.era === 0;
                 const blockNo = isEbb ? null : ++nextBlockNo;
 
-                const stats = countBlockBodyStats(meb);
+                const stats = opts.blocksOnly ? { txs: 0, inputs: 0, outputs: 0 } : countBlockBodyStats(meb);
 
-                await applyBlock(
+                // --blocks-only: the certified chain goes into the block store untouched by the
+                // ledger (a local relay serves it to a node that replays it under full validation).
+                if (!opts.blocksOnly) await applyBlock(
                     meb.block,
                     slot,
                     headerHash,

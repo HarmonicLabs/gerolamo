@@ -25,6 +25,16 @@ export function networkConfig(network: string): MithrilNetworkConfig {
             runMode: "release-mainnet",
         };
     }
+    if (n === "preview") {
+        return {
+            network: "preview",
+            aggregator:
+                "https://aggregator.pre-release-preview.api.mithril.network/aggregator",
+            genesisVkeyUrl:
+                "https://raw.githubusercontent.com/input-output-hk/mithril/main/mithril-infra/configuration/pre-release-preview/genesis.vkey",
+            runMode: "pre-release-preview",
+        };
+    }
     // preprod / testnet default
     return {
         network: "preprod",

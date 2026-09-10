@@ -53,6 +53,8 @@ export type ObserveVerdict =
     | { kind: "ahead"; slot: bigint }
     | { kind: "behind"; slot: bigint }
     | { kind: "duplicate"; slot: bigint }
+    /** Slot inside the primary's window with no primary header there: no verdict (see compareAgainstPrimary). */
+    | { kind: "unmatched"; slot: bigint }
     | { kind: "unknown-peer" };
 
 interface Fragment {
@@ -68,16 +70,15 @@ interface PeerState {
     agreedAtSlot: bigint | null;
     divergence: PeerAgreement["divergence"];
     headersSeen: number;
-    /** Verifier headers beyond the primary tip, waiting to be compared. */
-    pending: Map<string, string>;
+    /** Verifier headers beyond the primary tip, waiting to be compared (slot as a number: the sweep below compares one per primary header). */
+    pending: Map<number, string>;
 }
 
 function newFragment(): Fragment {
     return { points: [], bySlot: new Map() };
 }
 
-function fragmentPush(f: Fragment, p: CandidatePoint, depth: number): void {
-    const key = p.slot.toString();
+function fragmentPush(f: Fragment, p: CandidatePoint, depth: number, key: string = p.slot.toString()): void {
     const list = f.bySlot.get(key);
     if (list) {
         if (!list.includes(p.hash)) list.push(p.hash);
@@ -159,6 +160,12 @@ export class CandidateSet {
         return this.peers.get(key)?.role ?? null;
     }
 
+    /** Forget a verifier's recorded divergence (the fork it named is settled in its favour on our chain). */
+    clearDivergence(key: string): void {
+        const p = this.peers.get(key);
+        if (p) p.divergence = null;
+    }
+
     /** Promote `key` to primary; the old primary becomes a verifier. Its fragment is kept. */
     setPrimary(key: string): boolean {
         const p = this.peers.get(key);
@@ -227,7 +234,7 @@ export class CandidateSet {
      */
     private rememberPending(v: PeerState, pt: CandidatePoint): void {
         if (v.pending.size >= this.depth) return;
-        v.pending.set(pt.slot.toString(), pt.hash);
+        v.pending.set(Number(pt.slot), pt.hash);
     }
 
     /** Headers of `key` waiting for the primary to reach their slot. */
@@ -252,6 +259,8 @@ export class CandidateSet {
         if (primaryHashes) {
             if (primaryHashes.includes(pt.hash)) {
                 if (v.agreedAtSlot == null || pt.slot > v.agreedAtSlot) v.agreedAtSlot = pt.slot;
+                // the primary now carries the block this verifier diverged with: the fork resolved its way
+                if (v.divergence && v.divergence.slot === pt.slot && v.divergence.peerHash === pt.hash) v.divergence = null;
                 return { kind: "agree", slot: pt.slot };
             }
             // A Byron epoch-boundary block shares its slot with the epoch's first main
@@ -262,8 +271,11 @@ export class CandidateSet {
                 this.rememberPending(v, pt);
                 return { kind: "ahead", slot: pt.slot };
             }
-            v.divergence = { slot: pt.slot, peerHash: pt.hash, primaryHashes: [...primaryHashes] };
-            return { kind: "divergent", slot: pt.slot, peerHash: pt.hash, primaryHashes: [...primaryHashes] };
+            // Keep the first divergence: it is the fork point, and the outvote groups verifiers by
+            // it. Overwriting it with every later mismatched slot made two verifiers on the same
+            // branch look like two different forks (bug 88).
+            if (!v.divergence) v.divergence = { slot: pt.slot, peerHash: pt.hash, primaryHashes: [...primaryHashes] };
+            return { kind: "divergent", slot: v.divergence.slot, peerHash: v.divergence.peerHash, primaryHashes: [...v.divergence.primaryHashes] };
         }
         const primOldest = prim.fragment.points[0];
         if (!primTip || pt.slot > primTip.slot) {
@@ -271,10 +283,12 @@ export class CandidateSet {
             return { kind: "ahead", slot: pt.slot };
         }
         if (primOldest && pt.slot < primOldest.slot) return { kind: "behind", slot: pt.slot };
-        // Slot inside the primary window but the primary has no block there:
-        // the verifier claims a block the primary never saw. That is a fork.
-        v.divergence = { slot: pt.slot, peerHash: pt.hash, primaryHashes: [] };
-        return { kind: "divergent", slot: pt.slot, peerHash: pt.hash, primaryHashes: [] };
+        // Slot inside the primary window but the primary has no header there. Not a verdict:
+        // the window is kept in arrival order, and a peer re-anchored on the DB tip after a
+        // promotion replays older slots behind its own tip, so gaps are ours, not forks.
+        // Preview held 11 honest relays cold over canonical blocks this way (2026-09-06).
+        // A real fork shows up at the next shared slot as differing hashes.
+        return { kind: "unmatched", slot: pt.slot };
     }
 
     /** Record a validated header from `key`. */
@@ -284,18 +298,21 @@ export class CandidateSet {
         p.headersSeen++;
         const slotKey = pt.slot.toString();
         if (p.fragment.bySlot.get(slotKey)?.includes(pt.hash)) return { kind: "duplicate", slot: pt.slot };
-        fragmentPush(p.fragment, pt, this.depth);
+        fragmentPush(p.fragment, pt, this.depth, slotKey);
 
         if (p.role === "primary") {
             // Resolve verifiers that were ahead at this slot or at any slot the primary has
             // now passed (a pending second block at an earlier slot is settled either way).
+            // Numeric slots: this sweep ran a BigInt parse per pending entry per primary header
+            // (5 verifiers × hundreds of pending entries — 4 % of the applier thread).
+            const slotNum = Number(pt.slot);
             for (const v of this.peers.values()) {
                 if (v.role !== "verifier" || v.pending.size === 0) continue;
                 // Snapshot the due entries first: compareAgainstPrimary may re-add an entry
                 // (the EBB deferral), and a Map for-of visits entries added during iteration —
                 // that was an infinite loop at mainnet slot 0 (EBB + block 1 share the slot).
-                const due: Array<[string, string]> = [];
-                for (const [k, hash] of v.pending) if (BigInt(k) <= pt.slot) due.push([k, hash]);
+                const due: Array<[number, string]> = [];
+                for (const [k, hash] of v.pending) if (k <= slotNum) due.push([k, hash]);
                 for (const [k, hash] of due) {
                     v.pending.delete(k);
                     this.compareAgainstPrimary(v, { slot: BigInt(k), hash });
@@ -304,6 +321,14 @@ export class CandidateSet {
             return { kind: "primary-advance", slot: pt.slot };
         }
         return this.compareAgainstPrimary(p, pt);
+    }
+
+    /** Has any peer announced `hash` at `slot`? (A competing block of a slot battle is known here.) */
+    knownAtSlot(slot: bigint, hash: string): boolean {
+        const key = slot.toString();
+        const h = hash.toLowerCase();
+        for (const p of this.peers.values()) if (p.fragment.bySlot.get(key)?.includes(h)) return true;
+        return false;
     }
 
     /** Verifiers that currently disagree with the primary. */

@@ -249,8 +249,12 @@ export async function applyEraGenesis(raw: Record<string, unknown>, prevMajor: n
     const merge = (from: Record<string, unknown>, label: string) => {
         for (const [k, v] of Object.entries(from)) {
             if (k === "cost_models" && raw.cost_models && typeof raw.cost_models === "object") {
-                raw.cost_models = { ...(raw.cost_models as object), ...(v as object) };
-                merged.push(k);
+                // Genesis fills languages the record lacks; a language the record already carries
+                // (an applied update) wins. The other order let the startup repair revert preview's
+                // epoch-8 V1 update to the Alonzo genesis model (bug 86, halt at slot 894 594).
+                const before = Object.keys(raw.cost_models as object).length;
+                raw.cost_models = { ...(v as object), ...(raw.cost_models as object) };
+                if (Object.keys(raw.cost_models as object).length > before) merged.push(k);
             } else if (raw[k] == null || (k === "min_utxo" && label === "Alonzo")) {
                 raw[k] = v;
                 merged.push(k);

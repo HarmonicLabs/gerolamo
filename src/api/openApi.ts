@@ -211,34 +211,43 @@ function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
                     responses: { "200": okJson("BlockContent[] with height, time, epoch, epoch_slot, slot_leader, size, tx_count, previous/next_block, confirmations") },
                 },
             },
+            "/api/v0/blocks/slot/{slot}": {
+                get: {
+                    tags: ["blocks"],
+                    summary: "Block by absolute slot",
+                    operationId: "getBlockBySlot",
+                    parameters: [{ name: "slot", in: "path", required: true, schema: { type: "integer" } }],
+                    responses: { "200": okJson("BlockContent"), "404": okJson("no block in that slot") },
+                },
+            },
             "/api/v0/blocks/height/{height}": {
                 get: {
                     tags: ["blocks"],
-                    summary: "Block by chain height (Gerolamo extension; {hash_or_slot} keeps its slot meaning)",
+                    summary: "Block by chain height (alias: a bare number in {hash_or_number} is a height, as in Blockfrost)",
                     operationId: "getBlockByHeight",
                     parameters: [{ name: "height", in: "path", required: true, schema: { type: "integer" } }],
                     responses: { "200": okJson("BlockContent"), "404": okJson("no block at that height") },
                 },
             },
-            "/api/v0/blocks/{hash_or_slot}/previous": {
+            "/api/v0/blocks/{hash_or_number}/previous": {
                 get: {
                     tags: ["blocks"],
                     summary: "Blocks before a block, newest first",
                     operationId: "getBlockPrevious",
                     parameters: [
-                        { name: "hash_or_slot", in: "path", required: true, schema: { type: "string" } },
+                        { name: "hash_or_number", in: "path", required: true, schema: { type: "string" } },
                         { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 100 } },
                     ],
                     responses: { "200": okJson("BlockContent[]") },
                 },
             },
-            "/api/v0/blocks/{hash_or_slot}/next": {
+            "/api/v0/blocks/{hash_or_number}/next": {
                 get: {
                     tags: ["blocks"],
                     summary: "Blocks after a block, oldest first",
                     operationId: "getBlockNext",
                     parameters: [
-                        { name: "hash_or_slot", in: "path", required: true, schema: { type: "string" } },
+                        { name: "hash_or_number", in: "path", required: true, schema: { type: "string" } },
                         { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 100 } },
                     ],
                     responses: { "200": okJson("BlockContent[]") },
@@ -301,14 +310,14 @@ function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
                     },
                 },
             },
-            "/api/v0/blocks/{hash_or_slot}": {
+            "/api/v0/blocks/{hash_or_number}": {
                 get: {
                     tags: ["blocks"],
                     summary: "Block by slot or hash",
                     operationId: "getBlock",
                     parameters: [
                         pathParam(
-                            "hash_or_slot",
+                            "hash_or_number",
                             "Decimal slot or 64-hex block hash",
                         ),
                     ],
@@ -318,7 +327,7 @@ function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
                     },
                 },
             },
-            "/api/v0/blocks/{hash_or_slot}/txs": {
+            "/api/v0/blocks/{hash_or_number}/txs": {
                 get: {
                     tags: ["blocks"],
                     summary: "Tx hashes in block",
@@ -326,7 +335,7 @@ function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
                     operationId: "getBlockTxs",
                     parameters: [
                         pathParam(
-                            "hash_or_slot",
+                            "hash_or_number",
                             "Decimal slot or 64-hex block hash",
                         ),
                     ],

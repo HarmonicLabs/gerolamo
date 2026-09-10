@@ -14,10 +14,13 @@ import {
     PeerSharingClient,
     PeerSharingResponse,
     TxSubmitClient,
+    MiniProtocol,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { connect, type Socket } from "node:net";
 import { logger } from "../utils/logger";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
+import { AnnounceWindow, encodeInit, encodeReplyTxIds, encodeReplyTxs, hashBytes, hfcEraIndexNow, parseTxSubmissionMessages } from "./txSubmissionCodec";
+export { hashBytes } from "./txSubmissionCodec";
 import type { GerolamoConfig } from "./peerManager";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 
@@ -28,8 +31,8 @@ import { ChainSyncPipeline } from "./ChainSyncPipeline";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { GlobalSharedMempool, type GerolamoMempool } from "./SharedMempool";
 import { Tx, TxBody } from "@harmoniclabs/cardano-ledger-ts";
-import { GerolamoTxSubmitServer } from "./TxSubmitServer";
-import { getBlockBySlot, getMaxSlot } from "../db";
+import { getBlockBySlot, getMaxSlot, getRecentBlockPoints } from "../db";
+import { intersectOffsets } from "./chainSyncStart";
 import { peerKey as makePeerKey } from "./PeerGovernor";
 import { classifyPeerNetError } from "./peerNetError";
 import { RollForwardBatcher } from "./RollForwardBatcher";
@@ -80,7 +83,6 @@ export interface IPeerClient {
     syncPointTo?: ChainPoint | null;
     shelleyGenesisConfig: ShelleyGenesisConfig;
     sharedMempool: GerolamoMempool;
-    txSubmitServer: GerolamoTxSubmitServer;
     /** True while ChainSync rollForward loop is active (hot tier). */
     isSyncing: boolean;
     onTerminate?: (peerId: string, peerKey: string, reason?: string) => void;
@@ -148,7 +150,11 @@ export class PeerClient implements IPeerClient {
     /** Pipelined MsgRequestNext bookkeeping (see ChainSyncPipeline). */
     private csPipeline: ChainSyncPipeline | null = null;
     /** Intersection point from the last FindIntersect, until the first RollForward arrives. */
+    /** Topology origin ("localRoot", "publicRoot", "bootstrap", "ledger", …); set by the peer manager. */
+    source: string | null = null;
     private csIntersect: { slot: bigint; hash: string } | null = null;
+    /** The intersection lies behind our DB tip: the positioning RollBackward is a real fork signal for consensus. */
+    private csIntersectBehindTip = false;
     /** While true, replies are counted but their content is dropped (pre-restart drain). */
     private csDraining = false;
     /**
@@ -163,7 +169,6 @@ export class PeerClient implements IPeerClient {
     shelleyGenesisConfig: ShelleyGenesisConfig;
 
     readonly txSubmitClient!: TxSubmitClient;
-    readonly txSubmitServer!: GerolamoTxSubmitServer;
     onTerminate?: (peerId: string, peerKey: string, reason?: string) => void;
     onRollForward?: (
         peerId: string,
@@ -221,7 +226,10 @@ export class PeerClient implements IPeerClient {
             this.mplexer,
             this.sharedMempool,
         );
-        this.txSubmitServer = new GerolamoTxSubmitServer(this.mplexer);
+        // Outbound connection: the peer is the tx-submission server and asks *us* for ids/txs;
+        // the library client above answers from the shared mempool. A second handler on the same
+        // mini-protocol replied too (2026-09-10 05:00 UTC, once MsgInit made peers ask): duplicate
+        // replies, and every peer reset the connection within 30 s on both preview nodes.
         this.cookieCounter = 0;
         this.peerSlotNumber = null;
         this.keepAliveInterval = null;
@@ -257,9 +265,15 @@ export class PeerClient implements IPeerClient {
         this.txSubmitClient.on("requestTxs", (_requestTxs) => {
             // logger.mempool(`TxSubmitClient requestTxs for peer ${this.peerId}:`, requestTxs);
         });
-        this.txSubmitClient.on("requestTxIds", (_requestTxIds) => {
-            // logger.mempool(`TxSubmitClient requestTxIds for peer ${this.peerId}:`, requestTxIds);
-        });
+        // The library answers a *blocking* id request on an empty mempool with MsgDone after
+        // 40 s, which cardano-node treats as the end of the connection (every hot peer reset
+        // us ~40 s after MsgInit, 2026-09-10 05:08 UTC). A blocking request waits until there is
+        // something to announce, as the protocol asks.
+        // …and the library decodes the request's `blocking` flag (a CBOR boolean) as false, so
+        // the raw bytes are parsed here: MsgRequestTxIds = [0, blocking, ack, req].
+        this.txSubmitClient.removeAllListeners("requestTxIds");
+        this.txSubmitClient.removeAllListeners("requestTxs");
+        this.mplexer.on(MiniProtocol.TxSubmission, (chunk: Uint8Array) => this.onTxSubmissionChunk(chunk));
     }
 
     terminate(reason?: string) {
@@ -444,18 +458,52 @@ export class PeerClient implements IPeerClient {
             startPoint = dbTipPoint || peerTipPoint;
         }
 
-        const intersectResult = await this.chainSyncClient.findIntersect([
-            startPoint,
-        ]);
+        // Resuming: offer our tip and older points (dense near the tip, then Fibonacci-spaced
+        // back to k blocks) so a peer on the other side of a short fork still intersects — the
+        // producer then rolls us back to the fork point and streams its branch. Offering the tip
+        // alone left the consumer at origin after IntersectNotFound (see below).
+        const points: ChainPoint[] = [startPoint];
+        if (mode === "resume" && dbTipPoint) {
+            try {
+                const offsets = intersectOffsets();
+                const recent = await getRecentBlockPoints(offsets[offsets.length - 1]! + 1);
+                for (const off of offsets) {
+                    if (off === 0) continue;
+                    const r = recent[off];
+                    const hashBytes = r ? asBlockHashBytes(r.hash) : null;
+                    if (r && hashBytes) points.push(new ChainPoint({ blockHeader: { slotNumber: r.slot, hash: hashBytes } }));
+                }
+            } catch (err) {
+                logger.warn(`Failed to collect intersect points for peer ${this.peerId}:`, err);
+            }
+        }
+        const intersectResult = await this.chainSyncClient.findIntersect(points);
         this.notePeerTip(intersectResult.tip.point);
         if (intersectResult instanceof ChainSyncIntersectFound) {
             const bh = intersectResult.point.blockHeader;
             this.csIntersect = bh ? { slot: BigInt(bh.slotNumber), hash: toHex(bh.hash) } : null;
-            logger.debug(
-                `Intersect found at slot ${intersectResult.point.blockHeader?.slotNumber} for peer ${this.peerId}`,
-            );
+            const behind = bh && dbTipPoint?.blockHeader ? BigInt(dbTipPoint.blockHeader.slotNumber) - BigInt(bh.slotNumber) : 0n;
+            this.csIntersectBehindTip = behind > 0n;
+            if (behind > 0n) {
+                logger.info(
+                    `Intersect with ${this.peerId} at slot ${bh!.slotNumber}, ${behind} slot(s) behind our tip: the peer's chain forks off ours there`,
+                );
+            } else {
+                logger.debug(
+                    `Intersect found at slot ${intersectResult.point.blockHeader?.slotNumber} for peer ${this.peerId}`,
+                );
+            }
         } else {
             this.csIntersect = null;
+            if (mode === "resume") {
+                // Nothing in our last k blocks is on the peer's chain: it is far behind us or on
+                // another chain. Streaming from origin here validated ancient headers against the
+                // current stake distribution and banned every honest peer as malicious (preview,
+                // 2026-09-06 22:30 UTC, after a one-block fork at slot 122 077 808).
+                throw new Error(
+                    `no intersection with our last ${points.length} points (peer tip slot ${intersectResult.tip.point.blockHeader?.slotNumber ?? "origin"})`,
+                );
+            }
             logger.warn(
                 `No intersect found for peer ${this.peerId}, proceeding with producer tip`,
             );
@@ -479,6 +527,7 @@ export class PeerClient implements IPeerClient {
         this.syncLoopStarted = true;
         this.isSyncing = true;
         logger.debug(`Starting sync loop for peer ${this.peerId}...`);
+        this.initTxSubmission();
 
         const configuredBatchSize = Number(
             this.config.blockFetchBatch?.maxBlocks ?? 32,
@@ -608,9 +657,16 @@ export class PeerClient implements IPeerClient {
                     toHex(bh.hash) === this.csIntersect.hash
                 ) {
                     this.csIntersect = null;
-                    logger.debug(`Initial positioning rollback to intersection slot ${bh.slotNumber} for ${this.peerId} (ignored)`);
-                    this.chainSyncTopUp();
-                    return;
+                    if (!this.csIntersectBehindTip) {
+                        logger.debug(`Initial positioning rollback to intersection slot ${bh.slotNumber} for ${this.peerId} (ignored)`);
+                        this.chainSyncTopUp();
+                        return;
+                    }
+                    // The intersection is behind our tip: the peer's chain forks off ours there, so
+                    // consensus must see this rollback (it arms the deferred rollback with the fork
+                    // point's hash; the peer's next header confirms the fork and our block goes).
+                    this.csIntersectBehindTip = false;
+                    logger.info(`Positioning rollback to intersection slot ${bh.slotNumber} for ${this.peerId} lies behind our tip; handing it to consensus`);
                 }
                 try {
                     this.rollForwardBatcher?.reset();
@@ -674,6 +730,77 @@ export class PeerClient implements IPeerClient {
         return this.csGeneration;
     }
 
+    private onTxSubmissionChunk(chunk: Uint8Array): void {
+        if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission ← ${this.peerId}: ${Buffer.from(chunk).toString("hex").slice(0, 120)}`);
+        for (const m of parseTxSubmissionMessages(chunk)) {
+            if (m.kind === "requestTxIds") void this.answerTxIdRequest({ blocking: m.blocking, knownTxCount: m.ack, requestedTxCount: m.req });
+            else if (m.kind === "requestTxs") void this.answerTxRequest(m.ids);
+        }
+    }
+
+    /** What this peer has been told about (once per id per connection). */
+    private readonly announced = new AnnounceWindow();
+    private async answerTxIdRequest(req: { blocking: boolean; knownTxCount: number | bigint; requestedTxCount: number | bigint }): Promise<void> {
+        if (!this.txIdsRequestedLogged) { this.txIdsRequestedLogged = true; logger.mempool(`Peer ${this.peerId} pulls transaction ids from our mempool`); }
+        const ack = Number(req.knownTxCount), wanted = Number(req.requestedTxCount);
+        if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission request from ${this.peerId}: blocking=${req.blocking} ack=${ack} req=${wanted}`);
+        this.announced.acknowledge(ack);
+        const fresh = async () => {
+            const list = await this.sharedMempool.getTxHashesAndSizes();
+            const byHex = new Map(list.map((e) => [Buffer.from(hashBytes(e.hash)).toString("hex"), { hash: hashBytes(e.hash), size: Number(e.size) }]));
+            return this.announced.fresh([...byHex.keys()]).map((h) => byHex.get(h)!);
+        };
+        let candidates = await fresh();
+        // A blocking request waits until there is something new to announce.
+        while (req.blocking && candidates.length === 0 && !this.terminated) {
+            await new Promise((r) => setTimeout(r, 500));
+            candidates = await fresh();
+        }
+        if (this.terminated) return;
+        const response = candidates.slice(0, wanted);
+        this.announced.announce(response.map((e) => Buffer.from(e.hash).toString("hex")));
+        try {
+            const bytes = encodeReplyTxIds(hfcEraIndexNow(), response);
+            if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission → ${this.peerId}: ${Buffer.from(bytes).toString("hex").slice(0, 120)} (${response.length} id(s))`);
+            this.mplexer.send(bytes, { hasAgency: true, protocol: MiniProtocol.TxSubmission });
+        } catch (err) {
+            logger.warn(`tx-submission reply failed for ${this.peerId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+
+    /** MsgRequestTxs → MsgReplyTxs = [3, [[eraIndex, #6.24(txBytes)]…]] from the shared mempool. */
+    private async answerTxRequest(ids: Uint8Array[]): Promise<void> {
+        if (this.terminated) return;
+        if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission request for ${ids.length} tx(s) from ${this.peerId}`);
+        let txs: Array<{ hash: any; bytes: Uint8Array }> = [];
+        try { txs = (await this.sharedMempool.getTxs(ids as any)) as any; } catch (err) { logger.warn(`tx-submission: mempool lookup failed for ${this.peerId}: ${err instanceof Error ? err.message : String(err)}`); }
+        try {
+            const bytes = encodeReplyTxs(hfcEraIndexNow(), txs.map((t) => t.bytes));
+            if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission → ${this.peerId}: ${txs.length} tx(s), ${bytes.length} bytes`);
+            this.mplexer.send(bytes, { hasAgency: true, protocol: MiniProtocol.TxSubmission });
+        } catch (err) {
+            logger.warn(`tx-submission tx reply failed for ${this.peerId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+
+    /**
+     * tx-submission2 starts with the client's MsgInit; only then does the peer ask for our
+     * transaction ids. Nothing sent it, so a locally submitted transaction sat in the mempool
+     * and never reached the network (preview pool registration, 2026-09-10 04:31 UTC — it went
+     * through Koios in the end). Once per connection.
+     */
+    private txSubmitInitSent = false;
+    private txIdsRequestedLogged = false;
+    private initTxSubmission(): void {
+        if (this.txSubmitInitSent || this.terminated) return;
+        this.txSubmitInitSent = true;
+        try {
+            this.mplexer.send(encodeInit(), { hasAgency: true, protocol: MiniProtocol.TxSubmission });
+        } catch (err) {
+            logger.warn(`tx-submission init failed for ${this.peerId}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+    }
+
     async restartChainSync(reason: string): Promise<void> {
         if (this.terminated || !this.isSyncing) return;
         // Synchronously, before any await: every header batch already queued from the
@@ -683,9 +810,17 @@ export class PeerClient implements IPeerClient {
         logger.info(`Restarting ChainSync from DB tip for ${this.peerId}: ${reason}`);
         this.csDraining = true;
         this.rollForwardBatcher?.reset();
-        const deadline = Date.now() + 30_000;
+        // At the tip the one outstanding RequestNext is answered only by the peer's next block
+        // (MsgAwaitReply), so the drain takes as long as the gap to that block: with a 30 s
+        // deadline both preview nodes fell into a loop on 2026-09-10 04:35 UTC — promote a
+        // verifier, re-anchor, time out, drop it, promote the next — for 15 minutes without
+        // applying a block. Wait for the reply (dead peers are caught by KeepAlive); the
+        // deadline is a last resort.
+        const deadline = Date.now() + 600_000;
+        let warned = false;
         while ((this.csPipeline?.inFlight ?? 0) > 0 && Date.now() < deadline && !this.terminated) {
             await new Promise((r) => setTimeout(r, 25));
+            if (!warned && Date.now() - deadline > -570_000) { warned = true; logger.info(`ChainSync restart for ${this.peerId} waits for ${this.csPipeline?.inFlight} outstanding repl${(this.csPipeline?.inFlight ?? 0) === 1 ? "y" : "ies"}${this.csPipeline?.isAtTip ? " (at the peer's tip: the next block ends it)" : ""}`); }
         }
         if (this.terminated) return;
         if ((this.csPipeline?.inFlight ?? 0) > 0) {
@@ -700,6 +835,11 @@ export class PeerClient implements IPeerClient {
             logger.error(`ChainSync restart failed for ${this.peerId}:`, err);
             this.terminate("chainsync restart failed");
         }
+    }
+
+    /** True once the connection was torn down (batches still queued from it are stale). */
+    get isTerminated(): boolean {
+        return this.terminated;
     }
 
     /** Pipelined ChainSync requests currently in flight (for /metrics). */

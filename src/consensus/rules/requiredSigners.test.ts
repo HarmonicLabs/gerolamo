@@ -24,6 +24,16 @@ describe("requiredWitnesses", () => {
         expect(r.bootstrapRoots.size).toBe(1);
         expect(r.problems).toEqual([]);
     });
+    test("collateral inputs need key witnesses only, never a script (preview 78658821)", () => {
+        const resolved = new Map([
+            [`${H}:0`, utxo(`${H}:0`, keyAddr(K1))],
+            [`${H}:1`, utxo(`${H}:1`, scriptAddr(S1))],
+            [`${H}:2`, utxo(`${H}:2`, keyAddr(K2))],
+        ]);
+        const r = requiredWitnesses({ inputs: [input(`${H}:0`)], collateralInputs: [input(`${H}:1`), input(`${H}:2`)] }, resolved);
+        expect([...r.keyHashes].sort()).toEqual([K1, K2]);
+        expect([...r.scriptHashes]).toEqual([]);
+    });
     test("certificates, withdrawals, required signers, mint policies", () => {
         const stakeKey = new Credential({ type: CredentialType.KeyHash, hash: new PubKeyHash(fromHex(K2)) });
         const body = {

@@ -4,7 +4,8 @@
 # 24 GB otherwise). Sync resumes from the DB, every range is one SQLite transaction.
 #
 # usage: scripts/run-supervised.sh <network> <port> <datadir> [max_rss_gb=14] [logfile]
-# env passthrough: GEROLAMO_PLUTUS_SHADOW_MS, GEROLAMO_PLUTUS_SHADOW_SAMPLE
+# env: GEROLAMO_BUN_FLAGS (e.g. "--cpu-prof --cpu-prof-dir=<dir>": the profile is written when the node exits — SIGTERM it after the sample window)
+# env passthrough: GEROLAMO_PLUTUS_SHADOW_MS (default 2000: shadow evaluation runs detached, off the apply path), GEROLAMO_PLUTUS_SHADOW_SAMPLE (default 10)
 set -u
 NET=$1; PORT=$2; DIR=$3; MAX_GB=${4:-14}; LOGNAME_=${5:-${NET}-supervised.log}
 REPO=$(cd "$(dirname "$0")/.." && pwd)
@@ -30,8 +31,8 @@ while true; do
     say "launching $NET on :$PORT (db $DIR/$NET.db)"
     ( cd "$REPO" && NETWORK=$NET GEROLAMO_PORT=$PORT GEROLAMO_DB_PATH=$DIR/$NET.db GEROLAMO_CONFIG_PATH=$DIR/config.json \
         GEROLAMO_FAILED_BLOCK_DIR=$DIR/logs GEROLAMO_HEAP_DIR=$DIR/logs \
-        GEROLAMO_PLUTUS_SHADOW_MS=${GEROLAMO_PLUTUS_SHADOW_MS:-100} GEROLAMO_PLUTUS_SHADOW_SAMPLE=${GEROLAMO_PLUTUS_SHADOW_SAMPLE:-50} \
-        exec bun src/index.ts start-gerolamo >> "$LOG" 2>&1 ) &
+        GEROLAMO_PLUTUS_SHADOW_MS=${GEROLAMO_PLUTUS_SHADOW_MS:-2000} GEROLAMO_PLUTUS_SHADOW_SAMPLE=${GEROLAMO_PLUTUS_SHADOW_SAMPLE:-10} GEROLAMO_PLUTUS_TRACE=${GEROLAMO_PLUTUS_TRACE:-0} \
+        exec bun ${GEROLAMO_BUN_FLAGS:-} src/index.ts start-gerolamo >> "$LOG" 2>&1 ) &
     pid=$!
     sleep 5
   fi

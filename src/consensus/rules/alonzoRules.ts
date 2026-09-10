@@ -43,6 +43,8 @@ export interface AlonzoRuleInput {
     resolved: Map<string, ResolvedUtxo>;
     /** Script hashes known to be Plutus (witness set or reference scripts). */
     plutusScripts: Set<string>;
+    /** Plutus language per script hash where known: PlutusV3 spends may omit the datum (CIP-69). */
+    plutusLanguages?: Map<string, PlutusLanguage>;
     /** Script hashes known to be native (witness set). */
     nativeScripts: Set<string>;
     params: AlonzoParams;
@@ -106,6 +108,8 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
 
     // --- spent script inputs: datum available, redeemer present
     const spendRefs = sortedInputRefs(ledgerInputs(body.inputs ?? [], tx.era));
+    /** Hashes of the Plutus scripts this transaction runs (the language view covers exactly these). */
+    const neededHashes = new Set<string>();
     const neededSpend = new Set<number>();
     spendRefs.forEach((ref, idx) => {
         const u = tx.resolved.get(ref);
@@ -114,9 +118,17 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
         if (pc?.kind !== "script") return;
         if (tx.nativeScripts.has(pc.hash)) return; // native: no redeemer, no datum
         neededSpend.add(idx);
+        neededHashes.add(pc.hash);
         const inline = !!u.inlineDatumCbor;
         const dh = u.datumHash;
-        if (!inline && !dh) failures.push(`input ${ref} is locked by a Plutus script but carries no datum`);
+        if (!inline && !dh) {
+            // Conway (CIP-69): a PlutusV3 spending script takes an optional datum, so an output
+            // without one is spendable. V1/V2 spends still need a datum.
+            const lang = tx.plutusLanguages?.get(pc.hash) ?? null;
+            if (lang === 3) { /* datum optional */ }
+            else if (lang == null) reports.push(`input ${ref} is locked by a Plutus script of unknown version and carries no datum`);
+            else failures.push(`input ${ref} is locked by a PlutusV${lang} script but carries no datum`);
+        }
         else if (!inline && dh && !datumHashes.has(dh)) failures.push(`input ${ref}: datum ${dh.slice(0, 12)}… not in the witness set`);
     });
 
@@ -129,7 +141,7 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
     mintPolicies.sort();
     const neededMint = new Set<number>();
     mintPolicies.forEach((p, idx) => {
-        if (tx.plutusScripts.has(p)) neededMint.add(idx);
+        if (tx.plutusScripts.has(p)) { neededMint.add(idx); neededHashes.add(p); }
     });
 
     // --- certificates / withdrawals with script credentials
@@ -142,26 +154,40 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
         if (NO_CERT_WITNESS.has(Number(c.certType))) return;
         const cred = c.stakeCredential ?? c.drepCredential ?? c.coldCredential;
         const isScript = cred?.type === CredentialType.Script || cred?.type === 1 || cred?.type === "script";
-        if (isScript && tx.plutusScripts.has(hex(cred.hash))) neededCert.add(idx);
+        if (isScript && tx.plutusScripts.has(hex(cred.hash))) { neededCert.add(idx); neededHashes.add(hex(cred.hash)); }
     });
     const wdAccounts = ((body.withdrawals?.map ?? []) as any[]).map((w) => w.rewardAccount);
     const neededWd = new Set<number>();
     wdAccounts.forEach((acc: any, idx: number) => {
         const isScript = acc?.type === "script" || String(acc?.credentials?.constructor?.name ?? "").includes("Validator");
-        if (isScript && tx.plutusScripts.has(hex(acc?.credentials?.hash ?? acc?.credentials))) neededWd.add(idx);
+        if (isScript && tx.plutusScripts.has(hex(acc?.credentials?.hash ?? acc?.credentials))) { neededWd.add(idx); neededHashes.add(hex(acc?.credentials?.hash ?? acc?.credentials)); }
     });
 
+    // --- Conway: votes cast by script credentials (CC / DRep scripts) and proposals guarded
+    // by a policy script (the constitution's guardrail script) run Plutus scripts too.
+    for (const entry of ((body.votingProcedures?.procedures ?? []) as any[])) {
+        const kind = Number(entry?.voter?.kind);
+        if (kind === 1 || kind === 3) { // ConstitutionalCommitteeScript, DRepScript
+            const h = hex(entry.voter?.hash);
+            if (h && tx.plutusScripts.has(h)) neededHashes.add(h);
+        }
+    }
+    for (const pp of ((body.proposalProcedures ?? []) as any[])) {
+        const h = hex(pp?.govAction?.policyHash);
+        if (h && tx.plutusScripts.has(h)) neededHashes.add(h);
+    }
+
     // --- redeemers ↔ purposes
-    // Before Conway the redeemers are a list decoded with Map.fromList (a later entry for
-    // the same purpose silently replaces an earlier one; preprod slot 24837046 carries six
-    // for mint 0); Conway's map form rejects duplicate keys.
+    // The list form of the redeemers is decoded with Map.fromList in every era (a later entry
+    // for the same purpose silently replaces an earlier one; preprod slot 24837046 carries six
+    // for mint 0, preview slot 61206431 two for reward 0 under Conway). Conway's map form
+    // cannot carry duplicate keys, so a duplicate here is never a failure.
     const seen = new Set<string>();
     for (const r of redeemersRaw) {
         const tag = Number(r.tag), idx = Number(r.index);
         const key = `${tag}:${idx}`;
         if (seen.has(key)) {
-            if (Number(tx.era) >= 7) failures.push(`duplicate redeemer for purpose ${key}`);
-            else reports.push(`duplicate redeemer for purpose ${key} (pre-Conway list: last one wins)`);
+            reports.push(`duplicate redeemer for purpose ${key} (list form: last one wins)`);
             continue;
         }
         seen.add(key);
@@ -191,18 +217,7 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
     if (redeemers.length > 0 && !body.scriptDataHash) failures.push("redeemers present but no script_data_hash");
     if (redeemers.length === 0 && (ws.datums?.length ?? 0) === 0 && body.scriptDataHash) reports.push("script_data_hash present without redeemers or datums");
     if (tx.witnessSetBytes) {
-        const langs = new Set<PlutusLanguage>();
-        if ((ws.plutusV1Scripts?.length ?? 0) > 0) langs.add(1);
-        if ((ws.plutusV2Scripts?.length ?? 0) > 0) langs.add(2);
-        if ((ws.plutusV3Scripts?.length ?? 0) > 0) langs.add(3);
-        for (const i of [...(body.inputs ?? []), ...(body.refInputs ?? [])] as any[]) {
-            const r = utxoRefOf(i);
-            const u = r ? tx.resolved.get(r) : null;
-            if (u?.referenceScriptCbor) {
-                const l = scriptLanguageOfCbor(u.referenceScriptCbor);
-                if (l) langs.add(l);
-            }
-        }
+        const langs = scriptDataLanguages(neededHashes, tx.plutusLanguages, ws, body, tx.resolved);
         const expected = expectedScriptDataHash({ witnessSetBytes: tx.witnessSetBytes, languages: langs, models: costModelArrays(tx.rawParams), alonzoForm: tx.era <= 6 });
         const actual = body.scriptDataHash ? hex(body.scriptDataHash) : null;
         if (expected.reason) reports.push(`script_data_hash not checked: ${expected.reason}`);
@@ -247,12 +262,51 @@ function checkCollateral(tx: AlonzoRuleInput, failures: string[], runsPlutus: bo
 }
 
 /**
- * The redeemers the ledger actually keeps: before Conway the witness-set list is decoded
- * with Map.fromList, so a later entry for the same (tag, index) replaces an earlier one;
- * from Conway on duplicates are rejected at decoding (kept as they are here).
+ * Languages the script data hash's language view covers: those of the Plutus scripts
+ * the transaction *needs* (spends, mints, certificates, withdrawals), not of every
+ * script it can see. A reference input may carry an unrelated PlutusV2 script next
+ * to a V3 spend; including it changed the hash (preview slot 68390403, bug 61).
+ * Without a language map (older callers) fall back to witness-set and reference
+ * script languages.
  */
-export function effectiveRedeemers(redeemers: readonly any[], era: number): any[] {
-    if (era >= 7) return [...redeemers];
+export function scriptDataLanguages(
+    neededHashes: Set<string>,
+    plutusLanguages: Map<string, PlutusLanguage> | undefined,
+    ws: any,
+    body: any,
+    resolved: Map<string, { referenceScriptCbor?: string | null }>,
+): Set<PlutusLanguage> {
+    const langs = new Set<PlutusLanguage>();
+    if (plutusLanguages) {
+        for (const h of neededHashes) {
+            const l = plutusLanguages.get(h);
+            if (l) langs.add(l);
+        }
+        if (langs.size > 0 || ((ws.redeemers?.length ?? 0) === 0 && !(ws.redeemers instanceof Map))) return langs;
+        // Redeemers but no needed script recognised (a purpose this rule does not model yet):
+        // the witness-set scripts are the ledger's best available answer rather than "none".
+    }
+    if ((ws.plutusV1Scripts?.length ?? 0) > 0) langs.add(1);
+    if ((ws.plutusV2Scripts?.length ?? 0) > 0) langs.add(2);
+    if ((ws.plutusV3Scripts?.length ?? 0) > 0) langs.add(3);
+    for (const i of [...(body.inputs ?? []), ...(body.refInputs ?? [])] as any[]) {
+        const r = utxoRefOf(i);
+        const u = r ? resolved.get(r) : null;
+        if (u?.referenceScriptCbor) {
+            const l = scriptLanguageOfCbor(u.referenceScriptCbor);
+            if (l) langs.add(l);
+        }
+    }
+    return langs;
+}
+
+/**
+ * The redeemers the ledger actually keeps: the witness-set *list* form is decoded with
+ * Map.fromList in every era, so a later entry for the same (tag, index) replaces an
+ * earlier one (preview slot 61206431, protocol 9, lists the same reward redeemer twice).
+ * Conway's map form cannot carry duplicate keys at all, so collapsing is always right.
+ */
+export function effectiveRedeemers(redeemers: readonly any[], _era: number): any[] {
     const byKey = new Map<string, any>();
     for (const r of redeemers) byKey.set(`${Number(r.tag)}:${Number(r.index)}`, r);
     return [...byKey.values()];

@@ -24,7 +24,12 @@ const byEpoch = new Map<number, any>(totals.map((t) => [Number(t.epoch_no), t]))
 const local = db.query("SELECT performance_epoch, treasury_delta, reward_pot, paid, unclaimed FROM reward_epochs ORDER BY performance_epoch").all() as any[];
 const pots = db.query("SELECT reserves, treasury, fee_pot, initialized_epoch FROM reward_pots WHERE id = 1").get() as any;
 const from = Number(args.from ?? (local[0]?.performance_epoch ?? 0) + 2), to = Number(args.to ?? (local.at(-1)?.performance_epoch ?? 0) + 2);
-console.log("epoch  Δtreasury(local)  Δtreasury(koios)  diff(ppm)");
+// Two views per boundary: the reward update's treasury cut (reward_epochs.treasury_delta) and the
+// actual pot movements between the boundary snapshots (pot_snapshots), both against Koios totals.
+// Deposits forfeited to the treasury, donations and refunds show only in the actual column.
+const snaps = new Map<number, { reserves: bigint; treasury: bigint }>((db.query("SELECT epoch, reserves, treasury FROM pot_snapshots").all() as any[]).map((r) => [Number(r.epoch), { reserves: BigInt(r.reserves), treasury: BigInt(r.treasury) }]));
+const ppmOf = (l: bigint, k: bigint) => (k === 0n ? (l === 0n ? 0 : 1e6) : Number(((l - k) * 1_000_000n) / k));
+console.log("epoch  Δtreasury(rewards)  Δtreasury(koios)  ppm | Δtreasury(actual) ppm | Δreserves(actual) Δreserves(koios) diff(ADA)");
 let worst = 0;
 for (const r of local) {
     const e = Number(r.performance_epoch) + 2;
@@ -33,9 +38,15 @@ for (const r of local) {
     if (!k || !kp) continue;
     const kd = BigInt(k.treasury) - BigInt(kp.treasury);
     const ld = BigInt(r.treasury_delta);
-    const ppm = kd === 0n ? (ld === 0n ? 0 : 1e6) : Number(((ld - kd) * 1_000_000n) / kd);
+    const ppm = ppmOf(ld, kd);
     worst = Math.max(worst, Math.abs(ppm));
-    console.log(String(e).padStart(5), String(ld).padStart(18), String(kd).padStart(18), String(ppm).padStart(10));
+    const s1 = snaps.get(e), s0 = snaps.get(e - 1);
+    let actual = "";
+    if (s1 && s0) {
+        const lt = s1.treasury - s0.treasury, lr = s1.reserves - s0.reserves, kr = BigInt(k.reserves) - BigInt(kp.reserves);
+        actual = ` | ${String(lt).padStart(16)} ${String(ppmOf(lt, kd)).padStart(6)} | ${String(lr).padStart(17)} ${String(kr).padStart(17)} ${(Number(lr - kr) / 1e6).toFixed(0).padStart(8)}`;
+    }
+    console.log(String(e).padStart(5), String(ld).padStart(18), String(kd).padStart(18), String(ppm).padStart(6) + actual);
 }
 const tipEpoch = Number(args.at ?? to);
 const k = byEpoch.get(tipEpoch);

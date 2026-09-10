@@ -1,3 +1,6 @@
+diff --git a/node_modules/@harmoniclabs/ouroboros-miniprotocols-ts/.bun-tag-15a2fcf40ffd3471 b/.bun-tag-15a2fcf40ffd3471
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
 diff --git a/node_modules/@harmoniclabs/ouroboros-miniprotocols-ts/.bun-tag-674ee7686d264466 b/.bun-tag-674ee7686d264466
 new file mode 100644
 index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
@@ -24,7 +27,7 @@ index a99727d4ca749b6c5c93665527cdf7af0f46de41..5d9f1b57f4a1fc82af28c163d62343b4
                  for (var messages_1 = __values(messages), messages_1_1 = messages_1.next(); !messages_1_1.done; messages_1_1 = messages_1.next()) {
                      var _b = messages_1_1.value, header = _b.header, payload = _b.payload;
 diff --git a/dist/multiplexer/multiplexerMessage.js b/dist/multiplexer/multiplexerMessage.js
-index ecf0ddf7b0dd2fee4b7c6fc7e515662633e00aeb..76137d6efc5e324dde1a891b41b50c34113858ca 100644
+index ecf0ddf7b0dd2fee4b7c6fc7e515662633e00aeb..bfa1878ed3913ea06a4c4d8239403ef9efe50df2 100644
 --- a/dist/multiplexer/multiplexerMessage.js
 +++ b/dist/multiplexer/multiplexerMessage.js
 @@ -60,9 +60,19 @@ function unwrapMultiplexerMessage(message) {
@@ -48,9 +51,14 @@ index ecf0ddf7b0dd2fee4b7c6fc7e515662633e00aeb..76137d6efc5e324dde1a891b41b50c34
          // bitwise opeartor (or and shift) implicitly convert to signed int32
          // but these are 2 bytes long numbers, hence always positive
          var agencyAndProtocol = message[4] << 8 | message[5];
-@@ -78,5 +88,6 @@ function unwrapMultiplexerMessages(message) {
+@@ -76,7 +86,10 @@ function unwrapMultiplexerMessages(message) {
+             },
+             payload: Uint8Array.prototype.slice.call(message, 8, 8 + payloadLen)
          });
-         message = Uint8Array.prototype.slice.call(message, 8 + payloadLen);
+-        message = Uint8Array.prototype.slice.call(message, 8 + payloadLen);
++        // A view, not a copy: copying the remainder per segment was quadratic in segments per
++        // TCP chunk (1 % of Gerolamo's applier thread). The caller copies `rest` if it keeps it.
++        message = Uint8Array.prototype.subarray.call(message, 8 + payloadLen);
      }
 -    return messages;
 +    return { messages: messages, rest: message };

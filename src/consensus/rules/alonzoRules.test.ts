@@ -33,6 +33,18 @@ describe("evaluateAlonzoRules", () => {
         const r = evaluateAlonzoRules({ ...base, resolved: r2, body: { inputs: [input(scriptIn)], collateralInputs: [input(collIn)], fee: 300_000n, scriptDataHash: "x" }, witnessSet: { redeemers: [rd(0, 0)], datums: [] } });
         expect(r.failures.some((f) => f.includes("not in the witness set"))).toBe(true);
     });
+    test("a datum-less script output: spendable by PlutusV3 (CIP-69), rejected for V2, reported when the version is unknown", () => {
+        const r3 = new Map(resolved);
+        r3.set(scriptIn, utxo(scriptIn, scriptAddr, 5_000_000n, { hasDatum: false }));
+        const body = { inputs: [input(scriptIn)], collateralInputs: [input(collIn)], fee: 300_000n, scriptDataHash: "x" };
+        const v3 = evaluateAlonzoRules({ ...base, era: 7, resolved: r3, plutusLanguages: new Map([[SCRIPT, 3 as const]]), body, witnessSet: { redeemers: [rd(0, 0)] } });
+        expect(v3.failures).toEqual([]);
+        const v2 = evaluateAlonzoRules({ ...base, era: 7, resolved: r3, plutusLanguages: new Map([[SCRIPT, 2 as const]]), body, witnessSet: { redeemers: [rd(0, 0)] } });
+        expect(v2.failures.some((f) => f.includes("PlutusV2 script but carries no datum"))).toBe(true);
+        const unknown = evaluateAlonzoRules({ ...base, era: 7, resolved: r3, body, witnessSet: { redeemers: [rd(0, 0)] } });
+        expect(unknown.failures).toEqual([]);
+        expect(unknown.reports.some((f) => f.includes("unknown version"))).toBe(true);
+    });
     test("collateral: script address rejected, short collateral rejected, ex units capped", () => {
         const r2 = new Map(resolved);
         r2.set(collIn, utxo(collIn, scriptAddr, 5_000_000n));

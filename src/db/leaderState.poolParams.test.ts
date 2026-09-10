@@ -1,3 +1,4 @@
+import { rewardAccountTypedHex } from "../db";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -69,5 +70,14 @@ describe("pool re-registration takes effect at the next boundary", () => {
         const bal = (await sql`SELECT amount FROM rewards WHERE stake_credentials = ${Buffer.from(A, "hex")}`.values()) as any;
         expect(BigInt(bal[0][0])).toBe(1_000_000n);
         expect(((await sql`SELECT COUNT(*) FROM mir_pending`.values()) as any)[0][0]).toBe(0);
+    });
+});
+
+describe("reward account typing", () => {
+    test("a script stake address as reward account is stored typed (bug 84)", () => {
+        const h = "fda02f913f54589fcebe2afed33a6f62600ed649fd04f8f692108efe";
+        expect(rewardAccountTypedHex({ type: "script", credentials: { toString: () => h } })).toBe(`01${h}`);
+        expect(rewardAccountTypedHex({ type: "key", credentials: { toString: () => h } })).toBe(h);
+        expect(rewardAccountTypedHex({ credentials: { toString: () => h } })).toBe(h);
     });
 });

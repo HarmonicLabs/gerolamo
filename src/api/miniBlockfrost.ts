@@ -9,8 +9,10 @@
  *   GET /api/v0/epochs/latest
  *   GET /api/v0/epochs/latest/parameters
  *   GET /api/v0/blocks/latest
- *   GET /api/v0/blocks/{slot|hash}
- *   GET /api/v0/blocks/{slot|hash}/txs
+ *   GET /api/v0/blocks/{height|hash}   (a number is a height; a slot when no block has that height)
+ *   GET /api/v0/blocks/slot/{slot}
+ *   GET /api/v0/blocks/height/{height}
+ *   GET /api/v0/blocks/{height|hash}/txs
  *   GET /api/v0/addresses/{address}
  *   GET /api/v0/addresses/{address}/utxos
  *   GET /api/v0/addresses/{address}/transactions
@@ -31,7 +33,7 @@ import {
     getBlockBySlot,
     getBlockByHash,
     getMaxSlot,
-    getUtxoCount,
+    getUtxoCountCached,
     getEpochNonce,
     getTxByHash,
     getAddressTxs,
@@ -220,10 +222,17 @@ async function resolveBlockRow(id: string): Promise<{ row: BlockListRow | null; 
         if (tipSlot === 0n) return { row: null, error: bfError(404, "Not Found", "No blocks in local DB") };
         return { row: await getBlockListRowBySlot(Number(tipSlot)) };
     }
-    // 64 hex chars is always a hash (a slot never has 64 digits), so test it first.
+    // 64 hex chars is always a hash (a number never has 64 digits), so test it first.
     if (/^[0-9a-f]{64}$/i.test(id)) return { row: await getBlockListRowByHash(id.toLowerCase()) };
-    if (/^\d+n?$/.test(id)) return { row: await getBlockListRowBySlot(Number(id.replace("n", ""))) };
-    return { row: null, error: bfError(400, "Bad Request", "Block id must be `latest`, a slot number or a 64-hex hash") };
+    if (/^\d+n?$/.test(id)) {
+        // Blockfrost reads {hash_or_number} as the block height; a number no block has as
+        // its height falls back to the slot (heights start at 1, so `0` is the first slot).
+        const n = Number(id.replace("n", ""));
+        const byHeight = await getBlockListRowByHeight(n);
+        if (byHeight) return { row: byHeight };
+        return { row: await getBlockListRowBySlot(n) };
+    }
+    return { row: null, error: bfError(400, "Bad Request", "Block id must be `latest`, a block height (or slot), or a 64-hex hash") };
 }
 
 async function bfEpoch(epoch: number, network: EpochNetwork, tipSlot: number) {
@@ -317,11 +326,12 @@ export async function handleMiniBlockfrost(
                     "GET /api/v0/epochs/latest/parameters",
                     "GET /api/v0/blocks?limit=&before=<slot|hash>",
                     "GET /api/v0/blocks/latest",
-                    "GET /api/v0/blocks/{slot|hash}",
+                    "GET /api/v0/blocks/{height|hash}",
                     "GET /api/v0/blocks/height/{n}",
-                    "GET /api/v0/blocks/{slot|hash}/previous?count=",
-                    "GET /api/v0/blocks/{slot|hash}/next?count=",
-                    "GET /api/v0/blocks/{slot|hash}/txs",
+                    "GET /api/v0/blocks/slot/{n}",
+                    "GET /api/v0/blocks/{height|hash}/previous?count=",
+                    "GET /api/v0/blocks/{height|hash}/next?count=",
+                    "GET /api/v0/blocks/{height|hash}/txs",
                     "GET /api/v0/epochs/{n}",
                     "GET /api/v0/epochs/{n}/blocks?page=&count=",
                     "GET /api/v0/epochs/{n}/parameters",
@@ -397,7 +407,7 @@ export async function handleMiniBlockfrost(
             const nonce = Number.isFinite(epoch) && epoch >= 0
                 ? await getEpochNonce(epoch)
                 : null;
-            const utxoCount = await getUtxoCount();
+            const utxoCount = await getUtxoCountCached();
             return json({
                 epoch: Number.isFinite(epoch) ? epoch : null,
                 start_time: null,
@@ -461,12 +471,22 @@ export async function handleMiniBlockfrost(
             return json(await Promise.all(rows.map((r) => bfBlock(r, tipHeight, tipSlot, net))));
         }
 
-        // GET /api/v0/blocks/height/{n} — by chain height (Gerolamo extension; BF overloads {hash_or_number})
+        // GET /api/v0/blocks/height/{n} — by chain height (Gerolamo alias of Blockfrost's {hash_or_number})
         {
             const m = sub.match(/^\/blocks\/height\/(\d+)$/);
             if (req.method === "GET" && m) {
                 const row = await getBlockListRowByHeight(Number(m[1]));
                 if (!row) return bfError(404, "Not Found", "No block at that height");
+                return json(await bfBlock(row, await getMaxBlockNo(), Number(await getMaxSlot()), net));
+            }
+        }
+
+        // GET /api/v0/blocks/slot/{n} — Blockfrost: block by absolute slot
+        {
+            const m = sub.match(/^\/blocks\/slot\/(\d+)$/);
+            if (req.method === "GET" && m) {
+                const row = await getBlockListRowBySlot(Number(m[1]));
+                if (!row) return bfError(404, "Not Found", "No block in that slot");
                 return json(await bfBlock(row, await getMaxBlockNo(), Number(await getMaxSlot()), net));
             }
         }
@@ -971,8 +991,10 @@ export async function handleMiniBlockfrost(
             } catch (e: any) {
                 return bfError(503, "Service Unavailable", e?.message ?? "submit failed");
             }
-            if (result.status !== "success") {
-                return bfError(400, "Bad Request", `Mempool rejected the transaction: ${result.status}`);
+            // shared-cardano-mempool-ts MempoolAppendStatus: 0 Ok, 1 AlreadyPresent, 2 InsufficientSpace, 3 MaxTxsReached
+            if (result.status !== "success" && result.status !== "0" && result.status !== "1") {
+                const why = result.status === "2" ? "insufficient space" : result.status === "3" ? "max transactions reached" : result.status;
+                return bfError(400, "Bad Request", `Mempool rejected the transaction: ${why}`);
             }
             return json(
                 {

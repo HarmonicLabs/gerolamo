@@ -110,3 +110,21 @@ describe("Mithril chunk import writes block rows in the current schema", () => {
         expect(hashHex).toBe(fixture.headers[2]!.hash);
     });
 });
+
+describe("blocks-only import (local relay block store)", () => {
+    test("writes the block row and numbers it, without applying the ledger", async () => {
+        const before = Number(((await sql`SELECT COUNT(*) AS c FROM utxo_deltas`) as any[])[0]?.c ?? 0);
+        const hash = fixture.headers[2]!.hash;
+        await sql`DELETE FROM blocks WHERE hash = ${hash}`;
+        const heightBefore = await getMaxBlockNo();
+        const r = await processChunk(dir, 1, logger, undefined, { blocksOnly: true });
+        expect(r.applied).toBe(1);
+        expect(r.errors).toBe(0);
+        expect(r.txs).toBe(0);
+        const row = ((await sql`SELECT hash, block_no, block_data FROM blocks WHERE hash = ${hash}`) as Row[])[0]!;
+        expect(row.hash).toBe(hash);
+        expect(row.block_no).toBe(heightBefore + 1);
+        expect(toHex(row.block_data)).toBe(fixture.blocks[2]!);
+        expect(Number(((await sql`SELECT COUNT(*) AS c FROM utxo_deltas`) as any[])[0]?.c ?? 0)).toBe(before);
+    });
+});

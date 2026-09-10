@@ -43,11 +43,18 @@ describe("first mainnet Byron transaction", () => {
     });
 
     test("apply stores the output under the real tx id", async () => {
-        await applyByronTxPayload(aux, new Uint8Array(32));
+        await applyByronTxPayload(aux, new Uint8Array(32), undefined, { slot: 4456014, txIndex: 0, blockHeight: 220000 });
         const rows = (await sql`SELECT utxo_ref, address FROM utxo`.values()) as unknown[][];
         expect(rows.map((r) => String(r[0]))).toEqual([`${toHex(txHash)}:0`]);
         const address = String(rows[0]![1]);
         expect(ByronAddress.isValid(address)).toBe(true);
         expect(ByronAddress.fromBase58(address).rootHash.length).toBe(28);
+        // the Byron transaction is in the explorer projection (explorer tx counts, /txs/{hash});
+        // the legacy thin tables (tx_index / block_tx) are no longer written since the projection
+        // moved to its own worker and file (2026-09-06) — in tests, without the worker, mb_* land here.
+        const id = toHex(txHash);
+        expect(((await sql`SELECT tx_hash FROM mb_tx WHERE tx_hash = ${id}`.values()) as unknown[][]).length).toBe(1);
+        expect(((await sql`SELECT slot FROM mb_tx WHERE tx_hash = ${id}`.values()) as unknown[][]).map((r) => Number(r[0]))).toEqual([4456014]);
+        expect(((await sql`SELECT output_index, lovelace FROM mb_tx_out WHERE tx_hash = ${id}`.values()) as unknown[][]).length).toBeGreaterThan(0);
     });
 });

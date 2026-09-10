@@ -855,7 +855,7 @@ export type PureTsChainWalkResult = {
     errors: string[];
 };
 
-export const DEFAULT_CHAIN_MAX_DEPTH = 128;
+export const DEFAULT_CHAIN_MAX_DEPTH =  8192; // one hop per epoch back to the Mithril genesis certificate: preview needs > 128 (1 413 epochs)
 
 /**
  * HTTP certificate fetcher against a Mithril aggregator.
@@ -882,7 +882,7 @@ export function createAggregatorCertificateFetcher(
  * @param opts.fetcher Required to walk beyond provided `predecessors`
  * @param opts.predecessors Optional known chain (tip's previous first, …)
  * @param opts.genesisVkey Raw genesis.vkey contents (required for chainOk=true at genesis)
- * @param opts.maxDepth Cap walk length (default 128)
+ * @param opts.maxDepth Cap walk length (default 8192: one certificate per epoch back to genesis)
  */
 export async function walkCertificateChain(
     tip: MithrilCertificate | Record<string, unknown>,

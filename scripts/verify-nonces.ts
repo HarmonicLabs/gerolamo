@@ -33,7 +33,19 @@ const t0 = performance.now();
 const startRow = db.query("SELECT start_evolving_hex, start_candidate_hex FROM epoch_nonces WHERE epoch = ?").get(from) as any;
 const startState = startRow?.start_evolving_hex && startRow?.start_candidate_hex ? { etaVHex: String(startRow.start_evolving_hex), etaCHex: String(startRow.start_candidate_hex) } : null;
 if (!startState) console.log(`no recorded start state for epoch ${from}: ηv = ηc = η0 (exact only from the Shelley start epoch)`);
-const res = replayNonces(genesis, from, eta0, rows.map((r) => ({ slot: Number(r.slot), block_data: new Uint8Array(r.block_data) })), { etaHHex, ...(startState ?? {}) });
+// Conway (protocol major ≥ 9) freezes the candidate nonce 4k/f slots before the epoch ends, earlier eras 3k/f:
+// the version per epoch comes from the node's stored protocol parameters.
+const pvCache = new Map<number, number | null>();
+const protocolMajorForEpoch = (e: number): number | null => {
+    if (!pvCache.has(e)) {
+        const row = db.query("SELECT params FROM epoch_params WHERE epoch = ?").get(e) as any;
+        let pv: number | null = null;
+        try { const v = row?.params ? JSON.parse(String(row.params)).protocol_major_ver : null; pv = v == null ? null : Number(v); } catch { pv = null; }
+        pvCache.set(e, pv);
+    }
+    return pvCache.get(e) ?? null;
+};
+const res = replayNonces(genesis, from, eta0, rows.map((r) => ({ slot: Number(r.slot), block_data: new Uint8Array(r.block_data) })), { etaHHex, protocolMajorForEpoch, ...(startState ?? {}) });
 console.log(`replayed ${res.blocks} blocks in ${((performance.now() - t0) / 1000).toFixed(1)}s, ${res.ticks.length} boundaries`);
 let ok = 0, bad = 0;
 for (const t of res.ticks) {

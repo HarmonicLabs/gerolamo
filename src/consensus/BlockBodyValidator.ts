@@ -16,7 +16,7 @@ import {
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
-import { logger } from "../utils/logger";
+import { logger, LogLevel } from "../utils/logger";
 import { evaluateBlockRules, type BlockRuleOutcome } from "./rules/blockRules";
 import type { ValidationPool } from "./workers/ValidationPool";
 import type { EpochBodyParams } from "./epochParams";
@@ -291,45 +291,17 @@ export class BlockBodyValidator {
                 // provided`, which resolve reference inputs exactly); this structural
                 // look-up reads `referenceInputs` that ledger-ts calls `refInputs` and
                 // halted a valid preprod block. Report only.
-                const referenced = refs.length > 0 ? await countUtxosWithReferenceScript(refs) : 0;
+                // The count only feeds the debug line below: skip the query (one per scripted tx) at INFO.
+                const referenced = refs.length > 0 && logger.logLevel <= LogLevel.DEBUG ? await countUtxosWithReferenceScript(refs) : -1;
                 if (referenced === 0) {
                     logger.debug(`scriptValidation: tx[${i}]: no plutus scripts in the witness set and none found among ${refs.length} spent UTxO(s) (reference inputs are checked by the rules)`);
                 }
                 continue;
             }
 
-            // Best-effort UPLC decode when script bytes are available
-            for (let s = 0; s < scriptList.length; s++) {
-                const scr = scriptList[s];
-                // The flat-encoded program is `bytes`; `toCborBytes()` adds the CBOR
-                // wrapper the flat decoder cannot read (a false "decode failed").
-                const bytes: Uint8Array | null =
-                    scr instanceof Uint8Array
-                        ? scr
-                        : scr?.bytes instanceof Uint8Array
-                        ? scr.bytes
-                        : typeof scr?.toCborBytes === "function"
-                        ? scr.toCborBytes()
-                        : scr?.cbor != null
-                        ? scr.cbor
-                        : null;
-                if (!bytes || !(bytes instanceof Uint8Array) || bytes.length === 0) {
-                    continue;
-                }
-                try {
-                    const { UPLCDecoder } = await import(
-                        "@harmoniclabs/uplc"
-                    );
-                    // UPLCDecoder.parse(bytes) — proves script CBOR is well-formed
-                    if (typeof (UPLCDecoder as any)?.parse === "function") {
-                        (UPLCDecoder as any).parse(bytes);
-                    }
-                } catch (err: any) {
-                    // A script the chain accepted that our decoder cannot read is a gap in
-                    // the decoder, not an invalid block: the phase-2 rules report it.
-                    logger.warn(`scriptValidation: tx[${i}] script[${s}]: UPLC decode failed: ${err?.message ?? err}`);
-                }
-            }
+            // No UPLC decode here: the phase-2 rules on the workers decode and run every script
+            // that has a redeemer, so a malformed script fails there. Decoding it again on the
+            // applier thread cost 2 % of it in Alonzo blocks and far more with Conway traffic.
         }
 
         if (issues.length === 0) return true;
@@ -763,6 +735,21 @@ let reportCount = 0;
 const plutusTotals = { evaluated: 0, skipped: 0, mismatches: 0, nextLogAt: 1 };
 const plutusReasons: Record<string, number> = {};
 
+/** Aggregate Plutus shadow statistics of one block (from the inline path or the detached shadow job) and log the running totals. */
+export function recordPlutusShadow(outcome: { plutus?: { evaluated: number; skipped: number; mismatches: number; skipReasons?: Record<string, number> } | null }): void {
+    const pl = outcome.plutus;
+    if (!pl || !(pl.evaluated || pl.skipped)) return;
+    plutusTotals.evaluated += pl.evaluated;
+    plutusTotals.skipped += pl.skipped;
+    for (const [k, n] of Object.entries(pl.skipReasons ?? {})) plutusReasons[k] = (plutusReasons[k] ?? 0) + n;
+    plutusTotals.mismatches += pl.mismatches;
+    if (plutusTotals.evaluated + plutusTotals.skipped >= plutusTotals.nextLogAt) {
+        plutusTotals.nextLogAt *= 4;
+        const top = Object.entries(plutusReasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n}× ${k}`).join("; ");
+        logger.info(`Plutus shadow so far: ${plutusTotals.evaluated} redeemer(s) evaluated, ${plutusTotals.skipped} skipped, ${plutusTotals.mismatches} tx verdict mismatch(es)${top ? ` — ${top}` : ""}`);
+    }
+}
+
 /**
  * Body validation for every era: witness signatures, required signers, native
  * scripts and the era's transaction rules (rules/), then the Alonzo+ checks the
@@ -776,23 +763,12 @@ export async function validateBlock(
 ): Promise<boolean> {
     if (ctx) {
         const genesis = block.era >= 2 ? await getCachedShelleyGenesis(config) : null;
-        const outcome = ctx.ruleOutcome ?? await evaluateBlockRules(block, { config, pool: ctx.pool, params, genesis, slot: ctx.slot, preVerified: ctx.preVerified ?? null });
+        const outcome = ctx.ruleOutcome ?? await evaluateBlockRules(block, { config, pool: ctx.pool, params, genesis, slot: ctx.slot, preVerified: ctx.preVerified ?? null , phase: "rules" /* Plutus shadow never runs on the main thread: a 2 s budget stalled the applier (preview epoch 898) */ });
         if (outcome.failures.length) {
             logger.error(`Block body validation failed at slot ${ctx.slot} (era ${block.era}, ${outcome.txs} tx): ${outcome.failures.slice(0, 5).join(" | ")}${outcome.failures.length > 5 ? ` | +${outcome.failures.length - 5} more` : ""}`);
             return false;
         }
-        const pl = outcome.plutus;
-        if (pl && (pl.evaluated || pl.skipped)) {
-            plutusTotals.evaluated += pl.evaluated;
-            plutusTotals.skipped += pl.skipped;
-                for (const [k, n] of Object.entries(outcome.plutus.skipReasons ?? {})) plutusReasons[k] = (plutusReasons[k] ?? 0) + n;
-            plutusTotals.mismatches += pl.mismatches;
-            if (plutusTotals.evaluated + plutusTotals.skipped >= plutusTotals.nextLogAt) {
-                plutusTotals.nextLogAt *= 4;
-                const top = Object.entries(plutusReasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n}× ${k}`).join("; ");
-                logger.info(`Plutus shadow so far: ${plutusTotals.evaluated} redeemer(s) evaluated, ${plutusTotals.skipped} skipped, ${plutusTotals.mismatches} tx verdict mismatch(es)${top ? ` — ${top}` : ""}`);
-            }
-        }
+        recordPlutusShadow(outcome);
         if (outcome.reports.length) {
             reportCount += outcome.reports.length;
             if (reportCount <= 20 || reportCount % 1000 === 0) {

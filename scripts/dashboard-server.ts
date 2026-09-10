@@ -2,6 +2,8 @@ import { Database } from "bun:sqlite";
 import { parseArgs } from "util";
 import { existsSync, readFileSync } from "fs";
 import { resolve, join } from "path";
+import { epochBoundsAtSlot, networkTipSlotNow, type GerolamoNetwork } from "../desktop/src/shared/syncStatus";
+import { mithrilReplayStatus, readMithrilProgress } from "../src/mithril/progress";
 
 const { values: args } = parseArgs({
   args: Bun.argv.slice(2),
@@ -9,7 +11,9 @@ const { values: args } = parseArgs({
     port: { type: "string", default: "3050" },
     db: { type: "string", default: "./ledger/gerolamo.db" },
     "node-url": { type: "string", default: "http://localhost:3030" },
+    "network": { type: "string", default: process.env.NETWORK ?? "preprod" },
     "static-dir": { type: "string", default: "" },
+    "mithril-progress": { type: "string", default: "" },
     help: { type: "boolean", default: false },
   },
 });
@@ -24,6 +28,7 @@ Options:
   --db <path>        SQLite database path (default: ./ledger/gerolamo.db)
   --node-url <url>   Gerolamo node URL (default: http://localhost:3030)
   --static-dir <dir> Serve built dashboard from this directory
+  --mithril-progress <file>  Progress JSON written by mithril-bootstrap (shown as a Mithril card)
   --help             Show this help
 `);
   process.exit(0);
@@ -31,6 +36,8 @@ Options:
 
 const PORT = parseInt(args.port!, 10);
 const DB_PATH = resolve(args.db!);
+const MITHRIL_PROGRESS = args["mithril-progress"] ? resolve(args["mithril-progress"]) : "";
+const mithrilProgress = (tipSlot = 0) => { const p = MITHRIL_PROGRESS ? readMithrilProgress(MITHRIL_PROGRESS) : null; return p ? { ...p, replay: mithrilReplayStatus(p, tipSlot) } : null; };
 const NODE_URL = args["node-url"]!;
 const STATIC_DIR = args["static-dir"] ? resolve(args["static-dir"]) : "";
 
@@ -88,13 +95,36 @@ function broadcastSSE(channel: string, data: unknown) {
   }
 }
 
-// Network tip estimation for sync progress
-// Preprod genesis: slot 0 at epoch 208 boundary
-// Slot duration: 1 second, epoch length: 432000 slots
-const PREPROD_GENESIS_TIME = 1654041600; // June 1, 2022 UTC (preprod genesis)
+// Network tip estimation for sync progress: the slot the network clock is at now, with the
+// per-network geometry shared with the desktop app (Byron short epochs, Shelley start slot).
+const NET: GerolamoNetwork = (["preprod", "preview", "mainnet"].includes(String(args.network ?? "")) ? String(args.network) : "preprod") as GerolamoNetwork; // --network, else $NETWORK, else preprod
 function estimateNetworkTipSlot(): number {
-  const now = Math.floor(Date.now() / 1000);
-  return now - PREPROD_GENESIS_TIME;
+  return Number(networkTipSlotNow(NET));
+}
+function epochOfSlot(slot: number): number {
+  return slot > 0 ? Number(epochBoundsAtSlot(BigInt(Math.trunc(slot)), NET).epoch) : 0;
+}
+
+// The node's own /metrics (role, inbound listener, block producer): polled beside the DB so the
+// overview can show block production without a second endpoint.
+let nodeMetrics: any = null;
+async function pollNodeMetrics() {
+  try {
+    const r = await fetch(`${NODE_URL}/metrics`, { signal: AbortSignal.timeout(2000) });
+    nodeMetrics = r.ok ? await r.json() : null;
+  } catch { nodeMetrics = null; }
+}
+setInterval(pollNodeMetrics, 3000);
+void pollNodeMetrics();
+function nodeSection() {
+  const m = nodeMetrics;
+  if (!m) return { nodeUp: false, role: null, inbound: null, hotPeers: null, producer: null, nextLeaderInSec: null };
+  const p = m.producer ?? null;
+  const next = p?.nextLeaderSlot != null ? Number(p.nextLeaderSlot) : null;
+  return {
+    nodeUp: true, role: m.role ?? null, inbound: m.inbound ?? null, hotPeers: m.peers?.hot ?? null, version: m.version ?? null,
+    producer: p, nextLeaderInSec: next != null ? next - estimateNetworkTipSlot() : null,
+  };
 }
 
 // Poll and broadcast
@@ -115,15 +145,15 @@ async function pollAndBroadcast() {
 setInterval(pollAndBroadcast, 2000);
 
 const EMPTY_STATUS = {
-  tip: { slot: 0, hash: "", epoch: 0, era: 0 },
+  tip: { slot: 0, hash: "", epoch: 0, era: 0, targetEpoch: 0 },
   sync: { progress: 0, speed: 0, startedAt: new Date().toISOString() },
-  uptime: 0, network: process.env.NETWORK ?? "preprod",
+  uptime: 0, network: NET,
   volatileBlocks: 0, immutableBlocks: 0, utxoCount: 0, mempoolSize: 0, gcCycles: 0,
 };
 
 function buildStatus() {
   const d = getDb();
-  if (!d) return { ...EMPTY_STATUS, uptime: Date.now() - startTime };
+  if (!d) return { ...EMPTY_STATUS, uptime: Date.now() - startTime, mithril: mithrilProgress(), node: nodeSection() };
 
   const tipRow = d.query("SELECT MAX(slot) as slot FROM blocks").get() as any;
   const tipSlot = tipRow?.slot ?? 0;
@@ -147,19 +177,22 @@ function buildStatus() {
     gcCycles = ss?.total_blocks ?? 0;
   } catch {}
 
-  const epoch = tipSlot > 0 ? Math.floor((tipSlot - 86400) / 432000) + 208 : 0;
+  const epoch = epochOfSlot(tipSlot);
+  const targetEpoch = epochOfSlot(networkTip); // the epoch the network is in: "epoch 1255 / 1411" while syncing
   const era = 6; // Conway
 
   return {
-    tip: { slot: tipSlot, hash: typeof tipHash === "string" ? tipHash : "", epoch, era },
+    tip: { slot: tipSlot, hash: typeof tipHash === "string" ? tipHash : "", epoch, era, targetEpoch },
     sync: { progress, speed, startedAt: new Date(startTime).toISOString() },
     uptime: Date.now() - startTime,
-    network: process.env.NETWORK ?? "preprod",
+    network: NET,
     volatileBlocks: volatileCount,
     immutableBlocks: immutableCount,
     utxoCount,
     mempoolSize: 0,
     gcCycles,
+    mithril: mithrilProgress(tipSlot),
+    node: nodeSection(),
   };
 }
 
@@ -178,7 +211,7 @@ function queryRecentBlocks(limit: number) {
     hash: typeof r.hash === "string" ? r.hash : Buffer.from(r.hash).toString("hex"),
     prevHash: typeof r.prev_hash === "string" ? r.prev_hash : (r.prev_hash ? Buffer.from(r.prev_hash).toString("hex") : ""),
     era: 6,
-    epoch: r.slot > 0 ? Math.floor((r.slot - 86400) / 432000) + 208 : 0,
+    epoch: epochOfSlot(r.slot),
     txCount: 0,
     size: 0,
     insertedAt: r.inserted_at ? new Date(Number(r.inserted_at) * 1000).toISOString() : new Date().toISOString(),

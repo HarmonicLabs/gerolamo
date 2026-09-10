@@ -33,7 +33,6 @@ export interface EpochBodyParams {
 }
 
 const cache = new Map<number, EpochBodyParams>();
-let tableReady: Promise<void> | null = null;
 
 function num(v: unknown): number | null {
     if (v == null) return null;
@@ -93,20 +92,14 @@ export function epochParamsFromGenesis(epoch: number, genesis: ShelleyGenesisCon
 }
 
 async function ensureTable(): Promise<void> {
-    if (!tableReady) {
-        tableReady = (async () => {
-            await sql`CREATE TABLE IF NOT EXISTS epoch_params (
-                epoch INTEGER PRIMARY KEY,
-                params TEXT NOT NULL,
-                source TEXT,
-                fetched_at INTEGER DEFAULT (strftime('%s','now'))
-            )`;
-        })().catch((err) => {
-            tableReady = null;
-            throw err;
-        });
-    }
-    return tableReady;
+    // Not cached: the test suite re-points the sql client at fresh databases, and a cached
+    // promise from an earlier client left `epoch_params` missing on the new one.
+    await sql`CREATE TABLE IF NOT EXISTS epoch_params (
+        epoch INTEGER PRIMARY KEY,
+        params TEXT NOT NULL,
+        source TEXT,
+        fetched_at INTEGER DEFAULT (strftime('%s','now'))
+    )`;
 }
 
 async function readDb(epoch: number): Promise<Record<string, unknown> | null> {

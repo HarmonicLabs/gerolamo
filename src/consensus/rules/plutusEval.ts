@@ -15,12 +15,15 @@ import {
     dataFromCbor as bDataFromCbor, dataToCbor as bDataToCbor,
 } from "@harmoniclabs/buildooor";
 import { Machine, ExBudget } from "@harmoniclabs/plutus-machine";
+import { toCostModelV1, toCostModelV2 } from "@harmoniclabs/cardano-costmodels-ts";
 import { Cbor, CborBytes } from "@harmoniclabs/cbor";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { costModelArrays, witnessDatumBytes, witnessScriptHashes, type PlutusLanguage } from "./scriptDataHash";
-import { Application, ErrorUPLC, UPLCConst, UPLCDecoder } from "@harmoniclabs/uplc";
-import { DataB, DataConstr, DataI, DataList, DataMap, DataPair, dataFromCbor, type Data } from "@harmoniclabs/plutus-data";
+import { Application, ErrorUPLC, UPLCConst, UPLCDecoder, UPLCProgram, compileUPLC } from "@harmoniclabs/uplc";
+import { writeFileSync } from "node:fs";
+import { DataB, DataConstr, DataI, DataList, DataMap, DataPair, dataFromCbor, dataToCbor, type Data } from "@harmoniclabs/plutus-data";
 import { toHex } from "@harmoniclabs/uint8array-utils";
+import { logger } from "../../utils/logger";
 import { getTxInfos } from "@harmoniclabs/buildooor/dist/toOnChain/getTxInfos.js";
 import { getScriptInfoData, getSpendingPurposeData } from "@harmoniclabs/buildooor/dist/toOnChain/getSpendingPurposeData.js";
 import type { EpochBodyParams } from "../epochParams";
@@ -47,6 +50,68 @@ export const SHADOW_SAMPLE_EVERY = Math.max(1, Number(process.env.GEROLAMO_PLUTU
  */
 export const SHADOW_MAX_DECLARED_CPU = BigInt(Math.max(1, Number(process.env.GEROLAMO_PLUTUS_SHADOW_MAX_CPU ?? 3e9) || 3e9));
 export const SHADOW_MAX_STEP_CPU = BigInt(Math.max(1, Number(process.env.GEROLAMO_PLUTUS_SHADOW_STEP_CPU ?? 2e7) || 2e7));
+
+/**
+ * `GEROLAMO_PLUTUS_TRACE=1`: record every builtin cost charged during an evaluation
+ * (tag, argument sizes, cpu, mem) and append the per-builtin totals to mismatch notes.
+ * Diagnoses cost-model disagreements such as the constant +1453 cpu seen on preview
+ * (PLAN_LEDGER_INTEGRITY.md C). Off by default: it wraps the machine's cost lookup.
+ */
+export let SHADOW_TRACE = process.env.GEROLAMO_PLUTUS_TRACE === "1" || process.env.GEROLAMO_PLUTUS_TRACE === "2";
+/** GEROLAMO_PLUTUS_TRACE=2: also print the (argument sizes → cpu/mem) distribution of every builtin, not only the division family. */
+let TRACE_SIZES = process.env.GEROLAMO_PLUTUS_TRACE === "2";
+/** Turn the builtin cost trace on or off at run time (tests: the module may already be loaded without the env flag). */
+export function setShadowTrace(level: 0 | 1 | 2): void { SHADOW_TRACE = level > 0; TRACE_SIZES = level === 2; }
+/** GEROLAMO_PLUTUS_DUMP_DIR: write every applied program (CBOR-wrapped flat, hex) there as `<tag>-<idx>.hex` for an external evaluator (`aiken uplc eval --cbor`). */
+const DUMP_DIR = process.env.GEROLAMO_PLUTUS_DUMP_DIR || null;
+let traceBuf: Array<{ tag: number; args: string; cpu: bigint; mem: bigint }> | null = null; // cpu xor mem per entry
+if (SHADOW_TRACE) logger.info("Plutus builtin cost tracing enabled (GEROLAMO_PLUTUS_TRACE=1)");
+/**
+ * A view of `machine` whose builtin cost lookup records every charge. The machine reads
+ * `this.getBuiltinCostFuction` inside `eval`, so a Proxy over the instance is enough and
+ * works in worker realms too (patching the CJS module did not reach the workers).
+ */
+function tracedMachine(machine: Machine): Machine {
+    const lookup: any = (machine as any).getBuiltinCostFuction;
+    const wrapped = (tag: number) => {
+        const f = lookup(tag);
+        return {
+            cpu: { at: (...a: any[]) => { const c = f.cpu.at(...a); traceBuf?.push({ tag, args: a.map(String).join(","), cpu: BigInt(c), mem: -1n }); return c; } },
+            mem: { at: (...a: any[]) => { const m = f.mem.at(...a); traceBuf?.push({ tag, args: a.map(String).join(","), cpu: -1n, mem: BigInt(m) }); return m; } },
+        };
+    };
+    // The instance's properties are non-configurable, which a Proxy may not shadow: build a
+    // sibling object on the same prototype with the wrapped lookup and the original costs
+    // (`eval` reads only `getBuiltinCostFuction`, `machineCosts` and `maxBudget` off `this`).
+    const t = Object.create(Object.getPrototypeOf(machine));
+    Object.defineProperty(t, "getBuiltinCostFuction", { value: wrapped });
+    Object.defineProperty(t, "machineCosts", { value: (machine as any).machineCosts });
+    return t as Machine;
+}
+/** Per-builtin totals of the last traced evaluation, for the mismatch note. */
+function traceSummary(): string {
+    if (!traceBuf?.length) return "";
+    const agg = new Map<number, { n: number; cpu: bigint; mem: bigint; sizes: Map<string, { n: number; mem: bigint; cpu: bigint }> }>();
+    for (const t of traceBuf) {
+        const a = agg.get(t.tag) ?? { n: 0, cpu: 0n, mem: 0n, sizes: new Map() };
+        const sz = a.sizes.get(t.args) ?? { n: 0, mem: 0n, cpu: 0n };
+        if (t.cpu >= 0n) { a.n++; a.cpu += t.cpu; sz.cpu += t.cpu; }
+        if (t.mem >= 0n) { a.mem += t.mem; sz.n++; sz.mem += t.mem; }
+        a.sizes.set(t.args, sz);
+        agg.set(t.tag, a);
+    }
+    const name = (tag: number) => { try { return (require("@harmoniclabs/uplc").UPLCBuiltinTag as any)[tag] ?? String(tag); } catch { return String(tag); } };
+    // per-builtin totals, plus the (argument sizes → memory) distribution of the integer division family
+    const DIV = new Set(["divideInteger", "modInteger", "quotientInteger", "remainderInteger"]);
+    return " trace[" + [...agg].sort((x, y) => Number(y[1].cpu - x[1].cpu)).map(([tag, a]) => {
+        const nm = name(tag);
+        const detail = TRACE_SIZES ? " {" + [...a.sizes].map(([args, sz]) => `[${args}]→${sz.cpu}/${sz.mem}×${sz.n}`).join(" ") + "}"
+            : DIV.has(nm) ? " {" + [...a.sizes].map(([args, sz]) => `[${args}]→${sz.mem}×${sz.n}`).join(" ") + "}" : "";
+        return `${nm}×${a.n}:${a.cpu}/${a.mem}${detail}`;
+    }).join(" ") + "]";
+}
+/** Per-builtin totals of the last traced evaluation (empty when tracing is off). Exported for tests. */
+export function lastTraceSummary(): string { return traceSummary(); }
 let shadowCounter = 0;
 
 export interface ShadowEvalInput {
@@ -62,13 +127,18 @@ export interface ShadowEvalInput {
     network: string;
     /** The block producer marked this tx as phase-2 invalid. */
     markedInvalid: boolean;
+    /** Skip the every-n-th sampling: the caller already sampled (detached shadow jobs sample per block on the main thread). */
+    forceSample?: boolean;
 }
 
 export interface ShadowEvalResult {
     evaluated: number;
     skipped: number;
     /** Set when the local verdict differs from the block's, or a script cannot be run. */
+    /** Our verdict disagrees with the block's (valid vs invalid): the finding that matters. */
     mismatch: string | null;
+    /** Why redeemers were not evaluated (budget, decoding, unresolved inputs): coverage, not a disagreement. */
+    note?: string | null;
 }
 
 const hex = (h: any): string => String(h?.toString?.() ?? h ?? "").toLowerCase();
@@ -79,10 +149,18 @@ function machinesFor(raw: Record<string, any>): Partial<Record<"v1" | "v2" | "v3
     const arrays = costModelArrays(raw);
     const out: Partial<Record<"v1" | "v2" | "v3", Machine>> = {};
     for (const [lang, k] of [[1, "v1"], [2, "v2"], [3, "v3"]] as const) {
-        const m = arrays[lang];
-        if (!m) continue;
+        const arr = arrays[lang];
+        if (!arr) continue;
+        // The machine infers the language from an array's length and tests V3 first (≥ 251
+        // entries). Since preview epoch 1270 the V1/V2 lists carry 332 entries, so a V2 array
+        // was read with V3 names: every parameter after the bls12_381 block was shifted and
+        // classic builtins cost nonsense (tailList 43 M memory; bug 74). Name the V1/V2
+        // parameters ourselves: the first 166/175 entries in their historical order, which is
+        // exactly what aiken's `uplc` crate maps (the parameters appended later are ignored,
+        // as there).
+        const m: any = lang === 1 ? toCostModelV1(arr as any) : lang === 2 ? toCostModelV2(arr as any) : arr;
         try {
-            out[k] = new Machine(m as any);
+            out[k] = SHADOW_TRACE ? tracedMachine(new Machine(m)) : new Machine(m);
         } catch {
             /* unusable cost model for this language */
         }
@@ -166,18 +244,18 @@ function rebuildWitnessSet(era: number, bytes: Uint8Array): any {
 export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEvalResult> {
     const redeemersRoot: any[] = input.witnessSet?.redeemers ?? [];
     if (redeemersRoot.length === 0) return { evaluated: 0, skipped: 0, mismatch: null };
-    if (SHADOW_SAMPLE_EVERY > 1 && (shadowCounter++ % SHADOW_SAMPLE_EVERY) !== 0) return { evaluated: 0, skipped: 0, mismatch: null };
+    if (!input.forceSample && SHADOW_SAMPLE_EVERY > 1 && (shadowCounter++ % SHADOW_SAMPLE_EVERY) !== 0) return { evaluated: 0, skipped: 0, mismatch: null };
     const raw = input.params?.raw ?? {};
     const machines = machinesFor(raw);
-    if (!machines.v1 && !machines.v2 && !machines.v3) return { evaluated: 0, skipped: redeemersRoot.length, mismatch: "no cost models in the epoch parameters" };
-    if (!input.bodyBytes || !input.witnessSetBytes) return { evaluated: 0, skipped: redeemersRoot.length, mismatch: "original body/witness bytes unavailable" };
+    if (!machines.v1 && !machines.v2 && !machines.v3) return { evaluated: 0, skipped: redeemersRoot.length, mismatch: null, note: "no cost models in the epoch parameters" };
+    if (!input.bodyBytes || !input.witnessSetBytes) return { evaluated: 0, skipped: redeemersRoot.length, mismatch: null, note: "original body/witness bytes unavailable" };
 
     let body: any, ws: any;
     try {
         body = rebuildBody(input.era, input.bodyBytes);
         ws = rebuildWitnessSet(input.era, input.witnessSetBytes);
     } catch (err) {
-        return { evaluated: 0, skipped: redeemersRoot.length, mismatch: `buildooor could not decode the tx: ${err instanceof Error ? err.message : String(err)}` };
+        return { evaluated: 0, skipped: redeemersRoot.length, mismatch: null, note: `buildooor could not decode the tx: ${err instanceof Error ? err.message : String(err)}` };
     }
     const redeemers: any[] = ws.redeemers ?? [];
 
@@ -197,11 +275,18 @@ export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEv
     const inputs = resolve(ledgerInputs(body.inputs ?? [], input.era));
     const collateral = resolve(body.collateralInputs ?? []);
     const refInputs = resolve(body.refInputs ?? []);
-    if (!inputs || !collateral || !refInputs) return { evaluated: 0, skipped: redeemers.length, mismatch: "an input could not be resolved for evaluation (Byron address or missing)" };
+    if (!inputs || !collateral || !refInputs) return { evaluated: 0, skipped: redeemers.length, mismatch: null, note: "an input could not be resolved for evaluation (Byron address or missing)" };
+    // The ledger's TxInfo.signatories is a Set: ascending key hashes, whatever order the
+    // transaction listed them in. A script that searches the list pays a different budget for a
+    // different order (preview slot 12 996 478: 73 857 vs 73 758 declared memory units).
+    const signers: any[] | undefined = Array.isArray((body as any).requiredSigners) && (body as any).requiredSigners.length > 1
+        ? [...(body as any).requiredSigners].sort((a: any, b: any) => (String(a?.toString?.() ?? a) < String(b?.toString?.() ?? b) ? -1 : 1))
+        : undefined;
     const bodyLike = Object.create(body, {
         inputs: { value: inputs, enumerable: true },
         collateralInputs: { value: collateral.length ? collateral : undefined, enumerable: true },
         refInputs: { value: refInputs.length ? refInputs : undefined, enumerable: true },
+        ...(signers ? { requiredSigners: { value: signers, enumerable: true } } : {}),
     });
     const txLike = { body: bodyLike, witnesses: ws, isScriptValid: !input.markedInvalid };
 
@@ -210,9 +295,11 @@ export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEv
     const genesisInfos = { systemStartPosixMs: Number(slotToUnixTime(start)) * 1000, slotLengthMs: 1000, startSlotNo: Number(start) };
     let infos: any;
     try {
-        infos = getTxInfos(txLike as any, genesisInfos as any);
+        // The ledger translates a finite ttl as an exclusive upper bound from protocol version 9 on.
+        const pv = Number(input.params?.protocolMajor ?? 0);
+        infos = getTxInfos(txLike as any, genesisInfos as any, { upperBoundClosed: pv > 0 && pv < 9 });
     } catch (err) {
-        return { evaluated: 0, skipped: redeemers.length, mismatch: `script context failed: ${err instanceof Error ? err.message : String(err)}` };
+        return { evaluated: 0, skipped: redeemers.length, mismatch: null, note: `script context failed: ${err instanceof Error ? err.message : String(err)}` };
     }
 
     // scripts by hash (hashes over the bytes as carried, see witnessScriptHashes) → flat program
@@ -274,17 +361,22 @@ export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEv
             continue;
         }
         let term: any;
+        let progVersion: any = null;
         try {
             const redeemerData = toRootData(r.data);
             const purpose = getSpendingPurposeData(r, bodyLike, version);
-            const program = UPLCDecoder.parse(script.flat, "flat").body;
+            const parsed = UPLCDecoder.parse(script.flat, "flat");
+            const program = parsed.body;
+            progVersion = parsed.version;
             if (version === "v3") {
                 const bDatum = datumCbor ? bDataFromCbor(toHex(datumCbor)) : undefined;
                 const info = getScriptInfoData(r, bodyLike, version, bDatum);
                 const ctx = new DataConstr(0, [toRootData(txInfo), redeemerData, toRootData(info)]);
+                if (DUMP_DIR) writeFileSync(`${DUMP_DIR}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx).toBuffer()));
                 term = new Application(program, UPLCConst.data(ctx));
             } else {
                 const ctx = new DataConstr(0, [toRootData(txInfo), toRootData(purpose)]);
+                if (DUMP_DIR) writeFileSync(`${DUMP_DIR}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx).toBuffer()));
                 let t: any = program;
                 if (tag === 0) {
                     if (!datumCbor) {
@@ -302,6 +394,12 @@ export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEv
             failureNote = failureNote ?? `context build failed: ${err instanceof Error ? err.message : String(err)}`;
             continue;
         }
+        if (DUMP_DIR) {
+            try {
+                const flat = compileUPLC(new UPLCProgram(progVersion, term)).toBuffer().buffer;
+                writeFileSync(`${DUMP_DIR}/${tag}-${idx}.hex`, toHex(Cbor.encode(new CborBytes(flat)).toBuffer()));
+            } catch (err) { logger.warn(`plutus dump ${tag}:${idx} failed: ${err instanceof Error ? err.message : String(err)}`); }
+        }
         const declared = r.execUnits as ExBudget | undefined;
         if (declared && BigInt(declared.cpu) > SHADOW_MAX_DECLARED_CPU) {
             skipped++;
@@ -318,6 +416,7 @@ export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEv
             : { mem: 1n << 62n, cpu: 1n << 62n, deadlineMs: Date.now() + SHADOW_REDEEMER_WALL_MS, maxStepCpu: SHADOW_MAX_STEP_CPU };
         let result: any, budgetSpent: any, overBudget = false;
         try {
+            if (SHADOW_TRACE) traceBuf = [];
             ({ result, budgetSpent } = machine.eval(term));
         } catch (err: any) {
             if (err?.timedOut) {
@@ -336,10 +435,10 @@ export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEv
         if (!overBudget && declared) overBudget = BigInt(budgetSpent.mem) > BigInt(declared.mem) || BigInt(budgetSpent.cpu) > BigInt(declared.cpu);
         if (result instanceof ErrorUPLC || overBudget) {
             allValid = false;
-            failureNote = failureNote ?? (overBudget ? `redeemer ${tag}:${idx} exceeded its declared budget (mem ${budgetSpent.mem}/${declared?.mem}, cpu ${budgetSpent.cpu}/${declared?.cpu})` : `redeemer ${tag}:${idx} script error`);
+            failureNote = failureNote ?? (overBudget ? `redeemer ${tag}:${idx} exceeded its declared budget (mem ${budgetSpent.mem}/${declared?.mem}, cpu ${budgetSpent.cpu}/${declared?.cpu})${SHADOW_TRACE ? traceSummary() : ""}` : `redeemer ${tag}:${idx} script error${SHADOW_TRACE ? traceSummary() : ""}`);
         }
     }
-    if (skipped > 0) return { evaluated, skipped, mismatch: `could not evaluate ${skipped} redeemer(s): ${failureNote}` };
+    if (skipped > 0) return { evaluated, skipped, mismatch: null, note: `could not evaluate ${skipped} redeemer(s): ${failureNote}` };
     const expected = !input.markedInvalid;
     if (allValid !== expected) return { evaluated, skipped, mismatch: `local verdict ${allValid ? "valid" : "invalid"} ≠ block's ${expected ? "valid" : "invalid"}${failureNote ? ` (${failureNote})` : ""}` };
     return { evaluated, skipped, mismatch: null };

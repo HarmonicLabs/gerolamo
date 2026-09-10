@@ -8,7 +8,7 @@
  * transaction uses. No redeemers but datums: `80 ‖ datums ‖ A0` through Babbage
  * (redeemers were a list), `A0 ‖ datums ‖ A0` from Conway on (a map).
  */
-import { Cbor, CborBytes, CborMap, CborUInt } from "@harmoniclabs/cbor";
+import { Cbor, CborBytes, CborMap, CborUInt, CborArray, CborNegInt, CborTag } from "@harmoniclabs/cbor";
 import { blake2b_224, blake2b_256 } from "@harmoniclabs/crypto";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { costModelsToLanguageViewCbor, toCostModelArrV2, toCostModelArrV3 } from "@harmoniclabs/cardano-costmodels-ts";
@@ -54,12 +54,21 @@ export function languageViews(models: Partial<Record<PlutusLanguage, (number | b
     const entries: Array<{ k: any; v: any; keyBytes: Uint8Array }> = [];
     for (const l of [1, 2, 3] as PlutusLanguage[]) {
         if (!langs.has(l)) continue;
-        const single = costModelsToLanguageViewCbor(
-            { PlutusScriptV1: l === 1 ? (models[1] as any) : undefined, PlutusScriptV2: l === 2 ? (models[2] as any) : undefined, PlutusScriptV3: l === 3 ? (models[3] as any) : undefined },
-            { mustHaveV1: l === 1, mustHaveV2: l === 2, mustHaveV3: l === 3 },
-        );
-        const parsed = Cbor.parse(single) as CborMap;
-        for (const e of parsed.map) entries.push({ k: e.k, v: e.v, keyBytes: Cbor.encode(e.k).toBuffer() });
+        if (l === 1) {
+            // V1 keeps the legacy view (key = bytes of the encoded language, value = the list
+            // encoded as bytes, indefinite length) — the library reproduces it exactly.
+            const single = costModelsToLanguageViewCbor({ PlutusScriptV1: models[1] as any }, { mustHaveV1: true });
+            const parsed = Cbor.parse(single) as CborMap;
+            for (const e of parsed.map) entries.push({ k: e.k, v: e.v, keyBytes: Cbor.encode(e.k).toBuffer() });
+            continue;
+        }
+        // V2/V3: key = language int, value = the cost model list exactly as the protocol
+        // parameters carry it (definite array). The library pads V3 to its full named list
+        // (350 entries) while protocol 9 chains carry 251 — preview 55870734 hashed
+        // differently (bug 54); the ledger hashes the list as-is, so encode it directly.
+        const list = (models[l] as (number | bigint)[]).map((x) => { const n = BigInt(x); return n < 0n ? new CborNegInt(n) : new CborUInt(n); });
+        const k = new CborUInt(BigInt(l - 1));
+        entries.push({ k, v: new CborArray(list), keyBytes: Cbor.encode(k).toBuffer() });
     }
     entries.sort((a, b) => a.keyBytes.length - b.keyBytes.length || Buffer.compare(Buffer.from(a.keyBytes), Buffer.from(b.keyBytes)));
     return Cbor.encode(new CborMap(entries.map(({ k, v }) => ({ k, v })))).toBuffer();
@@ -139,13 +148,22 @@ export function scriptLanguageOfCbor(hexOrBytes: string | Uint8Array): PlutusLan
 }
 
 /** Original bytes of each witness-set datum (key 4), or null when the set carries none / cannot be sliced. */
+/**
+ * Elements of a CBOR list that may be wrapped in the Conway set tag (258):
+ * witness datums, scripts and key witnesses are `nonempty_set`s from Conway on.
+ */
+function setItems(v: unknown): any[] {
+    const inner: any = v instanceof CborTag ? v.data : v;
+    return Array.isArray(inner?.array) ? inner.array : [];
+}
+
 export function witnessDatumBytes(witnessSetBytes: Uint8Array): Uint8Array[] | null {
     try {
         const root = Cbor.parse(witnessSetBytes, { keepRef: true } as any);
         if (!(root instanceof CborMap)) return null;
         for (const { k, v } of root.map) {
             if (!(k instanceof CborUInt) || Number(k.num) !== 4) continue;
-            const items: any[] = (v as any).array ?? [];
+            const items: any[] = setItems(v);
             return items.map((el) => {
                 const ref: any = el.subCborRef ?? el.cborRef;
                 return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(el).toBuffer();
@@ -168,7 +186,7 @@ export function bodyOutputBytes(bodyBytes: Uint8Array): Uint8Array[] | null {
         if (!(root instanceof CborMap)) return null;
         for (const { k, v } of root.map) {
             if (!(k instanceof CborUInt) || Number(k.num) !== 1) continue;
-            const items: any[] = (v as any).array ?? [];
+            const items: any[] = setItems(v);
             return items.map((el) => {
                 const ref: any = el.subCborRef ?? el.cborRef;
                 return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(el).toBuffer();
@@ -213,7 +231,7 @@ export function witnessScriptHashes(witnessSetBytes: Uint8Array): Map<string, Wi
         if (!(k instanceof CborUInt)) continue;
         const spec = keyLang[Number(k.num)];
         if (!spec) continue;
-        const items: any[] = (v as any).array ?? [];
+        const items: any[] = setItems(v);
         for (const el of items) {
             let bytes: Uint8Array;
             if (spec.kind === "native") {

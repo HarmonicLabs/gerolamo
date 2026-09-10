@@ -170,3 +170,67 @@ header validator.
    validation still relies on the block-level strict check at adoption
 6. Relay/producer topology, duplex, watchdog (6).
 7. Operational safety and metrics (7), preprod pool (8).
+
+## Preview pool (2026-09-10)
+
+- Registered 2026-09-10 04:52 UTC: pool `8df215df1a762e84d826bae39516a424a76e81e649001a3f903eda12`,
+  keys in `/media/bakon/data/cardano/gerolamo-preview-pool` (keygen/opcert/register from
+  `scripts/pool-register.ts`), pledge 5 000 ADA, cost 170 ADA, margin 1 %, relay
+  50.202.37.130:3001, tx 5beecbaf… at slot 122 359 348 (epoch 1416). It enters the mark snapshot
+  at the 1417 boundary and can lead slots from epoch 1418 (2026-09-12).
+- Found on the way, fixed 2026-09-10: `GlobalSharedMempool` allocated its SharedArrayBuffer
+  without `SharedMempool.initMemory` (free space 0, every append `InsufficientSpace`);
+  `PeerClient` never sent tx-submission's `MsgInit`, so no peer requested our transaction ids
+  (now sent when the sync loop starts; peers pull within a second); the `/txsubmit` endpoint
+  mapped the numeric append status to HTTP 400 even on success. Once peers did ask, two more
+  surfaced within minutes: `GerolamoTxSubmitServer` was also attached to outbound connections
+  and answered beside the library client (duplicate replies), and the library decodes the
+  request's `blocking` flag (a CBOR boolean) as false and answers a blocking request on an
+  empty mempool with an empty list, then MsgDone after 40 s — either way every peer reset the
+  connection within a minute. `PeerClient` now parses `MsgRequestTxIds` itself and a blocking
+  request waits until the mempool has something (`GEROLAMO_TXSUB_TRACE=1` logs the exchange).
+  Upstream: ouroboros-miniprotocols-ts `TxSubmitRequestIds` encodes/decodes `blocking` as
+  simple(0/1) instead of a boolean, and `replyTxIdsBlocking` sends MsgDone.
+- Temporary greeting: `producer.greeting = { paymentSkeyFile, paymentAddress }` makes the first
+  block the pool forges on a network open with a self-payment carrying the metadata message
+  "Gerolamo was here!" (label 674, `messageMetadata` in `operator.ts`); remembered per network
+  in `stateFile` (`greeted`), never repeated. `BlockProducer.test.ts` "greeting transaction".
+- Still needed before forging: the router port-forward (TCP 3001 → this host) so relays can
+  pull our blocks, then `role: "producer"` with `n2n` and `producer` in the node config
+  (`gerolamo-preview-pool/config.producer.json` is the prepared fragment) — first with
+  `dryRun: true` for one epoch to see the leadership log, then live.
+- 2026-09-10 06:15 UTC: faucet delegation of 1 000 004 ADA received (≈ 2.8 blocks/epoch from 1418).
+  Inbound: OpenWrt port-forward WAN 3001 → this host's VPN address (masqueraded zone), verified
+  with a node-to-node handshake through 63.45.33.80:3001; relay entry updated to
+  63.45.33.80:3001 (tx 0c4a273c…, `pool-register.ts --pool-update`). The tip node runs as a relay
+  (inbound listener on 3001) until the producer switch.
+- 2026-09-10 07:00 UTC: transaction propagation works end to end through our own node — the
+  relay-update tx 0c4a273c… (relay → 63.45.33.80:3001) was announced, fetched by a preview
+  relay and confirmed within a minute. What cardano-node 11.0.1 actually speaks on
+  tx-submission2 (probed against the local Haskell node, `src/network/txSubmissionCodec.ts`
+  with tests): MsgInit `[6]`; the server's first MsgRequestTxIds comes 60 s after ChainSync
+  starts and is *blocking* (`[0, true, 0, 3]`) — a blocking request must wait for something to
+  announce; a tx id is the hard-fork combinator's `[eraIndex, hash]` (Conway = 6), a tx is
+  `[eraIndex, #6.24(txBytes)]`, and the id/tx lists of ReplyTxIds, RequestTxs and ReplyTxs are
+  *indefinite-length* arrays — any definite list, bare hash or empty blocking reply makes the
+  node close the connection at once. The peer acknowledges ids per request (`ack`); only ids
+  outside the unacknowledged window may be announced (`PeerClient.txIdsUnacked`). The producer
+  now starts after the HTTP server and skips the leader-schedule pass for epochs where the pool
+  has no stake; it derives the network from the node's setting (bug: `config.network` unset →
+  preprod geometry → "KES expired"). The inbound responder (`src/network/n2n/N2NTxSubmissionHost.ts`, pure core
+  `TxSubmissionResponder` with tests) is done 2026-09-10 09:05 UTC: after the connecting peer's
+  MsgInit we ask for ids (blocking, window 10), fetch the bodies we do not hold, check each parses
+  and hashes to its announced id, append to the shared mempool, acknowledge per round. Proved end
+  to end: a fee-only self-payment (d4d58e6d…) announced to the producer through the public port
+  63.45.33.80:3001 was fetched, accepted, announced by the producer to its hot peers, fetched by
+  two preview relays and included in a block within a minute. The old outbound `TxSubmitServer.ts`
+  (a misnamed second answerer) is deleted. Remaining for §4: ledger-rule validation before
+  admission (today: parse + hash; an invalid transaction costs a forged block one retry with an
+  empty body), eviction on adoption/expiry, and the id window surviving a mempool drop.
+- 2026-09-10 12:50 UTC: with a relay connected inbound, the producer's mempool filled from the
+  network (12 transactions within minutes) and the outbound announcer re-announced ids the peer
+  had already acknowledged (the unacknowledged window was the only memory) — every hot peer
+  reset within a second of the second announcement round (94 resets in 15 min, none on the
+  import node, which has no inbound). `AnnounceWindow` (codec module, tested) now remembers
+  every id announced to a peer for the life of the connection. Also today: open item 16
+  (promoted-verifier drain stall) in VALIDATION_STATUS.md.

@@ -64,6 +64,8 @@ export function allTopics(): readonly WsTopic[] {
 /** Publish JSON event to Bun topic subscribers. Never throws to callers. */
 export function wsPublish(topic: WsTopic, data: unknown): void {
     try {
+        // Serialising every tip for nobody was 2.7 % of the applier thread (profile 2026-09-07).
+        if (wsSubscriberCount(topic) === 0) return;
         const payload = JSON.stringify({
             v: 1,
             type: topic,

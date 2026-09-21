@@ -56,7 +56,7 @@ export class LocalTxMonitorHost {
 
     private send(msg: { toCbor: () => { toBuffer: () => Uint8Array } }): void {
         this.mplexer.send(msg.toCbor().toBuffer(), {
-            hasAgency: true,
+            hasAgency: false, // responder direction (the 0x8000 bit on the wire): a client rejects replies on its own initiator side (cardano-cli, 2026-09-14)
             protocol: PROTO,
         });
     }

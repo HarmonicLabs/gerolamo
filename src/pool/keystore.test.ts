@@ -72,7 +72,10 @@ describe("pool keystore: cardano-cli TextEnvelope interop", () => {
         expect(checkOperationalCert(oc, { ...base, currentKesPeriod: 184n, lastOnChainCounter: null })).toEqual({ ok: true, evolution: 61 });
         expect(checkOperationalCert(oc, { ...base, currentKesPeriod: 185n, lastOnChainCounter: null })).toMatchObject({ ok: false, reason: expect.stringContaining("expired") });
         expect(checkOperationalCert(oc, { ...base, currentKesPeriod: 122n, lastOnChainCounter: null })).toMatchObject({ ok: false, reason: expect.stringContaining("starts after") });
-        expect(checkOperationalCert(oc, { ...base, currentKesPeriod: 130n, lastOnChainCounter: 0n })).toMatchObject({ ok: false, reason: expect.stringContaining("not above") });
+        // OCERT: the same certificate serves every block (counter equal to the chain's) …
+        expect(checkOperationalCert(oc, { ...base, currentKesPeriod: 130n, lastOnChainCounter: 0n })).toEqual({ ok: true, evolution: 7 });
+        // … but a certificate the chain has already moved past is rejected
+        expect(checkOperationalCert(oc, { ...base, currentKesPeriod: 130n, lastOnChainCounter: 1n })).toMatchObject({ ok: false, reason: expect.stringContaining("below last on-chain counter") });
         expect(checkOperationalCert(oc, { ...base, currentKesPeriod: 130n, lastOnChainCounter: null, kesVkey: new Uint8Array(32) })).toMatchObject({ ok: false, reason: expect.stringContaining("different KES key") });
         const tampered = { ...oc, coldVkey: generateColdKey().vkey };
         expect(checkOperationalCert(tampered, { ...base, currentKesPeriod: 130n, lastOnChainCounter: null })).toMatchObject({ ok: false, reason: "cold signature invalid" });

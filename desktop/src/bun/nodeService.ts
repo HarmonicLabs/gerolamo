@@ -191,6 +191,15 @@ export async function startNode(input: Partial<InstanceConfig>): Promise<{
       ensureFeed(config.id, gerolamoHttpBase(config.port));
       return { success: true, pid: config.pid, config };
     }
+    if (config.attached) {
+      // Never a second writer on an attached node's DB: its supervisor owns the process.
+      const up = await portAnswers(config.port);
+      if (up) {
+        ensureFeed(config.id, gerolamoHttpBase(config.port));
+        return { success: true, pid: undefined, config };
+      }
+      return { success: false, error: `Attached node on port ${config.port} is not answering; start it with its own supervisor (this app does not spawn attached nodes)` };
+    }
 
     if (
       writersConflict({
@@ -327,8 +336,61 @@ export async function waitForPidExit(
   return true;
 }
 
+/** True when a Gerolamo HTTP API answers on the port (the health probe, 2.5 s). */
+export async function portAnswers(port: number): Promise<boolean> {
+  try {
+    const res = await fetch(gerolamoHttpBase(port) + "/health", { signal: AbortSignal.timeout(2500) });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Follow a node this app did not start (a supervisor-run relay or block producer): probe
+ * its /metrics for the network, record it as an attached instance and start the feed.
+ */
+export async function attachNode(input: { port: number; name?: string; network?: InstanceConfig["network"]; dbPath?: string; logPath?: string }): Promise<{ ok: boolean; config?: InstanceConfig; error?: string }> {
+  try {
+    const port = Number(input.port);
+    if (!Number.isInteger(port) || port <= 0 || port > 65535) return { ok: false, error: "port must be 1–65535" };
+    const metrics = await fetchGerolamoMetrics(gerolamoHttpBase(port));
+    if (!metrics) return { ok: false, error: `No Gerolamo node answers on port ${port}` };
+    const reported = (metrics as Record<string, unknown>).network;
+    const network = (reported === "preview" || reported === "preprod" || reported === "mainnet" ? reported : input.network) as InstanceConfig["network"] | undefined;
+    if (!network) return { ok: false, error: "The node did not report its network; pass one" };
+    if (input.network && input.network !== network) return { ok: false, error: `The node on port ${port} is on ${network}, not ${input.network}` };
+    const id = `gerolamo-${network}-attached-${port}`;
+    const existing = getInstance(getAppDb(), id);
+    const dir = ensureLayout(id);
+    const role = (metrics as Record<string, unknown>).role;
+    const config: InstanceConfig = {
+      ...createDefaultInstance({ ...(existing ?? {}), id, network, port }),
+      id,
+      name: input.name || existing?.name || `Gerolamo ${network} ${role === "producer" ? "block producer" : "relay"} :${port}`,
+      network,
+      port,
+      repoPath: existing?.repoPath || (() => { try { return resolveRepoRoot(); } catch { return ""; } })(),
+      instanceDir: dir,
+      dbPath: input.dbPath || existing?.dbPath || "",
+      snapshotDir: existing?.snapshotDir || join(dir, "snapshots"),
+      runState: "running",
+      pid: null,
+      attached: true,
+      logPath: input.logPath || existing?.logPath || null,
+    };
+    saveInstance(getAppDb(), config);
+    ensureFeed(id, gerolamoHttpBase(port));
+    return { ok: true, config };
+  } catch (err: any) {
+    return { ok: false, error: err?.message ?? String(err) };
+  }
+}
+
 export async function stopNode(id: string): Promise<{ success: boolean; error?: string }> {
   try {
+    const attachedRow = getInstance(getAppDb(), id);
+    if (attachedRow?.attached) return { success: false, error: "This node is attached, not owned by the app: stop it with its own supervisor" };
     intentionalStop.add(id); // a user stop is never "a crash to restart"
     const pendingRestart = restartTimers.get(id);
     if (pendingRestart) {
@@ -447,8 +509,9 @@ export async function healthCheck(input: Partial<InstanceConfig> | string): Prom
 export async function getNodeStatus(id: string): Promise<StatusResult | null> {
   const row = getInstance(getAppDb(), id);
   if (!row) return null;
-  const pid = row.pid ?? null;
-  const running = isPidAlive(pid) || live.has(id);
+  let pid = row.pid ?? null;
+  let running = isPidAlive(pid) || live.has(id);
+  if (!running && row.attached) running = await portAnswers(row.port);
   let health: HealthResult | null = null;
   let sync = null;
   let metrics = null;
@@ -459,6 +522,9 @@ export async function getNodeStatus(id: string): Promise<StatusResult | null> {
     health = await healthCheck(row);
     metrics = feedMetrics(id) ?? (await fetchGerolamoMetrics(gerolamoHttpBase(row.port)));
     sync = metrics ? deriveGerolamoSyncStatus(metrics, row.network) : null;
+    // an attached node reports its own pid in /metrics
+    const mp = metrics?.process && typeof metrics.process === "object" ? (metrics.process as Record<string, unknown>) : null;
+    if (row.attached && pid == null && mp && Number.isFinite(Number(mp.pid))) pid = Number(mp.pid);
   }
   const resources = resourceSnapshot({
     running,
@@ -469,6 +535,7 @@ export async function getNodeStatus(id: string): Promise<StatusResult | null> {
   return {
     id,
     running,
+    attached: !!row.attached,
     pid: running ? pid : null,
     instanceDir: row.instanceDir || null,
     baseUrl: gerolamoHttpBase(row.port),
@@ -486,7 +553,7 @@ export function logs(id: string, maxLines = 200): LogsResult {
   try {
     const row = getInstance(getAppDb(), id);
     const dir = row?.instanceDir || instanceDirFor(id);
-    const logPath = join(dir, "logs", "daemon.log");
+    const logPath = row?.attached && row.logPath ? row.logPath : join(dir, "logs", "daemon.log");
     return { ok: true, lines: tailFile(logPath, maxLines), logPath };
   } catch (err: any) {
     return { ok: false, lines: [], error: err?.message ?? String(err) };

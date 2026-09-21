@@ -11,6 +11,7 @@
  */
 import { sql } from "../sql";
 import type { SqlClient } from "../db";
+import { ledgerStake, ledgerStakeReads, ledgerUtxoReads, sqlLedgerWrites } from "../ledger/nodeLedgerStore";
 
 export async function ensureLeaderStateTables(): Promise<void> {
     await sql`CREATE TABLE IF NOT EXISTS pool_params (
@@ -105,6 +106,8 @@ export interface PoolRewardParams {
 export async function recordPoolRegistration(db: SqlClient, poolId: string, vrfKeyHash: string, slot: number, params?: PoolRewardParams | null): Promise<void> {
     const id = poolId.toLowerCase();
     const json = params ? JSON.stringify(params) : null;
+    ledgerStake()?.recordPoolRegistration(id, vrfKeyHash, slot, params ?? null);
+    if (!sqlLedgerWrites()) return;
     await ensurePendingPoolParamsTable(db);
     const existing = (await db`SELECT 1 FROM pool_params WHERE pool_id = ${id}`.values()) as unknown[][];
     if (!existing.length) {
@@ -128,22 +131,28 @@ async function ensurePendingPoolParamsTable(db: SqlClient): Promise<void> {
 
 /** Epoch boundary: pending re-registrations become the pools' parameters (after the snapshot was taken). */
 export async function promotePendingPoolParams(db: SqlClient): Promise<number> {
+    const fromStore = ledgerStake()?.promotePendingPoolParams();
+    if (!sqlLedgerWrites()) return fromStore ?? 0;
     await ensurePendingPoolParamsTable(db);
     const rows = (await db`SELECT pool_id, vrf_key_hash, registered_slot, params_json FROM pool_params_pending`.values()) as unknown[][];
     for (const r of rows) {
         await db`UPDATE pool_params SET vrf_key_hash = ${String(r[1])}, registered_slot = ${Number(r[2])}, params_json = COALESCE(${r[3] == null ? null : String(r[3])}, params_json) WHERE pool_id = ${String(r[0])}`;
     }
     await db`DELETE FROM pool_params_pending`;
-    return rows.length;
+    return ledgerStakeReads() && fromStore != null ? fromStore : rows.length;
 }
 
 /** One more block issued by `poolId` in `epoch` (reward performance input). */
 export async function noteBlockMade(db: SqlClient, poolId: string, epoch: number): Promise<void> {
+    ledgerStake()?.noteBlockMade(poolId.toLowerCase(), epoch);
+    if (!sqlLedgerWrites()) return;
     await db`INSERT INTO blocks_made_by_epoch (epoch, pool_id, blocks) VALUES (${epoch}, ${poolId.toLowerCase()}, 1)
         ON CONFLICT(epoch, pool_id) DO UPDATE SET blocks = blocks + 1`;
 }
 
 export async function blocksMadeInEpoch(epoch: number): Promise<Map<string, number>> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.blocksMade(epoch);
     const rows = (await sql`SELECT pool_id, blocks FROM blocks_made_by_epoch WHERE epoch = ${epoch}`.values()) as unknown[][];
     const out = new Map<string, number>();
     for (const r of rows) out.set(String(r[0]), Number(r[1]));
@@ -151,6 +160,8 @@ export async function blocksMadeInEpoch(epoch: number): Promise<Map<string, numb
 }
 
 export async function registeredPoolParams(): Promise<Map<string, { vrf: string; params: PoolRewardParams | null }>> {
+    const lr = ledgerStakeReads();
+    if (lr) { const out = new Map<string, { vrf: string; params: PoolRewardParams | null }>(); for (const [id, p] of lr.pools()) out.set(id, { vrf: p.vrf, params: p.params }); return out; }
     const rows = (await sql`SELECT pool_id, vrf_key_hash, params_json FROM pool_params`.values()) as unknown[][];
     const out = new Map<string, { vrf: string; params: PoolRewardParams | null }>();
     for (const r of rows) {
@@ -166,6 +177,8 @@ export async function registeredPoolParams(): Promise<Map<string, { vrf: string;
 }
 
 export async function recordPoolRetirement(db: SqlClient, poolId: string, epoch: number): Promise<void> {
+    ledgerStake()?.recordPoolRetirement(poolId.toLowerCase(), epoch);
+    if (!sqlLedgerWrites()) return;
     await db`UPDATE pool_params SET retiring_epoch = ${epoch} WHERE pool_id = ${poolId.toLowerCase()}`;
 }
 
@@ -188,6 +201,8 @@ export interface RetiredPool {
  * The caller refunds the pool deposit to the reward account.
  */
 export async function retirePoolsAtEpochDetailed(db: SqlClient, epoch: number): Promise<RetiredPool[]> {
+    const fromStore = ledgerStake()?.retirePoolsAtEpoch(epoch);
+    if (!sqlLedgerWrites()) return fromStore ?? [];
     const rows = (await db`SELECT pool_id, params_json FROM pool_params WHERE retiring_epoch IS NOT NULL AND retiring_epoch <= ${epoch}`.values()) as unknown[][];
     const out: RetiredPool[] = [];
     for (const r of rows) {
@@ -202,7 +217,7 @@ export async function retirePoolsAtEpochDetailed(db: SqlClient, epoch: number): 
         await db`DELETE FROM pool_params WHERE pool_id = ${poolId}`;
         out.push({ poolId, rewardAccount, delegationsRemoved: Number((d as { count?: number })?.count ?? 0) });
     }
-    return out;
+    return ledgerStakeReads() && fromStore ? fromStore : out;
 }
 
 /**
@@ -260,11 +275,15 @@ export async function creditRegisteredAccounts(db: SqlClient, amounts: Map<strin
 }
 
 export async function registeredPoolVrf(poolId: string): Promise<string | null> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.pool(poolId.toLowerCase())?.vrf ?? null;
     const rows = (await sql`SELECT vrf_key_hash FROM pool_params WHERE pool_id = ${poolId.toLowerCase()}`.values()) as unknown[][];
     return rows[0]?.[0] == null ? null : String(rows[0][0]);
 }
 
 export async function recordGenesisDelegation(db: SqlClient, genesisKeyHash: string, delegateHash: string, vrfKeyHash: string, effectiveSlot: number): Promise<void> {
+    ledgerStake()?.recordGenesisDelegation(genesisKeyHash, delegateHash, vrfKeyHash, effectiveSlot);
+    if (!sqlLedgerWrites()) return;
     await db`INSERT OR REPLACE INTO genesis_delegs (genesis_key_hash, delegate_hash, vrf_key_hash, effective_slot)
         VALUES (${genesisKeyHash.toLowerCase()}, ${delegateHash.toLowerCase()}, ${vrfKeyHash.toLowerCase()}, ${effectiveSlot})`;
 }
@@ -279,6 +298,8 @@ export async function seedGenesisDelegs(genDelegs: Record<string, { delegate: st
 
 /** Genesis key → { delegate, vrf } in force at `slot` (latest effective row per key). */
 export async function genesisDelegsAt(slot: number): Promise<Map<string, { delegate: string; vrf: string }>> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.genesisDelegsAt(slot);
     const rows = (await sql`
         SELECT g.genesis_key_hash, g.delegate_hash, g.vrf_key_hash FROM genesis_delegs g
         WHERE g.effective_slot = (SELECT MAX(effective_slot) FROM genesis_delegs x WHERE x.genesis_key_hash = g.genesis_key_hash AND x.effective_slot <= ${slot})
@@ -289,6 +310,8 @@ export async function genesisDelegsAt(slot: number): Promise<Map<string, { deleg
 }
 
 export async function opcertCounter(poolId: string): Promise<number | null> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.opcert(poolId.toLowerCase())?.counter ?? null;
     const rows = (await sql`SELECT counter FROM opcert_counters WHERE pool_id = ${poolId.toLowerCase()}`.values()) as unknown[][];
     return rows[0]?.[0] == null ? null : Number(rows[0][0]);
 }
@@ -302,6 +325,8 @@ export function resetOpcertCounterCache(): void { opcertCache.clear(); }
 /** Last applied operational-certificate counter of a pool and the slot of the block that set it. */
 export async function opcertCounterState(poolId: string): Promise<{ counter: number; slot: number } | null> {
     const key = poolId.toLowerCase();
+    const lr = ledgerStakeReads();
+    if (lr) return lr.opcert(key);
     const hit = opcertCache.get(key);
     if (hit) return hit;
     const rows = (await sql`SELECT counter, slot FROM opcert_counters WHERE pool_id = ${key}`.values()) as unknown[][];
@@ -318,6 +343,8 @@ export async function opcertCounterState(poolId: string): Promise<{ counter: num
  */
 export async function setOpcertCounter(db: SqlClient, poolId: string, counter: number, slot: number): Promise<void> {
     const key = poolId.toLowerCase();
+    ledgerStake()?.setOpcertCounter(key, counter, slot);
+    if (!sqlLedgerWrites()) return;
     const cur = opcertCache.get(key) ?? await opcertCounterState(key);
     if (cur && cur.counter === counter) return;
     await db`INSERT INTO opcert_counters (pool_id, counter, slot) VALUES (${key}, ${counter}, ${slot})
@@ -331,6 +358,12 @@ export async function setOpcertCounter(db: SqlClient, poolId: string, counter: n
  * credential's reward balance. Stored under `taken_at` = the epoch that begins.
  */
 export async function takeStakeSnapshot(db: SqlClient, takenAt: number): Promise<{ pools: number; total: bigint }> {
+    const fromStore = ledgerStake()?.takeStakeSnapshot(takenAt); // the store computes its own snapshot from its own state (dual-run compares them)
+    if (ledgerStakeReads() && fromStore) { if (sqlLedgerWrites()) await takeStakeSnapshotSql(db, takenAt); return fromStore; }
+    return takeStakeSnapshotSql(db, takenAt);
+}
+
+async function takeStakeSnapshotSql(db: SqlClient, takenAt: number): Promise<{ pools: number; total: bigint }> {
     const exists = (await db`SELECT 1 FROM epoch_stake_totals WHERE taken_at = ${takenAt}`.values()) as unknown[][];
     if (exists.length) {
         const t = (await db`SELECT total_active, pools FROM epoch_stake_totals WHERE taken_at = ${takenAt}`.values()) as unknown[][];
@@ -397,6 +430,7 @@ export interface PoolStakeDistribution {
  * (registered and retired within the epoch); the cause is still open.
  */
 export async function poolsMissingFromSnapshot(takenAt: number): Promise<Array<{ poolId: string; retiringEpoch: number | null; delegators: number }>> {
+    if (ledgerStakeReads()) return []; // diagnostic over SQLite only
     const rows = (await sql`
         SELECT p.pool_id, p.retiring_epoch, COUNT(d.id) FROM pool_params p
         JOIN delegations d ON lower(hex(d.pool_key_hash)) = p.pool_id
@@ -426,6 +460,8 @@ export async function ensureMirTable(db: SqlClient): Promise<void> {
 
 export async function queueMir(db: SqlClient, recordedEpoch: number, source: number, entries: Array<{ stakeKey: string | null; amount: bigint }>): Promise<void> {
     await ensureMirTable(db);
+    ledgerStake()?.queueMir(recordedEpoch, source, entries);
+    if (!sqlLedgerWrites()) return;
     for (const e of entries) {
         await db`INSERT INTO mir_pending (recorded_epoch, source, stake_key, amount) VALUES (${recordedEpoch}, ${source}, ${e.stakeKey}, ${e.amount.toString()})`;
     }
@@ -433,7 +469,10 @@ export async function queueMir(db: SqlClient, recordedEpoch: number, source: num
 
 export async function applyPendingMir(db: SqlClient, epoch: number): Promise<{ credited: bigint; transferred: bigint; dropped: number }> {
     await ensureMirTable(db);
-    const rows = (await db`SELECT id, source, stake_key, amount FROM mir_pending WHERE recorded_epoch < ${epoch} ORDER BY id`.values()) as unknown[][];
+    const lr = ledgerStakeReads();
+    const rows: unknown[][] = lr
+        ? lr.pendingMir(epoch).map((m) => [Number(m.seq), m.source, m.stakeKey, m.amount.toString()])
+        : (await db`SELECT id, source, stake_key, amount FROM mir_pending WHERE recorded_epoch < ${epoch} ORDER BY id`.values()) as unknown[][];
     const out = { credited: 0n, transferred: 0n, dropped: 0 };
     if (!rows.length) return out;
     const pots = await readRewardPots();
@@ -471,12 +510,15 @@ export async function applyPendingMir(db: SqlClient, epoch: number): Promise<{ c
         out.transferred += transfer;
     }
     if (pots) await updateRewardPots(db, { reserves: reserves - pots.reserves, treasury: treasury - pots.treasury, resetFees: false });
-    await db`DELETE FROM mir_pending WHERE recorded_epoch < ${epoch}`;
+    ledgerStake()?.deletePendingMir(epoch);
+    if (sqlLedgerWrites()) await db`DELETE FROM mir_pending WHERE recorded_epoch < ${epoch}`;
     return out;
 }
 
 export async function poolStakeForEpoch(epoch: number): Promise<PoolStakeDistribution | null> {
     const takenAt = epoch - 1;
+    const lr = ledgerStakeReads();
+    if (lr) { const t = lr.snapshotTotals(takenAt); return t ? { takenAt, total: t.total, stake: lr.snapshotPoolStake(takenAt) } : null; }
     const tot = (await sql`SELECT total_active FROM epoch_stake_totals WHERE taken_at = ${takenAt}`.values()) as unknown[][];
     if (!tot.length) return null;
     const rows = (await sql`SELECT pool_id, stake FROM epoch_pool_stake WHERE taken_at = ${takenAt}`.values()) as unknown[][];
@@ -486,6 +528,8 @@ export async function poolStakeForEpoch(epoch: number): Promise<PoolStakeDistrib
 }
 
 export async function latestSnapshotEpoch(): Promise<number | null> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.latestSnapshotEpoch();
     const rows = (await sql`SELECT MAX(taken_at) FROM epoch_stake_totals`.values()) as unknown[][];
     return rows[0]?.[0] == null ? null : Number(rows[0][0]);
 }
@@ -498,6 +542,8 @@ export interface RewardPots {
 }
 
 export async function readRewardPots(): Promise<RewardPots | null> {
+    const lr = ledgerStakeReads();
+    if (lr) { const p = lr.pots(); return p ? { reserves: p.reserves, treasury: p.treasury, feePot: p.feePot, initializedEpoch: p.initializedEpoch } : null; }
     const rows = (await sql`SELECT reserves, treasury, fee_pot, initialized_epoch FROM reward_pots WHERE id = 1`.values()) as unknown[][];
     if (!rows.length) return null;
     return { reserves: BigInt(String(rows[0]![0])), treasury: BigInt(String(rows[0]![1])), feePot: BigInt(String(rows[0]![2])), initializedEpoch: Number(rows[0]![3]) };
@@ -507,14 +553,18 @@ export async function readRewardPots(): Promise<RewardPots | null> {
 export async function initRewardPots(db: SqlClient, epoch: number, maxSupply: bigint): Promise<RewardPots> {
     const existing = await readRewardPots();
     if (existing) return existing;
-    const rows = (await db`SELECT COALESCE(SUM(lovelace), 0) FROM utxo`.values()) as unknown[][];
-    const circulating = BigInt(String(rows[0]?.[0] ?? 0));
+    const ur = ledgerUtxoReads();
+    const circulating = ur ? ur.totalLovelace() : BigInt(String(((await db`SELECT COALESCE(SUM(lovelace), 0) FROM utxo`.values()) as unknown[][])[0]?.[0] ?? 0));
     const reserves = maxSupply - circulating;
+    ledgerStake()?.initPots(epoch, reserves);
+    if (!sqlLedgerWrites()) return { reserves, treasury: 0n, feePot: 0n, initializedEpoch: epoch };
     await db`INSERT INTO reward_pots (id, reserves, treasury, fee_pot, initialized_epoch) VALUES (1, ${reserves.toString()}, 0, 0, ${epoch})`;
     return { reserves, treasury: 0n, feePot: 0n, initializedEpoch: epoch };
 }
 
 export async function addFeeToPot(db: SqlClient, fee: bigint): Promise<void> {
+    ledgerStake()?.addFee(fee);
+    if (!sqlLedgerWrites()) return;
     await db`UPDATE reward_pots SET fee_pot = fee_pot + ${fee.toString()} WHERE id = 1`;
 }
 
@@ -525,23 +575,31 @@ export async function addFeeToPot(db: SqlClient, fee: bigint): Promise<void> {
  */
 export async function addDonationToPot(db: SqlClient, amount: bigint): Promise<void> {
     if (amount <= 0n) return;
+    ledgerStake()?.addDonation(amount);
+    if (!sqlLedgerWrites()) return;
     await db`UPDATE reward_pots SET donation_pot = donation_pot + ${amount.toString()} WHERE id = 1`;
 }
 
 /** Move the epoch's donations into the treasury; returns the amount moved. */
 export async function settleDonations(db: SqlClient): Promise<bigint> {
+    const fromStore = ledgerStake()?.settleDonations();
+    if (!sqlLedgerWrites()) return fromStore ?? 0n;
     const rows = (await db`SELECT donation_pot FROM reward_pots WHERE id = 1`.values()) as unknown[][];
     const donated = BigInt(String(rows[0]?.[0] ?? 0));
     if (donated > 0n) await db`UPDATE reward_pots SET treasury = treasury + ${donated.toString()}, donation_pot = 0 WHERE id = 1`;
-    return donated;
+    return ledgerStakeReads() && fromStore != null ? fromStore : donated;
 }
 
 export async function updateRewardPots(db: SqlClient, delta: { reserves: bigint; treasury: bigint; resetFees: boolean }): Promise<void> {
+    ledgerStake()?.updatePots(delta);
+    if (!sqlLedgerWrites()) return;
     if (delta.resetFees) await db`UPDATE reward_pots SET reserves = reserves + ${delta.reserves.toString()}, treasury = treasury + ${delta.treasury.toString()}, fee_pot = 0 WHERE id = 1`;
     else await db`UPDATE reward_pots SET reserves = reserves + ${delta.reserves.toString()}, treasury = treasury + ${delta.treasury.toString()} WHERE id = 1`;
 }
 
 export async function stakeSnapshotMembers(takenAt: number): Promise<Map<string, Array<{ credential: string; stake: bigint }>>> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.snapshotMembers(takenAt);
     const rows = (await sql`SELECT pool_id, stake_key, stake FROM epoch_stake_cred WHERE taken_at = ${takenAt}`.values()) as unknown[][];
     const out = new Map<string, Array<{ credential: string; stake: bigint }>>();
     for (const r of rows) {
@@ -555,6 +613,8 @@ export async function stakeSnapshotMembers(takenAt: number): Promise<Map<string,
 
 /** Stake credentials currently registered (their reward accounts can receive rewards). */
 export async function registeredStakeKeys(): Promise<Set<string>> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.registeredStakeKeys();
     const rows = (await sql`SELECT lower(hex(stake_credentials)), cred_type FROM stake`.values()) as unknown[][];
     const out = new Set<string>();
     for (const r of rows) {
@@ -570,6 +630,8 @@ export async function registeredStakeKeys(): Promise<Set<string>> {
 }
 
 export async function queuePendingRewards(db: SqlClient, payAt: number, paid: Map<string, bigint>): Promise<void> {
+    ledgerStake()?.queuePendingRewards(payAt, paid);
+    if (!sqlLedgerWrites()) return;
     for (const [cred, amount] of paid) {
         if (amount <= 0n) continue;
         await db`INSERT INTO pending_rewards (pay_at, stake_key, amount) VALUES (${payAt}, ${cred}, ${amount.toString()})
@@ -579,6 +641,8 @@ export async function queuePendingRewards(db: SqlClient, payAt: number, paid: Ma
 
 /** Pay the rewards queued for `epoch` into the reward accounts; returns accounts paid and total. */
 export async function payPendingRewards(db: SqlClient, epoch: number): Promise<{ accounts: number; total: bigint }> {
+    const fromStore = ledgerStake()?.payPendingRewards(epoch);
+    if (!sqlLedgerWrites()) return fromStore ?? { accounts: 0, total: 0n };
     const rows = (await db`SELECT stake_key, amount FROM pending_rewards WHERE pay_at = ${epoch}`.values()) as unknown[][];
     let total = 0n;
     for (const r of rows) {
@@ -590,10 +654,12 @@ export async function payPendingRewards(db: SqlClient, epoch: number): Promise<{
         else await db`INSERT INTO rewards (stake_credentials, amount) VALUES (${cred}, ${amount.toString()})`;
     }
     await db`DELETE FROM pending_rewards WHERE pay_at = ${epoch}`;
-    return { accounts: rows.length, total };
+    return ledgerStakeReads() && fromStore ? fromStore : { accounts: rows.length, total };
 }
 
 export async function recordRewardEpoch(db: SqlClient, performanceEpoch: number, r: { rewardPot: bigint; treasuryDelta: bigint; paid: bigint; unclaimed: bigint; pools: number; accounts: number }): Promise<void> {
+    ledgerStake()?.recordRewardEpoch(performanceEpoch, r);
+    if (!sqlLedgerWrites()) return;
     await db`INSERT OR REPLACE INTO reward_epochs (performance_epoch, reward_pot, treasury_delta, paid, unclaimed, pools, accounts)
         VALUES (${performanceEpoch}, ${r.rewardPot.toString()}, ${r.treasuryDelta.toString()}, ${r.paid.toString()}, ${r.unclaimed.toString()}, ${r.pools}, ${r.accounts})`;
 }
@@ -603,7 +669,9 @@ export async function recordRewardEpoch(db: SqlClient, performanceEpoch: number,
 const REWARD_BATCH = 8192;
 
 export async function creditRewards(db: SqlClient, amounts: Map<string, bigint>): Promise<bigint> {
+    ledgerStake()?.creditRewards(amounts);
     let total = 0n;
+    if (!sqlLedgerWrites()) { for (const [, a] of amounts) if (a > 0n) total += a; return total; }
     const entries: Array<[string, string]> = [];
     for (const [credHex, amount] of amounts) {
         if (amount <= 0n) continue;
@@ -633,6 +701,8 @@ export async function ensurePotSnapshotsTable(db: SqlClient): Promise<void> {
 }
 
 export async function recordPotSnapshot(db: SqlClient, epoch: number, pots: { reserves: bigint; treasury: bigint; feesCollected: bigint }): Promise<void> {
+    ledgerStake()?.recordPotSnapshot(epoch, pots);
+    if (!sqlLedgerWrites()) return;
     await db`INSERT OR REPLACE INTO pot_snapshots (epoch, reserves, treasury, fees_collected)
         VALUES (${epoch}, ${pots.reserves.toString()}, ${pots.treasury.toString()}, ${pots.feesCollected.toString()})`;
 }
@@ -647,10 +717,14 @@ export async function recordPotSnapshot(db: SqlClient, epoch: number, pots: { re
 export async function refreshPotSnapshot(db: SqlClient, epoch: number): Promise<void> {
     const pots = await readRewardPots();
     if (!pots) return;
+    ledgerStake()?.refreshPotSnapshot(epoch, pots);
+    if (!sqlLedgerWrites()) return;
     await db`UPDATE pot_snapshots SET reserves = ${pots.reserves.toString()}, treasury = ${pots.treasury.toString()} WHERE epoch = ${epoch}`;
 }
 
 export async function readPotSnapshot(epoch: number): Promise<{ reserves: bigint; treasury: bigint; feesCollected: bigint } | null> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.potSnapshot(epoch);
     const rows = (await sql`SELECT reserves, treasury, fees_collected FROM pot_snapshots WHERE epoch = ${epoch}`.values()) as unknown[][];
     if (!rows.length) return null;
     return { reserves: BigInt(String(rows[0]![0])), treasury: BigInt(String(rows[0]![1])), feesCollected: BigInt(String(rows[0]![2])) };
@@ -666,6 +740,8 @@ export async function recordRewardPayouts(db: SqlClient, performanceEpoch: numbe
         pool_id TEXT,
         PRIMARY KEY (performance_epoch, stake_key)
     )`;
+    ledgerStake()?.recordRewardPayouts(performanceEpoch, paid);
+    if (!sqlLedgerWrites()) return;
     const entries: Array<[string, string]> = [];
     for (const [cred, amount] of paid) if (amount > 0n) entries.push([cred, amount.toString()]);
     for (let i = 0; i < entries.length; i += REWARD_BATCH) {
@@ -689,6 +765,8 @@ export async function recordPoolRewards(db: SqlClient, performanceEpoch: number,
         blocks INTEGER NOT NULL,
         PRIMARY KEY (performance_epoch, pool_id)
     )`;
+    ledgerStake()?.recordPoolRewards(performanceEpoch, pools);
+    if (!sqlLedgerWrites()) return;
     for (const p of pools) {
         await db`INSERT OR REPLACE INTO reward_pool_epochs (performance_epoch, pool_id, max_pool, pool_reward, operator, members, owner_stake, stake, blocks)
             VALUES (${performanceEpoch}, ${p.poolId}, ${p.maxPool.toString()}, ${p.poolReward.toString()}, ${p.operator.toString()}, ${p.members.toString()}, ${p.ownerStake.toString()}, ${p.stake.toString()}, ${Number(p.blocks)})`;
@@ -697,6 +775,8 @@ export async function recordPoolRewards(db: SqlClient, performanceEpoch: number,
 
 /** Pool parameters as they were at the snapshot `takenAt` (falls back to the current table for older DBs). */
 export async function poolParamsAt(takenAt: number): Promise<Map<string, { vrf: string; params: PoolRewardParams | null }>> {
+    const lr = ledgerStakeReads();
+    if (lr) { const m = lr.snapshotPoolParams(takenAt); return m.size ? m : registeredPoolParams(); }
     const rows = (await sql`SELECT pool_id, vrf_key_hash, params_json FROM epoch_pool_params WHERE taken_at = ${takenAt}`.values()) as unknown[][];
     if (!rows.length) return registeredPoolParams();
     const out = new Map<string, { vrf: string; params: PoolRewardParams | null }>();
@@ -711,3 +791,27 @@ export async function poolParamsAt(takenAt: number): Promise<Map<string, { vrf: 
     }
     return out;
 }
+
+// ───────────────────────────── pool relays (ledger peers) ─────────────────────────────
+
+/** Relays a pool announced in its latest registration certificate (the peer governor's "ledger" source). */
+export async function recordPoolRelays(db: SqlClient, poolId: string, relays: Array<{ host: string; port: number }>, slot: number): Promise<void> {
+    ledgerStake()?.recordPoolRelays(poolId.toLowerCase(), relays, slot);
+    if (!sqlLedgerWrites()) return;
+    await db`CREATE TABLE IF NOT EXISTS pool_relays (pool_id TEXT PRIMARY KEY, relays_json TEXT NOT NULL, updated_slot INTEGER NOT NULL)`;
+    await db`INSERT OR REPLACE INTO pool_relays (pool_id, relays_json, updated_slot) VALUES (${poolId.toLowerCase()}, ${JSON.stringify(relays)}, ${slot})`;
+}
+
+/** Every stored relay with its pool (pools retired or not: a dead relay just fails to connect). */
+export async function listPoolRelays(db: SqlClient): Promise<Array<{ pool: string; host: string; port: number }>> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.poolRelays();
+    await db`CREATE TABLE IF NOT EXISTS pool_relays (pool_id TEXT PRIMARY KEY, relays_json TEXT NOT NULL, updated_slot INTEGER NOT NULL)`;
+    const rows = (await db`SELECT pool_id, relays_json FROM pool_relays`.values()) as unknown[][];
+    const out: Array<{ pool: string; host: string; port: number }> = [];
+    for (const r of rows) {
+        try { for (const x of JSON.parse(String(r[1])) as Array<{ host: string; port: number }>) if (x && typeof x.host === "string" && Number.isInteger(x.port)) out.push({ pool: String(r[0]), host: x.host, port: x.port }); } catch { /* skip a bad row */ }
+    }
+    return out;
+}
+

@@ -68,7 +68,7 @@ async function applyChunkRange(
  * UTxO table from `tables` and every other ledger table from `state` (docs/PLAN_SNAPSHOT_BOOTSTRAP.md
  * phases B–D). The chunk store must already hold the blocks up to the snapshot slot.
  */
-async function importLedgerStateFromAncillary(a: { downloadDir: string; ancillaryDir: string; network: string; vkey?: string; logger: Logger; prog: (p: Partial<MithrilProgress>) => void }): Promise<void> {
+async function importLedgerStateFromAncillary(a: { downloadDir: string; ancillaryDir: string; network: string; vkey?: string; logger: Logger; prog: (p: Partial<MithrilProgress>) => void; trimSqliteBlocks?: boolean }): Promise<{ slot: number; blockHash: string; blockNo: number; epoch: number }> {
     const { logger } = a;
     const vkeyRaw = a.vkey ? (a.vkey.startsWith("http") || a.vkey.includes("/") ? await fetchGenesisVkey(a.vkey) : a.vkey) : ANCILLARY_VKEYS[a.network];
     if (!vkeyRaw) throw new Error(`--ledger-state: no ancillary verification key known for network ${a.network} (pass --ancillary-vkey)`);
@@ -100,6 +100,13 @@ async function importLedgerStateFromAncillary(a: { downloadDir: string; ancillar
     // does not include): drop them — the node fetches them again and applies them through the
     // rules — and give the stored blocks their chain heights (the blocks-only store numbers
     // from 1 when the range does not start at genesis).
+    if (a.trimSqliteBlocks === false) {
+        // Block store mode: the chunk files are the block store and are never trimmed; the node's
+        // selected tip is pinned to the state's block by the caller.
+        a.prog({ phase: "done", lastSlot: snapshot.slot, lastEpoch: snapshot.epoch, etaSec: 0, message: `ledger state imported at slot ${snapshot.slot} (epoch ${snapshot.epoch})` });
+        logInfo(logger, `Ledger state imported at slot ${snapshot.slot}, epoch ${snapshot.epoch}, block ${snapshot.blockNo}; the node continues from here`);
+        return { slot: snapshot.slot, blockHash: snapshot.blockHash, blockNo: snapshot.blockNo, epoch: snapshot.epoch };
+    }
     const { Database } = await import("bun:sqlite");
     const db = new Database(dbPath);
     try {
@@ -115,6 +122,52 @@ async function importLedgerStateFromAncillary(a: { downloadDir: string; ancillar
     }
     a.prog({ phase: "done", lastSlot: snapshot.slot, lastEpoch: snapshot.epoch, etaSec: 0, message: `ledger state imported at slot ${snapshot.slot} (epoch ${snapshot.epoch})` });
     logInfo(logger, `Ledger state imported at slot ${snapshot.slot}, epoch ${snapshot.epoch}, block ${snapshot.blockNo}; the node continues from here`);
+    return { slot: snapshot.slot, blockHash: snapshot.blockHash, blockNo: snapshot.blockNo, epoch: snapshot.epoch };
+}
+
+/**
+ * Block store mode (docs/PLAN_CHUNK_STORE.md phase 4): the certified chunks become the node's
+ * immutable directory as they are; the ledger state, when imported, pins the node's selected tip
+ * to the state's block so the node syncs the rest from peers on its first start.
+ */
+async function finishBlockStore(a: { blockStore: string; immutableDir: string; logger: Logger; prog: (p: Partial<MithrilProgress>) => void; state: { slot: number; blockHash: string } | null }): Promise<void> {
+    const { logger } = a;
+    const { seedImmutableDir } = await import("../storage/seed");
+    const { ChunkStore } = await import("../storage/chunkStore");
+    const { HashIndex } = await import("../storage/hashIndex");
+    const dstImm = join(a.blockStore, "immutable");
+    a.prog({ phase: "apply", message: `placing the chunks under ${dstImm}` });
+    const t0 = Date.now();
+    const seeded = await seedImmutableDir(a.immutableDir, dstImm);
+    logInfo(logger, `Block store ${a.blockStore}: ${seeded.chunks} chunks in place (${seeded.linked} files hardlinked, ${seeded.copied} copied, ${seeded.skipped} already there) in ${((Date.now() - t0) / 1000).toFixed(1)} s`);
+    const store = await ChunkStore.open(dstImm, { chunkSlots: chunkSlotsForNetwork(a.immutableDir), hashIndexPath: join(a.blockStore, "gerolamo", "hash-index.bin") });
+    const tip = await store.tip();
+    void HashIndex;
+    logInfo(logger, `Block store immutable tip: slot ${tip?.slot ?? "none"}; hash index ready`);
+    if (a.state) {
+        const b = await store.blockAt(a.state.slot);
+        if (!b) throw new Error(`block store has no block at the ledger state's slot ${a.state.slot}`);
+        const got = Buffer.from(b.hash).toString("hex");
+        if (got !== a.state.blockHash.toLowerCase()) throw new Error(`block at slot ${a.state.slot} is ${got.slice(0, 16)}…, the ledger state expects ${a.state.blockHash.slice(0, 16)}…`);
+        // The last chunk carries blocks the state does not include: drop them so the chunk store's
+        // tip is the ledger's tip (the node fetches them again from peers), as the SQLite importer did.
+        const dropped = await store.truncateAfter(a.state.slot);
+        await mkdir(join(a.blockStore, "gerolamo"), { recursive: true });
+        await Bun.write(join(a.blockStore, "gerolamo", "selected-tip.hex"), got);
+        const after = await store.tip();
+        logInfo(logger, `Selected tip pinned to the ledger state's block (slot ${a.state.slot}); ${dropped} later block(s) dropped from the last chunk, chunk store tip now slot ${after?.slot}`);
+    }
+    a.prog({ phase: "done", etaSec: 0, message: `block store ready at ${a.blockStore}` });
+}
+
+/** 10·k slots per chunk, read off the primary index size (17 289 bytes ⇒ 4 320 slots, 86 409 ⇒ 21 600). */
+function chunkSlotsForNetwork(immutableDir: string): number {
+    try {
+        const { statSync, readdirSync } = require("node:fs") as typeof import("node:fs");
+        const first = readdirSync(immutableDir).filter((n) => /^\d{5}\.primary$/.test(n)).sort()[0];
+        if (first) return (statSync(join(immutableDir, first)).size - 1) / 4 - 2;
+    } catch { /* fall through */ }
+    return 21600;
 }
 
 /** Discover chunk numbers present on disk under immutableDir. */
@@ -312,6 +365,16 @@ async function runTsBootstrapInner(
     }
 
     let applied: number[] = [];
+    if (opts.blockStore) {
+        if (!immutableDir) throw new Error("--block-store: no immutable directory to place");
+        let state: { slot: number; blockHash: string } | null = null;
+        if (opts.ledgerState) {
+            if (!ancillaryDir) throw new Error(`--ledger-state: no ancillary ledger directory under ${downloadDir}`);
+            state = await importLedgerStateFromAncillary({ downloadDir, ancillaryDir, network: opts.network, vkey: opts.ancillaryVkey, logger, prog, trimSqliteBlocks: false });
+        }
+        await finishBlockStore({ blockStore: resolve(opts.blockStore), immutableDir, logger, prog, state });
+        return { engine, snapshotHash: selected.hash, certificateHash: selected.certificate_hash, immutableDir, ancillaryDir, downloadedChunks: downloaded, appliedChunks: [], verified: true };
+    }
     if (opts.skipApply) {
         logInfo(
             logger,

@@ -18,6 +18,10 @@ import { startPeerBlockServer } from "./peerBlockServer";
 import { closeSql, getSqlFilename, initSql } from "../sql";
 import { startN2CServer, type N2CServerHandle } from "./n2c";
 import { startN2NServer, type N2NServerHandle } from "./n2n";
+import { duplexPullers, setDuplexResponderDeps } from "./n2n/DuplexResponders";
+import { relayChainStoreOverride } from "../storage/nodeBlockStore";
+import { getShelleyGenesisConfig } from "../utils/paths";
+import { connect as netConnect } from "node:net";
 import { GlobalSharedMempool } from "./SharedMempool";
 import { resolveN2NConfig } from "./n2n/config";
 import { listShareablePeers, setInboundN2NStatusProvider } from "./peerManager";
@@ -281,6 +285,16 @@ export async function start() {
         if (ignored.length) logger.warn(`config keys ignored (validation is not configurable): ${ignored.join(", ")}`);
     }
     logger.info(`Node role: ${resolveNodeRole(config)}${config.n2n ? ` (inbound N2N on ${config.n2n.host}:${config.n2n.port})` : " (no inbound N2N)"}`);
+    if (config.n2n) {
+        // Relay / producer: also serve our chain over the connections we open (duplex), so the
+        // hot peers pull forged blocks without depending on inbound connections.
+        setDuplexResponderDeps({
+            store: relayChainStoreOverride(),
+            sharePeers: (amount) => listShareablePeers(amount),
+            mempool: GlobalSharedMempool.getInstance(),
+            maxRangeBlocks: config.n2n.maxRangeBlocks,
+        });
+    }
     logger.info("Starting peer manager...");
 
     await initPeerManager(config);
@@ -288,23 +302,14 @@ export async function start() {
     logger.info("Starting peer block server...");
 
     await startPeerBlockServer(config, createHttpPeerManager());
-    if (config.producer) {
-        // Block producer: forges when this pool leads a slot; blocks go through the node's own
-        // strict validation (adoptLocalBlock) and are served to relays by the inbound N2N hosts.
-        // After the HTTP server: computing a leader schedule takes minutes and /metrics must not
-        // wait for it (2026-09-10 06:14 UTC: 3.5 minutes without a status endpoint).
-        try {
-            const { startBlockProducer } = await import("../pool/startBlockProducer");
-            await startBlockProducer(config);
-        } catch (err) {
-            logger.error("Block producer failed to start (node keeps running as a relay):", err);
-        }
-    }
     logger.info("Peer block server started.");
 
     let n2nHandle: N2NServerHandle | undefined;
     if (config.n2n) {
         n2nHandle = await startN2NServer({
+            store: relayChainStoreOverride(),
+            ws: config.n2n.ws,
+            lightQuery: { networkMagic: config.networkMagic, activeSlotsCoeff: Number((await getShelleyGenesisConfig(config) as { activeSlotsCoeff?: number } | null)?.activeSlotsCoeff ?? 0.05) },
             host: config.n2n.host,
             port: config.n2n.port,
             networkMagic: config.networkMagic,
@@ -320,8 +325,39 @@ export async function start() {
             `Inbound N2N ready: ${n2nHandle.host}:${n2nHandle.port}`,
         );
         const h = n2nHandle;
+        // Self-probe: can the world reach our public relay address? (2026-09-13: the VPN that
+        // carries the port forward did not come back after a reboot; three blocks forged into
+        // the void before anyone noticed "connection refused".)
+        let publicReachable: { address: string; ok: boolean; checkedAt: number; error: string | null } | null = null;
+        const publicAddress = config.n2n.publicAddress;
+        if (publicAddress) {
+            const [pHost, pPortStr] = publicAddress.split(":");
+            const pPort = Number(pPortStr);
+            const probe = () => new Promise<void>((resolve) => {
+                const sock = netConnect({ host: pHost!, port: pPort });
+                let settled = false;
+                const done = (ok: boolean, error: string | null) => {
+                    if (settled) return;
+                    settled = true;
+                    const was = publicReachable?.ok;
+                    publicReachable = { address: publicAddress, ok, checkedAt: Date.now(), error };
+                    if (!ok && was !== false) logger.error(`Public relay address ${publicAddress} is NOT reachable from here (${error}): no peer can pull our blocks over inbound — check the VPN / port forward`);
+                    if (ok && was === false) logger.info(`Public relay address ${publicAddress} is reachable again`);
+                    try { sock.destroy(); } catch { /* ignore */ }
+                    resolve();
+                };
+                sock.setTimeout(5000, () => done(false, "timeout"));
+                sock.once("connect", () => done(true, null));
+                sock.once("error", (e) => done(false, e.message));
+            });
+            void probe();
+            setInterval(() => { void probe(); }, 120_000).unref?.();
+        }
         setInboundN2NStatusProvider(() => ({
             listening: true,
+            publicReachable,
+            duplexPullers: duplexPullers().map((d) => d.peer),
+            clientList: h.clients(),
             host: h.host,
             port: h.port,
             clients: h.clientCount(),
@@ -331,6 +367,20 @@ export async function start() {
             'Inbound N2N disabled (role "data"; set role "relay", n2n.enabled or GEROLAMO_N2N_PORT to accept peers)',
         );
         setInboundN2NStatusProvider(null);
+    }
+
+    if (config.producer) {
+        // Block producer: forges when this pool leads a slot; blocks go through the node's own
+        // strict validation (adoptLocalBlock) and are served to relays by the inbound N2N hosts.
+        // After the HTTP server and the inbound listener: the schedule pass takes minutes and
+        // neither /metrics (2026-09-10 06:14 UTC) nor inbound peers (2026-09-12 09:40 UTC, five
+        // minutes without a listener after a reboot) may wait for it.
+        try {
+            const { startBlockProducer } = await import("../pool/startBlockProducer");
+            await startBlockProducer(config);
+        } catch (err) {
+            logger.error("Block producer failed to start (node keeps running as a relay):", err);
+        }
     }
 
     let n2cHandle: N2CServerHandle | undefined;

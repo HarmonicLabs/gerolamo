@@ -16,7 +16,7 @@ import {
     TxSubmitClient,
     MiniProtocol,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { connect, type Socket } from "node:net";
+import { connect, Socket } from "node:net";
 import { logger } from "../utils/logger";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { AnnounceWindow, encodeInit, encodeReplyTxIds, encodeReplyTxs, hashBytes, hfcEraIndexNow, parseTxSubmissionMessages } from "./txSubmissionCodec";
@@ -26,6 +26,8 @@ import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { initiatorOnly, peerSharingAdvertised } from "./nodeRole";
+import { initiatorSideMux } from "./n2n/N2NDirection";
+import { duplexActivity, duplexPullingSince, duplexRespondersEnabled, startDuplexResponders, type DuplexResponders } from "./n2n/DuplexResponders";
 import { ChainSyncPipeline } from "./ChainSyncPipeline";
 
 import { toHex } from "@harmoniclabs/uint8array-utils";
@@ -169,6 +171,17 @@ export class PeerClient implements IPeerClient {
     shelleyGenesisConfig: ShelleyGenesisConfig;
 
     readonly txSubmitClient!: TxSubmitClient;
+    /** Initiator-direction view of `mplexer` (replies to our clients only). */
+    private readonly initiatorMux!: Multiplexer;
+    /** Responder hosts serving the remote's initiators on this outbound bearer (duplex). */
+    private duplexResponders: DuplexResponders | null = null;
+    handshakeVersion: number | null = null;
+    connectedAt: number | null = null;
+    /** The one TCP dial this client makes; a later call of the connect closure is the library redialing. */
+    private dialed = false;
+    get duplexServing(): boolean { return this.duplexResponders !== null; }
+    get duplexPullingSince(): number | null { return duplexPullingSince(this.peerKey); }
+    get duplexProtocols(): string[] { return duplexActivity(this.peerKey).map((a) => a.protocol); }
     onTerminate?: (peerId: string, peerKey: string, reason?: string) => void;
     onRollForward?: (
         peerId: string,
@@ -201,6 +214,17 @@ export class PeerClient implements IPeerClient {
 
         this.mplexer = new Multiplexer({
             connect: () => {
+                // The library multiplexer redials this closure by itself when the peer closes the
+                // socket (SocketLike.reconnect, up to 3 times) and tells nobody: the governor kept
+                // a "connected" warm peer with no socket behind it (2026-09-14 01:50 UTC,
+                // 65.108.41.222 after it dropped a duplex session). A closed connection is over;
+                // the governor reconnects deliberately, with a fresh handshake.
+                if (this.dialed) {
+                    logger.info(`Peer ${this.peerId} closed the connection; not redialing`);
+                    setTimeout(() => this.terminate("peer closed the connection"), 0);
+                    return (this.transportSocket ?? new Socket()) as any;
+                }
+                this.dialed = true;
                 logger.info(`Attempt connection to peer ${this.peerId}`);
                 const sock = connect({ host, port: Number(port) });
                 this.transportSocket = sock;
@@ -217,13 +241,16 @@ export class PeerClient implements IPeerClient {
             protocolType: "node-to-node",
         });
 
-        this.chainSyncClient = new ChainSyncClient(this.mplexer);
-        this.blockFetchClient = new BlockFetchClient(this.mplexer);
-        this.keepAliveClient = new KeepAliveClient(this.mplexer);
-        this.peerSharingClient = new PeerSharingClient(this.mplexer);
+        // Our initiators only ever see responder-direction frames; a duplex peer's own requests
+        // (initiator direction) go to the responder hosts started after the handshake.
+        this.initiatorMux = initiatorSideMux(this.mplexer);
+        this.chainSyncClient = new ChainSyncClient(this.initiatorMux);
+        this.blockFetchClient = new BlockFetchClient(this.initiatorMux);
+        this.keepAliveClient = new KeepAliveClient(this.initiatorMux);
+        this.peerSharingClient = new PeerSharingClient(this.initiatorMux);
         this.sharedMempool = GlobalSharedMempool.getInstance();
         this.txSubmitClient = new TxSubmitClient(
-            this.mplexer,
+            this.initiatorMux,
             this.sharedMempool,
         );
         // Outbound connection: the peer is the tx-submission server and asks *us* for ids/txs;
@@ -273,7 +300,7 @@ export class PeerClient implements IPeerClient {
         // the raw bytes are parsed here: MsgRequestTxIds = [0, blocking, ack, req].
         this.txSubmitClient.removeAllListeners("requestTxIds");
         this.txSubmitClient.removeAllListeners("requestTxs");
-        this.mplexer.on(MiniProtocol.TxSubmission, (chunk: Uint8Array) => this.onTxSubmissionChunk(chunk));
+        this.initiatorMux.on(MiniProtocol.TxSubmission, (chunk: Uint8Array) => this.onTxSubmissionChunk(chunk));
     }
 
     terminate(reason?: string) {
@@ -321,6 +348,12 @@ export class PeerClient implements IPeerClient {
             this.keepAliveInterval = null;
         }
         try {
+            this.duplexResponders?.dispose();
+            this.duplexResponders = null;
+        } catch {
+            /* */
+        }
+        try {
             this.mplexer.close();
         } catch {
             /* */
@@ -337,7 +370,10 @@ export class PeerClient implements IPeerClient {
         if (this.terminated) {
             throw new Error(`peer ${this.peerKey} already terminated`);
         }
-        const handshake = new HandshakeClient(this.mplexer);
+        const handshake = new HandshakeClient(this.initiatorMux);
+        // Duplex only when the responder hosts exist to answer (relay / producer with the
+        // deps registered); otherwise the honest InitiatorOnly, whatever the role says.
+        const duplex = !initiatorOnly(this.config) && duplexRespondersEnabled();
 
         handshake.on("error", (err) => {
             const failure = classifyPeerNetError(err, this.peerKey);
@@ -359,7 +395,7 @@ export class PeerClient implements IPeerClient {
                     networkMagic: this.config.networkMagic,
                     // Spec: only a node reachable at its connecting address may
                     // advertise PeerSharing / act as responder (see nodeRole.ts).
-                    initiatorOnlyDiffusionMode: initiatorOnly(this.config),
+                    initiatorOnlyDiffusionMode: !duplex,
                     peerSharing: peerSharingAdvertised(this.config),
                     query: false,
                 })
@@ -383,8 +419,15 @@ export class PeerClient implements IPeerClient {
 
         const vd: any = (handshakeResult as any).versionData;
         this.peerSharingNegotiated = vd?.peerSharing === true;
+        const vn = Number((handshakeResult as any).versionNumber);
+        this.handshakeVersion = Number.isFinite(vn) ? vn : null;
+        this.connectedAt = Date.now();
+        if (duplex && !this.terminated) {
+            this.duplexResponders?.dispose();
+            this.duplexResponders = startDuplexResponders(this.mplexer, this.peerKey);
+        }
         logger.debug(
-            `Handshake success for peer ${this.peerId} (version ${String((handshakeResult as any).versionNumber ?? "?")}, peerSharing ${this.peerSharingNegotiated ? "on" : "off"})`,
+            `Handshake success for peer ${this.peerId} (version ${String((handshakeResult as any).versionNumber ?? "?")}, peerSharing ${this.peerSharingNegotiated ? "on" : "off"}${duplex ? ", duplex: serving our chain over this connection" : ""})`,
         );
     }
 
@@ -801,7 +844,7 @@ export class PeerClient implements IPeerClient {
         }
     }
 
-    async restartChainSync(reason: string): Promise<void> {
+    async restartChainSync(reason: string, drainMs = 600_000): Promise<void> {
         if (this.terminated || !this.isSyncing) return;
         // Synchronously, before any await: every header batch already queued from the
         // old stream is now stale (a verifier promoted to primary must not have its
@@ -816,11 +859,15 @@ export class PeerClient implements IPeerClient {
         // verifier, re-anchor, time out, drop it, promote the next — for 15 minutes without
         // applying a block. Wait for the reply (dead peers are caught by KeepAlive); the
         // deadline is a last resort.
-        const deadline = Date.now() + 600_000;
+        // …except when the caller cannot afford it: with 24 requests pipelined at the tip the
+        // drain needs 24 more blocks from the peer (2026-09-13 13:28 UTC: a producer sat on its
+        // orphan for minutes after a fork below its tip). A short drain then ends in a
+        // terminate, and the governor promotes a verifier that is already on the right chain.
+        const deadline = Date.now() + drainMs;
         let warned = false;
         while ((this.csPipeline?.inFlight ?? 0) > 0 && Date.now() < deadline && !this.terminated) {
             await new Promise((r) => setTimeout(r, 25));
-            if (!warned && Date.now() - deadline > -570_000) { warned = true; logger.info(`ChainSync restart for ${this.peerId} waits for ${this.csPipeline?.inFlight} outstanding repl${(this.csPipeline?.inFlight ?? 0) === 1 ? "y" : "ies"}${this.csPipeline?.isAtTip ? " (at the peer's tip: the next block ends it)" : ""}`); }
+            if (!warned && Date.now() - deadline > -(drainMs - 30_000)) { warned = true; logger.info(`ChainSync restart for ${this.peerId} waits for ${this.csPipeline?.inFlight} outstanding repl${(this.csPipeline?.inFlight ?? 0) === 1 ? "y" : "ies"}${this.csPipeline?.isAtTip ? " (at the peer's tip: the next block ends it)" : ""}`); }
         }
         if (this.terminated) return;
         if ((this.csPipeline?.inFlight ?? 0) > 0) {

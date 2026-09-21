@@ -1,5 +1,6 @@
 import { getShelleyGenesisConfig } from "../utils/paths";
 import { sql } from "../sql";
+import { ledgerGovDirect, ledgerGovReads, sqlLedgerWrites } from "../ledger/nodeLedgerStore";
 import { logger } from "../utils/logger";
 import { blockFrostFetchEpochParams } from "../utils/blockFrostFetchEra";
 import type { GerolamoConfig } from "../network/peerManager";
@@ -103,6 +104,8 @@ async function ensureTable(): Promise<void> {
 }
 
 async function readDb(epoch: number): Promise<Record<string, unknown> | null> {
+    const gr = ledgerGovReads();
+    if (gr) return gr.epochParams(epoch)?.params ?? null;
     await ensureTable();
     const rows = (await sql`SELECT params FROM epoch_params WHERE epoch = ${epoch}`) as any[];
     const row = rows?.[0];
@@ -128,12 +131,16 @@ export async function readEpochParamsRaw(epoch: number): Promise<Record<string, 
 
 /** The `source` column of the stored record ("genesis" | "local" | "external" …), or null. */
 export async function readEpochParamsSource(epoch: number): Promise<string | null> {
+    const gr = ledgerGovReads();
+    if (gr) { const r = gr.epochParams(epoch); return r ? (r.source ?? null) : null; }
     await ensureTable();
     const rows = (await sql`SELECT source FROM epoch_params WHERE epoch = ${epoch}`.values()) as unknown[][];
     return rows.length ? String(rows[0]![0]) : null;
 }
 
 async function writeDb(epoch: number, raw: Record<string, unknown>, source: string): Promise<void> {
+    await ledgerGovDirect((g) => g.putEpochParams(epoch, raw, source));
+    if (!sqlLedgerWrites()) return;
     await ensureTable();
     await sql`INSERT OR REPLACE INTO epoch_params (epoch, params, source) VALUES (${epoch}, ${JSON.stringify(raw)}, ${source})`;
 }

@@ -1,6 +1,8 @@
 /** Wire the BlockProducer to the running node (orchestrator, DB, shared mempool). */
 import { getConsensus } from "../network/peerManager";
+import { ledgerUtxoReads } from "../ledger/nodeLedgerStore";
 import type { GerolamoConfig } from "../network/peerManager";
+import { getInboundN2NStatus } from "../network/peerManager";
 import { GlobalSharedMempool } from "../network/SharedMempool";
 import { hashBytes } from "../network/txSubmissionCodec";
 import { getChainTip } from "../db";
@@ -45,6 +47,11 @@ export async function startBlockProducer(config: GerolamoConfig): Promise<BlockP
         dropFromMempool: async (hashes) => { await GlobalSharedMempool.getInstance().drop(hashes as any); },
         greetingTx: pc.greeting ? greetingBuilder(pc.greeting, network) : undefined,
     });
+    node.carriers = () => {
+        const inb = getInboundN2NStatus();
+        const inbound = (inb.clientList ?? []).filter((c) => c.chainSyncSlot != null).map((c) => c.peer);
+        return { inbound, duplex: inb.duplexPullers ?? [], publicReachable: inb.publicReachable ? inb.publicReachable.ok : null };
+    };
     producer = new BlockProducer(pc, node);
     await producer.start();
     logger.info(`Block producer started for pool ${producer.poolId}`);
@@ -66,7 +73,10 @@ function greetingBuilder(g: { paymentSkeyFile: string; paymentAddress: string },
     return async () => {
         key ??= loadSigningKey(g.paymentSkeyFile, KeyEnvelopeType.paymentSigning);
         const address = bech32Decode(g.paymentAddress).bytes;
-        const rows = (await sql`SELECT utxo_ref, lovelace, tx_out FROM utxo WHERE address = ${g.paymentAddress}`.values()) as unknown[][];
+        const ur = ledgerUtxoReads();
+        const rows: unknown[][] = ur
+            ? ur.byAddress(g.paymentAddress).map((u) => [u.utxo_ref, u.lovelace, u.tx_out])
+            : (await sql`SELECT utxo_ref, lovelace, tx_out FROM utxo WHERE address = ${g.paymentAddress}`.values()) as unknown[][];
         const usable = rows
             .map((r) => ({ ref: String(r[0]), lovelace: BigInt(String(r[1] ?? 0)), txOut: String(r[2] ?? "{}") }))
             .filter((u) => { try { const assets = JSON.parse(u.txOut)?.assets ?? {}; return Object.keys(assets).every((k) => k === "") && u.lovelace >= 2_000_000n; } catch { return false; } })

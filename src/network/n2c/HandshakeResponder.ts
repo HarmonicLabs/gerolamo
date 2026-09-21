@@ -14,10 +14,12 @@ import { logger } from "../../utils/logger";
 const n2cLogger = logger.child("n2c.handshake");
 
 /** N2C versions offered by Gerolamo (matches HandshakeClient N2C table). */
-export const GEROLAMO_N2C_VERSIONS: readonly VersionNumber[] = [16, 17, 18, 19];
+export const GEROLAMO_N2C_VERSIONS: readonly VersionNumber[] = [16, 17, 18, 19, 20, 21, 22, 23];
+// 16–23 share the [networkMagic, query] version data; cardano-cli 11 gates newer queries on
+// the negotiated version (`query stake-distribution` refused at 19, 2026-09-14).
 
 const handshakeHeader = Object.freeze({
-    hasAgency: true,
+    hasAgency: false, // responder direction (the 0x8000 bit on the wire): a client rejects replies on its own initiator side (cardano-cli, 2026-09-14)
     protocol: MiniProtocol.Handshake,
 });
 

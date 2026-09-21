@@ -60,3 +60,37 @@ describe("responder payloads larger than one mux segment", () => {
         expect(mux.sent).toHaveLength(1);
     });
 });
+
+describe("initiatorSideMux", () => {
+    test("forwards only responder-direction frames to protocol listeners; off removes the wrapped listener", async () => {
+        const { initiatorSideMux } = await import("./N2NDirection");
+        const listeners = new Map<any, Function[]>();
+        const real: any = {
+            isN2N: true,
+            on(evt: any, l: Function) { listeners.set(evt, [...(listeners.get(evt) ?? []), l]); return real; },
+            off(evt: any, l: Function) { listeners.set(evt, (listeners.get(evt) ?? []).filter((x) => x !== l)); return real; },
+            send(payload: Uint8Array, h: any) { sent.push(h); },
+        };
+        const sent: any[] = [];
+        const facade = initiatorSideMux(real);
+        const got: string[] = [];
+        const l = (p: Uint8Array, h: any) => got.push(`${p[0]}:${String(h?.hasAgency)}`);
+        facade.on(2 as any, l as any);
+        const errs: Error[] = [];
+        const onErr = (e: Error) => errs.push(e);
+        facade.on("error", onErr);
+        expect(listeners.get(2)).toHaveLength(1);
+        const w = listeners.get(2)![0]!;
+        w(new Uint8Array([1]), { hasAgency: false }); // remote initiator → not ours
+        w(new Uint8Array([2]), { hasAgency: true });  // remote responder → reply to our client
+        w(new Uint8Array([3]), undefined);            // no header → pass
+        expect(got).toEqual(["2:true", "3:undefined"]);
+        listeners.get("error")![0]!(new Error("x"));
+        expect(errs).toHaveLength(1);
+        facade.off(2 as any, l as any);
+        expect(listeners.get(2)).toHaveLength(0);
+        facade.send(new Uint8Array([9]), { protocol: 2, hasAgency: true } as any);
+        expect(sent).toHaveLength(1);
+        expect(facade.isN2N).toBe(true);
+    });
+});

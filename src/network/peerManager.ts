@@ -1,4 +1,11 @@
 import { logger } from "../utils/logger";
+import { openNodeLedgerStore } from "../ledger/nodeLedgerStore";
+import { blockStoreMode, catchUpFromSqlite, configureBlockStoreMode, configureRelayStore, noteSelectedTip, persistSelectedTipTo, resolveStartupTip, selectedTipPathFor, openNodeBlockStore, relayChainStoreOverride, setNodeBlockStore } from "../storage/nodeBlockStore";
+import { listPoolRelays } from "../db/leaderState";
+import { getMaxSlot, getChainTip } from "../db";
+import { sql } from "../sql";
+import { dedupeRelays, loadLedgerRelaysFile } from "./ledgerPeers";
+import { dirname, join } from "node:path";
 import {
     adaptLegacyTopology,
     isLegacyTopology,
@@ -52,6 +59,8 @@ export interface PeerGovernorConfig {
     tickMs?: number;
     /** PeerSharing request size. Default 10. */
     shareBatch?: number;
+    /** Ledger relays (registered pools) added to the cold tier per governor tick when cold is short (default 32). */
+    ledgerBatch?: number;
     /** Run PeerSharing every N ticks. Default 2. */
     shareEveryTicks?: number;
     /** Max parallel cold→warm connects per tick. Default 2. */
@@ -115,6 +124,8 @@ export interface ProducerConfig {
      * network, remembered in `stateFile`.
      */
     greeting?: { paymentSkeyFile: string; paymentAddress: string };
+    /** Protocol version written into forged headers (explorer badge); unset = the ledger's. */
+    headerProtocolVersion?: { major: number; minor: number };
 }
 
 export interface GerolamoConfig {
@@ -138,6 +149,15 @@ export interface GerolamoConfig {
     readonly byronGenesisHash?: string;
     readonly enableMinibf?: boolean;
     readonly dbPath: string;
+    /** cardano-node-format block store directory (`immutable/`, `volatile/`); default `<dir of dbPath>/db`. `GEROLAMO_BLOCK_STORE=0` disables. */
+    readonly blockStoreDir?: string;
+    /** Which store the N2N chain-sync / block-fetch servers read: "sqlite" (default) or "chunks" (the block store). */
+    readonly relayStore?: "sqlite" | "chunks";
+    /** "mirror" (default) writes the block store beside SQLite; "primary" makes it the block store (no more `blocks` rows). */
+    readonly blockStoreMode?: "mirror" | "primary";
+    /** LMDB ledger store: "sqlite" (default), "dual" (write both, verify), "lmdb" (LMDB answers UTxO reads). docs/PLAN_LMDB_LEDGER.md */
+    readonly ledgerStore?: "sqlite" | "dual" | "lmdb";
+    readonly ledgerDir?: string;
     readonly port?: number;
     readonly unixSocket?: boolean;
     /**
@@ -395,6 +415,46 @@ async function seedTopologyIntoGovernor(
                 }
             }
         }
+    }
+}
+
+let ledgerPeerConfig: { topology: Topology; resolveDns: boolean; file: string } | null = null;
+let ledgerRelayQueue: Array<{ pool: string; host: string; port: number }> = [];
+let ledgerRelaysLoadedAt = 0;
+let ledgerSeededTotal = 0;
+
+/**
+ * Feed registered relays (pool_relays table + <node dir>/ledger-relays.json) into the cold
+ * tier, a batch per call so DNS work stays bounded; honours topology.useLedgerAfterSlot.
+ */
+async function seedLedgerPeers(gov: PeerGovernor, config: GerolamoConfig): Promise<number> {
+    const lp = ledgerPeerConfig;
+    if (!lp || !gov.needsColdPeers()) return 0;
+    try {
+        const tip = Number(await getMaxSlot());
+        if (Number.isFinite(lp.topology.useLedgerAfterSlot) && tip < lp.topology.useLedgerAfterSlot) return 0;
+        if (ledgerRelayQueue.length === 0 && Date.now() - ledgerRelaysLoadedAt > 10 * 60_000) {
+            ledgerRelaysLoadedAt = Date.now();
+            const fromTable = await listPoolRelays(sql).catch(() => [] as Array<{ pool: string; host: string; port: number }>);
+            const fromFile = await loadLedgerRelaysFile(lp.file);
+            const all = dedupeRelays([...fromTable, ...fromFile]).filter((r) => !gov.get(peerKey(r.host, r.port)));
+            for (let i = all.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [all[i], all[j]] = [all[j]!, all[i]!]; }
+            ledgerRelayQueue = all;
+            if (all.length) logger.info(`Ledger peers: ${all.length} relay(s) to try (${fromTable.length} from certificates, ${fromFile.length} from ${lp.file})`);
+        }
+        const want = Math.min(Number(config.peerGovernor?.ledgerBatch ?? 32), Math.max(0, gov.counts().total < (gov.targets.targetCold + gov.targets.targetWarm + gov.targets.targetHot) ? gov.targets.targetCold : 0));
+        let added = 0;
+        while (added < want && ledgerRelayQueue.length) {
+            const r = ledgerRelayQueue.shift()!;
+            const hosts = lp.resolveDns ? await expandAccessPoint(r.host) : [r.host];
+            for (const h of hosts) { if (!gov.get(peerKey(h, r.port))) { gov.noteKnown(h, r.port, "ledger", false); added++; } }
+        }
+        ledgerSeededTotal += added;
+        if (added) logger.info(`Ledger peers: +${added} cold (${ledgerRelayQueue.length} left in the queue, ${ledgerSeededTotal} seeded since start)`);
+        return added;
+    } catch (err) {
+        logger.warn("Ledger peers: seeding failed:", err);
+        return 0;
     }
 }
 
@@ -682,12 +742,20 @@ async function governorTick(
             logger.info(`Forgot ${pruned.length} dead shared peer(s): ${pruned.slice(0, 4).join(", ")}${pruned.length > 4 ? "…" : ""}`);
         }
 
-        // 1) Grow cold via PeerSharing (only when we advertised it in the handshake)
-        if (
-            peerSharingAdvertised(config) &&
-            (tickCount === 1 || tickCount % shareEvery === 0)
-        ) {
+        // 1) Grow cold via PeerSharing. Asking is independent of advertising: the handshake
+        // flag says whether WE answer share requests (only a node reachable at its connecting
+        // address may), while a request goes to any peer that advertised willingness. A
+        // producer that never asks knows only its topology roots (10 peers on preview,
+        // 2026-09-12), and every extra outbound duplex connection to a different relay is
+        // another chance of being adopted as that relay's warm / hot peer.
+        if (gcfg.peerSharing !== false && (tickCount === 1 || tickCount % shareEvery === 0)) {
             await runPeerSharing(gov, shareBatch);
+        }
+
+        // 1b) Ledger peers (registered relays) whenever cold is short: the main source for a
+        // node that does not advertise itself, as in cardano-node.
+        if (gov.needsColdPeers() && (tickCount === 1 || tickCount % shareEvery === 0)) {
+            await seedLedgerPeers(gov, config);
         }
 
         // 2) cold → warm (capped concurrency; pickColdForWarm respects nextRetryAt)
@@ -901,6 +969,12 @@ export interface InboundN2NStatus {
     host: string | null;
     port: number | null;
     clients: number;
+    /** Outbound peers pulling our chain over duplex (they can carry our forged blocks). */
+    duplexPullers?: string[];
+    /** Connected inbound peers with what they have pulled. */
+    clientList?: Array<{ peer: string; transport?: "tcp" | "ws"; since: number; version: number | null; handshakeOk: boolean; chainSyncSlot: number | null; protocols: string[] }>;
+    /** Self-probe of the public relay address (config n2n.publicAddress): null = not configured / not probed yet. */
+    publicReachable?: { address: string; ok: boolean; checkedAt: number; error: string | null } | null;
 }
 
 let inboundStatusProvider: (() => InboundN2NStatus) | null = null;
@@ -1001,6 +1075,43 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
     consensus = new ConsensusOrchestrator(config, getPeerAccessor());
     config.allPeers = clientsById;
     logger.info("ConsensusOrchestrator ready (rollForward/rollBack → DB)");
+    try {
+        const k = Number((shelleyGenesisConfig as { securityParam?: number } | null)?.securityParam) || 2160;
+        configureRelayStore(config.relayStore);
+        configureBlockStoreMode(config.blockStoreMode);
+        const store = await openNodeBlockStore(config, k);
+        if (store) {
+            await catchUpFromSqlite(store, k);
+            consensus.attachBlockStore(store);
+            setNodeBlockStore(store);
+            persistSelectedTipTo(selectedTipPathFor(store.dir));
+            if (blockStoreMode() === "primary") {
+                const start = await resolveStartupTip(store, store.dir);
+                if (!start) {
+                    // Mirror mode only makes sense with a populated `blocks` table; on a fresh bootstrap it
+                    // would sync from genesis onto the imported ledger (2026-09-14 18:08, halted at slot 320).
+                    const legacyRows = (await sql`SELECT 1 FROM blocks LIMIT 1`.values().catch(() => [])) as unknown[][];
+                    const legacy = legacyRows.length > 0; // the SQLite table itself, not the routed helper (which would answer from the store)
+                    if (!legacy) throw new Error("Block store: primary mode requested but the ledger's applied tip is not in the store and SQLite holds no blocks; refusing to start (re-run mithril-bootstrap --block-store … --ledger-state)");
+                    logger.error("Block store: primary mode requested but the ledger's applied tip could not be found in the store; running in mirror mode on the SQLite blocks table instead");
+                    configureBlockStoreMode("mirror");
+                } else {
+                    noteSelectedTip(start.hash);
+                    logger.info(`Block store is PRIMARY: selected tip slot ${start.slot} (${start.source}); the SQLite blocks table is no longer written`);
+                }
+            }
+            if (blockStoreMode() !== "primary") {
+                const tip = await getChainTip();
+                if (tip) noteSelectedTip(Uint8Array.from(Buffer.from(tip.hashHex, "hex")));
+            }
+            if (relayChainStoreOverride()) logger.info("N2N chain-sync / block-fetch will serve from the chunk store (GEROLAMO_RELAY_STORE=chunks)");
+        }
+        // LMDB ledger store (phase 1: UTxO), seeded from SQLite at the selected tip when empty
+        const tipNow = await getChainTip();
+        await openNodeLedgerStore(config, tipNow ? { slot: Number(tipNow.slot), hash: Uint8Array.from(Buffer.from(tipNow.hashHex, "hex")) } : null);
+    } catch (err) {
+        logger.warn(`Block store unavailable (SQLite stays primary): ${(err as Error).message}`);
+    }
 
     if (!govEnabled(config)) {
         logger.warn(
@@ -1016,6 +1127,8 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
         governor,
         config.peerGovernor?.resolveDns !== false,
     );
+    ledgerPeerConfig = { topology, resolveDns: config.peerGovernor?.resolveDns !== false, file: join(dirname(config.topologyFile), "ledger-relays.json") };
+    await seedLedgerPeers(governor, config);
     logger.info(
         `Node role: ${resolveNodeRole(config)} (peerSharing ${peerSharingAdvertised(config) ? "on" : "off"})`,
     );

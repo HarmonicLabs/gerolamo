@@ -19,7 +19,7 @@
  * Honesty: contentHashOk ≠ match ≠ pureTsStmImplemented.
  */
 
-import { createHash } from "crypto";
+import { createHash } from "./hash";
 
 import type { MithrilCertificate } from "../types";
 import {

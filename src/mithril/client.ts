@@ -58,7 +58,10 @@ export async function fetchGenesisVkey(
         }
         return (await res.text()).trim();
     }
-    const file = Bun.file(pathOrUrl);
+    // A local path: only under Bun (the browser build passes URLs).
+    const bun = (globalThis as { Bun?: { file(p: string): { exists(): Promise<boolean>; text(): Promise<string> } } }).Bun;
+    if (!bun) throw new Error(`Genesis vkey must be a URL in this environment: ${pathOrUrl}`);
+    const file = bun.file(pathOrUrl);
     if (!(await file.exists())) {
         throw new Error(`Genesis vkey not found at ${pathOrUrl}`);
     }

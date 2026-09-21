@@ -1,5 +1,6 @@
 /** Read-only lookups the transaction rules need, batched per block. */
 import { sql } from "../sql";
+import { ledgerStakeReads, ledgerUtxoReads } from "../ledger/nodeLedgerStore";
 import { recentOutputs, spentRowsStats } from "./recentOutputs";
 
 export interface UtxoRow {
@@ -21,6 +22,11 @@ export async function getUtxoRowsByRefs(refs: string[]): Promise<UtxoRow[]> {
         const r = recentOutputs.get(ref);
         if (r) { out.push({ utxo_ref: r.utxo_ref, address: r.address, tx_out: r.tx_out, reference_script_hash: r.reference_script_hash ?? null, tx_hash: r.tx_hash }); spentRowsStats.preread++; }
         else fromDb.push(ref);
+    }
+    const lr = ledgerUtxoReads();
+    if (lr) {
+        for (const r of lr.getMany(fromDb)) out.push({ utxo_ref: r.utxo_ref, address: r.address, tx_out: r.tx_out, reference_script_hash: r.reference_script_hash, tx_hash: r.tx_hash });
+        return out;
     }
     // keep each IN list bounded (SQLite parameter limit)
     for (let i = 0; i < fromDb.length; i += 500) {
@@ -49,6 +55,8 @@ export async function registeredPools(poolHexes: string[]): Promise<Set<string>>
     // boundary that retires it (`retirePoolsAtEpoch`). A pending retirement still
     // counts as registered, as in the ledger's `psStakePoolParams`.
     const have = new Set<string>();
+    const lr = ledgerStakeReads();
+    if (lr) { for (const id of want) if (lr.pool(id)) have.add(id); return have; }
     for (const id of want) {
         const rows = (await sql`SELECT 1 FROM pool_params WHERE pool_id = ${id}`.values()) as unknown[][];
         if (rows.length) have.add(id);
@@ -59,6 +67,8 @@ export async function registeredPools(poolHexes: string[]): Promise<Set<string>>
 /** Local reward balances for stake credentials (hex), only when the reward pots are being tracked. */
 export async function rewardBalancesFor(credHexes: string[]): Promise<Map<string, bigint> | undefined> {
     if (credHexes.length === 0) return undefined;
+    const lr = ledgerStakeReads();
+    if (lr) { if (!lr.pots()) return undefined; const out = new Map<string, bigint>(); for (const c of new Set(credHexes)) out.set(c, lr.rewardBalance(c)); return out; }
     const tracked = (await sql`SELECT 1 FROM reward_pots WHERE id = 1`.values()) as unknown[][];
     if (!tracked.length) return undefined;
     const out = new Map<string, bigint>();

@@ -10,6 +10,34 @@ import { BlockProducer, type ProducerNode } from "./BlockProducer";
 import { encodeOperationalCert, issueOperationalCert, loadColdSigningKey, loadKesSigningKey, writeTextEnvelope } from "./keystore";
 import { leaderSlotsForEpoch } from "./leaderSchedule";
 import { slotStartMs } from "./slotClock";
+import { Cbor, CborArray, CborSimple, LazyCborArray } from "@harmoniclabs/cbor";
+import { blake2b_256 } from "@harmoniclabs/crypto";
+import { splitEraBlock } from "../consensus/bodyHash";
+import { splitTx } from "./bodyAssembly";
+
+/** Whole transactions ([body, witnesses, valid, aux]) from a real preview block, for a fake mempool. */
+async function fixtureTxs(): Promise<Uint8Array[]> {
+    const hex = (await Bun.file(new URL("../consensus/__fixtures__/preview-block-11663879.hex", import.meta.url)).text()).trim();
+    const { rawBlock } = splitEraBlock(Uint8Array.from(Buffer.from(hex, "hex")));
+    const lazy = Cbor.parseLazy(rawBlock) as LazyCborArray;
+    const [, bodiesRaw, witsRaw, auxRaw, invalidRaw] = lazy.array;
+    const bodies = (Cbor.parseLazy(bodiesRaw!) as LazyCborArray).array;
+    const wits = (Cbor.parseLazy(witsRaw!) as LazyCborArray).array;
+    const aux = Cbor.parse(auxRaw!) as any;
+    const auxByIx = new Map<number, Uint8Array>();
+    for (const e of aux.map) auxByIx.set(Number(e.k.num), Cbor.encode(e.v).toBuffer());
+    const invalid = new Set(((Cbor.parse(invalidRaw!) as CborArray).array as any[]).map((x) => Number(x.num)));
+    return bodies.map((b, i) => {
+        const parts = [b, wits[i]!, Cbor.encode(new CborSimple(!invalid.has(i))).toBuffer(), auxByIx.get(i) ?? new Uint8Array([0xf6])];
+        const out = new Uint8Array(1 + parts.reduce((n, p) => n + p.length, 0)); out[0] = 0x84;
+        let o = 1; for (const p of parts) { out.set(p, o); o += p.length; }
+        return out;
+    });
+}
+function txCountOf(blockFetchBytes: Uint8Array): number {
+    const outer = Cbor.parse(blockFetchBytes) as CborArray;
+    return ((outer.array[1] as CborArray).array[1] as CborArray).array.length;
+}
 
 const F = (n: string) => new URL(`./__fixtures__/cli-keys/${n}`, import.meta.url).pathname;
 const nonceHex = "aa72206c1e2884c06e32970f7d383c59f28b2046434c5bb456c105f344ca154c"; // preview epoch 333
@@ -64,7 +92,7 @@ describe("BlockProducer", () => {
         const adopted: Uint8Array[] = [];
         const node = fakeNode(clock, 300n, adopted);
         const producer = new BlockProducer(keyFiles(dir), node);
-        await producer.start();
+        await producer.start(); await producer.ready;
         const st = producer.stats();
         expect(st.scheduledEpochs).toEqual([EPOCH]);
         expect(st.leaderSlotsKnown).toBeGreaterThan(3); // σ = 1: ≈ 15 of 300 slots
@@ -92,7 +120,7 @@ describe("BlockProducer", () => {
         const state = JSON.parse(readFileSync(join(dir, "producer-state.json"), "utf8"));
         expect(state.lastForgedSlot).toBe(leaders[2]!.toString());
         const again = new BlockProducer(keyFiles(dir), node);
-        await again.start(); again.stop();
+        await again.start(); await again.ready; again.stop();
         clock.now = slotStartMs(leaders[2]!, "preview") + 200;
         await (again as any).onSlot(leaders[2]!, clock.now);
         expect(adopted.length).toBe(3);
@@ -109,7 +137,7 @@ describe("BlockProducer", () => {
         const clock = { now: slotStartMs(FIRST, "preview") + 100 };
         const adopted: Uint8Array[] = [];
         const producer = new BlockProducer(keyFiles(dir), fakeNode(clock, 300n, adopted, { rejectFirst: true }));
-        await producer.start(); producer.stop();
+        await producer.start(); await producer.ready; producer.stop();
         const first = [...(producer as any).leaderSlots.keys()].map(BigInt).sort((a: bigint, b: bigint) => (a < b ? -1 : 1))[0]!;
         clock.now = slotStartMs(first, "preview") + 200;
         await (producer as any).onSlot(first, clock.now);
@@ -123,7 +151,7 @@ describe("BlockProducer", () => {
         const dir = mkdtempSync(join(tmpdir(), "gerolamo-producer-"));
         const clock = { now: slotStartMs(FIRST, "preview") + 100 };
         const producer = new BlockProducer(keyFiles(dir), fakeNode(clock, 300n, [], { sigma: { num: 0n, den: 1n } }));
-        await producer.start(); producer.stop();
+        await producer.start(); await producer.ready; producer.stop();
         expect(producer.stats().leaderSlotsKnown).toBe(0);
         expect(producer.stats().nextLeaderSlot).toBeNull();
     }, 60_000);
@@ -156,7 +184,7 @@ describe("greeting transaction", () => {
         const node = fakeNode(clock, 300n, adopted);
         node.greetingTx = async () => { built++; return { hash: txId(greeting.body), bytes: greeting.tx }; };
         const producer = new BlockProducer(keyFiles(dir), node);
-        await producer.start();
+        await producer.start(); await producer.ready;
         producer.stop();
         const leaders = leaderSlotsForEpoch({ epoch: EPOCH, nonceHex, sigma: { num: 1n, den: 1n }, activeSlotsCoeff: 0.05, vrf: (producer as any).vrf, network: "preview", fromSlot: FIRST, toSlot: FIRST + 300n }).map((l) => l.slot);
         const txCount = (block: Uint8Array): number => { const top: any = Cbor.parse(block); const blk = top.array[1]; return blk.array[1].array.length; };
@@ -169,11 +197,113 @@ describe("greeting transaction", () => {
         expect(state.greeted).toBe("preview");
         // a restart reads the state back: no second greeting
         const again = new BlockProducer(keyFiles(dir), node);
-        await again.start(); again.stop();
+        await again.start(); await again.ready; again.stop();
         clock.now = slotStartMs(leaders[2]!, "preview") + 50; await (again as any).onSlot(leaders[2]!, clock.now);
         expect(adopted.length).toBe(3);
         expect(txCount(adopted[2]!)).toBe(0);
         expect(built).toBe(1);
         rmSync(dir, { recursive: true, force: true });
-    });
+    }, 60_000);
+});
+
+describe("BlockProducer mempool culprits", () => {
+    test("a transaction our rules reject is dropped and the body retried; the block goes out with the rest", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "gerolamo-producer-"));
+        const clock = { now: slotStartMs(FIRST, "preview") + 100 };
+        const adopted: Uint8Array[] = [];
+        const dropped: string[] = [];
+        const txs = (await fixtureTxs()).slice(0, 2);
+        expect(txs.length).toBe(2);
+        const node = fakeNode(clock, 300n, adopted);
+        const inner = node.adopt;
+        node.mempoolTxs = async () => txs.map((t) => ({ hash: new Uint8Array(blake2b_256(t)), bytes: t }));
+        node.dropFromMempool = async (hashes) => { for (const h of hashes) dropped.push(Buffer.from(h).toString("hex")); };
+        node.adopt = async (bytes) => {
+            // our rules: the second transaction is stale → the whole body is rejected, naming it
+            if (txCountOf(bytes) === 2) throw new Error("Block body validation failed at slot x (era 6, 2 tx): tx[1]: expired: ttl 1 < slot 2");
+            return inner(bytes);
+        };
+        const producer = new BlockProducer(keyFiles(dir), node);
+        await producer.start(); await producer.ready; producer.stop();
+        const first = [...(producer as any).leaderSlots.keys()].map(BigInt).sort((a: bigint, b: bigint) => (a < b ? -1 : 1))[0]!;
+        clock.now = slotStartMs(first, "preview") + 200;
+        await (producer as any).onSlot(first, clock.now);
+        expect(adopted.length).toBe(1);
+        expect(txCountOf(adopted[0]!)).toBe(1);
+        expect(producer.stats().forged).toBe(1);
+        // both the included transaction and the culprit left the mempool
+        expect(new Set(dropped)).toEqual(new Set(txs.map((t) => Buffer.from(blake2b_256(t)).toString("hex"))));
+        rmSync(dir, { recursive: true, force: true });
+    }, 60_000);
+});
+
+describe("BlockProducer forge fallback", () => {
+    test("when every body with transactions is rejected the slot still gets the empty block", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "gerolamo-producer-"));
+        const clock = { now: slotStartMs(FIRST, "preview") + 100 };
+        const adopted: Uint8Array[] = [];
+        const txs = (await fixtureTxs()).slice(0, 3);
+        const node = fakeNode(clock, 300n, adopted);
+        const inner = node.adopt;
+        let rejected = 0;
+        node.mempoolTxs = async () => txs.map((t) => ({ hash: new Uint8Array(blake2b_256(t)), bytes: t }));
+        node.dropFromMempool = async () => {};
+        node.adopt = async (bytes) => {
+            // our rules keep finding a bad transaction at index 1 as long as any transaction is in the body
+            if (txCountOf(bytes) > 0) { rejected++; throw new Error(`Block body validation failed at slot x (era 6, ${txCountOf(bytes)} tx): tx[${Math.min(1, txCountOf(bytes) - 1)}]: expired`); }
+            return inner(bytes);
+        };
+        const producer = new BlockProducer(keyFiles(dir), node);
+        await producer.start(); await producer.ready; producer.stop();
+        const first = [...(producer as any).leaderSlots.keys()].map(BigInt).sort((a: bigint, b: bigint) => (a < b ? -1 : 1))[0]!;
+        clock.now = slotStartMs(first, "preview") + 200;
+        await (producer as any).onSlot(first, clock.now);
+        expect(adopted.length).toBe(1);
+        expect(txCountOf(adopted[0]!)).toBe(0);
+        expect(rejected).toBe(3); // 3 → 2 → 1 transactions, then the empty body
+        expect(producer.stats().forged).toBe(1);
+        rmSync(dir, { recursive: true, force: true });
+    }, 60_000);
+
+    test("txSanity results keep stale transactions out of the first attempt", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "gerolamo-producer-"));
+        const clock = { now: slotStartMs(FIRST, "preview") + 100 };
+        const adopted: Uint8Array[] = [];
+        const txs = (await fixtureTxs()).slice(0, 2);
+        const node = fakeNode(clock, 300n, adopted);
+        node.mempoolTxs = async () => txs.map((t) => ({ hash: new Uint8Array(blake2b_256(t)), bytes: t }));
+        node.txSanity = async (list) => [list[1]!.hash]; // the second one expired
+        const dropped: string[] = [];
+        node.dropFromMempool = async (hashes) => { for (const h of hashes) dropped.push(Buffer.from(h).toString("hex")); };
+        const producer = new BlockProducer(keyFiles(dir), node);
+        await producer.start(); await producer.ready; producer.stop();
+        const first = [...(producer as any).leaderSlots.keys()].map(BigInt).sort((a: bigint, b: bigint) => (a < b ? -1 : 1))[0]!;
+        clock.now = slotStartMs(first, "preview") + 200;
+        await (producer as any).onSlot(first, clock.now);
+        expect(adopted.length).toBe(1);
+        expect(txCountOf(adopted[0]!)).toBe(1);
+        expect(dropped).toContain(Buffer.from(blake2b_256(txs[1]!)).toString("hex"));
+        rmSync(dir, { recursive: true, force: true });
+    }, 60_000);
+});
+
+describe("BlockProducer schedule cache", () => {
+    test("a relaunch reuses the schedule from the state file instead of redoing the VRF pass", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "gerolamo-producer-"));
+        const clock = { now: slotStartMs(FIRST, "preview") + 100 };
+        const node = fakeNode(clock, 300n, []);
+        let passes = 0;
+        const inner = node.schedule;
+        node.schedule = async (input) => { passes++; return inner(input); };
+        const first = new BlockProducer(keyFiles(dir), node);
+        await first.start(); await first.ready; first.stop();
+        expect(passes).toBe(1);
+        const slotsFirst = first.stats().leaderSlots.map((l) => l.slot);
+        expect(slotsFirst.length).toBeGreaterThan(0);
+        const again = new BlockProducer(keyFiles(dir), node);
+        await again.start(); await again.ready; again.stop();
+        expect(passes).toBe(1); // cached
+        expect(again.stats().leaderSlots.map((l) => l.slot)).toEqual(slotsFirst);
+        rmSync(dir, { recursive: true, force: true });
+    }, 60_000);
 });

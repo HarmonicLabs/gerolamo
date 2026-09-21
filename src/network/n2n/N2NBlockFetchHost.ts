@@ -13,18 +13,22 @@ import {
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "../../utils/logger";
 import { isN2NInitiatorFrame, sendN2NResponder } from "./N2NDirection";
+import { forgedAgoMs } from "../../pool/forgedBlocks";
 import type { RelayChainStore } from "./RelayChainStore";
 
 const log = logger.child("n2n.blockfetch");
 
 export interface N2NBlockFetchHostOptions {
     maxRangeBlocks?: number;
+    /** Peer label for the "served our block" log line. */
+    peer?: string;
 }
 
 export class N2NBlockFetchHost {
     private readonly mplexer: Multiplexer;
     private readonly store: RelayChainStore;
     private readonly maxRangeBlocks: number;
+    private readonly peer: string;
     private readonly listener: (
         chunk: Uint8Array,
         header?: MultiplexerHeader,
@@ -40,6 +44,7 @@ export class N2NBlockFetchHost {
     ) {
         this.mplexer = mplexer;
         this.store = store;
+        this.peer = options.peer ?? "peer";
         this.maxRangeBlocks = Math.min(
             4_096,
             Math.max(1, Math.trunc(options.maxRangeBlocks ?? 256)),
@@ -132,6 +137,12 @@ export class N2NBlockFetchHost {
         this.send(new BlockFetchStartBatch());
         for (const block of blocks) {
             this.send(new BlockFetchBlock({ blockData: block.blockData }));
+            try {
+                const h = (block as any).point?.blockHeader?.hash;
+                const hex = h instanceof Uint8Array ? Buffer.from(h).toString("hex") : typeof h === "string" ? h : null;
+                const ago = hex ? forgedAgoMs(hex) : null;
+                if (ago != null) logger.info(`Block fetch: served our block ${hex!.slice(0, 16)}… to ${this.peer} ${(ago / 1000).toFixed(1)} s after forging it`);
+            } catch { /* logging only */ }
         }
         this.send(new BlockFetchBatchDone());
     }

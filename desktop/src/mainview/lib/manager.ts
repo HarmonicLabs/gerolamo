@@ -17,6 +17,8 @@ export const manager = {
   pickPath: (): Promise<{ path: string } | { cancelled: true }> => rpc.request.pickPath(),
   start: (config: Partial<InstanceConfig>) => rpc.request["node.start"]({ config }),
   stop: (id: string) => rpc.request["node.stop"]({ id }),
+  attach: (input: { port: number; name?: string; network?: InstanceConfig["network"]; dbPath?: string; logPath?: string }): Promise<{ ok: boolean; config?: InstanceConfig; error?: string }> =>
+    rpc.request["node.attach"](input),
   status: (id: string): Promise<StatusResult | null> => rpc.request["node.status"]({ id }),
   health: (id: string): Promise<HealthResult> => rpc.request["node.health"]({ id }),
   logs: (id: string, maxLines = 120): Promise<LogsResult> => rpc.request["node.logs"]({ id, maxLines }),

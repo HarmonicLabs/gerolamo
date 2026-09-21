@@ -52,15 +52,7 @@ import {
     countBlockTxs,
     type BlockListRow,
 } from "../db";
-import {
-    epochForSlot,
-    epochLengthSlots,
-    firstSlotOfEpoch,
-    normalizeEpochNetwork,
-    slotInEpoch,
-    slotToUnixTime,
-    type EpochNetwork,
-} from "../utils/epochFromSlotCalculations";
+import { epochForSlot, epochLengthSlots, firstSlotOfEpoch, getEpochNetwork, normalizeEpochNetwork, slotInEpoch, slotToUnixTime, type EpochNetwork } from "../utils/epochFromSlotCalculations";
 import { slotLeaderOfBlock } from "./blockLeader";
 import { getStoredEpochParams } from "../consensus/epochParams";
 import { ensureLiveProtocolParams } from "./liveProtocolParams";
@@ -257,6 +249,8 @@ async function bfEpoch(epoch: number, network: EpochNetwork, tipSlot: number) {
         output: null as string | null,
         fees: null as string | null,
         active_stake: null as string | null,
+        // Gerolamo extension: η0 of the epoch (browser light clients verify VRF proofs against it).
+        epoch_nonce: await getEpochNonce(epoch).catch(() => null),
         // extensions
         first_block: first?.hash ?? null,
         last_block: last?.hash ?? null,
@@ -432,6 +426,12 @@ export async function handleMiniBlockfrost(
             sub === "/epochs/latest/parameters"
         ) {
             try {
+                // The node's own derived record for the current epoch (LMDB or SQLite, per ledger mode);
+                // the Koios-backed live fetch is only a fallback when nothing is stored yet.
+                const tipSlot = Number(await getMaxSlot());
+                const cur = Number(epochForSlot(tipSlot));
+                const stored = await getStoredEpochParams(cur);
+                if (stored) return json({ epoch: cur, ...stored });
                 const params = await ensureLiveProtocolParams(
                     ctx.network ?? process.env.NETWORK ?? "preprod",
                 );

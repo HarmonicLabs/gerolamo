@@ -12,6 +12,8 @@ export type PeerSource =
     | "bootstrap"
     | "publicRoot"
     | "shared"
+    /** A relay from a pool registration certificate (ledger peers). */
+    | "ledger"
     | "manual";
 
 export interface PeerGovernorTargets {
@@ -40,6 +42,42 @@ export interface GovernorPeerClient {
     readonly port: number | bigint;
     /** ms epoch of last ChainSync rollForward (hot liveness). */
     lastRollForwardAt?: number;
+    /** The peer's last reported tip slot (from ChainSync). */
+    peerSlotNumber?: number | null;
+    /** Negotiated in the handshake. */
+    peerSharingNegotiated?: boolean;
+    handshakeVersion?: number | null;
+    connectedAt?: number | null;
+    /** Duplex: we serve our chain over this outbound connection; the peer has started pulling. */
+    duplexServing?: boolean;
+    duplexPullingSince?: number | null;
+    /** Protocols the remote runs over our outbound connection (keep-alive = warm, chain-sync = hot). */
+    duplexProtocols?: string[];
+}
+
+/** One row of the peer table on /stats: governor record + what the client knows. */
+export interface PeerDetailSnapshot {
+    key: string;
+    tier: PeerTier;
+    source: PeerSource;
+    trustable: boolean;
+    localRootGroupId?: string;
+    failCount: number;
+    lastError?: string;
+    lastRttMs?: number;
+    addedAt: number;
+    promotedAt?: number;
+    nextRetryAt?: number;
+    malicious?: { reason: string; until: number };
+    connected: boolean;
+    connectedAt?: number | null;
+    tipSlot?: number | null;
+    lastRollForwardAt?: number;
+    version?: number | null;
+    peerSharing?: boolean;
+    duplexServing?: boolean;
+    duplexPullingSince?: number | null;
+    duplexProtocols?: string[];
 }
 
 export interface PeerRecord {
@@ -96,6 +134,8 @@ export interface PeerGovernorSnapshot {
     maliciousPeers?: Array<{ key: string; reason: string; until: number }>;
     /** P1 localRoot valency status. */
     localRootGroups?: LocalRootGroupSnapshot[];
+    /** Every hot and warm peer, then a sample of cold ones, with per-peer detail. */
+    peers?: PeerDetailSnapshot[];
 }
 
 export function peerKey(host: string, port: number | bigint): string {
@@ -431,7 +471,7 @@ export class PeerGovernor {
         if (!Number.isFinite(maxFailures) || maxFailures <= 0) return [];
         const removed: string[] = [];
         for (const [key, p] of this.peers) {
-            if (p.tier !== "cold" || p.trustable || p.source !== "shared") continue;
+            if (p.tier !== "cold" || p.trustable || (p.source !== "shared" && p.source !== "ledger")) continue;
             if (p.client || p.failCount < maxFailures) continue;
             this.peers.delete(key);
             removed.push(key);
@@ -607,12 +647,26 @@ export class PeerGovernor {
             recentErrors: recentErrors.length ? recentErrors : undefined,
             localRootGroups: groups.length ? groups : undefined,
             maliciousPeers: maliciousPeers.length ? maliciousPeers : undefined,
+            peers: [...this.listByTier("hot"), ...this.listByTier("warm"), ...this.listByTier("cold").slice(0, 24)].map((p) => ({
+                key: p.key, tier: p.tier, source: p.source, trustable: p.trustable, localRootGroupId: p.localRootGroupId,
+                failCount: p.failCount, lastError: p.lastError, lastRttMs: p.lastRttMs, addedAt: p.addedAt, promotedAt: p.promotedAt, nextRetryAt: p.nextRetryAt,
+                malicious: p.malicious && p.malicious.until > nowMs ? p.malicious : undefined,
+                connected: !!p.client,
+                connectedAt: p.client?.connectedAt ?? null,
+                tipSlot: p.client?.peerSlotNumber ?? null,
+                lastRollForwardAt: p.client?.lastRollForwardAt,
+                version: p.client?.handshakeVersion ?? null,
+                peerSharing: p.client?.peerSharingNegotiated,
+                duplexServing: p.client?.duplexServing,
+                duplexPullingSince: p.client?.duplexPullingSince ?? null,
+                duplexProtocols: p.client?.duplexProtocols ?? [],
+            })),
         };
     }
 
     private evictOldestCold(): void {
         const cold = this.listByTier("cold")
-            .filter((p) => !p.trustable && p.source === "shared")
+            .filter((p) => !p.trustable && (p.source === "shared" || p.source === "ledger"))
             .sort((a, b) => a.addedAt - b.addedAt);
         if (cold[0]) this.peers.delete(cold[0].key);
     }

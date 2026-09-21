@@ -36,6 +36,13 @@ export type InstanceConfig = {
   pid?: number | null;
   bootstrapPid?: number | null;
   bootstrapState?: "idle" | "running" | "ready" | "failed";
+  /**
+   * The node runs outside this app (a supervisor script, a service): the app follows it
+   * over its HTTP port and never spawns, stops or wipes it.
+   */
+  attached?: boolean;
+  /** Log file to tail for an attached node (its own log, not the app's daemon.log). */
+  logPath?: string | null;
 };
 
 export type DetectResult = {
@@ -60,6 +67,8 @@ export type HealthResult = {
 export type StatusResult = {
   id: string;
   running: boolean;
+  /** The node is followed over HTTP, not owned by this app. */
+  attached?: boolean;
   pid: number | null;
   instanceDir: string | null;
   baseUrl: string;
@@ -124,6 +133,8 @@ export function createDefaultInstance(
     pid: partial.pid ?? null,
     bootstrapPid: partial.bootstrapPid ?? null,
     bootstrapState: partial.bootstrapState || "idle",
+    attached: partial.attached ?? false,
+    logPath: partial.logPath ?? null,
   };
 }
 

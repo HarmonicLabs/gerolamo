@@ -20,7 +20,7 @@
  *   - mithril-client cardano_database_client/proving.rs (VerifiedDigests)
  */
 
-import { createHash } from "crypto";
+import { createHash } from "./hash";
 
 /** IntersectMBO golden_merkle_root leaves "golden-1"…"golden-5". */
 export const MKTREE_GOLDEN_ROOT_HEX =

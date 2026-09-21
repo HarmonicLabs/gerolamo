@@ -15,7 +15,7 @@
  * Pure TS is the source of truth (IOG WASM client removed after dual-run soaks).
  */
 
-import { createHash } from "crypto";
+import { createHash } from "./hash";
 import { createReadStream, existsSync, readdirSync, statSync } from "fs";
 import { join } from "path";
 import {

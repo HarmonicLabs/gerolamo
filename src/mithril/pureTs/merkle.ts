@@ -18,7 +18,7 @@
  * See docs/phase-4-pure-ts-crypto-research.md
  */
 
-import { createHash } from "crypto";
+import { createHash } from "./hash";
 
 import type {
     PureTsAggregateVerificationKey,

@@ -21,13 +21,12 @@ import {
   ConfirmDialog,
 } from "./nodeUI";
 
-type PageId = "overview" | "node" | "mithril" | "explorer" | "transactions" | "logs" | "docs";
+type PageId = "overview" | "node" | "mithril" | "transactions" | "logs" | "docs";
 
 const NAV: { id: PageId; label: string }[] = [
   { id: "overview", label: "Node" },
   { id: "node", label: "Config" },
   { id: "mithril", label: "Mithril" },
-  { id: "explorer", label: "Explorer" },
   { id: "transactions", label: "Transactions" },
   { id: "logs", label: "Logs" },
   { id: "docs", label: "Docs" },
@@ -61,6 +60,7 @@ const ControlCenter: Component = () => {
   const [errorMsg, setErrorMsg] = createSignal("");
   const [docsHtml, setDocsHtml] = createSignal("");
   const [confirm, setConfirm] = createSignal<"db" | "snap" | null>(null);
+  const [attachPort, setAttachPort] = createSignal(3035);
   /** Mithril bootstrap process alive → it owns the DB (one writer). */
   const bootAlive = () => !!boot()?.processAlive;
   /** Why an action is blocked right now, or null when it is allowed. */
@@ -468,6 +468,26 @@ const ControlCenter: Component = () => {
     }
   };
 
+  /** Follow a supervisor-run node over its HTTP port (never spawned or stopped by the app). */
+  const handleAttach = async () => {
+    setErrorMsg("");
+    setBusy(true);
+    try {
+      const result = await manager.attach({ port: attachPort() });
+      if (!result.ok || !result.config) {
+        setErrorMsg(result.error || "Attach failed");
+        return;
+      }
+      stopPolls();
+      await loadInstance(result.config);
+      setStatusMsg(`Attached · ${instanceLabel(result.config)}`);
+    } catch (e: any) {
+      setErrorMsg(e?.message || "attach failed");
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleStop = async () => {
     const id = activeConfig()?.id;
     if (!id) return;
@@ -828,7 +848,7 @@ const ControlCenter: Component = () => {
 
                 <div class="stagger grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
                   <div class="glass-card-accent p-5">
-                    <Stat label="Process" title="Whether the gerolamo bun process spawned by this app is alive." value={nodeRunning() ? "alive" : "stopped"} accent glow size="md" />
+                    <Stat label="Process" title={activeConfig()?.attached ? "This node runs under its own supervisor; the app follows it over its HTTP port." : "Whether the gerolamo bun process spawned by this app is alive."} value={nodeRunning() ? (activeConfig()?.attached ? "attached" : "alive") : "stopped"} accent glow size="md" />
                   </div>
                   <div class="glass-card-accent p-5">
                     <Stat label="HTTP" title="Health of the node's local HTTP API (MiniBF, /metrics) and its response time." value={health()?.healthy ? `ok · ${health()!.latencyMs ?? "?"}ms` : "down"} size="md" />
@@ -843,6 +863,72 @@ const ControlCenter: Component = () => {
                     <Stat label="Cold" title="Known peer addresses not currently connected, from topology and peer sharing." value={sync()?.peers.cold ?? 0} accent glow glowColor="cyan" size="md" />
                   </div>
                 </div>
+
+                <Show when={sync()?.producer}>
+                  {(prod) => {
+                    const p = () => prod();
+                    const es = () => p().epochStats;
+                    const nextIn = () => {
+                      const next = p().nextLeaderSlot;
+                      const tip = sync()?.networkTipSlot;
+                      if (!next || !tip) return null;
+                      const d = Number(next) - Number(tip);
+                      if (d <= 0) return "now";
+                      return d < 5400 ? `in ${Math.round(d / 60)} min` : `in ${(d / 3600).toFixed(1)} h`;
+                    };
+                    const when = (iso: string | null) => {
+                      if (!iso) return "—";
+                      const t = new Date(iso);
+                      return Number.isNaN(t.getTime()) ? iso : t.toLocaleString(undefined, { hour12: false });
+                    };
+                    const outcomeColor = (o: string) =>
+                      o === "adopted" || o === "confirmed" ? "text-green" : o === "upcoming" ? "text-accent" : o === "missed" || o === "invalid" ? "text-amber" : "text-red";
+                    return (
+                      <div class="glass-card-accent p-5 space-y-3" title="Block production, in gLiveView's terms: KES life, op-cert counters, missed slot leader checks, and this epoch's leader / ideal / luck, adopted, confirmed (10 blocks deep), invalid, missed, ghosted (rolled away), stolen (slot battle lost).">
+                        <div class="flex items-center justify-between gap-3">
+                          <h2 class="text-h2">Block production</h2>
+                          <Badge variant={p().dryRun ? "muted" : "success"}>{p().dryRun ? "dry run" : "forging"}</Badge>
+                        </div>
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                          <Stat label="Pool" title="Pool id (cold key hash) this node forges for." value={p().poolId.slice(0, 12) + "…"} size="sm" />
+                          <Stat label="KES current | remaining" title={`Current KES period, evolutions left of ${p().kes?.maxEvolutions ?? "?"}; the certificate expires ${when(p().kes?.expiresAt ?? null)}.`} value={p().kes ? `${p().kes!.period} | ${p().kes!.remaining}` : "—"} sub={p().kes ? `exp ${when(p().kes!.expiresAt)}` : undefined} size="sm" />
+                          <Stat label="OP cert disk | chain" title="Operational certificate counter on disk and the last one the chain has seen for this pool." value={`${p().opcert.counter} | ${p().opcert.chainCounter ?? "none"}`} size="sm" />
+                          <Stat label="Missed slot checks" title="Slots the wall-clock ticker never evaluated because the process stalled for more than a slot." value={p().missedLeaderChecks} accent glow glowColor={p().missedLeaderChecks > 0 ? "orange" : "green"} size="sm" />
+                        </div>
+                        <Show when={es()}>
+                          {(e) => (
+                            <div class="grid grid-cols-3 md:grid-cols-6 gap-4">
+                              <Stat label={`Epoch ${e().epoch} leader`} title="Leader slots scheduled for this pool in the epoch." value={e().leader} accent glow size="sm" />
+                              <Stat label="Ideal | luck" title="Expected slots for our stake (σ · f · epoch length) and leader / ideal." value={`${e().ideal == null ? "—" : e().ideal!.toFixed(2)} | ${e().luck == null ? "—" : e().luck!.toFixed(0) + "%"}`} size="sm" />
+                              <Stat label="Adopted | confirmed" title="Blocks forged and applied to our chain; confirmed once 10 blocks deep." value={`${e().adopted} | ${e().confirmed}`} glow glowColor="green" size="sm" />
+                              <Stat label="Invalid | missed" title="Forged blocks our own rules rejected; leader slots that passed without a forge." value={`${e().invalid} | ${e().missed}`} glow glowColor="orange" size="sm" />
+                              <Stat label="Ghosted | stolen" title="Adopted blocks that rolled away with nothing at the slot; slot battles lost to another pool." value={`${e().ghosted} | ${e().stolen}`} glow glowColor="red" size="sm" />
+                              <Stat label="Next leader slot" title="Next slot this pool leads, with the countdown from the network clock." value={p().nextLeaderSlot ? Number(p().nextLeaderSlot).toLocaleString("en-US") : "none"} sub={nextIn() ?? undefined} accent size="sm" />
+                            </div>
+                          )}
+                        </Show>
+                        <Show when={p().leaderSlots.length > 0}>
+                          <div class="space-y-1">
+                            <For each={p().leaderSlots.slice(0, 12)}>
+                              {(ls) => (
+                                <div class="flex flex-wrap items-center gap-x-3 text-[12px] font-mono tabular-nums">
+                                  <span class="text-text">{Number(ls.slot).toLocaleString("en-US")}</span>
+                                  <span class="text-text-muted">{when(ls.time)}</span>
+                                  <span class={outcomeColor(ls.outcome)}>{ls.outcome}</span>
+                                  <Show when={ls.hash}><span class="text-text-dim">{ls.hash!.slice(0, 12)}…</span></Show>
+                                  <Show when={ls.note && ls.outcome !== "upcoming"}><span class="text-text-dim">{ls.note}</span></Show>
+                                </div>
+                              )}
+                            </For>
+                          </div>
+                        </Show>
+                        <Show when={p().lastError}>
+                          <p class="text-[12px] text-red">{p().lastError}</p>
+                        </Show>
+                      </div>
+                    );
+                  }}
+                </Show>
 
                 <Show when={resources()}>
                   {(res) => {
@@ -1068,8 +1154,23 @@ const ControlCenter: Component = () => {
                     <Badge variant={nodeRunning() ? "success" : "muted"}>{nodeRunning() ? `pid ${activeConfig()?.pid ?? "live"}` : "stopped"}</Badge>
                   </div>
                   <p class="text-[12px] text-text-dim">
-                    Spawns <code class="text-text">bun src/index.ts start-gerolamo</code> with NETWORK / GEROLAMO_DB_PATH. Overlay at ~/.local/share/gerolamo.
+                    <Show when={activeConfig()?.attached} fallback={<>Spawns <code class="text-text">bun src/index.ts start-gerolamo</code> with NETWORK / GEROLAMO_DB_PATH. Overlay at ~/.local/share/gerolamo.</>}>
+                      Attached: this node runs under its own supervisor on port {activeConfig()?.port}; the app follows it and never starts, stops or wipes it.
+                    </Show>
                   </p>
+                  <div class="flex flex-wrap items-center gap-2" title="Follow a node this app did not start (a supervisor-run relay or block producer) by its HTTP port.">
+                    <label class="text-[12px] text-text-dim" for="attachPort">Attach a running node · port</label>
+                    <input
+                      id="attachPort"
+                      type="number"
+                      class="w-24 rounded-[6px] border border-border bg-bg-sunken px-2 py-1 text-[12px] font-mono text-text"
+                      value={attachPort()}
+                      onInput={(e) => setAttachPort(Number(e.currentTarget.value) || 0)}
+                    />
+                    <button onClick={() => void handleAttach()} disabled={busy() || !attachPort()} class={btnSecondary}>
+                      Attach
+                    </button>
+                  </div>
                   <div class="flex flex-wrap gap-2">
                     <span data-tooltip={blockedBecause("startNode") ?? "Spawn the node for this instance."}>
                       <button onClick={() => void handleStart()} disabled={busy() || !!blockedBecause("startNode")} class={btnPrimary}>
@@ -1270,21 +1371,6 @@ const ControlCenter: Component = () => {
                   </Show>
                 </div>
               </div>
-            </Show>
-            <Show when={page() === "explorer"}>
-              <Show
-                when={nodeRunning()}
-                fallback={
-                  <div class="glass-card p-5 text-[13px] text-text-secondary">
-                    Start the node to open the block explorer. It is served by the node itself at
-                    <span class="font-mono"> {gerolamoHttpBase(port())}/explorer/</span> (run <span class="font-mono">bun run dashboard:build</span> once in the repo).
-                  </div>
-                }
-              >
-                <div class="glass-card overflow-hidden" style={{ height: "calc(100vh - 140px)" }}>
-                  <iframe title="Block explorer" src={`${gerolamoHttpBase(port())}/explorer/?embed=1#/explorer`} class="h-full w-full border-0 bg-transparent" />
-                </div>
-              </Show>
             </Show>
             <Show when={page() === "docs"}>
               <div class="kb-prose glass-card p-5" innerHTML={docsHtml() || "<p>Loading…</p>"} />

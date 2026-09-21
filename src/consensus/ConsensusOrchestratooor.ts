@@ -2,6 +2,10 @@ import type { BlockWitnessResult, HeaderValidationResult } from "./workers/valid
 import type { TicknResult } from "../utils/nonceEvolver";
 import { nonceFactsOf } from "../utils/nonceReplay";
 import { logger } from "../utils/logger";
+import type { BlockStore } from "../storage/blockStore";
+import { blockStoreMode, noteSelectedTip } from "../storage/nodeBlockStore";
+import { getSelectedTipHash, rollbackSelectedTip, setSelectedTipHash, tipHashes } from "../storage/blockReads";
+import { ledgerAbortRange, ledgerAfterRange, ledgerBeginBlock, ledgerGovReads, ledgerStoreBroken, ledgerCommitBlock, ledgerDualVerify, ledgerRollbackTo, ledgerStoreMode } from "../ledger/nodeLedgerStore";
 import { sql } from "../sql";
 import { SerializedMutationQueue } from "./SerializedMutationQueue";
 import {
@@ -9,8 +13,11 @@ import {
     blockParser,
     headerParser,
     type HeaderSummary,
+    type ParsedHeader,
+    localRollForwardMessage,
 } from "./blockHeaderParser";
 import { validateBlock, recordPlutusShadow } from "./BlockBodyValidator";
+import { validateHeader } from "./BlockHeaderValidator";
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import {
     BlockFetchBlock,
@@ -55,7 +62,7 @@ import {
     gcVolatile,
     countBlocksAfterSlot,
     discardPendingUtxoWrites,
-    resetRecentOutputs, dropPointerStakeForConway } from "../db";
+    resetRecentOutputs, dropPointerStakeForConway, getChainTip } from "../db";
 import { applyBlock } from "./BlockApplication";
 import { type ChainCandidate, evaluateChains } from "./chainSelection";
 import {
@@ -515,6 +522,7 @@ export class ConsensusOrchestrator {
 
     /** Hashes (hex) at the DB tip slot: a Byron EBB shares its slot with the epoch's first block. */
     private async dbTipHashes(): Promise<string[] | null> {
+        if (blockStoreMode() === "primary" && this.blockStore) return tipHashes(this.blockStore);
         const maxSlot = await getMaxSlot();
         if (maxSlot <= 0n) return null;
         const rows = (await sql`SELECT hash FROM blocks WHERE slot = ${maxSlot}`.values()) as unknown[];
@@ -1223,7 +1231,8 @@ export class ConsensusOrchestrator {
                 }
             }
             if (this.conwayGenesis) await seedGovernance(sql, this.conwayGenesis, epoch);
-            const already = (await sql`SELECT 1 FROM gov_enacted WHERE epoch = ${epoch}`.values()) as unknown[][];
+            const gr = ledgerGovReads();
+            const already = gr ? (gr.enactedAt(epoch).length ? [[1]] : []) : (await sql`SELECT 1 FROM gov_enacted WHERE epoch = ${epoch}`.values()) as unknown[][];
             const result = await enactPending(sql, epoch);
             // Bug 95: the ledger takes this boundary's stake snapshot before crediting the
             // withdrawals and refunds (Conway EPOCH: SNAP on the old state, refunds in dState'),
@@ -1243,7 +1252,8 @@ export class ConsensusOrchestrator {
         try {
             const raw = await readEpochParamsRaw(epoch);
             if (!raw || Number(raw.protocol_major_ver ?? 0) < 9) return; // pre-Conway
-            const has = (await sql`SELECT 1 FROM gov_state WHERE id = 1`.values()) as unknown[][];
+            const gr = ledgerGovReads();
+            const has = gr ? (gr.state() ? [[1]] : []) : (await sql`SELECT 1 FROM gov_state WHERE id = 1`.values()) as unknown[][];
             if (!has.length) return;
             await ratifyForNext(sql, epoch, raw, epoch);
         } catch (err) {
@@ -1819,15 +1829,24 @@ export class ConsensusOrchestrator {
      */
     private async anchorPromotedPrimary(peer: PeerClient, key: string, anchored: boolean, reason: string): Promise<void> {
         const outstanding = peer.chainSyncInFlight;
-        if (!anchored || outstanding <= 1) { void peer.restartChainSync(reason); return; }
+        // Only a stream with nothing outstanding can be re-anchored without the drain. A verifier
+        // promoted seconds after it resumed at our DB tip has never agreed with anything yet
+        // (2026-09-11 15:00 UTC, import node: 32 replies outstanding, ten minutes stalled) — its
+        // stream is positioned at our tip all the same, and the contiguity check on primary
+        // headers rejects a stream that does not chain onto it, so keep it either way.
+        if (outstanding <= 1) { void peer.restartChainSync(reason); return; }
         const tipSlot = await getMaxSlot();
         const points = this.candidates.fragmentOf(key).filter((p) => p.slot > tipSlot);
-        logger.info(`Primary ${key}: keeping its stream (${outstanding} replies outstanding; ${points.length} header(s) past our tip ${tipSlot} handed to the scheduler)`);
+        logger.info(`Primary ${key}: keeping its stream (${outstanding} replies outstanding, ${anchored ? "agreed" : "not yet agreed"}; ${points.length} header(s) past our tip ${tipSlot} handed to the scheduler)`);
         const rangeBlocks = this.maxRangeBlocks();
         for (let i = 0; i < points.length; i += rangeBlocks) {
             const chunk = points.slice(i, i + rangeBlocks).map((p) => ({ slot: p.slot, hash: p.hash }));
             this.ensureScheduler().submit(chunk).applied.catch(() => undefined);
         }
+        // The stream continues after the last handed point, so the contiguity check must expect
+        // that, not the DB tip (2026-09-11 23:43 UTC: "does not chain onto our tip" → restart → drain).
+        const last = points[points.length - 1];
+        if (last) this.lastAccepted = { slot: last.slot, hash: last.hash.toLowerCase() };
     }
 
     /**
@@ -1886,7 +1905,10 @@ export class ConsensusOrchestrator {
             const d = this.deferredRollback;
             const first = parsed[0]!;
             const firstHash = toHex(first.blockHeaderHash).toLowerCase();
-            const ours = this.pendingHeaders.has(firstHash) || await this.isAlreadyApplied(firstHash);
+            // "Ours" means applied. A header merely pending (accepted from some peer, body never
+            // applied — e.g. the loser of a same-slot fork whose range failed) is not our chain; counting
+            // it cancelled the rollback and left node 3036 five hours on a dead fork (bug 124, 2026-09-14).
+            const ours = await this.isAlreadyApplied(firstHash);
             if (ours) {
                 this.deferredRollback = null;
                 logger.rollback(`Deferred rollback to slot ${d.slot} cancelled: the peer re-streams our own chain (slot ${first.slot})`);
@@ -1956,6 +1978,20 @@ export class ConsensusOrchestrator {
                     // header of a just-promoted peer, whose predecessor may lie past our pending window.
                     const anchorSlot = expectedPrevSlot ?? (await getMaxSlot());
                     const farAhead = parsedHeader.slot > anchorSlot + BigInt(this.headerLookahead()) * 20n;
+                    if (!farAhead && !this.pendingHeaders.has(prevHex) && await this.isAlreadyApplied(prevHex)) {
+                        // The header extends an applied block BELOW our tip and is newer than the tip:
+                        // a competing block at our height (2026-09-13 02:35 UTC: the network built on
+                        // the block before the one we forged; dropped as a late reply, the fork was
+                        // only noticed one header later and the producer sat on its orphan for two
+                        // minutes). Follow the peer's chain now; if ours wins, its headers come back.
+                        const tip = await getChainTip();
+                        if (tip && tip.hashHex.toLowerCase() !== prevHex && parsedHeader.slot >= tip.slot) { // ≥: a competing block in the SAME slot as our tip is a fork too (bug 127)
+                            logger.warn(`Primary ${peerKey}: header at slot ${parsedHeader.slot} forks from ${prevHex.slice(0, 12)}… below our tip ${tip.hashHex.slice(0, 12)}…@${tip.slot} (a competing block at our height); restarting its ChainSync to follow the peer's chain`);
+                            this.lastAccepted = null;
+                            void peer.restartChainSync("fork below our tip", 3_000);
+                            return;
+                        }
+                    }
                     if (farAhead || this.pendingHeaders.has(prevHex) || await this.isAlreadyApplied(prevHex)) {
                         this.profile.add("hdr.late.drop", parsed.length - i);
                         logger.debug(`Primary ${peerKey}: header at slot ${parsedHeader.slot} ${farAhead ? "is far beyond the stream position" : "chains onto a block we hold but not onto the stream position"}; dropping ${parsed.length - i} late header(s)`);
@@ -2282,12 +2318,36 @@ export class ConsensusOrchestrator {
     async adoptLocalBlock(blockFetchBytes: Uint8Array): Promise<{ slot: bigint; hashHex: string }> {
         if (this.halted) throw new Error("sync halted: not adopting a local block");
         const identity = headerIdentityOfBlock(blockFetchBytes);
-        const parsed = await headerParser(Cbor.encode(new CborArray([new CborUInt(BigInt(identity.era - 1)), new CborTag(24, new CborBytes(identity.rawHeaderBytes))])).toBuffer()).catch(() => null);
-        const slot = parsed?.slot ?? (() => { throw new Error("adoptLocalBlock: header does not parse"); })();
+        // The parser and the header row want the full MsgRollForward, as a peer would send it.
+        const local = localRollForwardMessage(blockFetchBytes);
+        let parsed: ParsedHeader | null = null;
+        try { parsed = await headerParser(local.bytes); } catch (err) { throw new Error(`adoptLocalBlock: header does not parse: ${(err as Error)?.message ?? err}`); }
+        if (!parsed) throw new Error("adoptLocalBlock: header does not parse");
+        const slot = parsed.slot;
         const hashHex = toHex(identity.hash).toLowerCase();
+        // Our own header through the same rules a peer's header gets (VRF proof, leader value,
+        // KES signature at the slot's evolution, operational certificate): a block that would
+        // fail them at every other node must never be published.
+        const nonceHex = await this.getEpochNonce(parsed.epoch);
+        if (!nonceHex) throw new Error(`adoptLocalBlock: no η0 for epoch ${parsed.epoch}`);
+        const headerOk = await validateHeader(parsed.multiEraHeader, fromHex(nonceHex), this.config).catch((err) => { throw new Error(`adoptLocalBlock: header validation threw: ${(err as Error)?.message ?? err}`); });
+        if (!headerOk) throw new Error("adoptLocalBlock: header fails our own header rules (VRF / KES / opcert)");
         const block = new BlockFetchBlock({ blockData: blockFetchBytes });
         this.verifiedIdentities.set(block, identity);
-        await this.applyRange([{ slot, hash: hashHex }], [block], "self");
+        // A pending entry like a peer header's, so the applier writes the volatile header row
+        // (what the ChainSync hosts serve to peers pulling this block).
+        const { multiEraHeader: _meh, ...summary } = parsed;
+        this.pendingHeaders.set(hashHex, { item: { rollForwardCborBytes: local.bytes, tip: local.blockNo }, parsedHeader: summary as HeaderSummary, nonce: nonceHex });
+        try {
+            await this.applyRange([{ slot, hash: hashHex }], [block], "self");
+        } finally {
+            this.pendingHeaders.delete(hashHex);
+        }
+        // Our block is the new stream position: the network's next header chains onto it. Left
+        // at the previous header, that header "chains onto a block we hold but not onto the
+        // stream position", was dropped, the one after it forced a ChainSync restart and the
+        // producer sat 55 s behind the tip (2026-09-12 06:33 UTC, the first accepted block).
+        this.lastAccepted = { slot, hash: hashHex };
         return { slot, hashHex };
     }
 
@@ -2309,6 +2369,7 @@ export class ConsensusOrchestrator {
         await this.dbMutations.run(async () => {
             if (this.stopping) return;
             this.batchHeaderRecords.clear();
+            const tipBeforeRange = getSelectedTipHash();
             try {
                 await sql.begin(async () => {
                     await this.applyRangeBlocks(points, blocks, fetchedFrom);
@@ -2317,11 +2378,24 @@ export class ConsensusOrchestrator {
                     await insertHeaderBatchVolatile(Array.from(this.batchHeaderRecords.values()));
                     this.profile.add("blk.insert", performance.now() - tIns);
                 });
+                await this.mirrorToBlockStore(points, blocks);
+                if (ledgerStoreMode() !== "sqlite") {
+                    const v = await ledgerDualVerify();
+                    if (ledgerStoreBroken() && !v.differences.length) v.differences.push(`ledger store unusable: ${ledgerStoreBroken()}`);
+                    if (v.differences.length) {
+                        logger.error(`LEDGER STORE DIVERGENCE (dual run): ${v.differences.length} of ${v.checked} touched UTxO refs differ, e.g. ${v.differences.slice(0, 3).join(" | ")}`);
+                        const tipPt = points[points.length - 1]!;
+                        this.halted = { slot: tipPt.slot.toString(), hash: tipPt.hash, reason: `ledger store dual-run divergence: ${v.differences[0]}`, since: Date.now() }; // stop applying: the two stores disagree
+                    }
+                    await ledgerAfterRange(await this.securityParamK());
+                }
             } catch (err) {
                 // The transaction rolled back: nothing from this range is in the DB. In-memory
                 // state that advanced with it must follow, exactly as after a chain rollback,
                 // or a retry would skip blocks (dedupe LRU) or evolve the nonce twice.
                 this.afterFailedRange();
+                if (blockStoreMode() === "primary") setSelectedTipHash(tipBeforeRange); // the range's volatile blocks stay as a dead branch
+                ledgerAbortRange();
                 throw err;
             } finally {
                 this.batchHeaderRecords.clear();
@@ -2352,6 +2426,10 @@ export class ConsensusOrchestrator {
     /** Drop in-memory state derived from applied blocks after a range's transaction rolled back. */
     private afterFailedRange(): void {
         discardPendingUtxoWrites(); // queued rows belonged to the rolled-back transaction
+        // The range's headers were accepted but their bodies never applied; the primary's ChainSync is
+        // restarted from the DB tip and re-streams them. Left in place they masqueraded as "our chain"
+        // in the deferred-rollback check (bug 124).
+        this.pendingHeaders.clear();
         this.lastBlockNo = null; // re-read from the DB
         this.nonceSnapshotDue = null;
         this.nonceEvolver?.reset();
@@ -2378,6 +2456,8 @@ export class ConsensusOrchestrator {
         }
         for (const h of await blockHashesAbove(slot)) { this.recentlyRolledBack.add(h); if (this.recentlyRolledBack.size > 256) this.recentlyRolledBack.delete(this.recentlyRolledBack.values().next().value!); }
         const counts = await this.dbMutations.run(() => rollbackChainTo(slot));
+        if (blockStoreMode() === "primary" && this.blockStore) await rollbackSelectedTip(this.blockStore, slot);
+        if (ledgerStoreMode() !== "sqlite") { const row = await getBlockBySlot(slot); ledgerRollbackTo(Number(slot), row ? fromHex(String(Array.isArray(row) ? row[3] : row.block_hash)) : null); }
         logger.rollback(`Rollback to slot ${slot} (${why}): ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`);
         this.nonceEvolver?.reset();
         this.epochNonceCache.clear();
@@ -2465,7 +2545,12 @@ export class ConsensusOrchestrator {
             // this loop applies blocks: the DB lookup is needed only for headerless ranges (primary switch).
             if (!pending && await this.profile.timeAsync("blk.dedupe", () => this.isAlreadyApplied(blockHash))) {
                 this.pendingHeaders.delete(pt.hash);
-                expectedPrev = [blockHash.toLowerCase()];
+                // Bug 127: the skipped block may sit BELOW our tip (a slot battle: we hold the losing block
+                // at the same height). The next block must then extend our real tip, not the skipped
+                // block, or it would be validated on top of the loser (preview 123032202: the winner's
+                // transaction spent the same inputs and the node halted on a "double spend").
+                const tips = await this.dbTipHashes();
+                expectedPrev = tips && !tips.includes(blockHash.toLowerCase()) ? tips : [blockHash.toLowerCase()];
                 continue;
             }
             if (expectedPrev === undefined) expectedPrev = await this.dbTipHashes();
@@ -2483,6 +2568,9 @@ export class ConsensusOrchestrator {
 
             // Ledger body rules (per-epoch parameters when available).
             let epochParams: EpochBodyParams | null = null;
+            // LMDB ledger diff for this block: opened before the boundary work so the epoch transition
+            // is part of the epoch's first block (docs/PLAN_LMDB_LEDGER.md §1).
+            ledgerBeginBlock(blockHeaderHash, (() => { try { const p = getHeaderPrevHashHex(blockHeader as any); return p ? fromHex(p) : null; } catch { return null; } })(), Number(blockSlot));
             if (!isByron) {
                 // Boundary work is not journaled (see ledgerJournal.ts): rollbacks never cross it.
                 await this.profile.timeAsync("blk.epoch", () => withJournalingOff(sql as any, () => this.onEpochStart(blockEpoch)));
@@ -2515,7 +2603,8 @@ export class ConsensusOrchestrator {
             if (i + 1 < lookahead.length && !isByron && epochParams) {
                 await this.profile.timeAsync("blk.rules.prep", () => this.scheduleRulesAhead(lookahead, i, multiEraBlock, blockEpoch, epochParams!));
             }
-            const valid = await this.profile.timeAsync("blk.validate", () => validateBlock(multiEraBlock, this.config, epochParams, { slot: blockSlot, pool: this.pool, preVerified, ruleOutcome }));
+            const vctx: any = { slot: blockSlot, pool: this.pool, preVerified, ruleOutcome };
+            const valid = await this.profile.timeAsync("blk.validate", () => validateBlock(multiEraBlock, this.config, epochParams, vctx));
             if (!valid && bodyPolicy === "strict") {
                 // Keep the offending block for offline replay (scripts/validate-stored-block.ts).
                 try {
@@ -2525,7 +2614,8 @@ export class ConsensusOrchestrator {
                     writeFileSync(`${dir}/failed-block-${blockSlot}.hex`, toHex(blockMessage.blockData));
                     logger.error(`Offending block written to ${dir}/failed-block-${blockSlot}.hex`);
                 } catch { /* best effort */ }
-                throw new BodyValidationFailure(blockSlot, blockHash, `params=${epochParams ? "epoch " + epochParams.epoch : "genesis"}`);
+                const reports: string[] = Array.isArray(vctx.failures) ? vctx.failures : [];
+                throw new BodyValidationFailure(blockSlot, blockHash, `params=${epochParams ? "epoch " + epochParams.epoch : "genesis"}${reports.length ? "; " + reports.slice(0, 12).join(" | ").slice(0, 2000) : ""}`);
             }
             if (!valid) {
                 logger.warn(`Block body validation failed at slot ${blockSlot} hash=${blockHash} (soft: applying)`);
@@ -2542,9 +2632,11 @@ export class ConsensusOrchestrator {
                 knownInputs,
                 govActionLifetime: epochParams?.raw?.gov_action_lifetime != null ? Number(epochParams.raw.gov_action_lifetime) : undefined,
             }));
-            await setApplyBlock(sql as any, null);
             if (!isByron) {
-                // Operational certificate counters follow the applied chain.
+                // Operational certificate counters and the leader's block count follow the applied
+                // chain — inside the journal scope, so a rollback undoes them (bug 104: the tables
+                // were journaled but these writes ran after `setApplyBlock(null)`, and preview
+                // epoch 1416 still ended with 24 phantom blocks on both nodes).
                 try {
                     const body: any = (blockHeader as any)?.body;
                     const issuer = body?.issuerPubKey;
@@ -2561,6 +2653,7 @@ export class ConsensusOrchestrator {
                     logger.debug("opcert counter update skipped:", err);
                 }
             }
+            await setApplyBlock(sql as any, null);
             this.rememberApplied(blockHash);
             expectedPrev = [blockHash.toLowerCase()];
             this.blocksApplied++;
@@ -2617,11 +2710,12 @@ export class ConsensusOrchestrator {
                 blockData: blockMessage.blockData,
             });
             this.profile.add("blk.insert", performance.now() - tEnc);
+            ledgerCommitBlock();
             // Header rows are flushed once per range by applyRange (same transaction).
             this.pendingHeaders.delete(pt.hash);
             if (++this.volatileDbGcCounter % ConsensusOrchestrator.VOLATILE_GC_EVERY_BLOCKS === 0) {
                 const gc = await this.profile.timeAsync("blk.gc", () => gcVolatile());
-                await pruneLedgerJournal(sql as any).catch(() => 0);
+                await pruneLedgerJournal(sql as any, undefined, blockStoreMode() === "primary" && this.blockStore ? await this.journalSlotResolver() : undefined).catch(() => 0);
                 if (gc.blocks || gc.headers) logger.debug(`Volatile GC removed ${gc.blocks} block(s), ${gc.headers} header(s)`);
             }
 
@@ -2666,6 +2760,46 @@ export class ConsensusOrchestrator {
     }
 
     private kCached: number | null = null;
+
+    /** Primary mode: the journal pruner learns block slots from the store, not the frozen `blocks` table. */
+    private async journalSlotResolver(): Promise<{ tipSlot: number; slotOf: (hashHex: string) => Promise<number | null> }> {
+        const store = this.blockStore!;
+        const tip = Number(await getMaxSlot());
+        return { tipSlot: tip, slotOf: async (h) => (await store.byHash(fromHex(h)))?.slot ?? null };
+    }
+
+    /** cardano-node-format block store mirrored beside SQLite (docs/PLAN_CHUNK_STORE.md phase 3). */
+    private blockStore: BlockStore | null = null;
+
+    attachBlockStore(store: BlockStore | null): void {
+        this.blockStore = store;
+    }
+
+    /**
+     * After a range committed to SQLite: the same `[era, block]` bytes go into the volatile set,
+     * then the selected chain is promoted k deep into the chunk files. Never fails the range:
+     * SQLite is still the primary store and `catchUpFromSqlite` repairs any gap on the next start.
+     */
+    private async mirrorToBlockStore(points: RangePt[], blocks: BlockFetchBlock[]): Promise<void> {
+        const store = this.blockStore;
+        if (!store || points.length === 0) return;
+        try {
+            const t0 = performance.now();
+            if (blockStoreMode() !== "primary") { // primary mode wrote the volatile blocks inside the range (insertBlockVolatile)
+                for (let i = 0; i < points.length && i < blocks.length; i++) {
+                    const hash = fromHex(points[i]!.hash);
+                    if (!store.volatile.has(hash)) await store.put(blocks[i]!.blockData, hash);
+                }
+            }
+            const tip = points[points.length - 1]!;
+            noteSelectedTip(fromHex(tip.hash));
+            const r = await store.promote(fromHex(tip.hash), await this.securityParamK());
+            this.profile.add("blk.store", performance.now() - t0);
+            if (r.promoted) logger.debug(`Block store: ${r.promoted} block(s) promoted into chunks, immutable slot ${r.immutableSlot}`);
+        } catch (err) {
+            logger.warn(`Block store mirror failed (SQLite is primary; catch-up repairs it on restart): ${(err as Error).message}`);
+        }
+    }
 
     /** k when already known (the genesis file is read once at startup); 2160 otherwise. */
     private securityParamKSync(): number {
@@ -2722,6 +2856,8 @@ export class ConsensusOrchestrator {
                 if (comparison.preferred === "candidate") {
                     const rollbackSlot = point.blockHeader!.slotNumber;
                     const counts = await this.dbMutations.run(() => rollbackChainTo(rollbackSlot));
+                    if (blockStoreMode() === "primary" && this.blockStore) await rollbackSelectedTip(this.blockStore, rollbackSlot, (() => { const h = (point.blockHeader as { hash?: unknown } | undefined)?.hash; return h instanceof Uint8Array ? toHex(h) : null; })());
+                    if (ledgerStoreMode() !== "sqlite") { const row = await getBlockBySlot(rollbackSlot); ledgerRollbackTo(Number(rollbackSlot), row ? fromHex(String(Array.isArray(row) ? row[3] : row.block_hash)) : null); }
                     logger.rollback(
                         `Praos-approved rollback to slot ${rollbackSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`,
                     );

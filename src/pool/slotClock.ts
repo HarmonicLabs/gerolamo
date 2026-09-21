@@ -80,6 +80,8 @@ export function decideForge(slot: bigint, nowMs: number, state: ForgeState, opts
 export class SlotTicker {
     private timer: ReturnType<typeof setTimeout> | null = null;
     private lastSlot: bigint | null = null;
+    /** Slots that were never delivered because the tick came more than a slot late (event loop stalled). */
+    missedSlots = 0;
     private readonly now: () => number;
     constructor(private readonly opts: SlotClockOptions, private readonly onSlot: (slot: bigint, nowMs: number) => void) {
         this.now = opts.now ?? Date.now;
@@ -106,6 +108,7 @@ export class SlotTicker {
         if (this.lastSlot != null && cur > this.lastSlot) {
             // at most one late slot is delivered; deadlines are judged by decideForge
             const from = cur - this.lastSlot > 1n ? cur : this.lastSlot + 1n;
+            if (cur - this.lastSlot > 1n) this.missedSlots += Number(cur - this.lastSlot - 1n);
             for (let s = from; s <= cur; s++) this.onSlot(s, nowMs);
         }
         this.lastSlot = cur;

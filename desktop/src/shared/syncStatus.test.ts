@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { deriveEpochProgress, deriveGerolamoSyncStatus, epochBoundsAtSlot } from "./syncStatus";
+import { deriveEpochProgress, deriveGerolamoSyncStatus, deriveProducer, epochBoundsAtSlot } from "./syncStatus";
 
 describe("deriveGerolamoSyncStatus", () => {
   test("preprod clock uses Shelley offset 86400", () => {
@@ -149,5 +149,33 @@ describe("genesis UTxO stats", () => {
     const s = deriveGerolamoSyncStatus({ tipSlot: "100", utxoCount: 4, genesisUtxos: { total: 1, unspent: 0, avvm: 0 } }, "preprod");
     expect(s.genesisUtxos).toEqual({ total: 1, unspent: 0, avvm: 0 });
     expect(deriveGerolamoSyncStatus({ tipSlot: "100", utxoCount: 4 }, "preprod").genesisUtxos).toBeNull();
+  });
+});
+
+describe("deriveProducer", () => {
+  test("parses the node's block-producer panel in gLiveView terms", () => {
+    const p = deriveProducer({
+      poolId: "8df215df1a762e84d826bae39516a424a76e81e649001a3f903eda12", vrfKeyHash: "a823", dryRun: false,
+      opcert: { counter: "0", kesPeriod: "944", chainCounter: null }, kesEvolution: 1,
+      kes: { period: "945", evolution: 1, remaining: 61, maxEvolutions: 62, expiresAt: "2026-12-12T00:00:00.000Z", expiresSlot: "130377600" },
+      missedLeaderChecks: 0, scheduledEpochs: [1417, 1418], leaderSlotsKnown: 5, nextLeaderSlot: "122520682",
+      leaderSlots: [{ slot: "122520682", time: "2026-09-12T01:31:22.000Z", epoch: 1418, outcome: "upcoming", hash: null, note: null }, { slot: "x" }],
+      epochStats: { epoch: 1418, leader: 5, ideal: 2.82, luck: 177.2, adopted: 0, confirmed: 0, invalid: 0, missed: 0, ghosted: 0, stolen: 0 },
+      forged: 0, lastForgedSlot: null, lastError: null,
+    });
+    expect(p).not.toBeNull();
+    expect(p!.kes?.remaining).toBe(61);
+    expect(p!.opcert.chainCounter).toBeNull();
+    expect(p!.leaderSlots).toHaveLength(1);
+    expect(p!.leaderSlots[0]!.outcome).toBe("upcoming");
+    expect(p!.epochStats?.luck).toBeCloseTo(177.2);
+    expect(p!.nextLeaderSlot).toBe("122520682");
+  });
+
+  test("relay nodes have no producer; the role passes through", () => {
+    expect(deriveProducer(null)).toBeNull();
+    const st = deriveGerolamoSyncStatus({ tipSlot: "1", role: "producer", producer: { poolId: "ab" } }, "preview");
+    expect(st.role).toBe("producer");
+    expect(st.producer?.poolId).toBe("ab");
   });
 });

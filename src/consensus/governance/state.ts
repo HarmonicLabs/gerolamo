@@ -19,6 +19,13 @@ import { updateToRaw } from "../pparams";
 import { readEpochParamsRaw } from "../epochParams";
 import { paramChangesOfProposal, type RawCostModels } from "./costModelUpdate";
 import { committeeAccepts, drepAccepts, poolAccepts, rationalOf, thresholdsFor, type ActionKind, type CommitteeTally, type DRepTally, type PoolTally, type ThresholdParams } from "./tally";
+import { ledgerGov, ledgerGovReads, ledgerStakeReads, sqlLedgerWrites } from "../../ledger/nodeLedgerStore";
+import type { ProposalRow as StoreProposalRow } from "../../ledger/govStore";
+
+/** A stored proposal in the shape this module works with (payload parsed, deposit as bigint). */
+function fromStoreProposal(p: StoreProposalRow): ProposalRow {
+    return { action_id: p.actionId, seq: p.seq, kind: p.kind as ActionKind, prev_action_id: p.prevActionId, deposit: BigInt(p.deposit), return_account: p.returnAccount, payload: JSON.parse(p.payload), proposed_epoch: p.proposedEpoch, expires_epoch: p.expiresEpoch };
+}
 
 const hex = (h: any): string => String(h?.toString?.() ?? h ?? "").toLowerCase();
 
@@ -109,15 +116,20 @@ export async function ensureGovernanceTables(): Promise<void> {
 
 /** Seed committee, constitution and thresholds from the Conway genesis once (idempotent). */
 export async function seedGovernance(db: SqlClient, conwayGenesis: any, epoch: number): Promise<void> {
-    const rows = (await db`SELECT 1 FROM gov_state WHERE id = 1`.values()) as unknown[][];
+    const gr = ledgerGovReads(), gw = ledgerGov();
+    const rows = gr ? (gr.state() ? [[1]] : []) : (await db`SELECT 1 FROM gov_state WHERE id = 1`.values()) as unknown[][];
     if (rows.length) return;
     const thr = conwayGenesis?.committee?.threshold ?? { numerator: 2, denominator: 3 };
     const cons = conwayGenesis?.constitution ?? {};
-    await db`INSERT INTO gov_state (id, committee_threshold_num, committee_threshold_den, constitution_hash, constitution_script, no_confidence, seeded_epoch)
+    if (gw && !gw.reads.state()) {
+        gw.putState({ thrNum: Number(thr.numerator ?? 2), thrDen: Number(thr.denominator ?? 3), constitutionHash: cons.anchor?.dataHash ?? null, constitutionScript: cons.script ?? null, noConfidence: 0, prevPP: null, prevHF: null, prevCC: null, prevCons: null, seededEpoch: epoch, dormantEpochs: 0, pending: null });
+        for (const [cred, expiry] of Object.entries(conwayGenesis?.committee?.members ?? {})) { const c = String(cred).replace(/^(keyHash|scriptHash)-/, "").toLowerCase(); if (!gw.reads.committee().has(c)) gw.putCommittee(c, { expiresEpoch: Number(expiry), hot: null, resigned: 0 }); }
+    }
+    if (sqlLedgerWrites()) await db`INSERT INTO gov_state (id, committee_threshold_num, committee_threshold_den, constitution_hash, constitution_script, no_confidence, seeded_epoch)
         VALUES (1, ${Number(thr.numerator ?? 2)}, ${Number(thr.denominator ?? 3)}, ${cons.anchor?.dataHash ?? null}, ${cons.script ?? null}, 0, ${epoch})`;
     for (const [cred, expiry] of Object.entries(conwayGenesis?.committee?.members ?? {})) {
         const c = String(cred).replace(/^(keyHash|scriptHash)-/, "").toLowerCase();
-        await db`INSERT OR IGNORE INTO gov_committee (cold_credential, expires_epoch, hot_credential, resigned) VALUES (${c}, ${Number(expiry)}, NULL, 0)`;
+        if (sqlLedgerWrites()) await db`INSERT OR IGNORE INTO gov_committee (cold_credential, expires_epoch, hot_credential, resigned) VALUES (${c}, ${Number(expiry)}, NULL, 0)`;
     }
     logger.info(`Governance seeded from the Conway genesis: ${Object.keys(conwayGenesis?.committee?.members ?? {}).length} committee member(s), threshold ${thr.numerator}/${thr.denominator}`);
 }
@@ -139,15 +151,17 @@ export async function drepExpiryFor(db: SqlClient, epoch: number, registration: 
     const raw = (await readEpochParamsRaw(epoch)) ?? {};
     const activity = Number(raw.drep_activity ?? 20);
     const major = Number(raw.protocol_major_ver ?? 9);
-    const st = (await db`SELECT dormant_epochs FROM gov_state WHERE id = 1`.values()) as unknown[][];
-    const dormant = Number(st[0]?.[0] ?? 0);
+    const gr = ledgerGovReads();
+    const dormant = gr ? Number(gr.state()?.dormantEpochs ?? 0) : Number(((await db`SELECT dormant_epochs FROM gov_state WHERE id = 1`.values()) as unknown[][])[0]?.[0] ?? 0);
     return epoch + activity - (registration && major < 10 ? 0 : dormant);
 }
 
 export async function recordDRepRegistration(db: SqlClient, cred: any, deposit: bigint, slot: number, epoch: number, expiryEpoch?: number): Promise<void> {
     const isScript = cred?.type === 1 || cred?.type === "script" ? 1 : 0;
     const expiry = expiryEpoch ?? (await drepExpiryFor(db, epoch, true));
-    await db`INSERT INTO gov_dreps (credential, is_script, deposit, registered_slot, last_active_epoch, expiry_epoch) VALUES (${hex(cred?.hash)}, ${isScript}, ${deposit.toString()}, ${slot}, ${epoch}, ${expiry})
+    const gw = ledgerGov();
+    if (gw) { const cur = gw.reads.drep(hex(cred?.hash)); gw.putDRep(hex(cred?.hash), { isScript: cur?.isScript ?? isScript, deposit: deposit.toString(), registeredSlot: cur?.registeredSlot ?? slot, lastActiveEpoch: epoch, expiryEpoch: expiry }); }
+    if (sqlLedgerWrites()) await db`INSERT INTO gov_dreps (credential, is_script, deposit, registered_slot, last_active_epoch, expiry_epoch) VALUES (${hex(cred?.hash)}, ${isScript}, ${deposit.toString()}, ${slot}, ${epoch}, ${expiry})
         ON CONFLICT(credential) DO UPDATE SET deposit = excluded.deposit, last_active_epoch = excluded.last_active_epoch, expiry_epoch = excluded.expiry_epoch`;
 }
 /**
@@ -161,23 +175,30 @@ export async function recordDRepRegistration(db: SqlClient, cred: any, deposit: 
 export async function recordDRepUnregistration(db: SqlClient, cred: any): Promise<void> {
     const h = hex(cred?.hash);
     const isScript = cred?.type === 1 || cred?.type === "script" ? 1 : 0;
-    await db`DELETE FROM gov_dreps WHERE credential = ${h}`;
-    await db`DELETE FROM gov_drep_delegations WHERE drep_type = ${isScript} AND drep_hash = ${h}`;
+    const gw = ledgerGov();
+    if (gw) { gw.delDRep(h); gw.clearDelegationsTo(isScript, h); }
+    if (sqlLedgerWrites()) await db`DELETE FROM gov_dreps WHERE credential = ${h}`;
+    if (sqlLedgerWrites()) await db`DELETE FROM gov_drep_delegations WHERE drep_type = ${isScript} AND drep_hash = ${h}`;
 }
 export async function recordDRepActivity(db: SqlClient, credHex: string, epoch: number): Promise<void> {
     const expiry = await drepExpiryFor(db, epoch, false);
-    await db`UPDATE gov_dreps SET last_active_epoch = ${epoch}, expiry_epoch = ${expiry} WHERE credential = ${credHex}`;
+    const gw = ledgerGov();
+    if (gw) { const cur = gw.reads.drep(credHex); if (cur) gw.putDRep(credHex, { ...cur, lastActiveEpoch: epoch, expiryEpoch: expiry }); }
+    if (sqlLedgerWrites()) await db`UPDATE gov_dreps SET last_active_epoch = ${epoch}, expiry_epoch = ${expiry} WHERE credential = ${credHex}`;
 }
 
 /** Credentials of the DReps whose expiry reaches `currentEpoch` (registered and not expired). */
 export async function activeDRepCredentials(currentEpoch: number, drepActivity: number): Promise<Set<string>> {
+    const gr = ledgerGovReads();
+    if (gr) return gr.activeDRepCredentials(currentEpoch, drepActivity);
     const reg = (await sql`SELECT credential FROM gov_dreps WHERE COALESCE(expiry_epoch, last_active_epoch + ${drepActivity}) >= ${currentEpoch}`.values()) as unknown[][];
     return new Set(reg.map((r) => String(r[0])));
 }
 export async function recordVoteDelegation(db: SqlClient, stakeCred: any, drep: any): Promise<void> {
     const t = Number(drep?.drepType ?? drep?.type ?? -1);
     const h = t === 0 || t === 1 ? hex(drep?.hash) : null;
-    await db`INSERT OR REPLACE INTO gov_drep_delegations (stake_key, drep_type, drep_hash) VALUES (${typedCredHexOf(stakeCred) ?? hex(stakeCred?.hash)}, ${t}, ${h})`;
+    ledgerGov()?.putDRepDelegation(typedCredHexOf(stakeCred) ?? hex(stakeCred?.hash), { type: t, hash: h });
+    if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO gov_drep_delegations (stake_key, drep_type, drep_hash) VALUES (${typedCredHexOf(stakeCred) ?? hex(stakeCred?.hash)}, ${t}, ${h})`;
 }
 /**
  * A stake credential's deregistration removes its DRep delegation with its pool delegation and
@@ -190,17 +211,22 @@ export async function recordVoteDelegation(db: SqlClient, stakeCred: any, drep: 
 export async function recordStakeDeregistration(db: SqlClient, stakeCred: any): Promise<void> {
     const key = typedCredHexOf(stakeCred) ?? hex(stakeCred?.hash);
     if (!key) return;
-    await db`DELETE FROM gov_drep_delegations WHERE stake_key = ${key}`;
+    ledgerGov()?.delDRepDelegation(key);
+    if (sqlLedgerWrites()) await db`DELETE FROM gov_drep_delegations WHERE stake_key = ${key}`;
 }
 export async function recordCommitteeHot(db: SqlClient, cold: any, hot: any): Promise<void> {
     const c = hex(cold?.hash), h = hex(hot?.hash);
-    await db`INSERT INTO gov_committee_auth (cold_credential, hot_credential, resigned) VALUES (${c}, ${h}, 0) ON CONFLICT(cold_credential) DO UPDATE SET hot_credential = excluded.hot_credential, resigned = 0`;
-    await db`UPDATE gov_committee SET hot_credential = ${h}, resigned = 0 WHERE cold_credential = ${c}`;
+    const gw = ledgerGov();
+    if (gw) { gw.putCommitteeAuth(c, { hot: h, resigned: 0 }); const m = gw.reads.committee().get(c); if (m) gw.putCommittee(c, { ...m, hot: h, resigned: 0 }); }
+    if (sqlLedgerWrites()) await db`INSERT INTO gov_committee_auth (cold_credential, hot_credential, resigned) VALUES (${c}, ${h}, 0) ON CONFLICT(cold_credential) DO UPDATE SET hot_credential = excluded.hot_credential, resigned = 0`;
+    if (sqlLedgerWrites()) await db`UPDATE gov_committee SET hot_credential = ${h}, resigned = 0 WHERE cold_credential = ${c}`;
 }
 export async function recordCommitteeResign(db: SqlClient, cold: any): Promise<void> {
     const c = hex(cold?.hash);
-    await db`INSERT INTO gov_committee_auth (cold_credential, hot_credential, resigned) VALUES (${c}, NULL, 1) ON CONFLICT(cold_credential) DO UPDATE SET hot_credential = NULL, resigned = 1`;
-    await db`UPDATE gov_committee SET resigned = 1, hot_credential = NULL WHERE cold_credential = ${c}`;
+    const gw = ledgerGov();
+    if (gw) { gw.putCommitteeAuth(c, { hot: null, resigned: 1 }); const m = gw.reads.committee().get(c); if (m) gw.putCommittee(c, { ...m, hot: null, resigned: 1 }); }
+    if (sqlLedgerWrites()) await db`INSERT INTO gov_committee_auth (cold_credential, hot_credential, resigned) VALUES (${c}, NULL, 1) ON CONFLICT(cold_credential) DO UPDATE SET hot_credential = NULL, resigned = 1`;
+    if (sqlLedgerWrites()) await db`UPDATE gov_committee SET resigned = 1, hot_credential = NULL WHERE cold_credential = ${c}`;
 }
 
 function actionKind(a: any): ActionKind | null {
@@ -248,15 +274,23 @@ function actionPayload(kind: ActionKind, a: any, rawChanges?: Record<string, unk
 
 export async function recordProposals(db: SqlClient, txIdHex: string, proposals: any[], epoch: number, govActionLifetime: number, bodyBytes?: Uint8Array | null): Promise<number> {
     let n = 0;
+    const gr = ledgerGovReads(), gw = ledgerGov();
+    if (proposals.length && gw) {
+        const dormant = Number(gw.reads.state()?.dormantEpochs ?? 0);
+        if (dormant > 0) {
+            for (const [c, d] of gw.reads.dreps()) gw.putDRep(c, { ...d, expiryEpoch: d.expiryEpoch != null && d.expiryEpoch + dormant >= epoch ? d.expiryEpoch + dormant : d.expiryEpoch, lastActiveEpoch: d.lastActiveEpoch + dormant });
+            gw.updateState({ dormantEpochs: 0 });
+        }
+    }
     if (proposals.length) {
         // A proposal after dormant epochs: those epochs did not count against any DRep's activity.
-        const st = (await db`SELECT dormant_epochs FROM gov_state WHERE id = 1`.values()) as unknown[][];
+        const st = gr ? [[gr.state()?.dormantEpochs ?? 0]] : (await db`SELECT dormant_epochs FROM gov_state WHERE id = 1`.values()) as unknown[][];
         const dormant = Number(st[0]?.[0] ?? 0);
         if (dormant > 0) {
             // cardano-ledger `updateDormantDRepExpiry`: an already expired DRep is not revived.
-            await db`UPDATE gov_dreps SET expiry_epoch = expiry_epoch + ${dormant} WHERE expiry_epoch IS NOT NULL AND expiry_epoch + ${dormant} >= ${epoch}`;
-            await db`UPDATE gov_dreps SET last_active_epoch = last_active_epoch + ${dormant}`;
-            await db`UPDATE gov_state SET dormant_epochs = 0 WHERE id = 1`;
+            if (sqlLedgerWrites()) await db`UPDATE gov_dreps SET expiry_epoch = expiry_epoch + ${dormant} WHERE expiry_epoch IS NOT NULL AND expiry_epoch + ${dormant} >= ${epoch}`;
+            if (sqlLedgerWrites()) await db`UPDATE gov_dreps SET last_active_epoch = last_active_epoch + ${dormant}`;
+            if (sqlLedgerWrites()) await db`UPDATE gov_state SET dormant_epochs = 0 WHERE id = 1`;
         }
     }
     for (let i = 0; i < proposals.length; i++) {
@@ -266,8 +300,10 @@ export async function recordProposals(db: SqlClient, txIdHex: string, proposals:
         const rawChanges = kind === "ParameterChange" && bodyBytes ? paramChangesOfProposal(bodyBytes, i) : null;
         const prev = p.govAction?.govActionId;
         const prevId = prev ? `${hex(prev.id)}:${Number(prev.index)}` : null;
-        const seqRows = (await db`SELECT COALESCE(MAX(seq), 0) + 1 FROM gov_proposals`.values()) as unknown[][];
-        await db`INSERT OR IGNORE INTO gov_proposals (action_id, seq, kind, prev_action_id, deposit, return_account, payload, proposed_epoch, expires_epoch)
+        const actionId = `${txIdHex.toLowerCase()}:${i}`;
+        if (gw && !gw.reads.proposal(actionId)) gw.putProposal({ actionId, seq: gw.reads.maxSeq() + 1, kind, prevActionId: prevId, deposit: String(p.deposit ?? 0), returnAccount: rewardAccountTypedHex(p.rewardAccount), payload: JSON.stringify(actionPayload(kind, p.govAction, rawChanges)), proposedEpoch: epoch, expiresEpoch: epoch + govActionLifetime, status: "active", decidedEpoch: null });
+        const seqRows = gr ? [[gr.maxSeq() + 1]] : (await db`SELECT COALESCE(MAX(seq), 0) + 1 FROM gov_proposals`.values()) as unknown[][];
+        if (sqlLedgerWrites()) await db`INSERT OR IGNORE INTO gov_proposals (action_id, seq, kind, prev_action_id, deposit, return_account, payload, proposed_epoch, expires_epoch)
             VALUES (${`${txIdHex.toLowerCase()}:${i}`}, ${Number(seqRows[0]?.[0] ?? 1)}, ${kind}, ${prevId}, ${String(p.deposit ?? 0)}, ${rewardAccountTypedHex(p.rewardAccount)}, ${JSON.stringify(actionPayload(kind, p.govAction, rawChanges))}, ${epoch}, ${epoch + govActionLifetime})`;
         n++;
     }
@@ -286,7 +322,8 @@ export async function recordVotes(db: SqlClient, procedures: any[], slot: number
             // decoded entry: { govActionId, vote: VotingProcedure { vote, anchor } } (ledger-ts 0.5.8); accept older shapes too
             const vote = Number(v.votingProcedure?.vote ?? (typeof v.vote === "object" && v.vote != null ? v.vote.vote : v.vote) ?? -1);
             if (vote < 0) continue;
-            await db`INSERT OR REPLACE INTO gov_votes (action_id, voter_kind, voter_hash, vote, slot) VALUES (${actionId}, ${kind}, ${vh}, ${vote}, ${slot})`;
+            ledgerGov()?.putVote({ actionId, voterKind: kind, voterHash: vh, vote, slot });
+            if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO gov_votes (action_id, voter_kind, voter_hash, vote, slot) VALUES (${actionId}, ${kind}, ${vh}, ${vote}, ${slot})`;
             if (kind === 2 || kind === 3) await recordDRepActivity(db, vh, epoch);
             n++;
         }
@@ -345,7 +382,8 @@ async function dropOrphans(db: SqlClient, epoch: number, out: EnactmentResult, h
         }
         for (const p of mine) {
             if (kept.has(p.action_id)) continue;
-            await db`UPDATE gov_proposals SET status = 'dropped', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
+            ledgerGov()?.updateProposal(p.action_id, { status: "dropped", decidedEpoch: epoch });
+            if (sqlLedgerWrites()) await db`UPDATE gov_proposals SET status = 'dropped', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
             out.refunds.set(p.return_account, (out.refunds.get(p.return_account) ?? 0n) + p.deposit);
             out.dropped.push(p.action_id);
         }
@@ -355,6 +393,8 @@ async function dropOrphans(db: SqlClient, epoch: number, out: EnactmentResult, h
 interface ProposalRow { action_id: string; seq: number; kind: ActionKind; prev_action_id: string | null; deposit: bigint; return_account: string; payload: any; proposed_epoch: number; expires_epoch: number }
 
 async function activeProposals(): Promise<ProposalRow[]> {
+    const gr = ledgerGovReads();
+    if (gr) return gr.proposals("active").map(fromStoreProposal);
     const rows = (await sql`SELECT action_id, seq, kind, prev_action_id, deposit, return_account, payload, proposed_epoch, expires_epoch FROM gov_proposals WHERE status = 'active' ORDER BY seq`.values()) as unknown[][];
     return rows.map((r) => ({ action_id: String(r[0]), seq: Number(r[1]), kind: String(r[2]) as ActionKind, prev_action_id: r[3] == null ? null : String(r[3]), deposit: BigInt(String(r[4])), return_account: String(r[5]), payload: JSON.parse(String(r[6])), proposed_epoch: Number(r[7]), expires_epoch: Number(r[8]) }));
 }
@@ -378,9 +418,15 @@ async function activeProposals(): Promise<ProposalRow[]> {
  * Idempotent per `takenAt`; the state must be that of the boundary (call before the tally).
  */
 export async function takeDRepStakeSnapshot(db: SqlClient, takenAt: number): Promise<number> {
+    const fromStore = ledgerGov()?.takeDRepStakeSnapshot(takenAt);
+    if (ledgerGovReads() && fromStore != null) { if (sqlLedgerWrites()) await takeDRepStakeSnapshotSql(db, takenAt); return fromStore; }
+    return takeDRepStakeSnapshotSql(db, takenAt);
+}
+
+async function takeDRepStakeSnapshotSql(db: SqlClient, takenAt: number): Promise<number> {
     const have = (await db`SELECT COUNT(*) FROM epoch_drep_stake WHERE taken_at = ${takenAt}`.values()) as unknown[][];
     if (Number(have[0]?.[0] ?? 0) > 0) return 0;
-    await db`INSERT INTO epoch_drep_stake (taken_at, drep_type, drep_hash, stake)
+    if (sqlLedgerWrites()) await db`INSERT INTO epoch_drep_stake (taken_at, drep_type, drep_hash, stake)
         SELECT ${takenAt}, d.drep_type, COALESCE(d.drep_hash, ''), CAST(SUM(x.amount) AS TEXT) FROM (
             SELECT b.stake_key AS stake_key, b.lovelace AS amount FROM stake_balance b WHERE b.lovelace <> 0
             UNION ALL
@@ -394,8 +440,15 @@ export async function takeDRepStakeSnapshot(db: SqlClient, takenAt: number): Pro
 }
 
 async function drepDistribution(takenAt: number, currentEpoch: number, drepActivity: number): Promise<{ byDrep: Map<string, bigint>; alwaysAbstain: bigint; alwaysNoConfidence: bigint; registered: Set<string> }> {
-    let rows = (await sql`SELECT drep_type, drep_hash, stake FROM epoch_drep_stake WHERE taken_at = ${takenAt}`.values()) as unknown[][];
-    if (rows.length === 0) {
+    const gr = ledgerGovReads(), sr = ledgerStakeReads();
+    let rows = gr ? gr.drepStake(takenAt).map((r) => [r.type, r.hash, r.stake.toString()] as unknown[]) : (await sql`SELECT drep_type, drep_hash, stake FROM epoch_drep_stake WHERE taken_at = ${takenAt}`.values()) as unknown[][];
+    if (rows.length === 0 && gr && sr) {
+        logger.warn(`DRep stake snapshot ${takenAt} missing; tallying from the pool stake snapshot (pre-bug-90 approximation)`);
+        const sums = new Map<string, bigint>();
+        const dl = gr.drepDelegations();
+        for (const [c, v] of sr.snapshotCredentials(takenAt)) { const d = dl.get(c); if (d) { const k = `${d.type}:${d.hash ?? ""}`; sums.set(k, (sums.get(k) ?? 0n) + v.stake); } }
+        rows = [...sums].map(([k, v]) => { const i = k.indexOf(":"); return [Number(k.slice(0, i)), k.slice(i + 1) || null, v.toString()] as unknown[]; });
+    } else if (rows.length === 0) {
         // databases from before bug 90 (no snapshot at this boundary): the pool-delegated approximation
         logger.warn(`DRep stake snapshot ${takenAt} missing; tallying from the pool stake snapshot (pre-bug-90 approximation)`);
         rows = (await sql`
@@ -417,6 +470,12 @@ async function drepDistribution(takenAt: number, currentEpoch: number, drepActiv
 }
 
 async function poolDistribution(takenAt: number): Promise<{ byPool: Map<string, bigint>; rewardDrep: Map<string, number> }> {
+    const gr = ledgerGovReads(), sr = ledgerStakeReads();
+    if (gr && sr) {
+        const rewardDrep = new Map<string, number>();
+        for (const [id, p] of sr.pools()) { const ra = p.params?.rewardAccount ? String(p.params.rewardAccount).toLowerCase() : null; const d = ra ? gr.drepDelegation(ra) : null; if (d && (d.type === 2 || d.type === 3)) rewardDrep.set(id, d.type); }
+        return { byPool: sr.snapshotPoolStake(takenAt), rewardDrep };
+    }
     const rows = (await sql`SELECT pool_id, stake FROM epoch_pool_stake WHERE taken_at = ${takenAt}`.values()) as unknown[][];
     const byPool = new Map<string, bigint>();
     for (const r of rows) byPool.set(String(r[0]), BigInt(String(r[1])));
@@ -428,7 +487,9 @@ async function poolDistribution(takenAt: number): Promise<{ byPool: Map<string, 
 }
 
 async function thresholdParams(raw: Record<string, unknown>): Promise<ThresholdParams> {
-    const st = (await sql`SELECT committee_threshold_num, committee_threshold_den, no_confidence FROM gov_state WHERE id = 1`.values()) as unknown[][];
+    const gr = ledgerGovReads();
+    const gs = gr?.state();
+    const st = gr ? (gs ? [[gs.thrNum, gs.thrDen, gs.noConfidence]] : []) : (await sql`SELECT committee_threshold_num, committee_threshold_den, no_confidence FROM gov_state WHERE id = 1`.values()) as unknown[][];
     const drep: Record<string, any> = {}, pool: Record<string, any> = {};
     for (const [k, v] of Object.entries(raw)) {
         if (k.startsWith("dvt_")) drep[k] = rationalOf(v, "1");
@@ -448,6 +509,8 @@ type PendingRatification = { epoch: number; ratified: string[]; expired: string[
 type ChainIds = { prevPP: string | null; prevHF: string | null; prevCC: string | null; prevCons: string | null };
 
 async function proposalById(id: string): Promise<ProposalRow | null> {
+    const gr = ledgerGovReads();
+    if (gr) { const p = gr.proposal(id); return p ? fromStoreProposal(p) : null; }
     const rows = (await sql`SELECT action_id, seq, kind, prev_action_id, deposit, return_account, payload, proposed_epoch, expires_epoch FROM gov_proposals WHERE action_id = ${id}`.values()) as unknown[][];
     const r = rows[0];
     if (!r) return null;
@@ -456,6 +519,7 @@ async function proposalById(id: string): Promise<ProposalRow | null> {
 
 /** Apply one ratified action's effects at the boundary into `epoch` (cardano-ledger ENACT). */
 async function enactOne(db: SqlClient, p: ProposalRow, epoch: number, out: EnactmentResult, ids: ChainIds): Promise<void> {
+    const gw = ledgerGov();
     switch (p.kind) {
         case "ParameterChange":
             Object.assign(out.paramChanges, p.payload.changes ?? {});
@@ -471,28 +535,37 @@ async function enactOne(db: SqlClient, p: ProposalRow, epoch: number, out: Enact
             for (const w of (p.payload.withdrawals ?? []) as Array<{ account: string; amount: string }>) out.withdrawals.set(w.account, (out.withdrawals.get(w.account) ?? 0n) + BigInt(w.amount));
             break;
         case "NoConfidence":
-            await db`UPDATE gov_state SET no_confidence = 1 WHERE id = 1`;
+            gw?.updateState({ noConfidence: 1 });
+            if (sqlLedgerWrites()) await db`UPDATE gov_state SET no_confidence = 1 WHERE id = 1`;
             ids.prevCC = p.action_id;
             break;
         case "UpdateCommittee":
+            if (gw) {
+                for (const c of (p.payload.remove ?? []) as string[]) gw.delCommittee(c);
+                for (const a of (p.payload.add ?? []) as Array<{ cred: string; expires: number }>) { const au = gw.reads.committeeAuth(a.cred); const hot = au && au.resigned === 0 ? au.hot : null; gw.putCommittee(a.cred, { expiresEpoch: a.expires, hot, resigned: 0 }); }
+                gw.updateState({ thrNum: Number(p.payload.thresholdNum ?? 2), thrDen: Number(p.payload.thresholdDen ?? 3), noConfidence: 0 });
+            }
             for (const c of (p.payload.remove ?? []) as string[]) await db`DELETE FROM gov_committee WHERE cold_credential = ${c}`;
             for (const a of (p.payload.add ?? []) as Array<{ cred: string; expires: number }>) {
                 const auth = (await db`SELECT hot_credential, resigned FROM gov_committee_auth WHERE cold_credential = ${a.cred}`.values()) as unknown[][];
                 const hot = auth.length && Number(auth[0]![1]) === 0 ? (auth[0]![0] == null ? null : String(auth[0]![0])) : null;
-                await db`INSERT INTO gov_committee (cold_credential, expires_epoch, hot_credential, resigned) VALUES (${a.cred}, ${a.expires}, ${hot}, 0) ON CONFLICT(cold_credential) DO UPDATE SET expires_epoch = excluded.expires_epoch, hot_credential = COALESCE(excluded.hot_credential, gov_committee.hot_credential), resigned = 0`;
+                if (sqlLedgerWrites()) await db`INSERT INTO gov_committee (cold_credential, expires_epoch, hot_credential, resigned) VALUES (${a.cred}, ${a.expires}, ${hot}, 0) ON CONFLICT(cold_credential) DO UPDATE SET expires_epoch = excluded.expires_epoch, hot_credential = COALESCE(excluded.hot_credential, gov_committee.hot_credential), resigned = 0`;
             }
-            await db`UPDATE gov_state SET committee_threshold_num = ${Number(p.payload.thresholdNum ?? 2)}, committee_threshold_den = ${Number(p.payload.thresholdDen ?? 3)}, no_confidence = 0 WHERE id = 1`;
+            if (sqlLedgerWrites()) await db`UPDATE gov_state SET committee_threshold_num = ${Number(p.payload.thresholdNum ?? 2)}, committee_threshold_den = ${Number(p.payload.thresholdDen ?? 3)}, no_confidence = 0 WHERE id = 1`;
             ids.prevCC = p.action_id;
             break;
         case "NewConstitution":
-            await db`UPDATE gov_state SET constitution_hash = ${p.payload.hash ?? null}, constitution_script = ${p.payload.script ?? null} WHERE id = 1`;
+            gw?.updateState({ constitutionHash: p.payload.hash ?? null, constitutionScript: p.payload.script ?? null });
+            if (sqlLedgerWrites()) await db`UPDATE gov_state SET constitution_hash = ${p.payload.hash ?? null}, constitution_script = ${p.payload.script ?? null} WHERE id = 1`;
             ids.prevCons = p.action_id;
             break;
         case "Info":
             break;
     }
-    await db`UPDATE gov_proposals SET status = 'enacted', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
-    await db`INSERT OR REPLACE INTO gov_enacted (epoch, action_id, kind, detail) VALUES (${epoch}, ${p.action_id}, ${p.kind}, ${JSON.stringify(p.payload)})`;
+    gw?.updateProposal(p.action_id, { status: "enacted", decidedEpoch: epoch });
+    gw?.putEnacted(epoch, p.action_id, p.kind, JSON.stringify(p.payload));
+    if (sqlLedgerWrites()) await db`UPDATE gov_proposals SET status = 'enacted', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
+    if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO gov_enacted (epoch, action_id, kind, detail) VALUES (${epoch}, ${p.action_id}, ${p.kind}, ${JSON.stringify(p.payload)})`;
     out.refunds.set(p.return_account, (out.refunds.get(p.return_account) ?? 0n) + p.deposit);
     out.enacted.push(`${p.kind} ${p.action_id.slice(0, 12)}…`);
 }
@@ -505,14 +578,15 @@ export async function tallyProposal(db: SqlClient, epoch: number, actionId: stri
     const activity = Number(prevRaw.drep_activity ?? 20);
     const dreps = await drepDistribution(takenAt, epoch - 1, activity);
     const pools = await poolDistribution(takenAt);
-    const committee = (await db`SELECT c.cold_credential, c.expires_epoch, COALESCE(a.hot_credential, c.hot_credential), COALESCE(a.resigned, c.resigned) FROM gov_committee c LEFT JOIN gov_committee_auth a ON a.cold_credential = c.cold_credential`.values()) as unknown[][];
+    const gr = ledgerGovReads();
+    const committee = gr ? (gr.committeeWithAuth() as unknown[][]) : (await db`SELECT c.cold_credential, c.expires_epoch, COALESCE(a.hot_credential, c.hot_credential), COALESCE(a.resigned, c.resigned) FROM gov_committee c LEFT JOIN gov_committee_auth a ON a.cold_credential = c.cold_credential`.values()) as unknown[][];
     const activeMembers = committee.filter((r) => Number(r[3]) === 0 && Number(r[1]) >= epoch && r[2] != null);
     const hotToCold = new Map<string, string>(activeMembers.map((r) => [String(r[2]), String(r[0])]));
-    const nc = (await db`SELECT no_confidence FROM gov_state WHERE id = 1`.values()) as unknown[][];
+    const nc = gr ? [[gr.state()?.noConfidence ?? 0]] : (await db`SELECT no_confidence FROM gov_state WHERE id = 1`.values()) as unknown[][];
     const noConfidence = Number(nc[0]?.[0]) === 1;
     const changedKeys = p.kind === "ParameterChange" ? Object.keys(p.payload.changes ?? {}) : [];
     const thr = thresholdsFor(p.kind, params, changedKeys, noConfidence ? "noConfidence" : "normal");
-    const votes = (await db`SELECT voter_kind, voter_hash, vote FROM gov_votes WHERE action_id = ${p.action_id} AND slot <= ${votesUntilSlot}`.values()) as unknown[][];
+    const votes = gr ? gr.votes(p.action_id, votesUntilSlot).map((v) => [v.voterKind, v.voterHash, v.vote] as unknown[]) : (await db`SELECT voter_kind, voter_hash, vote FROM gov_votes WHERE action_id = ${p.action_id} AND slot <= ${votesUntilSlot}`.values()) as unknown[][];
     const ct: CommitteeTally = { yes: 0, no: 0, abstain: 0, active: activeMembers.length };
     const dt: DRepTally = { yes: 0n, no: 0n, abstain: 0n, unvoted: 0n, alwaysNoConfidence: dreps.alwaysNoConfidence, alwaysAbstain: dreps.alwaysAbstain };
     const pt: PoolTally = { yes: 0n, no: 0n, abstain: 0n, unvoted: 0n, unvotedAbstain: 0n, unvotedNoConfidence: 0n };
@@ -553,7 +627,9 @@ export async function ratifyAndEnact(db: SqlClient, epoch: number, prevRaw: Reco
 }
 
 async function chainIds(db: SqlClient): Promise<{ ids: ChainIds; noConfidence: boolean; pending: PendingRatification | null } | null> {
-    const state = (await db`SELECT prev_pparams, prev_hardfork, prev_committee, prev_constitution, no_confidence, pending FROM gov_state WHERE id = 1`.values()) as unknown[][];
+    const gr = ledgerGovReads();
+    const gs = gr?.state();
+    const state = gr ? (gs ? [[gs.prevPP, gs.prevHF, gs.prevCC, gs.prevCons, gs.noConfidence, gs.pending]] : []) : (await db`SELECT prev_pparams, prev_hardfork, prev_committee, prev_constitution, no_confidence, pending FROM gov_state WHERE id = 1`.values()) as unknown[][];
     if (!state.length) return null;
     const ids: ChainIds = { prevPP: state[0]![0] == null ? null : String(state[0]![0]), prevHF: state[0]![1] == null ? null : String(state[0]![1]), prevCC: state[0]![2] == null ? null : String(state[0]![2]), prevCons: state[0]![3] == null ? null : String(state[0]![3]) };
     let pending: PendingRatification | null = null;
@@ -583,12 +659,14 @@ export async function enactPending(db: SqlClient, epoch: number): Promise<Enactm
         for (const id of pending.expired) {
             const p = await proposalById(id);
             if (!p) continue;
-            await db`UPDATE gov_proposals SET status = 'expired', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
+            ledgerGov()?.updateProposal(p.action_id, { status: "expired", decidedEpoch: epoch });
+            if (sqlLedgerWrites()) await db`UPDATE gov_proposals SET status = 'expired', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
             out.refunds.set(p.return_account, (out.refunds.get(p.return_account) ?? 0n) + p.deposit);
             out.expired.push(p.action_id);
         }
         await dropOrphans(db, epoch, out, { pparams: ids.prevPP ?? null, hardfork: ids.prevHF ?? null, committee: ids.prevCC ?? null, constitution: ids.prevCons ?? null }, touched);
-        await db`UPDATE gov_state SET prev_pparams = ${ids.prevPP}, prev_hardfork = ${ids.prevHF}, prev_committee = ${ids.prevCC}, prev_constitution = ${ids.prevCons}, pending = NULL WHERE id = 1`;
+        ledgerGov()?.updateState({ prevPP: ids.prevPP, prevHF: ids.prevHF, prevCC: ids.prevCC, prevCons: ids.prevCons, pending: null });
+        if (sqlLedgerWrites()) await db`UPDATE gov_state SET prev_pparams = ${ids.prevPP}, prev_hardfork = ${ids.prevHF}, prev_committee = ${ids.prevCC}, prev_constitution = ${ids.prevCons}, pending = NULL WHERE id = 1`;
     }
     return out;
 }
@@ -614,7 +692,8 @@ export async function ratifyForNext(db: SqlClient, epoch: number, raw: Record<st
     await takeDRepStakeSnapshot(db, takenAt); // bug 90: the pulser's DRep stake, as of this boundary
     const dreps = await drepDistribution(takenAt, epoch - 1, activity);
     const pools = await poolDistribution(takenAt);
-    const committee = (await db`SELECT c.cold_credential, c.expires_epoch, COALESCE(a.hot_credential, c.hot_credential), COALESCE(a.resigned, c.resigned) FROM gov_committee c LEFT JOIN gov_committee_auth a ON a.cold_credential = c.cold_credential`.values()) as unknown[][];
+    const gr = ledgerGovReads();
+    const committee = gr ? (gr.committeeWithAuth() as unknown[][]) : (await db`SELECT c.cold_credential, c.expires_epoch, COALESCE(a.hot_credential, c.hot_credential), COALESCE(a.resigned, c.resigned) FROM gov_committee c LEFT JOIN gov_committee_auth a ON a.cold_credential = c.cold_credential`.values()) as unknown[][];
     const activeMembers = committee.filter((r) => Number(r[3]) === 0 && Number(r[1]) >= epoch && r[2] != null);
     const hotToCold = new Map<string, string>(activeMembers.map((r) => [String(r[2]), String(r[0])]));
     const ratifiedThisEpoch = new Set<"pparams" | "hardfork" | "committee" | "constitution">();
@@ -641,7 +720,7 @@ export async function ratifyForNext(db: SqlClient, epoch: number, raw: Record<st
         }
         const changedKeys = p.kind === "ParameterChange" ? Object.keys(p.payload.changes ?? {}) : [];
         const thr = thresholdsFor(p.kind, params, changedKeys, noConfidence ? "noConfidence" : "normal");
-        const votes = (await db`SELECT voter_kind, voter_hash, vote FROM gov_votes WHERE action_id = ${p.action_id}`.values()) as unknown[][];
+        const votes = gr ? gr.votes(p.action_id).map((v) => [v.voterKind, v.voterHash, v.vote] as unknown[]) : (await db`SELECT voter_kind, voter_hash, vote FROM gov_votes WHERE action_id = ${p.action_id}`.values()) as unknown[][];
         // committee
         const ct: CommitteeTally = { yes: 0, no: 0, abstain: 0, active: activeMembers.length };
         const dt: DRepTally = { yes: 0n, no: 0n, abstain: 0n, unvoted: 0n, alwaysNoConfidence: dreps.alwaysNoConfidence, alwaysAbstain: dreps.alwaysAbstain };
@@ -696,12 +775,14 @@ export async function ratifyForNext(db: SqlClient, epoch: number, raw: Record<st
             case "constitution": ids.prevCons = p.action_id; break;
         }
         if (purpose) ratifiedThisEpoch.add(purpose);
-        await db`UPDATE gov_proposals SET status = 'ratified', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
+        ledgerGov()?.updateProposal(p.action_id, { status: "ratified", decidedEpoch: epoch });
+        if (sqlLedgerWrites()) await db`UPDATE gov_proposals SET status = 'ratified', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
         next.ratified.push(p.action_id);
     }
-    await db`UPDATE gov_state SET prev_pparams = ${ids.prevPP}, prev_hardfork = ${ids.prevHF}, prev_committee = ${ids.prevCC}, prev_constitution = ${ids.prevCons}, pending = ${JSON.stringify(next)} WHERE id = 1`;
+    ledgerGov()?.updateState({ prevPP: ids.prevPP, prevHF: ids.prevHF, prevCC: ids.prevCC, prevCons: ids.prevCons, pending: JSON.stringify(next) });
+    if (sqlLedgerWrites()) await db`UPDATE gov_state SET prev_pparams = ${ids.prevPP}, prev_hardfork = ${ids.prevHF}, prev_committee = ${ids.prevCC}, prev_constitution = ${ids.prevCons}, pending = ${JSON.stringify(next)} WHERE id = 1`;
     if (next.ratified.length || next.expired.length) logger.info(`Epoch ${epoch} governance: ratified [${next.ratified.map((a) => a.slice(0, 12) + "…").join(", ")}], expiring ${next.expired.length} — enacted at the next boundary`);
     // An epoch with no proposal to vote on is dormant: it must not age the DReps.
-    if (proposals.length === 0) await db`UPDATE gov_state SET dormant_epochs = dormant_epochs + 1 WHERE id = 1`;
+    if (proposals.length === 0) { const gw = ledgerGov(); if (gw) gw.updateState({ dormantEpochs: Number(gw.reads.state()?.dormantEpochs ?? 0) + 1 }); await db`UPDATE gov_state SET dormant_epochs = dormant_epochs + 1 WHERE id = 1`; }
     return next;
 }

@@ -1329,3 +1329,9 @@ profile → Phase 2 → Phase 3 → Phase 4. Status log at the bottom of this fi
   looped on that for 15 minutes without applying a block (the import node also sat on a losing
   one-block fork and was rolled back by hand). Also in the tree: the once-per-network
   "Gerolamo was here!" metadata transaction in the first forged block (PLAN_BLOCK_PRODUCTION.md).
+- 2026-09-11 02:45 UTC PHASE E PASSED: the snapshot-bootstrapped node's 1417 boundary is
+  identical to the replay node's and both match Koios to the lovelace (pots, stake, rewards,
+  governance). Snapshot bootstrap (Mithril certified chunks + verified ancillary state, ≈ 8
+  minutes to a strict node at the tip) is production-ready on preview. Bug 104's journaling
+  had missed the leader-count writes (24 phantom blocks in 1416 on both nodes, fixed,
+  recounted). Pool 8df215df… has 1 009 501 ADA in the 1417 snapshot → leader slots from 1418.

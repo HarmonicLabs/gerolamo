@@ -29,7 +29,7 @@
  * See docs/phase-4-pure-ts-crypto-research.md
  */
 
-import { createHash } from "crypto";
+import { createHash } from "./hash";
 
 import {
     blake2b_128,

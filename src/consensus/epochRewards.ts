@@ -14,6 +14,7 @@
  * report; nothing halts on them until they are verified against a reference.
  */
 import { sql } from "../sql";
+import { ledgerStakeReads } from "../ledger/nodeLedgerStore";
 import { logger } from "../utils/logger";
 import { readEpochParamsRaw } from "./epochParams";
 import { computeEpochRewards, type PoolInput, type RewardParams } from "./rewards";
@@ -142,7 +143,8 @@ export async function runEpochRewards(epoch: number, genesis: any, shelleyStart:
     }
     const perfEpoch = epoch - 2;
     // Idempotent across restarts: a boundary re-run must not move the pots twice.
-    const done = (await sql`SELECT 1 FROM reward_epochs WHERE performance_epoch = ${perfEpoch}`.values()) as unknown[][];
+    const lr = ledgerStakeReads();
+    const done = lr ? (lr.rewardEpochDone(perfEpoch) ? [[1]] : []) : (await sql`SELECT 1 FROM reward_epochs WHERE performance_epoch = ${perfEpoch}`.values()) as unknown[][];
     if (done.length) return;
     const tBuild = performance.now();
     const built = await buildRewardInputs(epoch, genesis, shelleyStart, slotsPerEpoch);

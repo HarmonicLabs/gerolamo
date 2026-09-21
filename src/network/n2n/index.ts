@@ -2,6 +2,7 @@ export {
     startN2NServer,
     type N2NServerHandle,
     type N2NServerOptions,
+    type InboundClientInfo,
 } from "./N2NServer";
 export {
     N2NHandshakeResponder,

@@ -15,6 +15,7 @@
  * proven exact against a reference (see PLAN_FULL_VALIDATION.md, Phase 2).
  */
 import { sql } from "../../sql";
+import { ledgerStakeReads } from "../../ledger/nodeLedgerStore";
 import { genesisDelegsAt, opcertCounterState, poolStakeForEpoch, registeredPoolVrf, type PoolStakeDistribution } from "../../db/leaderState";
 import { getEpochBodyParams } from "../epochParams";
 import { firstSlotOfEpoch } from "../../utils/epochFromSlotCalculations";
@@ -106,7 +107,10 @@ export class LeaderChecker {
     private async snapshotPools(epoch: number): Promise<Map<string, { vrf: string }> | null> {
         const takenAt = epoch - 1;
         try {
-            const rows = (await sql`SELECT pool_id, vrf_key_hash FROM epoch_pool_params WHERE taken_at = ${takenAt}`.values()) as unknown[][];
+            const sr = ledgerStakeReads();
+            const rows: unknown[][] = sr
+                ? [...sr.snapshotPoolParams(takenAt)].map(([id, p]) => [id, p.vrf])
+                : (await sql`SELECT pool_id, vrf_key_hash FROM epoch_pool_params WHERE taken_at = ${takenAt}`.values()) as unknown[][];
             if (!rows.length) return null;
             return new Map(rows.map((r) => [String(r[0]).toLowerCase(), { vrf: String(r[1]).toLowerCase() }]));
         } catch {

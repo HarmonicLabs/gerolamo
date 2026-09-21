@@ -20,6 +20,8 @@ export type MetricsPayload = {
   sync?: unknown;
   role?: unknown;
   inbound?: unknown;
+  /** Block producer state (null on relays); see deriveProducer. */
+  producer?: unknown;
   version?: unknown;
   /** Node process resources (rssBytes, heapUsedBytes, cpuPercent …); see shared/resources. */
   process?: unknown;
@@ -67,6 +69,31 @@ export type GerolamoMultiPeerSync = {
 
 export type GerolamoInbound = { listening: boolean; host: string | null; port: number | null; clients: number };
 
+export type LeaderSlotOutcome = "upcoming" | "adopted" | "confirmed" | "invalid" | "missed" | "ghosted" | "stolen";
+
+export type GerolamoLeaderSlot = { slot: string; time: string; epoch: number; outcome: LeaderSlotOutcome; hash: string | null; note: string | null };
+
+/** The node's block-producer panel, in gLiveView's vocabulary. */
+export type GerolamoProducer = {
+  poolId: string;
+  vrfKeyHash: string | null;
+  dryRun: boolean;
+  opcert: { counter: string; kesPeriod: string; chainCounter: string | null };
+  kes: { period: string; evolution: number; remaining: number; maxEvolutions: number; expiresAt: string | null } | null;
+  missedLeaderChecks: number;
+  scheduledEpochs: number[];
+  leaderSlotsKnown: number;
+  nextLeaderSlot: string | null;
+  leaderSlots: GerolamoLeaderSlot[];
+  epochStats: {
+    epoch: number; leader: number; ideal: number | null; luck: number | null;
+    adopted: number; confirmed: number; invalid: number; missed: number; ghosted: number; stolen: number;
+  } | null;
+  forged: number;
+  lastForgedSlot: string | null;
+  lastError: string | null;
+};
+
 /** Where the chain tip sits inside its epoch, and how far the clock epoch is. */
 export type GerolamoEpochProgress = {
   /** Epoch the tip slot belongs to. */
@@ -87,9 +114,11 @@ export type GerolamoSyncStatus = {
   /** Node build label (`version+commit[-dirty]`), null for nodes that predate it. */
   nodeVersion: string | null;
   epochProgress: GerolamoEpochProgress | null;
-  /** "data" or "relay"; null when the node predates roles. */
-  role: "data" | "relay" | null;
+  /** "data", "relay" or "producer"; null when the node predates roles. */
+  role: "data" | "relay" | "producer" | null;
   inbound: GerolamoInbound | null;
+  /** Block-producer state; null on relays and on nodes that predate it. */
+  producer: GerolamoProducer | null;
   tipSlot: string;
   networkTipSlot: string;
   syncPercent: number;
@@ -223,6 +252,74 @@ const slotString = (value: unknown): string | null => {
   return /^\d+$/.test(s) ? s : null;
 };
 
+const OUTCOMES: LeaderSlotOutcome[] = ["upcoming", "adopted", "confirmed", "invalid", "missed", "ghosted", "stolen"];
+
+export function deriveProducer(value: unknown): GerolamoProducer | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if (typeof v.poolId !== "string") return null;
+  const oc = v.opcert && typeof v.opcert === "object" ? (v.opcert as Record<string, unknown>) : {};
+  const kes = v.kes && typeof v.kes === "object" ? (v.kes as Record<string, unknown>) : null;
+  const es = v.epochStats && typeof v.epochStats === "object" ? (v.epochStats as Record<string, unknown>) : null;
+  const leaderSlots: GerolamoLeaderSlot[] = Array.isArray(v.leaderSlots)
+    ? v.leaderSlots.slice(0, 64).flatMap((item) => {
+        if (!item || typeof item !== "object") return [];
+        const r = item as Record<string, unknown>;
+        const slot = slotString(r.slot);
+        if (!slot) return [];
+        return [{
+          slot,
+          time: typeof r.time === "string" ? r.time : "",
+          epoch: finiteNumber(r.epoch) ?? 0,
+          outcome: OUTCOMES.includes(r.outcome as LeaderSlotOutcome) ? (r.outcome as LeaderSlotOutcome) : "upcoming",
+          hash: typeof r.hash === "string" ? r.hash : null,
+          note: typeof r.note === "string" ? r.note : null,
+        }];
+      })
+    : [];
+  return {
+    poolId: v.poolId,
+    vrfKeyHash: typeof v.vrfKeyHash === "string" ? v.vrfKeyHash : null,
+    dryRun: v.dryRun === true,
+    opcert: {
+      counter: String(oc.counter ?? "?"),
+      kesPeriod: String(oc.kesPeriod ?? "?"),
+      chainCounter: oc.chainCounter == null ? null : String(oc.chainCounter),
+    },
+    kes: kes
+      ? {
+          period: String(kes.period ?? "?"),
+          evolution: finiteNumber(kes.evolution) ?? finiteNumber(v.kesEvolution) ?? 0,
+          remaining: finiteNumber(kes.remaining) ?? 0,
+          maxEvolutions: finiteNumber(kes.maxEvolutions) ?? 0,
+          expiresAt: typeof kes.expiresAt === "string" ? kes.expiresAt : null,
+        }
+      : null,
+    missedLeaderChecks: finiteNumber(v.missedLeaderChecks) ?? 0,
+    scheduledEpochs: Array.isArray(v.scheduledEpochs) ? v.scheduledEpochs.map(finiteNumber).filter((n): n is number => n != null) : [],
+    leaderSlotsKnown: finiteNumber(v.leaderSlotsKnown) ?? leaderSlots.length,
+    nextLeaderSlot: slotString(v.nextLeaderSlot),
+    leaderSlots,
+    epochStats: es
+      ? {
+          epoch: finiteNumber(es.epoch) ?? 0,
+          leader: finiteNumber(es.leader) ?? 0,
+          ideal: es.ideal == null ? null : finiteNumber(es.ideal),
+          luck: es.luck == null ? null : finiteNumber(es.luck),
+          adopted: finiteNumber(es.adopted) ?? 0,
+          confirmed: finiteNumber(es.confirmed) ?? 0,
+          invalid: finiteNumber(es.invalid) ?? 0,
+          missed: finiteNumber(es.missed) ?? 0,
+          ghosted: finiteNumber(es.ghosted) ?? 0,
+          stolen: finiteNumber(es.stolen) ?? 0,
+        }
+      : null,
+    forged: finiteNumber(v.forged) ?? 0,
+    lastForgedSlot: slotString(v.lastForgedSlot),
+    lastError: typeof v.lastError === "string" ? v.lastError : null,
+  };
+}
+
 export function deriveMultiPeerSync(value: unknown): GerolamoMultiPeerSync | null {
   if (!value || typeof value !== "object") return null;
   const v = value as Record<string, unknown>;
@@ -309,7 +406,8 @@ export function deriveGerolamoSyncStatus(
   return {
     nodeVersion: typeof metrics.version === "string" && metrics.version ? metrics.version : null,
     epochProgress: tip > 0n ? deriveEpochProgress(tip, networkTip, network) : null,
-    role: metrics.role === "relay" || metrics.role === "data" ? metrics.role : null,
+    role: metrics.role === "relay" || metrics.role === "data" || metrics.role === "producer" ? metrics.role : null,
+    producer: deriveProducer(metrics.producer),
     inbound: inb
       ? {
           listening: inb.listening === true,

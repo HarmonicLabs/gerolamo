@@ -230,6 +230,30 @@ function parseByronChainSyncHeader(wrapperBytes: Uint8Array): ParsedHeader {
     };
 }
 
+/**
+ * The ChainSync MsgRollForward a peer would have sent for a block we hold as `[era, block]`
+ * bytes: `[2, [era − 1, #6.24(header)], [[slot, hash], blockNo]]`. `headerParser` and the
+ * volatile header row take that whole message, not the inner `[era − 1, #6.24(header)]`
+ * (2026-09-12 01:31 UTC: the first forged block was rejected as "header does not parse"
+ * because adoptLocalBlock passed the inner pair). Shelley+ only: nothing forges Byron.
+ */
+export function localRollForwardMessage(blockFetchBytes: Uint8Array): { bytes: Uint8Array; slot: bigint; blockNo: bigint; hashHex: string; era: number } {
+    const id = blockFetchHeaderIdentity(blockFetchBytes);
+    if (isByronEra(id.era)) throw new Error("localRollForwardMessage: Byron blocks are not forged locally");
+    const hdr = Cbor.parseLazy(id.rawHeaderBytes);
+    if (!(hdr instanceof LazyCborArray) || hdr.array.length < 2) throw new Error("localRollForwardMessage: header is not [body, signature]");
+    const body = Cbor.parseLazy(hdr.array[0]!);
+    if (!(body instanceof LazyCborArray) || body.array.length < 2) throw new Error("localRollForwardMessage: header body is not an array");
+    const blockNo = BigInt(readUInt(body.array[0]!, "block number"));
+    const slot = BigInt(readUInt(body.array[1]!, "slot"));
+    const bytes = Cbor.encode(new CborArray([
+        new CborUInt(2n),
+        new CborArray([new CborUInt(BigInt(id.era - 1)), new CborTag(24, new CborBytes(id.rawHeaderBytes))]),
+        new CborArray([new CborArray([new CborUInt(slot), new CborBytes(id.hash)]), new CborUInt(blockNo)]),
+    ])).toBuffer();
+    return { bytes, slot, blockNo, hashHex: Buffer.from(id.hash).toString("hex"), era: id.era };
+}
+
 export async function headerParser(
     rollForward: Uint8Array,
 ): Promise<ParsedHeader | null> {

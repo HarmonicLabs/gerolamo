@@ -20,7 +20,7 @@
  * See docs/phase-4-pure-ts-crypto-research.md
  */
 
-import { createHash } from "crypto";
+import { createHash } from "./hash";
 import { verifyEd25519Signature_sync } from "@harmoniclabs/crypto";
 
 import type { MithrilCertificate } from "../types";

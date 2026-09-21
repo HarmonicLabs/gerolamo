@@ -417,6 +417,10 @@ export function Main() {
             "Ancillary verification key (hex-of-JSON, file or URL; default: the network's published key)",
         )
         .option(
+            "--block-store <dir>",
+            "cardano-node-format block store (<nodeDir>/db): the chunks become the store as they are, nothing is applied into SQLite; with --ledger-state the ledger tables are imported and the node's tip pinned to the state's block",
+        )
+        .option(
             "--db <path>",
             "SQLite path for apply (default: GEROLAMO_DB_PATH or .live/test.db)",
             process.env.GEROLAMO_DB_PATH || "./.live/test.db",
@@ -442,6 +446,7 @@ export function Main() {
                 progressFile?: string;
                 downloadConcurrency?: number;
                 db?: string;
+                blockStore?: string;
             }) => {
                 const logger = new Logger({ logLevel: LogLevel.INFO });
                 const engineRaw = (options.engine || "ts").toLowerCase();
@@ -477,6 +482,7 @@ export function Main() {
                         genesisVkey: options.genesisVkey,
                         skipDownload: !!options.skipDownload,
                         skipApply: !!options.skipApply,
+                        blockStore: options.blockStore ? resolve(options.blockStore) : undefined,
                         fromChunk: options.fromChunk,
                         toChunk: options.toChunk,
                         limitChunks: options.limitChunks,

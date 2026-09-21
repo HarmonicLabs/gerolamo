@@ -766,6 +766,7 @@ export async function validateBlock(
         const outcome = ctx.ruleOutcome ?? await evaluateBlockRules(block, { config, pool: ctx.pool, params, genesis, slot: ctx.slot, preVerified: ctx.preVerified ?? null , phase: "rules" /* Plutus shadow never runs on the main thread: a 2 s budget stalled the applier (preview epoch 898) */ });
         if (outcome.failures.length) {
             logger.error(`Block body validation failed at slot ${ctx.slot} (era ${block.era}, ${outcome.txs} tx): ${outcome.failures.slice(0, 5).join(" | ")}${outcome.failures.length > 5 ? ` | +${outcome.failures.length - 5} more` : ""}`);
+            (ctx as any).failures = outcome.failures.slice(); // the caller's error carries them (the producer drops the named transactions and retries)
             return false;
         }
         recordPlutusShadow(outcome);

@@ -185,9 +185,16 @@ over at the tip as today. Estimated throughput ≥ 5 000 blocks/s (pure CBOR, no
   boundary — rewards 80 353/80 353, the 1414/1415/1416 snapshots, pots, pot snapshot, parameters,
   nonces, DRep stake 2 904/2 904, governance state and proposals; `stake_balance` identical
   (3 902 280 214 551 718). The two differences were both on the replay side: bug 104 (phantom
-  blocks after rollbacks) and the 13 zero-stake snapshot rows (both fixed). Left: boundary 1417
-  (2026-09-11 ≈ 00:00 UTC), the reward update for epoch 1415 whose blocks the imported node
-  counted partly from `nesBcur` and partly itself, checked against Koios and the tip node.
+  blocks after rollbacks) and the 13 zero-stake snapshot rows (both fixed). Boundary 1417 (applied 2026-09-11
+  02:33 UTC, after an internet outage): the reward update for epoch 1415 — the one whose blocks
+  the imported node counted partly from `nesBcur` and partly itself — is lovelace-identical on
+  both nodes (pot 16 972 576 264 511, treasury +3 394 515 252 902, 418 938 148 444 to 6 019
+  accounts), the 1417 stake snapshot identical (1 545 727 609 211 407, our pool's
+  1 009 501 687 663 included), pots at 1417 equal to Koios to the lovelace (reserves
+  7 607 278 908 197 930, treasury 7 095 916 826 110 957), parameters, nonces, DRep stake and
+  governance identical. **Phase E passed: snapshot bootstrap is production-ready on preview.**
+  Side finding: the bug-104 journaling had missed the leader-count writes (24 phantom blocks in
+  1416 on both nodes); fixed and recounted before the 1418 reward update uses them.
 - **F. Ledger store** — LMDB with the node's TxIn → TxOut layout + in-memory volatile diffs.
 
 The preview ancillary artifact download started 2026-09-09 20:40 UTC

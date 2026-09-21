@@ -22,8 +22,15 @@ import {
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 // Not re-exported at package root.
 import type { IChainDb } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/protocols/interfaces/IChainDb.js";
-import { getEpochNonce, getMaxSlot, getUtxoCount } from "../../db";
+import { getChainTipFromHeader } from "../../db";
+import { ledgerStakeReads, ledgerUtxoReads } from "../../ledger/nodeLedgerStore";
+import { sql } from "../../sql";
+import { CborBytes, CborTag } from "@harmoniclabs/cbor";
+import { HFC_ERA_NAMES, encodeUtcTime, eraSummaries, networkFromMagic, systemStartOf, type EraHistoryNetwork } from "./eraHistory";
 import { calculatePreProdCardanoEpoch } from "../../utils/epochFromSlotCalculations";
+import { readEpochParamsRaw } from "../../consensus/epochParams";
+import { conwayPParamsCbor } from "./pparamsCbor";
+import { addressString, txInRef, utxoMapCbor, type UtxoRowLike } from "./utxoCbor";
 import { logger } from "../../utils/logger";
 
 const log = logger.child("n2c.localstatequery");
@@ -44,9 +51,12 @@ export class LocalStateQueryHost {
     private prevBytes: Uint8Array | undefined;
     private readonly listener: (chunk: Uint8Array) => void;
 
-    constructor(mplexer: Multiplexer, chainDb: IChainDb) {
+    private readonly network: EraHistoryNetwork | null;
+
+    constructor(mplexer: Multiplexer, chainDb: IChainDb, networkMagic?: number) {
         this.mplexer = mplexer;
         this.chainDb = chainDb;
+        this.network = networkMagic == null ? null : networkFromMagic(networkMagic);
         this.listener = (chunk) => this.onChunk(chunk);
         this.mplexer.on(PROTO, this.listener);
     }
@@ -64,7 +74,7 @@ export class LocalStateQueryHost {
 
     private send(msg: { toCbor: () => { toBuffer: () => Uint8Array } }): void {
         this.mplexer.send(msg.toCbor().toBuffer(), {
-            hasAgency: true,
+            hasAgency: false, // responder direction (the 0x8000 bit on the wire): a client rejects replies on its own initiator side (cardano-cli, 2026-09-14)
             protocol: PROTO,
         });
     }
@@ -141,53 +151,104 @@ export class LocalStateQueryHost {
         );
     }
 
-    private async handleQuery(_msg: QryQuery): Promise<void> {
-        if (!this.acquired) {
-            // Not acquired — still answer so clients don't hang; empty result.
-            this.send(
-                new QryResult({
-                    result: new CborArray([new CborUInt(0)]),
-                }),
-            );
-            return;
-        }
-        const tip = await this.chainDb.getTip();
-        const chainSlot = tip.point.blockHeader
-            ? BigInt(tip.point.blockHeader.slotNumber)
-            : 0n;
-
-        // Enrich with local DB tip/utxo/nonce (data-node surface; not full ledger query.cddl).
-        let dbTip = 0n;
-        let utxoCount = 0;
-        let epochNonce: string | null = null;
+    private async handleQuery(msg: QryQuery): Promise<void> {
+        let result: CborObj;
         try {
-            dbTip = await getMaxSlot();
-            utxoCount = await getUtxoCount();
-            const epoch = Number(calculatePreProdCardanoEpoch(Number(dbTip || chainSlot)));
-            if (Number.isFinite(epoch) && epoch >= 0) {
-                epochNonce = await getEpochNonce(epoch);
-            }
+            result = await this.answer(msg.query);
         } catch (err) {
-            log.warn("LSQ enrichment failed (returning tip-only):", err);
+            log.warn("LocalStateQuery: query failed:", err);
+            result = new CborArray([]);
         }
+        this.send(new QryResult({ result }));
+    }
 
-        const entries: { k: CborObj; v: CborObj }[] = [
-            { k: new CborText("tipSlot"), v: new CborUInt(dbTip || chainSlot) },
-            { k: new CborText("tipBlockNo"), v: new CborUInt(tip.blockNo) },
-            { k: new CborText("utxoCount"), v: new CborUInt(BigInt(utxoCount)) },
-            { k: new CborText("node"), v: new CborText("gerolamo") },
-        ];
-        if (epochNonce) {
-            entries.push({
-                k: new CborText("epochNonce"),
-                v: new CborText(epochNonce),
-            });
+    /**
+     * The queries cardano-cli and wallets send, encoded as ouroboros-consensus does (captured
+     * from a cardano-node with scripts/n2c-oracle.ts). Query = [1] GetSystemStart · [2]
+     * GetChainBlockNo · [3] GetChainPoint · [0, [2, [1]]] GetCurrentEra · [0, [2, [0]]]
+     * GetInterpreter · [0, [0, [era, q]]] QueryIfCurrent (Right r = [r]; wrong era =
+     * [[qEra, name], [curEra, name]]); inside: [0] GetLedgerTip · [1] GetEpochNo · [3] GetCurrentPParams
+     * (Conway record) · [6, set<address>] GetUTxOByAddress · [15, set<txin>] GetUTxOByTxIn · [16] GetStakePools. Unknown queries get an empty array (the client fails
+     * to decode instead of hanging).
+     */
+    private async answer(q: CborObj): Promise<CborObj> {
+        const setItems = (o: CborObj | undefined): CborObj[] => {
+            const inner = o instanceof CborTag ? o.data : o;
+            return inner instanceof CborArray ? inner.array : [];
+        };
+        const tag = (o: CborObj | undefined) => (o instanceof CborUInt ? Number(o.num) : -1);
+        const arr = (o: CborObj | undefined) => (o instanceof CborArray ? o.array : null);
+        const top = arr(q);
+        if (!top) return new CborArray([]);
+        const tip = await getChainTipFromHeader();
+        const net = this.network;
+        switch (tag(top[0])) {
+            case 1: return net ? encodeUtcTime(systemStartOf(net)) : new CborArray([]);
+            case 2: return tip ? new CborArray([new CborUInt(1), new CborUInt(tip.blockNumber)]) : new CborArray([]);
+            case 3: return tip ? new CborArray([new CborUInt(tip.slot), new CborBytes(Uint8Array.from(Buffer.from(tip.hashHex, "hex")))]) : new CborArray([]);
+            case 0: {
+                const bq = arr(top[1]);
+                if (!bq) break;
+                const eraIndex = tip ? Math.max(0, tip.era - 1) : 0; // our era numbering counts the Byron EBB era; the HFC index does not
+                if (tag(bq[0]) === 2) {
+                    const hq = arr(bq[1]);
+                    if (hq && tag(hq[0]) === 1) return new CborUInt(eraIndex);
+                    if (hq && tag(hq[0]) === 0 && net) return eraSummaries(net, eraIndex, tip ? Number(calculatePreProdCardanoEpoch(Number(tip.slot))) : undefined);
+                    break;
+                }
+                if (tag(bq[0]) === 0) {
+                    const ic = arr(bq[1]);
+                    if (!ic) break;
+                    const qEra = tag(ic[0]);
+                    if (qEra !== eraIndex) {
+                        const name = (i: number) => new CborText(HFC_ERA_NAMES[i] ?? `era${i}`);
+                        return new CborArray([new CborArray([new CborUInt(qEra), name(qEra)]), new CborArray([new CborUInt(eraIndex), name(eraIndex)])]);
+                    }
+                    const sq = arr(ic[1]);
+                    if (!sq) break;
+                    const right = (r: CborObj) => new CborArray([r]);
+                    switch (tag(sq[0])) {
+                        case 0: return right(tip ? new CborArray([new CborUInt(tip.slot), new CborBytes(Uint8Array.from(Buffer.from(tip.hashHex, "hex")))]) : new CborArray([]));
+                        case 1: return right(new CborUInt(tip ? BigInt(Number(calculatePreProdCardanoEpoch(Number(tip.slot)))) : 0n));
+                        case 3: {
+                            const epoch = tip ? Number(calculatePreProdCardanoEpoch(Number(tip.slot))) : 0;
+                            const raw = (await readEpochParamsRaw(epoch)) ?? (await readEpochParamsRaw(epoch - 1));
+                            if (!raw) break;
+                            return right(conwayPParamsCbor(raw));
+                        }
+                        case 6: {
+                            const addrs = setItems(sq[1]).map((a) => (a instanceof CborBytes ? addressString(a.bytes) : null)).filter((a): a is string => !!a);
+                            if (!addrs.length) return right(new CborMap([]));
+                            const ur = ledgerUtxoReads();
+                            const rows: unknown[][] = ur
+                                ? addrs.flatMap((a) => ur.byAddress(a).map((u) => [u.utxo_ref, u.tx_out])).sort((x, y) => (String(x[0]) < String(y[0]) ? -1 : 1))
+                                : (await sql.unsafe(`SELECT utxo_ref, tx_out FROM utxo WHERE address IN (${addrs.map(() => "?").join(",")}) ORDER BY utxo_ref`, addrs as any).values()) as unknown[][];
+                            return right(utxoMapCbor(rows.map((r) => ({ utxo_ref: String(r[0]), tx_out: String(r[1]) }) as UtxoRowLike)));
+                        }
+                        case 15: {
+                            const refs = setItems(sq[1]).map(txInRef).filter((r): r is string => !!r);
+                            if (!refs.length) return right(new CborMap([]));
+                            const ur = ledgerUtxoReads();
+                            const rows: unknown[][] = ur
+                                ? ur.getMany(refs).map((u) => [u.utxo_ref, u.tx_out]).sort((x, y) => (String(x[0]) < String(y[0]) ? -1 : 1))
+                                : (await sql.unsafe(`SELECT utxo_ref, tx_out FROM utxo WHERE utxo_ref IN (${refs.map(() => "?").join(",")}) ORDER BY utxo_ref`, refs as any).values()) as unknown[][];
+                            return right(utxoMapCbor(rows.map((r) => ({ utxo_ref: String(r[0]), tx_out: String(r[1]) }) as UtxoRowLike)));
+                        }
+                        case 16: {
+                            const sr = ledgerStakeReads();
+                            const rows: unknown[][] = sr
+                                ? [...sr.pools()].filter(([, p]) => p.retiringEpoch === null).map(([id]) => [id]).sort((x, y) => (String(x[0]) < String(y[0]) ? -1 : 1))
+                                : (await sql`SELECT pool_id FROM pool_params WHERE retiring_epoch IS NULL ORDER BY pool_id`.values()) as unknown[][];
+                            return right(new CborTag(258, new CborArray(rows.map((r) => new CborBytes(Uint8Array.from(Buffer.from(String(r[0]), "hex")))))));
+                        }
+                        default: break;
+                    }
+                }
+                break;
+            }
+            default: break;
         }
-
-        this.send(
-            new QryResult({
-                result: new CborMap(entries),
-            }),
-        );
+        log.warn(`LocalStateQuery: unsupported query ${JSON.stringify(q, (_k, v) => (typeof v === "bigint" ? v.toString() : v)).slice(0, 160)}`);
+        return new CborArray([]);
     }
 }

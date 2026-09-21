@@ -1,4 +1,5 @@
 import { sql } from "../sql";
+import { getMaxBlockNo, getMaxSlot } from "../db";
 import { logger } from "../utils/logger";
 
 const chainLogger = logger.child("chainSelection");
@@ -37,13 +38,24 @@ export type ChainSelectionMode = "praos";
  * Calculate intersection point between current chain and candidate chain
  * Uses block hash chains to find the actual common ancestor
  */
+/**
+ * Stand-in for the old `SELECT slot FROM blocks … LIMIT 10000`: an array whose length is the
+ * chain's height and whose last element is the tip slot (the two things the callers read).
+ */
+async function currentChainSlots(): Promise<number[]> {
+    const tip = Number(await getMaxSlot());
+    if (tip <= 0) return [];
+    const height = Math.max(1, await getMaxBlockNo());
+    const out = new Array<number>(Math.min(height, 10000)).fill(0);
+    out[out.length - 1] = tip;
+    return out;
+}
+
 export async function findIntersection(
     candidate: ChainCandidate,
 ): Promise<{ intersectionBlock: number; rollbackDistance: number }> {
-    // Query current chain tip info from database (indexed query)
-    const currentSlots = await sql`
-        SELECT slot FROM blocks ORDER BY slot ASC LIMIT 10000
-    `.values() as number[];
+    // Current chain tip from the block store / db helpers (the `blocks` table is empty in primary mode)
+    const currentSlots = await currentChainSlots();
 
     if (currentSlots.length === 0) {
         // No current chain, intersection at genesis
@@ -152,10 +164,8 @@ export async function selectBestChain(
 > {
     if (candidates.length === 0) return { candidate: null, comparison: null };
 
-    // Get current chain tip (bounded query)
-    const currentSlots = await sql`
-        SELECT slot FROM blocks ORDER BY slot ASC LIMIT 10000
-    `.values() as number[];
+    // Current chain tip (block store / db helpers)
+    const currentSlots = await currentChainSlots();
 
     const currentBlockCount = currentSlots.length;
     const currentTipSlot = currentSlots.length > 0

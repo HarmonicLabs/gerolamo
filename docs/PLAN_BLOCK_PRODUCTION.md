@@ -234,3 +234,113 @@ header validator.
   import node, which has no inbound). `AnnounceWindow` (codec module, tested) now remembers
   every id announced to a peer for the life of the connection. Also today: open item 16
   (promoted-verifier drain stall) in VALIDATION_STATUS.md.
+- 2026-09-10 19:20 UTC: the block-production view lives on the node's own `/stats` page
+  (role, inbound listener, pool, op-cert/KES, schedule, next leader slot, forged, last error);
+  the web dashboard servers (3050/3051) and the node's `/explorer/` static route are retired —
+  the only UIs are the desktop app and `/stats`, which also shows recent blocks and the mempool.
+
+### Epoch 1418 schedule (2026-09-12)
+
+Final schedule from the stored η0 `00c6c2f8eb5de83a…` (σ = 1009501687663 /
+1545727609211407, expected ≈ 2.8 slots, got 5): slots 122520682 01:31:22Z,
+122535169 05:32:49Z, 122538785 06:33:05Z, 122546676 08:44:36Z, 122567530
+14:32:10Z. The producer's schedule from the evolver's pre-boundary peek
+(first at 14:26 UTC, right after the candidate froze) was identical: η0(e+1)
+= ηc ⋆ ηh with ηh carried from the *previous* boundary, so the next epoch's
+nonce is final 4k/f slots (9.6 h on preview) before the boundary, the same
+window `cardano-cli query leadership-schedule --next` relies on.
+`BlockProducer` records the nonce each epoch was scheduled from and
+reschedules only if it changes (rollback across the freeze).
+
+### Producer panel (gLiveView terms), 2026-09-12
+
+`ProducerStats` (node `/metrics.producer`, the `/stats` card and the desktop
+Overview card) now carries what gLiveView's CORE / BLOCK PRODUCTION panel
+shows: `kes` (current period, evolutions used / remaining of maxKESEvolutions,
+expiry slot and time), `opcert.chainCounter` (last counter the chain saw for
+the pool, beside the on-disk counter), `missedLeaderChecks` (slots the ticker
+never evaluated), `leaderSlots[]` with an outcome each (`upcoming`, `adopted`,
+`confirmed` = still ours 10 blocks deep, `invalid` = our rules rejected the
+forge, `missed` = slot passed without a forge, with the verdict as note,
+`ghosted` = adopted then rolled away, `stolen` = another pool's block at our
+slot) and `epochStats` (leader, ideal = σ·f·epoch length, luck, and the
+outcome counters for the clock epoch). Outcomes settle every 30 slots by an
+index lookup of the slot on our chain. The `/stats` page script had been
+broken by a quote escape in the page template since the card was added; a
+scratch check renders the template and parses the script.
+
+### Duplex outbound (2026-09-12)
+
+Blocks leave a Cardano node only by being pulled. Inbound sessions on the
+preview producer were short (most under 15 s; two long-lived in 36 h), so a
+forged block could sit unseen. Relays and producers advertised
+InitiatorAndResponder on outbound connections already, but nothing served that
+side and the library clients ignore the mux direction bit. Now
+`initiatorSideMux` (N2NDirection.ts) gives the clients a responder-direction-only
+view of the bearer, and `DuplexResponders.ts` attaches the ChainSync, BlockFetch,
+KeepAlive, PeerSharing and TxSubmission hosts to every outbound connection once
+the handshake succeeds, so the hot peers we dial can pull our chain. The flag is
+advertised only when the responder deps are registered (index.ts, with `n2n`).
+
+### Propagation odds for a small pool (2026-09-12)
+
+From the ouroboros-network source: a remote treats the connection we opened as
+a duplex peer only 15 minutes after the handshake, adopts it into its known set
+through "light peer sharing" (peer sharing on, below the known-peers target, a
+coin flip, at most 10 per minute), and promotes it warm then hot by uniform
+random picks on churn cycles of 15 to 55 minutes. Inbound sessions that end
+within seconds are churn demotions, not protocol faults. With 0.065 % of the
+preview stake the expected number of hot inbound peers is about 0.5, so the
+producer now keeps 20 warm outbound connections to distinct relays (each a
+duplex candidate), asks peers for addresses regardless of its own advertising
+flag, and logs every protocol a remote starts over our connections. The
+ledger-peer source now exists: every registration certificate writes the
+pool's relays to `pool_relays` (`recordPoolRelays`), pools registered before
+that come from `<node dir>/ledger-relays.json` written by
+`scripts/ledger-relays.ts` from a Mithril ledger snapshot (preview: 564 relays
+of 504 pools), and the governor seeds them into the cold tier a batch at a time
+(`seedLedgerPeers`, source "ledger", after `useLedgerAfterSlot`). Peer-sharing
+requests are independent of our own advertising flag, but remotes answer a
+non-advertising client with peer sharing disabled, so ledger peers are the
+working source.
+
+### Epoch 1418 result and epoch 1419 schedule (2026-09-12)
+
+Epoch 1418: five leader slots; one block confirmed on the network (slot
+122538785, height 4655249), one ghosted (height off by one, bug 106), two
+rejected by our own rules (bugs 105 and 110), one missed with the machine off
+(battery). Epoch 1419 (2026-09-13): slots 122610920 02:35:20Z, 122619622
+05:00:22Z, 122622853 05:54:13Z, 122650083 13:28:03Z; the greeting transaction
+is still pending for the first accepted block with a body.
+
+### Explorer badge: header protocol version 11.67 (2026-09-13)
+
+Cardanoscan offered to badge blocks minted by Gerolamo if their headers carry a
+distinctive protocol version (Dingo does the same). cardano-node writes its own
+supported version into headers (11.0 on preview today), and the ledger checks
+only that the major does not exceed a validating node's maximum, so the minor
+is free. `producer.headerProtocolVersion` (default: the ledger's version) is set
+to 11.67 on the preview producer; `scripts/forge-dry-run.ts` shows the header
+version it would forge.
+
+### The greeting landed (2026-09-14)
+
+Block 4661888 at slot 122732819 (12:26:59 UTC), hash f79f3b1217d40600…,
+carries transaction fc0a79223e3a… with `{674: {msg: ["Gerolamo was here!"]}}`.
+Three inbound peers fetched it within 0.2 s and the network built on it. The
+same forge exercised the stale-transaction retry (5 → 3 transactions), the
+11.67 header version and the readiness checks (four pullers attached before
+the slot). The temporary greeting is done for preview; the producer keeps the
+flag with the block hash and would only repeat it if that block left the chain.
+
+
+### Node-to-client socket works for cardano-cli (2026-09-14)
+
+`cardano-cli query tip|protocol-parameters|utxo|stake-pools --testnet-magic 2 --socket-path <nodeDir>/node.socket`
+decode Gerolamo's replies (bug 120 in VALIDATION_STATUS.md). The reference encodings came from a real
+cardano-node via `bun scripts/n2c-oracle.ts --socket <cardano-node.socket> --magic <n> --era 6`, which prints the
+hex and decoded CBOR of each reply; run it against Gerolamo's socket too and diff. Left for the next pass, once
+the preview cardano-node relay (`startPreviewRelay.sh`, port 6424) reaches Conway and can be used as the oracle:
+GetStakeDistribution (5), GetStakePoolParams (17; relays live in `pool_relays`, metadata is not stored yet),
+GetGenesisConfig (11), GetGovState (24) and the other governance queries, plus LocalTxSubmission end to end
+(submit a tx through the socket and see it in our block).

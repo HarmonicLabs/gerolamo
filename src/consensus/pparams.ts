@@ -14,6 +14,7 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
  * Conway epoch without a local record is fetched externally and reported.
  */
 import { sql } from "../sql";
+import { ledgerGov, ledgerGovReads, sqlLedgerWrites } from "../ledger/nodeLedgerStore";
 import { storeEpochParams } from "./epochParams";
 import type { SqlClient } from "../db";
 import { logger } from "../utils/logger";
@@ -125,7 +126,8 @@ export async function recordUpdateProposal(db: SqlClient, proposal: any, slot: n
         const gk = String(e?.genesisHash?.toString?.() ?? e?.genesisHash ?? "").toLowerCase();
         if (!gk) continue;
         const raw = fromBytes?.entries.get(gk) ?? updateToRaw(e?.changes ?? {});
-        await db`INSERT OR REPLACE INTO pparam_proposals (epoch, genesis_key, changes_json, slot) VALUES (${Number(epoch)}, ${gk}, ${canonicalJson(raw)}, ${slot})`;
+        ledgerGov()?.putPParamProposal(Number(epoch), gk, canonicalJson(raw), slot);
+        if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO pparam_proposals (epoch, genesis_key, changes_json, slot) VALUES (${Number(epoch)}, ${gk}, ${canonicalJson(raw)}, ${slot})`;
         n++;
     }
     return n;
@@ -133,7 +135,10 @@ export async function recordUpdateProposal(db: SqlClient, proposal: any, slot: n
 
 /** Changes that reached the quorum among proposals for `epoch`, merged in key order; null when none. */
 export async function quorumUpdateFor(epoch: number, quorum: number): Promise<Record<string, unknown> | null> {
-    const rows = (await sql`SELECT changes_json, COUNT(*) FROM pparam_proposals WHERE epoch = ${epoch} GROUP BY changes_json`.values()) as unknown[][];
+    const gr = ledgerGovReads();
+    let rows: unknown[][];
+    if (gr) { const counts = new Map<string, number>(); for (const r of gr.pparamProposals(epoch)) counts.set(r.changes, (counts.get(r.changes) ?? 0) + 1); rows = [...counts].map(([c, n]) => [c, n]); }
+    else rows = (await sql`SELECT changes_json, COUNT(*) FROM pparam_proposals WHERE epoch = ${epoch} GROUP BY changes_json`.values()) as unknown[][];
     let merged: Record<string, unknown> | null = null;
     for (const r of rows) {
         if (Number(r[1]) >= quorum) {

@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { BabbageHeader, MultiEraHeader } from "@harmoniclabs/cardano-ledger-ts";
 import { Cbor, CborArray, CborTag, CborBytes } from "@harmoniclabs/cbor";
 import { validateHeader } from "../consensus/BlockHeaderValidator";
-import { blockFetchHeaderIdentity } from "../consensus/blockHeaderParser";
+import { blockFetchHeaderIdentity, headerParser, localRollForwardMessage } from "../consensus/blockHeaderParser";
 import { verifyBlockBodyHash, splitEraBlock, computeShelleyBodyHash, shelleyHeaderBodyHash } from "../consensus/bodyHash";
 import { praosLeaderValue } from "../consensus/workers/validationJob";
 import { isSlotLeader } from "../consensus/rules/leaderMath";
@@ -84,5 +84,30 @@ describe("forging a Praos block", () => {
         expect(() => forgeBlock(early)).toThrow(/before the operational certificate/);
         forgeBlock({ ...early, slot: slot + SLOTS_PER_KES }); // evolution 3
         expect(() => forgeBlock({ ...early, slot })).toThrow(/cannot go back/); // evolution 2 after 3
+    });
+});
+
+describe("adopting a forged block locally", () => {
+    test("a forged Conway block becomes a full MsgRollForward that headerParser accepts and validateHeader passes", async () => {
+        const slot = 1418n * 86400n + 5482n;
+        const { kes, vrf, opcert, coldVkey } = setup(slot);
+        const forged = forgeBlock({
+            era: 7, blockNumber: 4_654_600n, slot, prevHash: new Uint8Array(32).fill(3), nonce, coldVkey, vrf, kes, opcert,
+            protocolVersion: { major: 10, minor: 0 }, slotsPerKESPeriod: SLOTS_PER_KES,
+        });
+        const local = localRollForwardMessage(forged.blockFetchBytes);
+        expect(local.slot).toBe(slot);
+        expect(local.blockNo).toBe(4_654_600n);
+        expect(local.era).toBe(7);
+        expect(local.hashHex).toBe(Buffer.from(forged.headerHash).toString("hex"));
+        // the inner pair alone is what the first forge handed the parser: it must NOT parse
+        await expect(headerParser(forged.rollForwardData)).rejects.toThrow();
+        const parsed = await headerParser(local.bytes);
+        expect(parsed).not.toBeNull();
+        expect(parsed!.slot).toBe(slot);
+        expect(Buffer.from(parsed!.blockHeaderHash).toString("hex")).toBe(local.hashHex);
+        expect(parsed!.era).toBe(7);
+        expect(parsed!.prevHashHex).toBe("03".repeat(32));
+        expect(await validateHeader(parsed!.multiEraHeader, nonce, config)).toBe(true);
     });
 });

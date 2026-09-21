@@ -176,7 +176,30 @@ export async function undoLedgerJournal(db: SqlLike, blockHashes: Uint8Array[]):
  * `blocks` millions (a first version scanned `blocks` on every call and cost 80 % of
  * the applier's time).
  */
-export async function pruneLedgerJournal(db: SqlLike, keepBlocks = 4320): Promise<number> {
+export async function pruneLedgerJournal(
+    db: SqlLike,
+    keepBlocks = 4320,
+    resolver?: { tipSlot: number; slotOf: (hashHex: string) => Promise<number | null> },
+): Promise<number> {
+    if (resolver) {
+        // Block store is primary: resolve each journaled block's slot through it (few thousand rows).
+        const hashes = (await db.unsafe(`SELECT DISTINCT block_hash FROM ledger_journal`).values()) as unknown[][];
+        const threshold = resolver.tipSlot - keepBlocks * 20;
+        const gone: Uint8Array[] = [];
+        for (const r of hashes) {
+            const raw = r[0];
+            const bytes = raw instanceof Uint8Array ? raw : typeof raw === "string" ? Uint8Array.from(Buffer.from(raw, "hex")) : null;
+            if (!bytes) continue;
+            const slot = await resolver.slotOf(Buffer.from(bytes).toString("hex"));
+            if (slot != null && slot < threshold) gone.push(bytes);
+        }
+        let n = 0;
+        for (const h of gone) {
+            const r = await db.unsafe(`DELETE FROM ledger_journal WHERE block_hash = ?`, [h] as any);
+            n += Number((r as { count?: number })?.count ?? 0);
+        }
+        return n;
+    }
     const ids = (await db.unsafe(
         `SELECT j.id FROM ledger_journal j JOIN blocks b ON b.hash = lower(hex(j.block_hash)) WHERE b.slot < (SELECT MAX(slot) FROM blocks) - ? * 20`,
         [keepBlocks] as any,

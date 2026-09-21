@@ -11,6 +11,7 @@ import {
   openExternal,
   pickDirectory,
   startNode,
+  attachNode,
   stopNode,
   wipeChainDb,
   wipeSnapshots,
@@ -56,6 +57,11 @@ const bunRpc = defineElectrobunRPC("bun", {
       },
       async "node.start"(params?: unknown) {
         return startNode(asParams(params).config ?? {});
+      },
+      async "node.attach"(params?: unknown) {
+        const p = asParams(params) as { port?: number; name?: string; network?: any; dbPath?: string; logPath?: string };
+        if (!p.port) return { ok: false, error: "port required" };
+        return attachNode({ port: Number(p.port), name: p.name, network: p.network, dbPath: p.dbPath, logPath: p.logPath });
       },
       async "node.stop"(params?: unknown) {
         const id = asParams(params).id;

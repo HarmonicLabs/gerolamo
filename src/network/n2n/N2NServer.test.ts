@@ -6,6 +6,7 @@ import {
     ChainPoint,
     ChainSyncClient,
     ChainSyncIntersectFound,
+    ChainSyncRollBackwards,
     ChainSyncRollForward,
     ChainTip,
     HandshakeAcceptVersion,
@@ -106,6 +107,9 @@ describe("N2NServer loopback interoperability", () => {
         const chainSync = new ChainSyncClient(clientMux);
         const intersection = await chainSync.findIntersect([store.headers[0]!.point]);
         expect(intersection).toBeInstanceOf(ChainSyncIntersectFound);
+        // spec §3.7: the first reply after the intersection rolls the client back to it
+        const rollback = await chainSync.requestNext();
+        expect(rollback).toBeInstanceOf(ChainSyncRollBackwards);
         const next = await chainSync.requestNext();
         expect(next).toBeInstanceOf(ChainSyncRollForward);
         expect((next as ChainSyncRollForward).data).toEqual(store.headers[1]!.data);

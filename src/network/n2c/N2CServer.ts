@@ -132,7 +132,7 @@ function onConnection(
             try {
                 client.chainSync = new LocalChainSyncHost(mplexer, chainDb);
                 client.txSubmit = new LocalTxSubmitHost(mplexer);
-                client.stateQuery = new LocalStateQueryHost(mplexer, chainDb);
+                client.stateQuery = new LocalStateQueryHost(mplexer, chainDb, networkMagic);
                 client.txMonitor = new LocalTxMonitorHost(mplexer);
             } catch (err) {
                 n2cLogger.error(`failed to start N2C hosts for ${peer}:`, err);

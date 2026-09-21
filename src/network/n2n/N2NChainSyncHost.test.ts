@@ -6,6 +6,7 @@ import {
     ChainSyncFindIntersect,
     ChainSyncIntersectFound,
     ChainSyncRequestNext,
+    ChainSyncRollBackwards,
     ChainSyncRollForward,
     ChainTip,
     MiniProtocol,
@@ -81,9 +82,15 @@ describe("N2NChainSyncHost", () => {
         await Bun.sleep(0);
         mux.emit(MiniProtocol.ChainSync as any, new ChainSyncRequestNext().toCborBytes());
         await Bun.sleep(0);
+        mux.emit(MiniProtocol.ChainSync as any, new ChainSyncRequestNext().toCborBytes());
+        await Bun.sleep(0);
 
-        const first = decode(mux.sent[1]!) as ChainSyncRollForward;
-        const second = decode(mux.sent[2]!) as ChainSyncRollForward;
+        // spec §3.7: the first reply after the intersection rolls the client back to it
+        const rollback = decode(mux.sent[1]!) as ChainSyncRollBackwards;
+        expect(rollback).toBeInstanceOf(ChainSyncRollBackwards);
+        expect(String(rollback.point.blockHeader?.slotNumber)).toBe(String(store.headers[0]!.point.blockHeader?.slotNumber));
+        const first = decode(mux.sent[2]!) as ChainSyncRollForward;
+        const second = decode(mux.sent[3]!) as ChainSyncRollForward;
         expect(first).toBeInstanceOf(ChainSyncRollForward);
         expect(second).toBeInstanceOf(ChainSyncRollForward);
         expect(first.data).toEqual(store.headers[1]!.data);

@@ -41,13 +41,14 @@ function hashHex(value: unknown): string | undefined {
     return undefined;
 }
 
+/** `getBlockBySlot` / `getBlockByHash` return positional rows (`.values()`): [id, chunk_id, slot, block_hash, prev_hash, header_data, block_data, …]. */
 function pointFromRow(row: any): ChainPoint | undefined {
     if (!row) return undefined;
-    const slot = BigInt(row.slot ?? 0);
-    const hash =
-        asBytes(row.block_hash) ??
-        asBytes(row.hash) ??
-        asBytes(row.header_hash);
+    const positional = Array.isArray(row);
+    const slot = BigInt((positional ? row[2] : row.slot) ?? 0);
+    const hash = positional
+        ? asBytes(row[3])
+        : asBytes(row.block_hash) ?? asBytes(row.hash) ?? asBytes(row.header_hash);
     if (!hash) return undefined;
     return new ChainPoint({
         blockHeader: {
@@ -58,6 +59,7 @@ function pointFromRow(row: any): ChainPoint | undefined {
 }
 
 function headerBytesFromRow(row: any): Uint8Array {
+    if (Array.isArray(row)) return asBytes(row[5]) ?? asBytes(row[6]) ?? new Uint8Array([0xa0]);
     return (
         asBytes(row.rollforward_header_cbor) ??
         asBytes(row.header_data) ??
@@ -143,12 +145,12 @@ export class GerolamoChainDb implements IChainDb {
                     if (p) {
                         return new ChainTip({
                             point: p,
-                            blockNo: BigInt(byHash.slot ?? slot),
+                            blockNo: BigInt((Array.isArray(byHash) ? byHash[2] : byHash.slot) ?? slot),
                         });
                     }
                 }
                 const bySlot = await getBlockBySlot(slot);
-                const got = hashHex(bySlot?.block_hash ?? bySlot?.hash);
+                const got = hashHex(Array.isArray(bySlot) ? bySlot[3] : (bySlot?.block_hash ?? bySlot?.hash));
                 if (got && got === want) {
                     const p = pointFromRow(bySlot);
                     if (p) {

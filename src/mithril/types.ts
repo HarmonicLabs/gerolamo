@@ -104,6 +104,13 @@ export type MithrilBootstrapOptions = {
     progressFile?: string;
     /** Parallel chunk downloads (default 8). */
     downloadConcurrency?: number;
+    /**
+     * cardano-node-format block store directory (`<nodeDir>/db`): the downloaded chunks become the
+     * node's block store as they are (hardlinked when --download-dir differs), nothing is applied
+     * into SQLite, and with --ledger-state the ledger tables are imported and the node's selected
+     * tip is set to the state's block. docs/PLAN_CHUNK_STORE.md phase 4.
+     */
+    blockStore?: string;
 };
 
 export type MithrilBootstrapResult = {

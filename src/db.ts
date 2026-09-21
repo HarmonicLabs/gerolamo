@@ -1,4 +1,4 @@
-import { Cbor, CborUInt, LazyCborArray } from "@harmoniclabs/cbor";
+import { Cbor, CborArray, CborUInt, LazyCborArray } from "@harmoniclabs/cbor";
 import { getSqlFilename, sql } from "./sql";
 import { ensureLedgerJournal, undoLedgerJournal } from "./db/ledgerJournal";
 import { outputAddressString } from "./utils/byronAddressString";
@@ -8,9 +8,13 @@ import { BoundedMap } from "./utils/boundedMap";
 import { recentOutputs, rememberRecentOutput, spentRowsStats, type KnownUtxoRow } from "./db/recentOutputs";
 import { logger } from "./utils/logger";
 import { Address as LedgerAddress } from "@harmoniclabs/cardano-ledger-ts";
-import { addDonationToPot, addFeeToPot, ensureLeaderStateTables, recordGenesisDelegation, recordPoolRegistration, recordPoolRetirement, queueMir } from "./db/leaderState";
+import { addDonationToPot, addFeeToPot, ensureLeaderStateTables, recordGenesisDelegation, recordPoolRegistration, recordPoolRelays, recordPoolRetirement, queueMir } from "./db/leaderState";
+import { relayFromLedgerTs } from "./network/ledgerPeers";
 import { stabilityWindowSlots } from "./utils/epochFromSlotCalculations";
 import { ensurePParamsTables, recordUpdateProposal } from "./consensus/pparams";
+import { primaryBlockStore } from "./storage/nodeBlockStore";
+import * as blockReads from "./storage/blockReads";
+import { ledgerGovDirect, ledgerGovReads, ledgerStake, ledgerStakeReads, ledgerUtxoDel, ledgerUtxoPut, ledgerUtxoReads, sqlLedgerWrites } from "./ledger/nodeLedgerStore";
 import { ensureGovernanceTables, recordCommitteeHot, recordCommitteeResign, recordDRepActivity, recordDRepRegistration, recordDRepUnregistration, recordProposals, recordStakeDeregistration, recordVoteDelegation, recordVotes } from "./consensus/governance/state";
 import {
     AllegraTxBody,
@@ -120,7 +124,7 @@ async function insertUtxoDelta(
     action: string,
     utxo: string,
 ): Promise<void> {
-    if (applySkipDeltas()) return;
+    if (applySkipDeltas() || !sqlLedgerWrites()) return;
     pendingDeltaRows.push([blockHash, action, utxo]);
 }
 
@@ -653,6 +657,8 @@ export async function ensureInitialized(): Promise<void> {
 
 /** Local epoch η0 (hex). Null if not yet stored. */
 export async function getEpochNonce(epoch: number): Promise<string | null> {
+    const gr = ledgerGovReads();
+    if (gr) { const n = gr.nonce(epoch); return n && n.nonceHex ? n.nonceHex : null; }
     const rows = await sql`
 		SELECT nonce_hex FROM epoch_nonces WHERE epoch = ${epoch} LIMIT 1
 	`.values();
@@ -670,6 +676,8 @@ export async function getEpochNonceState(epoch: number): Promise<{
     evolving_hex: string | null;
     candidate_hex: string | null;
 } | null> {
+    const gr = ledgerGovReads();
+    if (gr) { const n = gr.nonce(epoch); return n ? { epoch, nonce_hex: n.nonceHex, source: n.source, evolving_hex: n.evolvingHex, candidate_hex: n.candidateHex } : null; }
     const rows = await sql`
 		SELECT epoch, nonce_hex, source, evolving_hex, candidate_hex
 		FROM epoch_nonces WHERE epoch = ${epoch} LIMIT 1
@@ -705,6 +713,8 @@ export async function storeEpochNonce(
     evolvingHex?: string | null,
     candidateHex?: string | null,
 ): Promise<void> {
+    await ledgerGovDirect((g) => { const cur = g.reads.nonce(epoch); g.putNonce(epoch, { nonceHex, source, evolvingHex: evolvingHex ?? null, candidateHex: candidateHex ?? null, startEvolvingHex: cur?.startEvolvingHex ?? null, startCandidateHex: cur?.startCandidateHex ?? null, startSlot: cur?.startSlot ?? null, startLabHex: cur?.startLabHex ?? null }); });
+    if (!sqlLedgerWrites()) return;
     await sql`
 		INSERT INTO epoch_nonces (epoch, nonce_hex, source, evolving_hex, candidate_hex, updated_at)
 		VALUES (
@@ -730,6 +740,7 @@ export async function storeEpochNonce(
  * `block_data` is the BlockFetch payload `[era, block]` as received.
  */
 export async function getBlockByHash(hash: string): Promise<any> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getBlockByHash(bs, hash); }
     // `blocks.hash` has been written both as hex TEXT and as a raw BLOB; match either.
     const hex = hash.toLowerCase();
     const blob = /^[0-9a-f]{64}$/.test(hex) ? Buffer.from(hex, "hex") : null;
@@ -744,6 +755,7 @@ export async function getBlockByHash(hash: string): Promise<any> {
 }
 
 export async function getBlockBySlot(slot: bigint): Promise<any> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getBlockBySlot(bs, slot); }
     const result = await sql`
 			SELECT NULL as id, NULL as chunk_id, slot, hash as block_hash, prev_hash, header_data, block_data, NULL as rollforward_header_cbor, is_valid, inserted_at, block_no
 			FROM blocks WHERE slot = ${slot}
@@ -815,27 +827,31 @@ const BLOCK_LIST_COLS = "slot, hash, prev_hash, block_no, length(block_data), bl
  * blocks of one slot).
  */
 export async function listBlocksDesc(opts: { limit: number; beforeSlot?: number; beforeIsEbb?: boolean }): Promise<BlockListRow[]> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.listBlocksDesc(bs, opts.limit, opts.beforeSlot); }
     const limit = Math.max(1, Math.min(100, Math.trunc(opts.limit)));
+    // Index-driven: `ORDER BY slot DESC` alone walks idx_volatile_slot backwards; adding the
+    // block_no tie-breaker to the SQL made SQLite scan the whole table into a temp b-tree,
+    // reading every block's body (58 GB on preview) — and on the synchronous SQLite client that
+    // stalled the entire node for minutes (2026-09-10 19:22 UTC, producer, one `/api/v0/blocks`
+    // request). Ties (a Byron EBB and the epoch's first block share a slot) are ordered here.
+    const fetch = limit + 1;
     let rows: unknown[][];
     if (opts.beforeSlot == null) {
-        rows = (await sql.unsafe(
-            `SELECT ${BLOCK_LIST_COLS} FROM blocks ORDER BY slot DESC, block_no DESC NULLS LAST LIMIT ${limit}`,
-        ).values()) as unknown[][];
+        rows = (await sql.unsafe(`SELECT ${BLOCK_LIST_COLS} FROM blocks ORDER BY slot DESC LIMIT ${fetch}`).values()) as unknown[][];
     } else if (opts.beforeIsEbb) {
-        rows = (await sql.unsafe(
-            `SELECT ${BLOCK_LIST_COLS} FROM blocks WHERE slot < ${Math.trunc(opts.beforeSlot)} ORDER BY slot DESC, block_no DESC NULLS LAST LIMIT ${limit}`,
-        ).values()) as unknown[][];
+        rows = (await sql.unsafe(`SELECT ${BLOCK_LIST_COLS} FROM blocks WHERE slot < ${Math.trunc(opts.beforeSlot)} ORDER BY slot DESC LIMIT ${fetch}`).values()) as unknown[][];
     } else {
         // cursor was a main block: the EBB of the same slot (if any) comes next
-        rows = (await sql.unsafe(
-            `SELECT ${BLOCK_LIST_COLS} FROM blocks WHERE slot < ${Math.trunc(opts.beforeSlot)} OR (slot = ${Math.trunc(opts.beforeSlot)} AND block_no IS NULL) ORDER BY slot DESC, block_no DESC NULLS LAST LIMIT ${limit}`,
-        ).values()) as unknown[][];
+        rows = (await sql.unsafe(`SELECT ${BLOCK_LIST_COLS} FROM blocks WHERE slot <= ${Math.trunc(opts.beforeSlot)} ORDER BY slot DESC LIMIT ${fetch + 1}`).values()) as unknown[][];
+        rows = rows.filter((r) => Number(r[0]) < Math.trunc(opts.beforeSlot!) || r[3] == null);
     }
-    return rows.map(toBlockListRow);
+    rows.sort((a, b) => Number(b[0]) - Number(a[0]) || (b[3] == null ? -1 : a[3] == null ? 1 : Number(b[3]) - Number(a[3])));
+    return rows.slice(0, limit).map(toBlockListRow);
 }
 
 /** Blocks of one slot range, oldest first (epoch pages). */
 export async function listBlocksInSlotRange(fromSlot: number, toSlotExclusive: number, limit: number, offset = 0): Promise<BlockListRow[]> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.listBlocksInSlotRange(bs, fromSlot, toSlotExclusive, limit, offset); }
     const rows = (await sql`
         SELECT slot, hash, prev_hash, block_no, length(block_data), block_data, header_data FROM blocks
         WHERE slot >= ${Math.trunc(fromSlot)} AND slot < ${Math.trunc(toSlotExclusive)}
@@ -846,10 +862,12 @@ export async function listBlocksInSlotRange(fromSlot: number, toSlotExclusive: n
 }
 
 export async function countBlocksInSlotRange(fromSlot: number, toSlotExclusive: number): Promise<number> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.countBlocksInSlotRange(bs, fromSlot, toSlotExclusive); }
     return countQuery(sql`SELECT COUNT(*) as c FROM blocks WHERE slot >= ${Math.trunc(fromSlot)} AND slot < ${Math.trunc(toSlotExclusive)}`);
 }
 
 export async function getBlockListRowByHash(hashHex: string): Promise<BlockListRow | null> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getBlockListRowByHash(bs, hashHex); }
     const hex = hashHex.toLowerCase();
     const blob = /^[0-9a-f]{64}$/.test(hex) ? Buffer.from(hex, "hex") : null;
     const rows = (await sql`
@@ -861,6 +879,7 @@ export async function getBlockListRowByHash(hashHex: string): Promise<BlockListR
 
 /** The applied block with the highest slot strictly below `slot` (prev hash + slot), or null. */
 export async function getLastBlockBefore(slot: number): Promise<{ slot: number; hash: string; prevHash: string | null } | null> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getLastBlockBefore(bs, slot); }
     const rows = (await sql`SELECT slot, hash, prev_hash FROM blocks WHERE slot < ${slot} AND is_valid = TRUE ORDER BY slot DESC LIMIT 1`.values()) as unknown[][];
     if (!rows.length) return null;
     const r = rows[0]!;
@@ -868,6 +887,7 @@ export async function getLastBlockBefore(slot: number): Promise<{ slot: number; 
 }
 
 export async function getBlockListRowBySlot(slot: number): Promise<BlockListRow | null> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getBlockListRowBySlot(bs, slot); }
     const rows = (await sql`
         SELECT slot, hash, prev_hash, block_no, length(block_data), block_data, header_data FROM blocks
         WHERE slot = ${Math.trunc(slot)} ORDER BY (block_no IS NULL) ASC LIMIT 1
@@ -876,6 +896,7 @@ export async function getBlockListRowBySlot(slot: number): Promise<BlockListRow 
 }
 
 export async function getBlockListRowByHeight(blockNo: number): Promise<BlockListRow | null> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getBlockListRowByHeight(bs, blockNo); }
     const rows = (await sql`
         SELECT slot, hash, prev_hash, block_no, length(block_data), block_data, header_data FROM blocks
         WHERE block_no = ${Math.trunc(blockNo)} LIMIT 1
@@ -885,6 +906,7 @@ export async function getBlockListRowByHeight(blockNo: number): Promise<BlockLis
 
 /** Chain tip for a block producer: highest applied block (slot, number, header hash hex). */
 export async function getChainTip(): Promise<{ slot: bigint; blockNumber: bigint; hashHex: string } | null> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getChainTip(bs); }
     const rows = (await sql`SELECT hash, slot, block_no FROM blocks WHERE is_valid = TRUE ORDER BY slot DESC LIMIT 1`.values()) as unknown[][];
     if (!rows.length) return null;
     const h = rows[0]![0];
@@ -892,7 +914,37 @@ export async function getChainTip(): Promise<{ slot: bigint; blockNumber: bigint
     return { slot: BigInt(String(rows[0]![1])), blockNumber: BigInt(String(rows[0]![2] ?? 0)), hashHex: hashHex.toLowerCase() };
 }
 
+/**
+ * The chain tip with the block number read from the tip block's own header. The `block_no`
+ * column is this node's running count and can drift from the headers (the replay-built
+ * preview DB counts one higher than every header; the snapshot-built one matches): a block
+ * forged from the column carried height 4655119 where the network expected 4655118
+ * (2026-09-12 05:32 UTC) and would have been rejected by every peer. Producers use this.
+ */
+export async function getChainTipFromHeader(): Promise<{ slot: bigint; blockNumber: bigint; hashHex: string; dbBlockNumber: bigint; era: number } | null> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getChainTipFromHeader(bs); }
+    const rows = (await sql`SELECT hash, slot, block_no, block_data FROM blocks WHERE is_valid = TRUE ORDER BY slot DESC LIMIT 1`.values()) as unknown[][];
+    if (!rows.length) return null;
+    const h = rows[0]![0];
+    const hashHex = (h instanceof Uint8Array ? Buffer.from(h).toString("hex") : String(h)).toLowerCase();
+    const dbBlockNumber = BigInt(String(rows[0]![2] ?? 0));
+    let blockNumber = dbBlockNumber;
+    let era = 0;
+    try {
+        const outer = Cbor.parse(rows[0]![3] as Uint8Array);
+        if (outer instanceof CborArray && outer.array[0] instanceof CborUInt) era = Number(outer.array[0].num);
+        if (outer instanceof CborArray && outer.array[0] instanceof CborUInt && Number(outer.array[0].num) >= 2) {
+            const block = outer.array[1];
+            const hdr = block instanceof CborArray ? block.array[0] : null;
+            const body = hdr instanceof CborArray ? hdr.array[0] : null;
+            if (body instanceof CborArray && body.array[0] instanceof CborUInt) blockNumber = BigInt(body.array[0].num);
+        }
+    } catch { /* keep the column */ }
+    return { slot: BigInt(String(rows[0]![1])), blockNumber, hashHex, dbBlockNumber, era };
+}
+
 export async function getMaxBlockNo(): Promise<number> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getMaxBlockNo(bs); }
     const rows = (await sql`SELECT MAX(block_no) FROM blocks`.values()) as unknown[][];
     const v = rows[0]?.[0];
     return v == null ? 0 : Number(v);
@@ -919,7 +971,9 @@ export async function countBlockTxs(hashHex: string): Promise<number> {
     // Not indexed (Byron blocks synced before the Byron indexer, or the index paused while far
     // behind the tip): count the transactions in the stored block bytes.
     try {
-        const rows = (await sql`SELECT block_data FROM blocks WHERE hash = ${hashHex.toLowerCase()} OR hash = ${Buffer.from(hashHex, "hex")}`.values()) as unknown[][];
+        const bs = primaryBlockStore();
+        const fromStore = bs ? await blockReads.getBlockByHash(bs, hashHex) : null;
+        const rows = fromStore ? [[fromStore[6]]] : ((await sql`SELECT block_data FROM blocks WHERE hash = ${hashHex.toLowerCase()} OR hash = ${Buffer.from(hashHex, "hex")}`.values()) as unknown[][]);
         const data = rows[0]?.[0];
         if (data instanceof Uint8Array) return countTxsInBlockBytes(data);
     } catch {
@@ -980,6 +1034,7 @@ export async function backfillBlockHeights(): Promise<{ numbered: number }> {
 
 /** The block we hold at `slot` (hash hex + height), or null — one indexed read, no block bytes. */
 export async function blockAtSlot(slot: bigint): Promise<{ hash: string; blockNo: number } | null> {
+    { const bs = primaryBlockStore(); if (bs) { const r = await blockReads.getBlockBySlot(bs, slot); return r ? { hash: r[3], blockNo: r[10] ?? 0 } : null; } }
     const rows = (await sql`SELECT hash, block_no FROM blocks WHERE slot = ${slot}`.values()) as unknown[][];
     const r = rows[0];
     if (!r) return null;
@@ -988,11 +1043,13 @@ export async function blockAtSlot(slot: bigint): Promise<{ hash: string; blockNo
 
 /** Hex hashes of the stored blocks above `slot` (what a rollback to `slot` removes). */
 export async function blockHashesAbove(slot: bigint | number): Promise<string[]> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.blockHashesAbove(bs, slot); }
     const rows = (await sql`SELECT hash FROM blocks WHERE slot > ${slot}`.values()) as unknown[][];
     return rows.map((r) => String(r[0]).toLowerCase());
 }
 
 export async function getMaxSlot(): Promise<bigint> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getMaxSlot(bs); }
     // Prefer object rows; still tolerate `.values()` array-of-arrays.
     const result = await sql`SELECT MAX(slot) as max_slot FROM blocks`;
     const raw = firstScalar(Array.isArray(result) ? result[0] : result);
@@ -1007,6 +1064,7 @@ export async function getMaxSlot(): Promise<bigint> {
 export async function getRecentBlockHeaders(
     limit: number,
 ): Promise<Array<{ slot: bigint; header_data: Uint8Array }>> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getRecentBlockHeaders(bs, limit); }
     const n = Math.max(1, Math.min(100_000, Math.trunc(limit)));
     const rows = await sql`SELECT slot, header_data FROM blocks WHERE header_data IS NOT NULL AND is_valid = TRUE ORDER BY slot DESC LIMIT ${n}`;
     const out: Array<{ slot: bigint; header_data: Uint8Array }> = [];
@@ -1023,6 +1081,7 @@ export async function getRecentBlockHeaders(
  * resuming ChainSync offers in MsgFindIntersect (see `intersectOffsets`).
  */
 export async function getRecentBlockPoints(limit: number): Promise<Array<{ slot: bigint; hash: unknown }>> {
+    { const bs = primaryBlockStore(); if (bs) return blockReads.getRecentBlockPoints(bs, limit); }
     const n = Math.max(1, Math.min(100_000, Math.trunc(limit)));
     const rows = await sql`SELECT slot, hash FROM blocks WHERE is_valid = TRUE ORDER BY slot DESC LIMIT ${n}`.values();
     const out: Array<{ slot: bigint; hash: unknown }> = [];
@@ -1064,6 +1123,7 @@ export async function insertHeaderBatchVolatile(
     records: Array<HeaderInsertData>,
 ): Promise<void> {
     if (records.length === 0) return;
+    if (primaryBlockStore()) return; // header payloads are served from the block bytes
 
     // Pre-check for dups in batch (debug only; Map prevents)
     const hashes = new Set(records.map((r) => r.headerHash));
@@ -1090,6 +1150,17 @@ export async function insertHeaderBatchVolatile(
 export async function insertBlockVolatile(
     block: BlockInsertData,
 ): Promise<void> {
+    {
+        // Primary block store: the block goes to the volatile files and becomes the selected tip at once
+        // (the "applied tip" every reader sees); SQLite rows are no longer written.
+        const bs = primaryBlockStore();
+        if (bs) {
+            const hash = typeof block.blockHash === "string" ? Uint8Array.from(Buffer.from(block.blockHash, "hex")) : (block.blockHash as Uint8Array);
+            await bs.put(block.blockData as Uint8Array, hash);
+            blockReads.setSelectedTipHash(hash);
+            return;
+        }
+    }
     // Volatile store is table `blocks` (not volatile_blocks).
     await sql`
 			INSERT INTO blocks (hash, slot, prev_hash, header_data, block_data, is_valid, block_no)
@@ -1259,6 +1330,7 @@ export async function getUtxosByRefs(
 
 /** How many of these UTxOs carry a reference script (Babbage+ script lookup source). */
 export async function countUtxosWithReferenceScript(utxoRefs: string[]): Promise<number> {
+    { const lr = ledgerUtxoReads(); if (lr) return lr.refsWithReferenceScript(utxoRefs); }
     if (utxoRefs.length === 0) return 0;
     return countQuery(sql`
         SELECT COUNT(*) as c FROM utxo
@@ -1270,6 +1342,7 @@ export async function countUtxosWithReferenceScript(utxoRefs: string[]): Promise
 export async function getUtxoByRef(
     utxoRef: string,
 ): Promise<{ utxo_ref: string; tx_out: string } | null> {
+    { const lr = ledgerUtxoReads(); if (lr) { const r = lr.get(utxoRef); return r ? { utxo_ref: r.utxo_ref, tx_out: r.tx_out } : null; } }
     const result =
         await sql`SELECT utxo_ref, tx_out FROM utxo WHERE utxo_ref = ${utxoRef}`
             .values();
@@ -1279,6 +1352,7 @@ export async function getUtxoByRef(
 export async function getUtxosByTxHash(
     txHash: string,
 ): Promise<Array<{ utxo_ref: string; tx_out: string }>> {
+    { const lr = ledgerUtxoReads(); if (lr) return lr.byTxHash(txHash).map((r) => ({ utxo_ref: r.utxo_ref, tx_out: r.tx_out })); }
     return await sql`SELECT utxo_ref, tx_out FROM utxo WHERE tx_hash = ${txHash} ORDER BY CAST(substr(utxo_ref, 66) AS INTEGER)`
         .values() as Array<{ utxo_ref: string; tx_out: string }>;
 }
@@ -1291,6 +1365,12 @@ export async function getUtxosByTxHash(
 export async function getUtxosByAddress(
     address: string,
 ): Promise<Array<{ utxo_ref: string; tx_out: string; tx_hash: string }>> {
+    const ur = ledgerUtxoReads();
+    if (ur) {
+        return ur.byAddress(address)
+            .map((u) => ({ utxo_ref: u.utxo_ref, tx_out: u.tx_out, tx_hash: u.tx_hash ?? u.utxo_ref.slice(0, 64) }))
+            .sort((a, b) => (a.tx_hash < b.tx_hash ? -1 : a.tx_hash > b.tx_hash ? 1 : Number(a.utxo_ref.slice(65)) - Number(b.utxo_ref.slice(65))));
+    }
     const rows = await sql`
         SELECT utxo_ref, tx_out, tx_hash
         FROM utxo
@@ -1334,6 +1414,14 @@ export async function getReferenceScriptCborByHash(
     }
     const cached = referenceScriptCache.get(expected);
     if (cached) return cached;
+    const ur = ledgerUtxoReads();
+    if (ur) {
+        for (const u of ur.byReferenceScript(expected)) {
+            const parsed = parseStoredTxOut(u.tx_out);
+            if (parsed.scriptRefCbor) { referenceScriptCache.set(expected, parsed.scriptRefCbor); return parsed.scriptRefCbor; }
+        }
+        return null;
+    }
 
     const exactRows = await sql`
         SELECT tx_out
@@ -1409,6 +1497,8 @@ export async function getLatestProtocolParams(): Promise<unknown | null> {
 export async function getAllStake(): Promise<
     Array<{ stake_credentials: Uint8Array; amount: number }>
 > {
+    const lr = ledgerStakeReads();
+    if (lr) return [...lr.registeredStakeKeys()].map((h) => ({ stake_credentials: Uint8Array.from(Buffer.from(h.length === 58 ? h.slice(2) : h, "hex")), amount: 0 }));
     // Bun SQL .values() returns row arrays [[cred, amount], ...], not objects.
     // Callers (BlockBodyValidator) destructure { stake_credentials, amount }.
     const rows = await sql`SELECT stake_credentials, amount FROM stake`
@@ -1430,6 +1520,8 @@ export async function getAllStake(): Promise<
 export async function getAllDelegations(): Promise<
     Array<{ stake_credentials: Uint8Array; pool_key_hash: Uint8Array }>
 > {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.allDelegations().map(([h, p]) => ({ stake_credentials: Uint8Array.from(Buffer.from(h.length === 58 ? h.slice(2) : h, "hex")), pool_key_hash: Uint8Array.from(Buffer.from(p, "hex")) }));
     // Same Bun .values() dual-shape trap as getAllStake / getUtxosByRefs.
     const rows =
         await sql`SELECT stake_credentials, pool_key_hash FROM delegations`
@@ -1643,6 +1735,11 @@ export async function ensureOrphanedDeltasReverted(): Promise<void> {
     await sql`CREATE TABLE IF NOT EXISTS schema_migrations (name TEXT PRIMARY KEY, applied_at DATETIME DEFAULT CURRENT_TIMESTAMP)`;
     const done = (await sql`SELECT 1 FROM schema_migrations WHERE name = 'orphaned_utxo_deltas_reverted'`.values()) as unknown[][];
     if (done.length) return;
+    if (primaryBlockStore()) {
+        // The `blocks` table is frozen in primary mode: every new block's deltas would look orphaned.
+        await sql`INSERT OR REPLACE INTO schema_migrations (name) VALUES ('orphaned_utxo_deltas_reverted')`;
+        return;
+    }
     const t0 = performance.now();
     const rows = (await sql`
         SELECT d.id, d.action, d.utxo, d.block_hash FROM utxo_deltas d
@@ -1727,6 +1824,8 @@ export async function dropPointerStakeForConway(client?: SqlClient): Promise<{ o
 
 /** Typed stake key registered at a pointer's position, or null when nothing was registered there. */
 export async function resolveStakePointer(db: SqlClient, ptr: { slot: number; txIx: number; certIx: number }): Promise<string | null> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.pointer(ptr.slot, ptr.txIx, ptr.certIx);
     const rows = (await db`SELECT stake_key FROM stake_pointers WHERE slot = ${ptr.slot} AND tx_ix = ${ptr.txIx} AND cert_ix = ${ptr.certIx}`.values()) as unknown[][];
     return rows.length ? String(rows[0]![0]) : null;
 }
@@ -1822,7 +1921,8 @@ async function upsertUtxoRow(
 ): Promise<void> {
     // queued; written by flushPendingUtxoWrites before the next utxo read / at block end
     void db;
-    pendingUtxoRows.push([utxoRef, txOut, txHash, cols.address, cols.lovelace, cols.referenceScriptHash, cols.stakeKey]);
+    if (sqlLedgerWrites()) pendingUtxoRows.push([utxoRef, txOut, txHash, cols.address, cols.lovelace, cols.referenceScriptHash, cols.stakeKey]);
+    ledgerUtxoPut({ utxo_ref: utxoRef, tx_out: txOut, tx_hash: txHash, address: cols.address, lovelace: cols.lovelace, reference_script_hash: cols.referenceScriptHash, stake_key: cols.stakeKey }); // LMDB ledger store (dual / lmdb modes)
 }
 
 function parseUtxoDelta(raw: unknown): {
@@ -1889,7 +1989,9 @@ export async function getStakeByCredentials(
     creds: Array<Uint8Array | StakeCredRef>,
 ): Promise<Array<{ stake_credentials: Uint8Array; cred_type: number; amount: number }>> {
     const out: Array<{ stake_credentials: Uint8Array; cred_type: number; amount: number }> = [];
+    const lr = ledgerStakeReads();
     for (const cred of distinctCredentials(creds)) {
+        if (lr) { if (lr.isRegistered(typedCredHex(cred.type, toHex(cred.hash)))) out.push({ stake_credentials: cred.hash, cred_type: cred.type, amount: 0 }); continue; }
         // A legacy row (cred_type NULL) matches either type.
         const rows = await sql`SELECT stake_credentials, amount FROM stake WHERE stake_credentials = ${cred.hash} AND (cred_type IS NULL OR cred_type = ${cred.type})`
             .values() as any[];
@@ -1907,7 +2009,9 @@ export async function getDelegationsByCredentials(
     creds: Array<Uint8Array | StakeCredRef>,
 ): Promise<Array<{ stake_credentials: Uint8Array; cred_type: number; pool_key_hash: Uint8Array }>> {
     const out: Array<{ stake_credentials: Uint8Array; cred_type: number; pool_key_hash: Uint8Array }> = [];
+    const lr = ledgerStakeReads();
     for (const cred of distinctCredentials(creds)) {
+        if (lr) { const p = lr.delegationOf(typedCredHex(cred.type, toHex(cred.hash))); if (p) out.push({ stake_credentials: cred.hash, cred_type: cred.type, pool_key_hash: Uint8Array.from(Buffer.from(p, "hex")) }); continue; }
         const rows = await sql`SELECT stake_credentials, pool_key_hash FROM delegations WHERE stake_credentials = ${cred.hash} AND (cred_type IS NULL OR cred_type = ${cred.type})`
             .values() as any[];
         for (const row of rows) {
@@ -2058,8 +2162,10 @@ export function newBlockSpends(): BlockSpends { return { refs: [], expected: 0, 
  */
 export async function deleteBlockSpends(db: SqlClient, spends: BlockSpends): Promise<number> {
     if (spends.refs.length === 0) return 0;
+    const goneInStore = ledgerUtxoDel(spends.refs); // LMDB ledger store (dual / lmdb modes)
     const returned = new Set<string>();
-    for (let i = 0; i < spends.refs.length; i += 2000) {
+    if (!sqlLedgerWrites()) for (const r of goneInStore) returned.add(r); // SQLite no longer written: the store's deletions are the truth
+    else for (let i = 0; i < spends.refs.length; i += 2000) {
         const chunk = spends.refs.slice(i, i + 2000);
         const rows = (await db`DELETE FROM utxo WHERE utxo_ref IN ${db(chunk)} RETURNING utxo_ref`.values()) as unknown[][];
         for (const r of rows) returned.add(String(r[0]));
@@ -2085,7 +2191,10 @@ export async function loadSpentRows(db: SqlClient, inputRefs: string[], known?: 
         missing.push(ref);
     }
     spentRowsStats.db += missing.length;
-    if (missing.length) {
+    const ur = ledgerUtxoReads();
+    if (missing.length && ur) {
+        for (const u of ur.getMany(missing)) out.push({ utxo_ref: u.utxo_ref, tx_out: u.tx_out, tx_hash: u.tx_hash, address: u.address });
+    } else if (missing.length) {
         const rows = await db`SELECT utxo_ref, tx_out, tx_hash, address FROM utxo WHERE utxo_ref IN ${db(missing)}` as any[];
         for (const row of rows) {
             out.push(Array.isArray(row)
@@ -2412,7 +2521,7 @@ export async function applyCertificates(
             const c: any = certs[ci];
             if (!certStakeEffect(Number(c?.certType)).registers) continue;
             const key = typedCredHexOf(c?.stakeCredential);
-            if (key) await db`INSERT OR REPLACE INTO stake_pointers (slot, tx_ix, cert_ix, stake_key) VALUES (${ctx.slot}, ${ctx.txIndex}, ${ci}, ${key})`;
+            if (key) { ledgerStake()?.putPointer(ctx.slot, ctx.txIndex, ci, key); if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO stake_pointers (slot, tx_ix, cert_ix, stake_key) VALUES (${ctx.slot}, ${ctx.txIndex}, ${ci}, ${key})`; }
         }
     }
     // Header-rule state: registered pools with their VRF keys, retirements by
@@ -2430,6 +2539,11 @@ export async function applyCertificates(
                 if (t === 3 && c.poolParams?.operator && c.poolParams?.vrfKeyHash) {
                     const pp = c.poolParams;
                     const margin = pp.margin ?? {};
+                    // the pool's relays feed the peer governor's ledger-peer source (not ledger state: not journaled)
+                    try {
+                        const relays = ((pp.relays ?? []) as any[]).map(relayFromLedgerTs).filter((r): r is { host: string; port: number } => !!r);
+                        await recordPoolRelays(db, String(pp.operator.toString()), relays, ctx.slot);
+                    } catch (err) { logger.warn(`pool relays not recorded for ${String(pp.operator?.toString?.() ?? "?").slice(0, 12)}…:`, err); }
                     await recordPoolRegistration(db, String(pp.operator.toString()), String(pp.vrfKeyHash.toString()), ctx.slot, {
                         pledge: String(pp.pledge ?? 0),
                         cost: String(pp.cost ?? 0),
@@ -2511,20 +2625,28 @@ export async function applyCertificates(
         const fx = certStakeEffect(Number(cert.certType));
         // (type, hash) keys a stake credential; a legacy row with cred_type NULL matches either type.
         const credType = certAny.stakeCredential ? (Number(certAny.stakeCredential.type) === 1 ? 1 : 0) : 0;
+        const typedHex = stakeCred ? typedCredHex(credType, toHex(stakeCred)) : null;
         if (stakeCred && fx.registers) {
-            await db`INSERT OR REPLACE INTO stake (stake_credentials, cred_type, amount) VALUES (${stakeCred}, ${credType}, 0)`;
+            if (typedHex) ledgerStake()?.registerStake(typedHex);
+            if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO stake (stake_credentials, cred_type, amount) VALUES (${stakeCred}, ${credType}, 0)`;
         }
         if (stakeCred && fx.deregisters) {
-            await db`DELETE FROM stake WHERE stake_credentials = ${stakeCred} AND (cred_type IS NULL OR cred_type = ${credType})`;
-            await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred} AND (cred_type IS NULL OR cred_type = ${credType})`;
+            if (typedHex) ledgerStake()?.deregisterStake(typedHex);
+            if (sqlLedgerWrites()) {
+                await db`DELETE FROM stake WHERE stake_credentials = ${stakeCred} AND (cred_type IS NULL OR cred_type = ${credType})`;
+                await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred} AND (cred_type IS NULL OR cred_type = ${credType})`;
+            }
             if (!ctx) await recordStakeDeregistration(db, certAny.stakeCredential); // bug 89: the DRep delegation goes too (with ctx: done in order above)
         }
         if (stakeCred && fx.delegatesToPool) {
             const poolKh = certAny.poolKeyHash?.toBuffer();
             if (poolKh) {
                 // one row per credential: a re-delegation replaces the previous one
-                await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred} AND (cred_type IS NULL OR cred_type = ${credType})`;
-                await db`INSERT INTO delegations (stake_credentials, cred_type, pool_key_hash) VALUES (${stakeCred}, ${credType}, ${poolKh})`;
+                if (typedHex) ledgerStake()?.delegate(typedHex, toHex(poolKh));
+                if (sqlLedgerWrites()) {
+                    await db`DELETE FROM delegations WHERE stake_credentials = ${stakeCred} AND (cred_type IS NULL OR cred_type = ${credType})`;
+                    await db`INSERT INTO delegations (stake_credentials, cred_type, pool_key_hash) VALUES (${stakeCred}, ${credType}, ${poolKh})`;
+                }
             }
         }
         switch (cert.certType) {
@@ -2535,13 +2657,13 @@ export async function applyCertificates(
                         pool_id: toHex(poolId),
                         active_stake: "0",
                     });
-                    await db`UPDATE pool_distr SET pools = json_insert(pools, "$[#]", json(${newPoolJson})) WHERE id = 1`;
+                    if (sqlLedgerWrites()) await db`UPDATE pool_distr SET pools = json_insert(pools, "$[#]", json(${newPoolJson})) WHERE id = 1`;
                 }
                 break;
             case 4: // CertificateType.PoolRetirement
                 const retiringPoolId = certAny.poolHash?.toBuffer();
                 if (retiringPoolId) {
-                    await db`UPDATE pool_distr SET pools = (SELECT json_group_array(json(value)) FROM json_each(pools) WHERE json_extract(value, '$.pool_id') != ${
+                    if (sqlLedgerWrites()) await db`UPDATE pool_distr SET pools = (SELECT json_group_array(json(value)) FROM json_each(pools) WHERE json_extract(value, '$.pool_id') != ${
                         toHex(retiringPoolId)
                     }) WHERE id = 1`;
                 }
@@ -2574,7 +2696,10 @@ export async function applyInvalidTransaction(
     }
     let consumed = 0n;
     if (refs.length) {
-        const rows = (await db`SELECT utxo_ref, tx_out, tx_hash, lovelace FROM utxo WHERE utxo_ref IN ${db(refs)}`) as any[];
+        const ur = ledgerUtxoReads();
+        const rows = ur
+            ? ur.getMany(refs).map((u) => [u.utxo_ref, u.tx_out, u.tx_hash, u.lovelace]) as any[]
+            : (await db`SELECT utxo_ref, tx_out, tx_hash, lovelace FROM utxo WHERE utxo_ref IN ${db(refs)}`) as any[];
         assertInputsPresent(refs, rows, txId);
         for (const row of rows) {
             const utxo_ref = Array.isArray(row) ? String(row[0]) : String(row.utxo_ref);
@@ -2584,7 +2709,8 @@ export async function applyInvalidTransaction(
             consumed += BigInt(String(lovelace ?? 0));
             await insertUtxoDelta(db, blockHash, "spend", packUtxoDelta({ utxo_ref, tx_out, tx_hash }));
         }
-        await db`DELETE FROM utxo WHERE utxo_ref IN ${db(refs)}`;
+        ledgerUtxoDel(refs); // the collateral leaves the LMDB UTxO set too (phase-2-invalid transaction)
+        if (sqlLedgerWrites()) await db`DELETE FROM utxo WHERE utxo_ref IN ${db(refs)}`;
     }
     const ret: any = body.collateralReturn;
     let returned = 0n;
@@ -2650,7 +2776,8 @@ export async function applyWithdrawals(
 ): Promise<void> {
     const db = client ?? sql;
     for (const { stakeCred, amount } of withdrawalEntries(withdrawals)) {
-        await db`UPDATE rewards SET amount = amount - ${amount.toString()} WHERE stake_credentials = ${stakeCred}`;
+        ledgerStake()?.debitReward(toHex(stakeCred), amount);
+        if (sqlLedgerWrites()) await db`UPDATE rewards SET amount = amount - ${amount.toString()} WHERE stake_credentials = ${stakeCred}`;
         // Bun SQLite rejects multi-row VALUES ${sql([...])} — row-by-row.
         await insertUtxoDelta(
             db,
@@ -2681,6 +2808,7 @@ async function countQuery(q: Promise<any>): Promise<number> {
  */
 /** Blocks strictly after `slot` (what a rollback to `slot` would discard). */
 export async function countBlocksAfterSlot(slot: bigint): Promise<number> {
+    { const bs = primaryBlockStore(); if (bs) return (await blockReads.blockHashesAbove(bs, slot)).length; }
     return countQuery(sql`SELECT COUNT(*) as c FROM blocks WHERE slot > ${slot}`);
 }
 
@@ -2715,8 +2843,13 @@ export async function rollbackChainTo(
     // raw 32-byte blob: match the deltas through hex(), never by direct comparison (the
     // direct join matched nothing, so rollbacks left every spent input missing and every
     // created output in place — mainnet slot 5753400).
-    const goneHashes = ((await sql`SELECT hash FROM blocks WHERE slot > ${slot}`.values()) as unknown[][])
-        .map((r) => String(r[0]).toLowerCase());
+    const primary = primaryBlockStore();
+    const goneHashes = primary
+        ? await blockReads.blockHashesAbove(primary, slot)
+        : ((await sql`SELECT hash FROM blocks WHERE slot > ${slot}`.values()) as unknown[][]).map((r) => String(r[0]).toLowerCase());
+    // Slot of each gone block (the delta rows are reverted newest first): from the store in primary mode.
+    const goneSlot = new Map<string, number>();
+    if (primary) for (const h of goneHashes) { const b = await primary.byHash(Uint8Array.from(Buffer.from(h, "hex"))); if (b) goneSlot.set(h, b.slot); }
 
     {
         // The epoch boundary's reward update, snapshot and parameter derivation are not
@@ -2745,12 +2878,18 @@ export async function rollbackChainTo(
     // Capture deltas before delete — newest first so reverse order is natural
     const deltaRows: any[] = [];
     for (const h of goneHashes) {
-        const rows = (await sql`
-            SELECT d.action, d.utxo, d.id, b.slot
-            FROM utxo_deltas d
-            INNER JOIN blocks b ON b.hash = ${h}
-            WHERE d.block_hash = ${Buffer.from(h, "hex")} OR d.block_hash = ${h}
-        `.values()) as unknown[][];
+        const rows = primary
+            ? ((await sql`
+                SELECT d.action, d.utxo, d.id, ${goneSlot.get(h) ?? 0} AS slot
+                FROM utxo_deltas d
+                WHERE d.block_hash = ${Buffer.from(h, "hex")} OR d.block_hash = ${h}
+            `.values()) as unknown[][])
+            : ((await sql`
+                SELECT d.action, d.utxo, d.id, b.slot
+                FROM utxo_deltas d
+                INNER JOIN blocks b ON b.hash = ${h}
+                WHERE d.block_hash = ${Buffer.from(h, "hex")} OR d.block_hash = ${h}
+            `.values()) as unknown[][]);
         for (const r of rows) deltaRows.push(r);
     }
     // newest first so the reverse order is natural
@@ -2839,6 +2978,7 @@ export const VOLATILE_GC_K = 2160;
  * applier every few thousand blocks instead of per insert.
  */
 export async function gcVolatile(k: number = VOLATILE_GC_K): Promise<{ blocks: number; headers: number }> {
+    if (primaryBlockStore()) return { blocks: 0, headers: 0 }; // the block store garbage-collects on promotion
     const b = await sql`DELETE FROM blocks WHERE is_valid = FALSE AND slot < (SELECT MAX(slot) - ${k} FROM blocks)`;
     const h = await sql`DELETE FROM volatile_headers WHERE is_valid = FALSE AND slot < (SELECT MAX(slot) - ${k} FROM volatile_headers)`;
     const n = (r: unknown) => Number((r as { count?: number })?.count ?? 0);
@@ -2910,6 +3050,7 @@ export async function getGenesisUtxoStats(): Promise<{ total: number; unspent: n
 }
 
 export async function getUtxoCount(): Promise<number> {
+    { const lr = ledgerUtxoReads(); if (lr) return lr.count(); }
     return countQuery(sql`SELECT COUNT(*) as c FROM utxo`);
 }
 
@@ -2937,6 +3078,7 @@ export function getGenesisUtxoStatsCached(ttlMs = 60_000): Promise<{ total: numb
 /** True when a block with this header hash is applied (volatile or immutable). Fetches no blob. */
 export async function blockExists(hash: string): Promise<boolean> {
     const hex = hash.toLowerCase();
+    { const bs = primaryBlockStore(); if (bs) return blockReads.hasOnSelectedChain(bs, hex); }
     const blob = /^[0-9a-f]{64}$/.test(hex) ? Buffer.from(hex, "hex") : null;
     const rows = (await sql`SELECT 1 FROM blocks WHERE hash = ${hex} OR hash = ${blob}
         UNION ALL SELECT 1 FROM immutable_blocks WHERE block_hash = ${hex} OR block_hash = ${blob} LIMIT 1`.values()) as unknown[][];
@@ -3295,7 +3437,8 @@ export async function applyByronTxPayload(
             );
         }
         if (existingUtxos.length > 0) {
-            await db`DELETE FROM utxo WHERE utxo_ref IN ${db(inputRefs)}`;
+            ledgerUtxoDel(inputRefs);
+            if (sqlLedgerWrites()) await db`DELETE FROM utxo WHERE utxo_ref IN ${db(inputRefs)}`;
         }
     }
 
@@ -3387,10 +3530,14 @@ async function ensureEpochNonceStartColumns(): Promise<void> {
 /** The evolver state right after TICKN into `epoch` (ηv, ηc at the epoch start), for header replay after a restart or rollback. */
 export async function storeEpochNonceStart(epoch: number, etaVHex: string, etaCHex: string): Promise<void> {
     await ensureEpochNonceStartColumns();
+    await ledgerGovDirect((g) => g.updateNonce(epoch, { startEvolvingHex: etaVHex, startCandidateHex: etaCHex }));
+    if (!sqlLedgerWrites()) return;
     await sql`UPDATE epoch_nonces SET start_evolving_hex = ${etaVHex}, start_candidate_hex = ${etaCHex} WHERE epoch = ${epoch}`;
 }
 
 export async function getEpochNonceStart(epoch: number): Promise<{ etaVHex: string; etaCHex: string; startSlot: number | null; labHex: string | null } | null> {
+    const gr = ledgerGovReads();
+    if (gr) { const n = gr.nonce(epoch); return n && n.startEvolvingHex != null && n.startCandidateHex != null ? { etaVHex: n.startEvolvingHex, etaCHex: n.startCandidateHex, startSlot: n.startSlot, labHex: n.startLabHex } : null; }
     await ensureEpochNonceStartColumns();
     const rows = (await sql`SELECT start_evolving_hex, start_candidate_hex, start_slot, start_lab_hex FROM epoch_nonces WHERE epoch = ${epoch}`.values()) as unknown[][];
     if (!rows.length || rows[0]![0] == null || rows[0]![1] == null) return null;
@@ -3399,6 +3546,13 @@ export async function getEpochNonceStart(epoch: number): Promise<{ etaVHex: stri
 
 /** Stored blocks with `from <= slot <= to`, ascending, in chunks (header replay). */
 export async function* storedBlocksInSlotRange(from: number, to: number, chunk = 2000): AsyncGenerator<{ slot: number; block_data: Uint8Array }> {
+    {
+        const bs = primaryBlockStore();
+        if (bs) {
+            for await (const b of blockReads.selectedChain(bs, from, to)) yield { slot: b.slot, block_data: b.bytes };
+            return;
+        }
+    }
     let cursor = from - 1;
     for (;;) {
         const rows = (await sql`SELECT slot, block_data FROM blocks WHERE slot > ${cursor} AND slot <= ${to} AND is_valid = TRUE ORDER BY slot LIMIT ${chunk}`.values()) as unknown[][];

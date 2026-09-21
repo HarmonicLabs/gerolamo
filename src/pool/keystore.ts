@@ -318,7 +318,11 @@ export function checkOperationalCert(oc: OperationalCert, input: OpcertCheckInpu
     if (input.currentKesPeriod < cert.kesPeriod) return { ok: false, reason: `KES period ${cert.kesPeriod} starts after the current period ${input.currentKesPeriod}` };
     if (input.currentKesPeriod >= cert.kesPeriod + input.maxKesEvolutions) return { ok: false, reason: `KES key expired: period ${cert.kesPeriod} + ${input.maxKesEvolutions} evolutions ≤ current ${input.currentKesPeriod}` };
     if (input.lastOnChainCounter != null) {
-        if (cert.counter <= input.lastOnChainCounter) return { ok: false, reason: `counter ${cert.counter} not above last on-chain counter ${input.lastOnChainCounter}` };
+        // OCERT: the counter must be at least the last one the chain saw for this pool and at
+        // most one above it. Equal is the normal case: one certificate serves every block until
+        // the operator rotates it (2026-09-12 06:35 UTC: our own first accepted block recorded
+        // counter 0 and the producer refused to restart with the same certificate).
+        if (cert.counter < input.lastOnChainCounter) return { ok: false, reason: `counter ${cert.counter} below last on-chain counter ${input.lastOnChainCounter}` };
         if (cert.counter > input.lastOnChainCounter + 1n) return { ok: false, reason: `counter ${cert.counter} skips ahead of last on-chain counter ${input.lastOnChainCounter} (must be +1)` };
     }
     return { ok: true, evolution: Number(input.currentKesPeriod - cert.kesPeriod) };

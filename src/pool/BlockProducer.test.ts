@@ -285,6 +285,27 @@ describe("BlockProducer forge fallback", () => {
         expect(dropped).toContain(Buffer.from(blake2b_256(txs[1]!)).toString("hex"));
         rmSync(dir, { recursive: true, force: true });
     }, 60_000);
+
+    test("a validating mempool's snapshot for the slot replaces mempoolTxs + txSanity", async () => {
+        const dir = mkdtempSync(join(tmpdir(), "gerolamo-producer-"));
+        const clock = { now: slotStartMs(FIRST, "preview") + 100 };
+        const adopted: Uint8Array[] = [];
+        const txs = (await fixtureTxs()).slice(0, 2);
+        const node = fakeNode(clock, 300n, adopted);
+        const asked: bigint[] = [];
+        node.mempoolTxs = async () => { throw new Error("mempoolTxs must not be read when a snapshot exists"); };
+        node.txSanity = async () => { throw new Error("txSanity must not run on a validated snapshot"); };
+        node.mempoolSnapshot = async (slot) => { asked.push(slot); return [{ hash: new Uint8Array(blake2b_256(txs[0]!)), bytes: txs[0]! }]; };
+        const producer = new BlockProducer(keyFiles(dir), node);
+        await producer.start(); await producer.ready; producer.stop();
+        const first = [...(producer as any).leaderSlots.keys()].map(BigInt).sort((a: bigint, b: bigint) => (a < b ? -1 : 1))[0]!;
+        clock.now = slotStartMs(first, "preview") + 200;
+        await (producer as any).onSlot(first, clock.now);
+        expect(asked).toEqual([first]);
+        expect(adopted.length).toBe(1);
+        expect(txCountOf(adopted[0]!)).toBe(1);
+        rmSync(dir, { recursive: true, force: true });
+    }, 60_000);
 });
 
 describe("BlockProducer schedule cache", () => {

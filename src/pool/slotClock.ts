@@ -20,6 +20,12 @@ export interface SlotClockOptions {
 /** Slot whose window contains `nowMs` (Shelley slots: 1 s). */
 export function slotAt(nowMs: number, network: EpochNetwork): bigint {
     const g = geometry(network);
+    if (g.byronSlotMs != null || g.shelleySlotMs != null) { // a custom network's slot lengths (genesis)
+        const byronMs = Number(g.byronSlotMs ?? 20_000n), shelleyMs = Number(g.shelleySlotMs ?? 1_000n);
+        const startMs = slotToUnixTime(g.shelleyStartSlot, network) * 1000;
+        if (nowMs < startMs) return BigInt(Math.floor((nowMs - Number(g.systemStartUnix) * 1000) / byronMs));
+        return g.shelleyStartSlot + BigInt(Math.floor((nowMs - startMs) / shelleyMs));
+    }
     const sec = Math.floor(nowMs / 1000);
     const shelleyStartSec = slotToUnixTime(g.shelleyStartSlot, network);
     if (sec < shelleyStartSec) return BigInt(Math.floor((sec - Number(g.systemStartUnix)) / 20));
@@ -31,7 +37,8 @@ export function slotStartMs(slot: bigint, network: EpochNetwork): number {
 }
 
 export function slotLengthMs(slot: bigint, network: EpochNetwork): number {
-    return slot < geometry(network).shelleyStartSlot ? 20_000 : 1_000;
+    const g = geometry(network);
+    return slot < g.shelleyStartSlot ? Number(g.byronSlotMs ?? 20_000n) : Number(g.shelleySlotMs ?? 1_000n);
 }
 
 function geometry(network: EpochNetwork) {

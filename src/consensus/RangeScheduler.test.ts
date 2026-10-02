@@ -292,3 +292,49 @@ describe("RangeScheduler", () => {
         expect(s.stats().inFlight).toBe(0);
     });
 });
+
+describe("RangeScheduler: no silent stall, superseded ranges (bugs 284, 285)", () => {
+    test("a range nobody may serve is asked for again instead of sleeping forever", async () => {
+        const saved = RangeScheduler.RETRY_NO_PEER_MS;
+        RangeScheduler.RETRY_NO_PEER_MS = 20;
+        try {
+            let eligible: string[] = [];
+            const applied: bigint[] = [];
+            const s = new RangeScheduler<Pt, Blk>({
+                maxInFlight: 2,
+                pickPeers: () => eligible,
+                fetch: honestFetch(),
+                verify,
+                onRange: async (points) => { applied.push(points[0]!.slot); },
+            });
+            const r = s.submit(pts(0, 2));
+            await sleep(50);
+            expect(applied).toEqual([]);
+            expect(s.stats().noPeerWaits).toBeGreaterThanOrEqual(1);
+            eligible = ["primary"]; // e.g. the primary's stale divergence was cleared
+            await r.applied;
+            expect(applied).toEqual([0n]);
+        } finally {
+            RangeScheduler.RETRY_NO_PEER_MS = saved;
+        }
+    });
+
+    test("stillCurrent turns false for the range being applied when reset() drops it", async () => {
+        let release!: () => void;
+        const gate = new Promise<void>((r) => { release = r; });
+        const seen: boolean[] = [];
+        const s = new RangeScheduler<Pt, Blk>({
+            maxInFlight: 1,
+            pickPeers: () => ["p"],
+            fetch: honestFetch(),
+            verify,
+            onRange: async (_points, _blocks, _peer, stillCurrent) => { seen.push(stillCurrent()); await gate; seen.push(stillCurrent()); },
+        });
+        void s.submit(pts(0, 1)).applied.catch(() => undefined);
+        while (seen.length === 0) await sleep(2);
+        s.reset("primary outvoted");
+        release();
+        while (seen.length < 2) await sleep(2);
+        expect(seen).toEqual([true, false]);
+    });
+});

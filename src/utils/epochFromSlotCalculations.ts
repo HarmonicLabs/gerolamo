@@ -12,7 +12,7 @@ import { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
  * The active network is set once at startup (`setEpochNetwork`); the legacy
  * `calculatePreProdCardanoEpoch` / `getFirstSlotOfEpoch` names delegate to it.
  */
-export type EpochNetwork = "mainnet" | "preprod" | "preview";
+export type EpochNetwork = "mainnet" | "preprod" | "preview" | "custom";
 
 export interface EpochGeometry {
     /** Unix seconds of slot 0 (the network's systemStart). */
@@ -23,22 +23,44 @@ export interface EpochGeometry {
     /** Epoch number of that first Shelley epoch. */
     shelleyStartEpoch: bigint;
     shelleySlotsPerEpoch: bigint;
+    /** Slot lengths in ms (20 000 / 1 000 on every public network). */
+    byronSlotMs?: bigint;
+    shelleySlotMs?: bigint;
+    /** Shelley stability window 3k/f in slots (mainnet/preprod 129 600, preview 25 920). */
+    stabilityWindow?: bigint;
 }
 
 export const EPOCH_GEOMETRY: Record<EpochNetwork, EpochGeometry> = {
     // Shelley HF at epoch 208 (slot 208 × 21 600 = 4 492 800), 2020-07-29.
-    mainnet: { systemStartUnix: 1_506_203_091n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 4_492_800n, shelleyStartEpoch: 208n, shelleySlotsPerEpoch: 432_000n },
+    mainnet: { systemStartUnix: 1_506_203_091n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 4_492_800n, shelleyStartEpoch: 208n, shelleySlotsPerEpoch: 432_000n, stabilityWindow: 129_600n },
     // Confirmed via Blockfrost: /blocks/slot/86400 → epoch 4, epoch_slot 0.
-    preprod: { systemStartUnix: 1_655_769_600n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 86_400n, shelleyStartEpoch: 4n, shelleySlotsPerEpoch: 432_000n },
+    preprod: { systemStartUnix: 1_655_769_600n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 86_400n, shelleyStartEpoch: 4n, shelleySlotsPerEpoch: 432_000n, stabilityWindow: 129_600n },
     // Preview started in Shelley-era rules (no Byron epochs), 86 400-slot epochs.
-    preview: { systemStartUnix: 1_666_656_000n, byronSlotsPerEpoch: 86_400n, shelleyStartSlot: 0n, shelleyStartEpoch: 0n, shelleySlotsPerEpoch: 86_400n },
+    preview: { systemStartUnix: 1_666_656_000n, byronSlotsPerEpoch: 86_400n, shelleyStartSlot: 0n, shelleyStartEpoch: 0n, shelleySlotsPerEpoch: 86_400n, stabilityWindow: 25_920n },
+    // any other network (SanchoNet, local testnets): filled from its genesis files and hard-fork
+    // history at startup (setCustomEpochGeometry); preprod's numbers until then
+    custom: { systemStartUnix: 1_655_769_600n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 86_400n, shelleyStartEpoch: 4n, shelleySlotsPerEpoch: 432_000n, stabilityWindow: 129_600n },
 };
+
+let customSet = false;
+
+/** Geometry of a network that is not one of the three public ones (from its genesis files; see consensus/hfc). */
+export function setCustomEpochGeometry(g: EpochGeometry): void {
+    EPOCH_GEOMETRY.custom = { ...g };
+    customSet = true;
+}
+
+/** The custom geometry when one is set (workers receive it with their jobs). */
+export function customEpochGeometry(): EpochGeometry | null {
+    return customSet ? EPOCH_GEOMETRY.custom : null;
+}
 
 let activeNetwork: EpochNetwork = "preprod";
 
 export function normalizeEpochNetwork(name: unknown): EpochNetwork {
     const n = String(name ?? "").trim().toLowerCase();
-    return n === "mainnet" || n === "preview" ? n : "preprod";
+    if (n === "mainnet" || n === "preview" || n === "preprod") return n;
+    return customSet || n === "custom" ? "custom" : "preprod";
 }
 
 /** Select the network whose geometry the legacy helpers use. Call once at startup. */
@@ -86,6 +108,7 @@ export function slotToUnixTime(absoluteSlot: number | bigint, network: EpochNetw
     const slot = BigInt(absoluteSlot);
     const byronSlots = slot < g.shelleyStartSlot ? slot : g.shelleyStartSlot;
     const shelleySlots = slot < g.shelleyStartSlot ? 0n : slot - g.shelleyStartSlot;
+    if (g.byronSlotMs != null || g.shelleySlotMs != null) return Number(g.systemStartUnix) + Number(byronSlots * (g.byronSlotMs ?? 20_000n) + shelleySlots * (g.shelleySlotMs ?? 1_000n)) / 1000;
     return Number(g.systemStartUnix + byronSlots * 20n + shelleySlots);
 }
 
@@ -109,10 +132,11 @@ export function getFirstSlotOfEpoch(epoch: number | bigint, _genesis?: ShelleyGe
 /**
  * Shelley stability window in slots (3k/f): genesis key delegations and other
  * "future" state become effective this many slots after their certificate.
- * k = 2160 and f = 0.05 on every public Cardano network (129 600 slots).
+ * 129 600 on mainnet/preprod (k = 2160), 25 920 on preview (k = 432) — it was 129 600 for every
+ * network, so preview genesis delegations took effect five times too late.
  */
-export function stabilityWindowSlots(): number {
-    return 129_600;
+export function stabilityWindowSlots(network: EpochNetwork = activeNetwork): number {
+    return Number(EPOCH_GEOMETRY[network]?.stabilityWindow ?? 129_600n);
 }
 
 /** First Shelley slot of the network (mainnet 4 492 800, preprod 86 400, preview 0). */

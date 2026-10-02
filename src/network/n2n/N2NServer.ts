@@ -12,6 +12,7 @@ import type { RelayChainStore } from "./RelayChainStore";
 import { SqliteRelayChainStore } from "./SqliteRelayChainStore";
 import { WsNodeSocket } from "./WsNodeSocket";
 import { N2NLightQueryHost, type LightQueryDeps } from "./N2NLightQueryHost";
+import { formatHostPort, normalizeHost } from "../relayAccessPoint";
 
 const log = logger.child("n2n");
 
@@ -44,6 +45,10 @@ export interface InboundClientInfo {
     chainSyncSlot: number | null;
     /** Mini-protocols the client has started (keep-alive = warm at its side, chain-sync = hot). */
     protocols: string[];
+    /** From its handshake proposal: InitiatorAndResponder (duplex, reachable at `peer`) or InitiatorOnly; null = unknown. */
+    duplex?: boolean | null;
+    /** It proposed PeerSharing enabled. */
+    peerSharing?: boolean | null;
 }
 
 export interface N2NServerHandle {
@@ -74,6 +79,8 @@ interface ActiveClient {
     since: number;
     version: number | null;
     protocols: Map<string, number>;
+    remoteDuplex?: boolean | null;
+    remotePeerSharing?: boolean | null;
 }
 
 export async function startN2NServer(
@@ -149,7 +156,7 @@ export async function startN2NServer(
         port,
         networkMagic,
         clientCount: () => clients.size,
-        clients: () => [...clients.values()].map((c) => ({ peer: c.peer, transport: c.transport, since: c.since, version: c.version, handshakeOk: !!c.chainSync, chainSyncSlot: c.chainSync?.cursorSlot() ?? null, protocols: [...c.protocols.keys()] })),
+        clients: () => [...clients.values()].map((c) => ({ peer: c.peer, transport: c.transport, since: c.since, version: c.version, handshakeOk: !!c.chainSync, chainSyncSlot: c.chainSync?.cursorSlot() ?? null, protocols: [...c.protocols.keys()], duplex: c.remoteDuplex ?? null, peerSharing: c.remotePeerSharing ?? null })),
         wsPort: wsServer ? (wsServer.port ?? null) : null,
         stop: () => { try { wsServer?.stop(true); } catch { /* ignore */ } return stopServer(server, clients); },
     };
@@ -174,7 +181,8 @@ function attachClient(
     store: RelayChainStore,
     options: N2NServerOptions,
 ): void {
-    const peer = `${socket.remoteAddress ?? "unknown"}:${socket.remotePort ?? 0}`;
+    // IPv6-safe key ([2001:db8::1]:3001); a dual-stack listener reports IPv4 clients as ::ffff:a.b.c.d
+    const peer = socket.remoteAddress ? formatHostPort(normalizeHost(socket.remoteAddress), socket.remotePort ?? 0) : `unknown:${socket.remotePort ?? 0}`;
     let handedOut = false;
     const mplexer = new Multiplexer({
         protocolType: "node-to-node",
@@ -220,11 +228,14 @@ function attachClient(
 
     const handshake = new N2NHandshakeResponder(mplexer, {
         networkMagic: options.networkMagic,
-        onAccepted: ({ versionNumber }) => {
+        onAccepted: ({ versionNumber, remoteVersionData }) => {
             if (client.handshakeTimer) clearTimeout(client.handshakeTimer);
             client.handshakeTimer = undefined;
             handshake.dispose();
             client.version = Number.isFinite(Number(versionNumber)) ? Number(versionNumber) : null;
+            const rv = remoteVersionData as { initiatorOnlyDiffusionMode?: boolean; peerSharing?: boolean | number } | undefined;
+            client.remoteDuplex = typeof rv?.initiatorOnlyDiffusionMode === "boolean" ? !rv.initiatorOnlyDiffusionMode : null;
+            client.remotePeerSharing = rv?.peerSharing == null ? null : !!rv.peerSharing;
             // first frame per mini-protocol: what the remote's governor does with us (warm = keep-alive, hot = chain-sync)
             const names: Record<number, string> = { [MiniProtocol.ChainSync]: "chain-sync", [MiniProtocol.BlockFetch]: "block-fetch", [MiniProtocol.TxSubmission]: "tx-submission", [MiniProtocol.KeepAlive]: "keep-alive", [MiniProtocol.PeerSharing]: "peer-sharing" };
             for (const proto of [MiniProtocol.ChainSync, MiniProtocol.BlockFetch, MiniProtocol.TxSubmission, MiniProtocol.KeepAlive, MiniProtocol.PeerSharing]) {

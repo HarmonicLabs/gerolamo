@@ -9,7 +9,21 @@ import { blockFetchHeaderIdentity, headerParser } from "../blockHeaderParser";
 import { verifyBlockBodyHash } from "../bodyHash";
 import { verifyByronBlockSignature, type ByronBlockSignatureCheck } from "../byron/ByronCrypto";
 import { validateHeader } from "../BlockHeaderValidator";
-import { setEpochNetwork } from "../../utils/epochFromSlotCalculations";
+import { getEpochNetwork, setCustomEpochGeometry, setEpochNetwork, type EpochGeometry } from "../../utils/epochFromSlotCalculations";
+import { logger } from "../../utils/logger";
+
+/**
+ * Pin the worker's slot→epoch geometry to the job's network, accepting only a network the
+ * geometry table knows: `normalizeEpochNetwork` turns any other name into preprod, and the
+ * config files say `"network": "testnet"` — on preview that put the Plutus validity range
+ * 9.2 Ms into the past and a valid block was rejected (bug 168, slot 124075124).
+ */
+let badNetworkWarned = false;
+function pinJobNetwork(name: unknown): void {
+    const n = String(name ?? "").trim().toLowerCase();
+    if (n === "mainnet" || n === "preview" || n === "preprod" || n === "custom") { setEpochNetwork(n); return; }
+    if (!badNetworkWarned) { badNetworkWarned = true; logger.warn(`validation job names network "${String(name)}", not an epoch geometry; keeping ${getEpochNetwork()}`); }
+}
 import { runWitnessVerifyJob, type WitnessItem, type WitnessVerifyJob } from "./witnessJob";
 
 /**
@@ -52,6 +66,8 @@ export interface HeaderValidationConfig {
     networkMagic: number;
     shelleyGenesisFile: string;
     network?: string;
+    /** Set for a network other than mainnet/preprod/preview (genesis-derived; see consensus/hfc). */
+    epochGeometry?: EpochGeometry;
 }
 
 export interface HeaderValidationResult {
@@ -129,7 +145,8 @@ function summarize(parsed: Awaited<ReturnType<typeof headerParser>> & object): O
 
 export async function runHeaderValidationJob(job: HeaderValidationJob): Promise<HeaderValidationResult> {
     // Worker threads have their own module state: pin slot→epoch math to the job's network.
-    if (job.config.network) setEpochNetwork(job.config.network);
+    if (job.config.epochGeometry) setCustomEpochGeometry(job.config.epochGeometry); // a custom network's geometry (bigints survive structured clone)
+    if (job.config.network) pinJobNetwork(job.config.network);
     const parsed = await headerParser(job.rollForward);
     if (!parsed) {
         return {
@@ -329,6 +346,14 @@ export interface BlockRulesJob {
     resolved: Map<string, ResolvedUtxo>;
     pools: Set<string>;
     rewardBalances: Map<string, bigint> | null;
+    /** Conway: DRep delegation of the withdrawn key accounts (BlockRuleInputs.drepDelegated); absent = unknown. */
+    drepDelegated?: Map<string, boolean> | null;
+    /** Registration of the withdrawn accounts (BlockRuleInputs.stakeRegistered). */
+    stakeRegistered?: Map<string, boolean> | null;
+    /** Treasury for `current_treasury_value` (BlockRuleInputs.treasury). */
+    treasury?: bigint | null;
+    /** BlockRuleInputs.exactness: balances and treasury exact (their rules strict). */
+    exactness?: { exact: boolean; why: string } | null;
     preVerified: boolean[] | null;
     /**
      * Epoch parameters and genesis are the same objects for every block of an epoch; cloning them
@@ -363,13 +388,16 @@ export async function runBlockRulesJob(job: BlockRulesJob): Promise<BlockRulesRe
     try {
         const t0 = performance.now();
         const queueMs = job.postedAt ? Date.now() - job.postedAt : undefined;
+        // Workers start with the default (preprod) slot geometry; Plutus contexts turn slots into
+        // POSIX time with it (txpath finding 140), so take the job's network.
+        if (job.config?.network) pinJobNetwork(job.config.network);
         const meb: any = MultiEraBlock.fromCbor(job.block);
         if (Number(meb.era) < 2) return { outcome: null, reason: "byron" };
         const t1 = performance.now();
         const outcome = await evaluateShelleyBlockWithInputs(
             meb,
             { config: job.config, pool: null, params: job.params, genesis: job.genesis, slot: BigInt(job.slot), preVerified: job.preVerified, phase: job.phase ?? "both" },
-            { resolved: job.resolved, pools: job.pools, rewardBalances: job.rewardBalances ?? undefined },
+            { resolved: job.resolved, pools: job.pools, rewardBalances: job.rewardBalances ?? undefined, drepDelegated: job.drepDelegated ?? undefined, stakeRegistered: job.stakeRegistered ?? undefined, treasury: job.treasury ?? null, exactness: job.exactness ?? undefined },
         );
         return { outcome, parseMs: t1 - t0, evalMs: performance.now() - t1, queueMs, finishedAt: Date.now() };
     } catch (err) {

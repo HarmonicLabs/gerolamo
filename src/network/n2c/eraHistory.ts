@@ -5,8 +5,13 @@
  * scripts/n2c-oracle.ts on 2026-09-14). Era summary = [start, end, params]; bound =
  * [relative time in picoseconds, slot, epoch]; params = [epochSize, slotLength ms,
  * safeZone [0, n, [0]], genesisWindow]; the last era's end is the horizon (start of the epoch after the tip's).
+ *
+ * The node answers from its ledger-driven hard-fork history (consensus/hfc, `interpreterFor`); the
+ * per-network table below is the fallback when that history does not reach the tip's era.
  */
 import { CborBytes, CborArray, CborSimple, CborUInt, type CborObj } from "@harmoniclabs/cbor";
+import { getHardForkHistory } from "../../consensus/hfc/hfcNode";
+import { encodeInterpreter, eraShape, reconstructSummary } from "../../consensus/hfc/hfc";
 
 export type EraHistoryNetwork = "preview" | "preprod" | "mainnet";
 
@@ -86,4 +91,27 @@ export function eraSummaries(network: EraHistoryNetwork, currentEraIndex: number
         out.push(new CborArray([start, end, params(i === 0 ? n.byron : n.shelley)]));
     }
     return new CborArray(out, { indefinite: true }); // the reference node writes the summary list indefinite-length
+}
+
+/**
+ * GetInterpreter for a ledger whose tip is at `tipSlot` in HFC era `eraIndex`: the node's
+ * hard-fork history when it reaches that era (custom networks included), else the table above with
+ * the consensus safe-zone horizon. null when neither knows the network.
+ */
+export function interpreterFor(network: EraHistoryNetwork | null, eraIndex: number, tipSlot: bigint | null): CborObj | null {
+    const h = getHardForkHistory();
+    if (h && h.currentEra() === eraIndex) return encodeInterpreter(h.summary(tipSlot));
+    if (!network) return null;
+    const n = NETWORKS[network];
+    const shape = eraShape({
+        byron: { k: n.byron.safeZone / 2, slotDurationMs: n.byron.slotMs },
+        shelley: { epochLength: n.shelley.epochSlots, slotLengthSec: n.shelley.slotMs / 1000, securityParam: n.byron.safeZone / 2, activeSlotsCoeff: 0.05, systemStart: n.systemStart },
+    });
+    const starts = n.eraStartEpochs.slice(0, Math.min(eraIndex, n.eraStartEpochs.length - 1) + 1).map((e) => BigInt(e));
+    return encodeInterpreter(reconstructSummary(shape, starts, { kind: "unknown", ledgerTipSlot: tipSlot }));
+}
+
+/** GetSystemStart: the Shelley genesis `systemStart` of the running network (table fallback). */
+export function systemStartFor(network: EraHistoryNetwork | null): string | null {
+    return getHardForkHistory()?.geometry.shelley.systemStart ?? (network ? NETWORKS[network].systemStart : null);
 }

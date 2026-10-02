@@ -19,7 +19,4 @@ const r = await withReadOnlyConnection(async () => {
     const raw = JSON.parse(String(rows[0]![0]));
     return tallyProposal(sql as any, epoch, args.action!, raw, takenAt, untilSlot);
 });
-const show = (x: any) => x == null ? "none" : `${x.num}/${x.den}`;
-const pct = (a: bigint, b: bigint) => b === 0n ? "n/a" : (Number(a * 10000n / b) / 100).toFixed(2) + "%";
-const poolTotal = r.pt.yes + r.pt.no + r.pt.unvoted + r.pt.abstain;
-console.log(`epoch ${epoch} snapshot ${takenAt} votes≤epoch ${args["votes-until-epoch"] ?? "all"}: ratified=${r.ratified} cc=${r.ccOk} (${r.ct.yes}/${r.ct.active}) drep=${r.drepOk} (yes ${pct(r.dt.yes, r.dt.yes + r.dt.no + r.dt.unvoted)}) pool=${r.poolOk} (yes ${pct(r.pt.yes, poolTotal - r.pt.abstain - r.pt.unvotedAbstain)} of non-abstaining; yes ${r.pt.yes} no ${r.pt.no} unvoted ${r.pt.unvoted} abstain ${r.pt.abstain} unvotedAbstain ${r.pt.unvotedAbstain} unvotedNoConf ${r.pt.unvotedNoConfidence}) thr pool=${show(r.thr.pool)} drep=${show(r.thr.drep)}`);
+console.log(`epoch ${epoch} snapshot ${takenAt} votes≤epoch ${args["votes-until-epoch"] ?? "all"}: ${r.kind} ${r.id} ratified=${r.ratified} (${r.reason}) cc ${r.cc}; drep ${r.drep}; spo ${r.spo}`);

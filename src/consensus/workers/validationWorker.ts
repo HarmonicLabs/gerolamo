@@ -11,6 +11,7 @@ import {
     runBlockRulesJob,
 } from "./validationJob";
 import { isWitnessVerifyJob, runWitnessVerifyJob } from "./witnessJob";
+import { isMempoolPlutusJob, runMempoolPlutusJob } from "../../mempool/plutusJob";
 
 /**
  * Bun Worker entry: header parse + validation, and fetched-range verification
@@ -36,6 +37,10 @@ self.onmessage = async (ev: MessageEvent<{ id: number; job: PoolJob }>) => {
         }
         if (isWitnessVerifyJob(job)) {
             self.postMessage({ id, result: runWitnessVerifyJob(job) });
+            return;
+        }
+        if (isMempoolPlutusJob(job)) {
+            self.postMessage({ id, result: await runMempoolPlutusJob(job) });
             return;
         }
         if (isBlockWitnessJob(job)) {

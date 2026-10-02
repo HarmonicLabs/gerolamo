@@ -895,6 +895,17 @@ const ControlCenter: Component = () => {
                           <Stat label="OP cert disk | chain" title="Operational certificate counter on disk and the last one the chain has seen for this pool." value={`${p().opcert.counter} | ${p().opcert.chainCounter ?? "none"}`} size="sm" />
                           <Stat label="Missed slot checks" title="Slots the wall-clock ticker never evaluated because the process stalled for more than a slot." value={p().missedLeaderChecks} accent glow glowColor={p().missedLeaderChecks > 0 ? "orange" : "green"} size="sm" />
                         </div>
+                        <Show when={p().kes && p().kes!.health && p().kes!.health !== "ok"}>
+                          <div class={`rounded-lg border px-4 py-3 text-sm ${p().kes!.health === "rotate-soon" ? "border-amber/40 text-amber" : "border-red/40 text-red"}`} title="KES certificate life: rotate before it expires or the pool stops producing blocks.">
+                            {p().kes!.health === "rotate-soon" ? "KES: rotate soon" : p().kes!.health === "rotate-now" ? "KES: ROTATE NOW" : p().kes!.health === "expired" ? "KES certificate EXPIRED: no blocks can be forged" : "KES certificate not valid yet"}
+                            {` — ${p().kes!.remaining} of ${p().kes!.maxEvolutions} periods left, expires ${when(p().kes!.expiresAt)}. Rotate where the cold key lives: bun scripts/pool-register.ts rotate-kes --dir <pool keys>, copy kes.skey, kes.vkey and node.cert to the producer, restart it.`}
+                          </div>
+                        </Show>
+                        <Show when={p().kes?.counter === "ahead-of-chain" || p().kes?.counter === "behind-chain"}>
+                          <div class="rounded-lg border border-red/40 px-4 py-3 text-sm text-red">
+                            {`Operational certificate counter ${p().opcert.counter} does not follow the chain's ${p().opcert.chainCounter}: headers need the chain's counter or one above it. Blocks will be rejected.`}
+                          </div>
+                        </Show>
                         <Show when={es()}>
                           {(e) => (
                             <div class="grid grid-cols-3 md:grid-cols-6 gap-4">

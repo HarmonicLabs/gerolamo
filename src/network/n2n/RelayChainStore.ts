@@ -12,6 +12,8 @@ export interface RelayIntersection {
 export interface RelayHeader extends RelayIntersection {
     /** ChainSync RollForward data field (the header payload, not its envelope). */
     data: CborObj;
+    /** The header's previous-block hash (null: genesis); absent when the store cannot tell. */
+    prevHash?: Uint8Array | null;
 }
 
 export interface RelayBlock extends RelayIntersection {

@@ -3,11 +3,17 @@
  * Differential costing of every Plutus builtin: one small program per builtin (and argument
  * size), evaluated by our machine (plutus-machine + the named cost model) and by aiken's
  * `uplc` crate (tools/uplc-ref eval-text). Prints the builtins whose budgets differ.
- *   bun scripts/builtin-cost-diff.ts <costs.json> [v1|v2|v3] [--all]
+ *   bun scripts/builtin-cost-diff.ts <costs.json> [v1|v2|v3] [--all] [--new]
+ * --new: evaluate with Gerolamo's validation evaluator (src/consensus/plutus/cek.ts, the program
+ * compiled to flat and decoded as a script would be) instead of plutus-machine.
  * costs.json: {"PlutusV2":[…]} as tools/uplc-ref expects (epoch_params cost_models).
  */
 import { Machine } from "@harmoniclabs/plutus-machine";
-import { parseUPLCText, showUPLC } from "@harmoniclabs/uplc";
+import { parseUPLCText, showUPLC, compileUPLC, UPLCProgram } from "@harmoniclabs/uplc";
+import { decodeProgram } from "../src/consensus/plutus/flat";
+import { evaluate } from "../src/consensus/plutus/cek";
+import { costTable } from "../src/consensus/plutus/costs";
+import { VCon } from "../src/consensus/plutus/values";
 import { toCostModelV1, toCostModelV2 } from "@harmoniclabs/cardano-costmodels-ts";
 import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,7 +26,7 @@ const arr = costs[{ v1: "PlutusV1", v2: "PlutusV2", v3: "PlutusV3" }[langArg]!];
 const model: any = langArg === "v1" ? toCostModelV1(arr) : langArg === "v2" ? toCostModelV2(arr) : arr;
 const machine = new Machine(model);
 const dir = mkdtempSync(join(tmpdir(), "bcd-"));
-const B = "tools/uplc-ref/target/release/uplc-ref";
+const B = process.env.UPLC_REF ?? "tools/uplc-ref/target/release/uplc-ref";
 
 const bs = (n: number, b = 0xab) => "#" + Buffer.alloc(n, b).toString("hex");
 const bigInt = (words: number) => (1n << BigInt(64 * words - 3)).toString();
@@ -79,17 +85,28 @@ cases.push(["verifyEd25519Signature", app("(builtin verifyEd25519Signature)", `(
 
 if (process.argv.includes("--edge")) { const { extra } = await import("./builtin-cost-cases-edge.ts"); cases.length = 0; cases.push(...extra); }
 if (process.argv.includes("--edge2")) { const { extra } = await import("./builtin-cost-cases-sizes.ts"); cases.length = 0; cases.push(...extra); }
+if (process.argv.includes("--batch5")) { const { extra } = await import("./builtin-cost-cases-batch5.ts"); cases.length = 0; cases.push(...extra); }
 let diffs = 0, ran = 0, skipped = 0;
 for (const [name, term] of cases) {
-    let ours: { cpu: bigint; mem: bigint } | string; let ourResult = "";
+    let ours: { cpu: bigint; mem: bigint } | string = "ours: not run"; let ourResult = "";
     try {
         const t = parseUPLCText(term);
+        if (process.argv.includes("--new")) {
+            const lang = ({ v1: 1, v2: 2, v3: 3 } as const)[langArg as "v1" | "v2" | "v3"];
+            const prog = decodeProgram(compileUPLC(new UPLCProgram([1, 0, 0], t)).toBuffer().buffer, lang, 11);
+            const pvOpt = process.argv.indexOf("--pv"); const r = evaluate(prog.term, costTable(lang, arr, pvOpt > 0 ? Number(process.argv[pvOpt + 1]) : 10), { cpu: 1e13, mem: 1e13 });
+            ours = { cpu: BigInt(r.cpu), mem: BigInt(r.mem) };
+            const v: any = r.result;
+            if (!r.ok) ourResult = `error ${r.error}`;
+            else if (v instanceof VCon) { const c = v.v; ourResult = v.type.tag === 0 ? `(con integer ${c})` : v.type.tag === 4 ? `(con bool ${c ? "True" : "False"})` : v.type.tag === 1 ? `(con bytestring #${Buffer.from(c).toString("hex")})` : v.type.tag === 2 ? `(con string "${c}")` : v.type.key; }
+            throw { __done: true };
+        }
         const r: any = machine.eval(t);
         ours = { cpu: BigInt(r.budgetSpent.cpu), mem: BigInt(r.budgetSpent.mem) };
         const v: any = r.result;
         if (v instanceof Error || v?.constructor?.name === "CEKError") ourResult = `error ${String(v?.message ?? v?.msg ?? "").slice(0, 60)}`;
         else { const c = v?.value ?? v; ourResult = typeof c === "bigint" ? `(con integer ${c})` : typeof c === "boolean" ? `(con bool ${c ? "True" : "False"})` : typeof c?.toString === "function" && c?.constructor?.name === "ByteString" ? `(con bytestring #${c.toString()})` : typeof c === "string" ? `(con string "${c}")` : (v?.constructor?.name ?? String(v)); }
-    } catch (e: any) { ours = `ours: ${String(e?.message ?? e).slice(0, 80)}`; }
+    } catch (e: any) { if (!e?.__done) ours = `ours: ${String(e?.message ?? e).slice(0, 80)}`; }
     const f = join(dir, name.replace(/[^A-Za-z0-9]/g, "_") + ".uplc");
     writeFileSync(f, `(program 1.0.0 ${term})`);
     const p = Bun.spawnSync([B, "eval-text", f, langArg, costsPath!]);

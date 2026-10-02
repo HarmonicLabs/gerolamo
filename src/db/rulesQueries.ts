@@ -1,6 +1,6 @@
 /** Read-only lookups the transaction rules need, batched per block. */
 import { sql } from "../sql";
-import { ledgerStakeReads, ledgerUtxoReads } from "../ledger/nodeLedgerStore";
+import { ledgerGovReads, ledgerStakeReads, ledgerUtxoReads } from "../ledger/nodeLedgerStore";
 import { recentOutputs, spentRowsStats } from "./recentOutputs";
 
 export interface UtxoRow {
@@ -77,4 +77,63 @@ export async function rewardBalancesFor(credHexes: string[]): Promise<Map<string
         out.set(c, rows.length ? BigInt(String(rows[0]![0] ?? 0)) : 0n);
     }
     return out;
+}
+
+/**
+ * Conway withdrawal rule: which of the given key-hash reward accounts (typed hex) are
+ * delegated to a DRep. Undefined while the governance state is not seeded (the rule then
+ * reports instead of rejecting on an empty table).
+ */
+export async function drepDelegatedFor(keys: string[]): Promise<Map<string, boolean> | undefined> {
+    const want = [...new Set(keys.filter((k) => k.length === 56).map((k) => k.toLowerCase()))];
+    if (want.length === 0) return undefined;
+    const gr = ledgerGovReads();
+    if (gr) {
+        if (!gr.state()) return undefined;
+        return new Map(want.map((k) => [k, gr.drepDelegation(k) != null]));
+    }
+    try {
+        const seeded = (await sql`SELECT 1 FROM gov_state WHERE id = 1`.values()) as unknown[][];
+        if (!seeded.length) return undefined;
+        const out = new Map<string, boolean>();
+        for (const k of want) {
+            const rows = (await sql`SELECT 1 FROM gov_drep_delegations WHERE stake_key = ${k}`.values()) as unknown[][];
+            out.set(k, rows.length > 0);
+        }
+        return out;
+    } catch {
+        return undefined;
+    }
+}
+
+/** Treasury as the local pots hold it (updated at epoch boundaries), or null when pots are not tracked. */
+export async function localTreasury(): Promise<bigint | null> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.pots()?.treasury ?? null;
+    try {
+        const rows = (await sql`SELECT treasury FROM reward_pots WHERE id = 1`.values()) as unknown[][];
+        return rows.length ? BigInt(String(rows[0]![0])) : null;
+    } catch {
+        return null;
+    }
+}
+
+/** Registration of the given stake credentials (typed hex: 56 hex = key, "01" + 56 = script). */
+export async function stakeRegisteredFor(keys: string[]): Promise<Map<string, boolean> | undefined> {
+    const want = [...new Set(keys.map((k) => k.toLowerCase()).filter((k) => k.length === 56 || k.length === 58))];
+    if (want.length === 0) return undefined;
+    const lr = ledgerStakeReads();
+    if (lr) return new Map(want.map((k) => [k, lr.isRegistered(k)]));
+    try {
+        const out = new Map<string, boolean>();
+        for (const k of want) {
+            const type = k.length === 58 ? 1 : 0, h = Buffer.from(k.slice(-56), "hex");
+            // a legacy row (cred_type NULL) matches either type, as getStakeByCredentials
+            const rows = (await sql`SELECT 1 FROM stake WHERE stake_credentials = ${h} AND (cred_type IS NULL OR cred_type = ${type})`.values()) as unknown[][];
+            out.set(k, rows.length > 0);
+        }
+        return out;
+    } catch {
+        return undefined;
+    }
 }

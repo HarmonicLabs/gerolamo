@@ -6,11 +6,13 @@ import { initSql, sql } from "../../sql";
 import { ensureInitialized } from "../../db";
 import { storeEpochParams } from "../epochParams";
 import { addDonationToPot, creditRegisteredAccounts, initRewardPots, readRewardPots, settleDonations } from "../../db/leaderState";
-import { ratifyAndEnact, recordCommitteeHot, activeDRepCredentials, recordDRepActivity, recordDRepRegistration, recordDRepUnregistration, recordProposals, recordStakeDeregistration, recordVoteDelegation, recordVotes, seedGovernance, takeDRepStakeSnapshot, tallyProposal } from "./state";
+import { hardForkToV10, ratifyAndEnact, recordCommitteeHot, activeDRepCredentials, recordDRepActivity, recordDRepRegistration, recordDRepUnregistration, recordProposals, recordStakeDeregistration, recordVoteDelegation, recordVotes, seedGovernance, takeDRepStakeSnapshot, tallyProposal } from "./state";
 
 const dir = mkdtempSync(join(tmpdir(), "gerolamo-gov-"));
 const DREP = "aa".repeat(28), STAKE = "bb".repeat(28), POOL = "cc".repeat(28), CC_COLD = "dd".repeat(28), CC_HOT = "ee".repeat(28), RET = "ff".repeat(28);
 const TX = "12".repeat(32);
+// the hot key of the member the "committee hot keys" test adds; later tests need its vote too (a member that does not vote counts as No, bug 152)
+const EARLY_HOT_G = "a2".repeat(28);
 const cred = (h: string, type = 0) => ({ type, hash: { toString: () => h } });
 const params = { protocol_major_ver: 10, committee_min_size: 1, drep_activity: 20, dvt_p_p_economic_group: 0.67, pvt_p_p_security_group: 0.51, dvt_hard_fork_initiation: 0.6, pvt_hard_fork_initiation: 0.51 };
 
@@ -18,7 +20,7 @@ beforeAll(async () => {
     initSql(join(dir, "t.db"));
     await ensureInitialized();
     await seedGovernance(sql, { committee: { members: { [`keyHash-${CC_COLD}`]: 999 }, threshold: { numerator: 1, denominator: 2 } }, constitution: { anchor: { dataHash: "00".repeat(32) } } }, 100);
-    await sql`UPDATE gov_committee SET hot_credential = ${CC_HOT} WHERE cold_credential = ${CC_COLD}`;
+    await recordCommitteeHot(sql, cred(CC_COLD), cred(CC_HOT));
     await recordDRepRegistration(sql, cred(DREP), 500_000_000n, 1, 100);
     await recordVoteDelegation(sql, cred(STAKE), { drepType: 0, hash: { toString: () => DREP } });
     await sql`INSERT INTO stake_balance (stake_key, lovelace) VALUES (${STAKE}, 1000000)`; // the DRep stake snapshot reads balances (bug 90)
@@ -36,7 +38,7 @@ describe("Conway ratification", () => {
         const proposal = { deposit: 100_000_000_000n, rewardAccount: { credentials: { hash: { toString: () => RET } } }, govAction: { govActionType: 0, govActionId: undefined, protocolParamsUpdate: { txFeePerByte: 45n } } };
         await recordProposals(sql, TX, [proposal], 100, 6);
         const votes = [
-            { voter: { kind: 0, hash: { toString: () => CC_HOT } }, votes: [{ govActionId: { id: TX, index: 0 }, votingProcedure: { vote: 1 } }] },
+            { voter: { kind: 0, hash: { toString: () => CC_HOT } }, votes: [{ govActionId: { id: TX, index: 0 }, votingProcedure: { vote: 1 } }] }, { voter: { kind: 0, hash: { toString: () => EARLY_HOT_G } }, votes: [{ govActionId: { id: TX, index: 0 }, votingProcedure: { vote: 1 } }] },
             { voter: { kind: 2, hash: { toString: () => DREP } }, votes: [{ govActionId: { id: TX, index: 0 }, votingProcedure: { vote: 1 } }] },
             { voter: { kind: 4, hash: { toString: () => POOL } }, votes: [{ govActionId: { id: TX, index: 0 }, votingProcedure: { vote: 1 } }] },
         ];
@@ -70,7 +72,7 @@ describe("Conway ratification", () => {
         await sql`INSERT OR IGNORE INTO epoch_stake_cred (taken_at, stake_key, pool_id, stake) VALUES (102, ${STAKE}, ${POOL}, 1000000)`;
         await sql`INSERT OR IGNORE INTO epoch_pool_stake (taken_at, pool_id, stake) VALUES (102, ${POOL}, 1000000)`;
         await recordVotes(sql, [
-            { voter: { kind: 0, hash: { toString: () => CC_HOT } }, votes: [{ govActionId: { id: TX3, index: 0 }, votingProcedure: { vote: 1 } }] },
+            { voter: { kind: 0, hash: { toString: () => CC_HOT } }, votes: [{ govActionId: { id: TX3, index: 0 }, votingProcedure: { vote: 1 } }] }, { voter: { kind: 0, hash: { toString: () => EARLY_HOT_G } }, votes: [{ govActionId: { id: TX3, index: 0 }, votingProcedure: { vote: 1 } }] },
             { voter: { kind: 2, hash: { toString: () => DREP } }, votes: [{ govActionId: { id: TX3, index: 0 }, votingProcedure: { vote: 0 } }] },
             { voter: { kind: 4, hash: { toString: () => POOL } }, votes: [{ govActionId: { id: TX3, index: 0 }, votingProcedure: { vote: 1 } }] },
         ], 7, 102);
@@ -99,7 +101,7 @@ describe("UpdateCommittee ratification", () => {
         const r = await ratifyAndEnact(sql, 106, params);
         expect(r.enacted.length).toBe(1);
         const members = (await sql`SELECT cold_credential, expires_epoch FROM gov_committee ORDER BY cold_credential`.values()) as unknown[][];
-        expect(members.map((m) => `${m[0]}@${m[1]}`)).toContain(`${NEW_COLD}@300`);
+        expect(members.map((m) => `${m[0]}@${m[1]}`)).toContain(`00${NEW_COLD}@300`); // typed key: "00" + hash (bug 153)
         const st = (await sql`SELECT prev_committee, committee_threshold_num, committee_threshold_den FROM gov_state`.values()) as unknown[][];
         expect(String(st[0]![0])).toBe(`${TX4}:0`);
         expect(Number(st[0]![1]) / Number(st[0]![2])).toBeCloseTo(2 / 3);
@@ -109,9 +111,6 @@ describe("UpdateCommittee ratification", () => {
 describe("committee hot keys", () => {
     test("a hot key authorised before the cold key joins the committee counts once it is a member (bug 83)", async () => {
         const EARLY_COLD = "a1".repeat(28), EARLY_HOT = "a2".repeat(28);
-        await recordCommitteeHot(sql, cred(EARLY_COLD), cred(EARLY_HOT)); // not a member yet: must be remembered
-        const auth = (await sql`SELECT hot_credential FROM gov_committee_auth WHERE cold_credential = ${EARLY_COLD}`.values()) as unknown[][];
-        expect(String(auth[0]![0])).toBe(EARLY_HOT);
         const TX6 = "bc".repeat(32);
         await recordProposals(sql, TX6, [{ deposit: 1n, rewardAccount: { credentials: { hash: { toString: () => RET } } }, govAction: { govActionType: 4, govActionId: { id: "78".repeat(32), index: 0 }, toRemove: [], toAdd: [{ coldCredential: { hash: { toString: () => EARLY_COLD } }, expiration: 400 }], threshold: { num: 2n, den: 3n } } }], 109, 6);
         await recordVotes(sql, [
@@ -119,9 +118,23 @@ describe("committee hot keys", () => {
             { voter: { kind: 4, hash: { toString: () => POOL } }, votes: [{ govActionId: { id: TX6, index: 0 }, votingProcedure: { vote: 1 } }] },
         ], 10, 109);
         expect((await ratifyAndEnact(sql, 110, params)).enacted).toEqual([]);
+        // authorised in the epoch between ratification and enactment (a potential future member)
+        await recordCommitteeHot(sql, cred(EARLY_COLD), cred(EARLY_HOT)); // not a member yet: must be remembered
+        const auth = (await sql`SELECT hot_credential FROM gov_committee_auth WHERE cold_credential = ${"00" + EARLY_COLD}`.values()) as unknown[][];
+        expect(String(auth[0]![0])).toBe("00" + EARLY_HOT);
         expect((await ratifyAndEnact(sql, 111, params)).enacted.length).toBe(1);
-        const m = (await sql`SELECT hot_credential FROM gov_committee WHERE cold_credential = ${EARLY_COLD}`.values()) as unknown[][];
-        expect(String(m[0]![0])).toBe(EARLY_HOT); // the earlier authorisation applies
+        const m = (await sql`SELECT hot_credential FROM gov_committee WHERE cold_credential = ${"00" + EARLY_COLD}`.values()) as unknown[][];
+        expect(String(m[0]![0])).toBe("00" + EARLY_HOT); // the earlier authorisation applies
+        // survives the boundary: a member now
+        await ratifyAndEnact(sql, 112, params);
+        expect(((await sql`SELECT COUNT(*) FROM gov_committee_auth WHERE cold_credential = ${"00" + EARLY_COLD}`.values()) as unknown[][])[0]![0]).toBe(1);
+    });
+    test("the committee state forgets cold keys that are not members at the boundary (bug 160)", async () => {
+        const STRAY = "a3".repeat(28), STRAY_HOT = "a4".repeat(28);
+        await recordCommitteeHot(sql, cred(STRAY, 1), cred(STRAY_HOT, 1));
+        expect(((await sql`SELECT COUNT(*) FROM gov_committee_auth WHERE cold_credential = ${"01" + STRAY}`.values()) as unknown[][])[0]![0]).toBe(1);
+        await ratifyAndEnact(sql, 113, params);
+        expect(((await sql`SELECT COUNT(*) FROM gov_committee_auth WHERE cold_credential = ${"01" + STRAY}`.values()) as unknown[][])[0]![0]).toBe(0);
     });
 });
 
@@ -154,7 +167,7 @@ describe("DRep activity", () => {
         const proposal = { deposit: 1n, rewardAccount: { credentials: { hash: { toString: () => RET } } }, govAction: { govActionType: 0, govActionId: { id: prevId, index: Number(prevIdx) }, protocolParamsUpdate: { txFeePerByte: 48n } } };
         await recordProposals(sql, TX5, [proposal], 107, 6);
         await recordVotes(sql, [
-            { voter: { kind: 0, hash: { toString: () => CC_HOT } }, votes: [{ govActionId: { id: TX5, index: 0 }, votingProcedure: { vote: 1 } }] },
+            { voter: { kind: 0, hash: { toString: () => CC_HOT } }, votes: [{ govActionId: { id: TX5, index: 0 }, votingProcedure: { vote: 1 } }] }, { voter: { kind: 0, hash: { toString: () => EARLY_HOT_G } }, votes: [{ govActionId: { id: TX5, index: 0 }, votingProcedure: { vote: 1 } }] },
             { voter: { kind: 2, hash: { toString: () => DREP } }, votes: [{ govActionId: { id: TX5, index: 0 }, votingProcedure: { vote: 1 } }] },
             { voter: { kind: 4, hash: { toString: () => POOL } }, votes: [{ govActionId: { id: TX5, index: 0 }, votingProcedure: { vote: 1 } }] }, // min_fee_a is a security-group parameter
         ], 9, 107);
@@ -217,6 +230,27 @@ describe("DRep unregistration", () => {
     });
 });
 
+describe("protocol-9 reverse delegations (bug 165)", () => {
+    test("a bootstrap-phase unregistration clears the accounts of the DRep's set, stale ones included; the protocol-10 fork drops dangling delegations", async () => {
+        const E = "5e".repeat(28), D = "5f".repeat(28), F = "60".repeat(28), X = "61".repeat(28), Y = "62".repeat(28);
+        await storeEpochParams(700, { protocol_major_ver: 9, drep_activity: 20 }, "local");
+        await recordDRepRegistration(sql, cred(E), 500_000_000n, 1, 700);
+        await recordDRepRegistration(sql, cred(D), 500_000_000n, 1, 700);
+        await recordVoteDelegation(sql, cred(X), { drepType: 0, hash: { toString: () => E } }, 700);
+        await recordVoteDelegation(sql, cred(X), { drepType: 0, hash: { toString: () => D } }, 700); // E's set keeps X
+        await recordVoteDelegation(sql, cred(Y), { drepType: 0, hash: { toString: () => F } }, 700); // F not registered: no set
+        await recordDRepRegistration(sql, cred(F), 500_000_000n, 2, 700);
+        const deleg = async (k: string) => (((await sql`SELECT drep_hash FROM gov_drep_delegations WHERE stake_key = ${k}`.values()) as unknown[][])[0]?.[0] ?? null);
+        await recordDRepUnregistration(sql, cred(E), 700);
+        expect(await deleg(X)).toBeNull(); // cleared although X delegates to D (cardano-ledger issue 4772)
+        await recordDRepUnregistration(sql, cred(F), 700);
+        expect(await deleg(Y)).toBe(F); // not in F's set: the delegation stays, dangling
+        expect(await hardForkToV10(sql)).toBeGreaterThanOrEqual(1);
+        expect(await deleg(Y)).toBeNull(); // updateDRepDelegations: F is not registered
+        expect(((await sql`SELECT COUNT(*) FROM gov_drep_boot_delegs`.values()) as unknown[][])[0]![0]).toBe(0);
+    });
+});
+
 describe("DRep stake distribution", () => {
     test("a vote delegation without a pool delegation and a live proposal's deposit count for the DRep (bug 90)", async () => {
         const DREP2 = "c1".repeat(28), NP = "c2".repeat(28), TX9 = "c3".repeat(32);
@@ -229,8 +263,8 @@ describe("DRep stake distribution", () => {
         await recordVotes(sql, [{ voter: { kind: 2, hash: { toString: () => DREP } }, votes: [{ govActionId: { id: TX9, index: 0 }, votingProcedure: { vote: 1 } }] }], 11, 120);
         expect(await takeDRepStakeSnapshot(sql, 121)).toBeGreaterThan(0);
         const r = await tallyProposal(sql, 121, `${TX9}:0`, params, 121);
-        expect(r.dt.yes).toBe(1000000n); // STAKE through DREP
-        expect(r.dt.unvoted).toBe(5000000n); // NP's 3 ADA + the proposal's own 2 ADA deposit, through DREP2 (no pool, no epoch_stake_cred row)
+        expect(r.counts.drepYes).toBe(1000000n); // STAKE through DREP
+        expect(r.counts.drepTotal! - r.counts.drepYes!).toBe(5000000n); // unvoted: NP's 3 ADA + the proposal's own 2 ADA deposit, through DREP2 (no pool, no epoch_stake_cred row)
         expect((await sql`SELECT COUNT(*) FROM epoch_stake_cred WHERE stake_key = ${NP}`.values())[0]![0]).toBe(0);
     });
 });
@@ -306,7 +340,7 @@ describe("delaying actions", () => {
         await recordProposals(sql, TX_C, [committee], 125, 6); // submitted first: tallied first
         await recordProposals(sql, TX_P, [pparams], 125, 6);
         const yes = (tx: string) => [
-            { voter: { kind: 0, hash: { toString: () => CC_HOT } }, votes: [{ govActionId: { id: tx, index: 0 }, votingProcedure: { vote: 1 } }] },
+            { voter: { kind: 0, hash: { toString: () => CC_HOT } }, votes: [{ govActionId: { id: tx, index: 0 }, votingProcedure: { vote: 1 } }] }, { voter: { kind: 0, hash: { toString: () => EARLY_HOT_G } }, votes: [{ govActionId: { id: tx, index: 0 }, votingProcedure: { vote: 1 } }] },
             { voter: { kind: 2, hash: { toString: () => DREP } }, votes: [{ govActionId: { id: tx, index: 0 }, votingProcedure: { vote: 1 } }] },
             { voter: { kind: 2, hash: { toString: () => DREP2 } }, votes: [{ govActionId: { id: tx, index: 0 }, votingProcedure: { vote: 1 } }] },
             { voter: { kind: 4, hash: { toString: () => POOL } }, votes: [{ govActionId: { id: tx, index: 0 }, votingProcedure: { vote: 1 } }] },

@@ -11,6 +11,7 @@
  * `[id, chunk_id, slot, block_hash, prev_hash, header_data, block_data, rollforward_header_cbor, is_valid, inserted_at, block_no]`
  * with `block_hash` / `prev_hash` as lowercase hex text (the `blocks.hash` column's form).
  */
+import { renameSync, writeFileSync } from "node:fs";
 import type { BlockRecord, BlockStore } from "./blockStore";
 import { locateHeader } from "./chunkFormat";
 import { blockNoOf, prevHashOf } from "./volatileStore";
@@ -29,7 +30,9 @@ export function setSelectedTipHash(hash: Uint8Array | null): void {
     if (persistPath && hash) {
         if (persistTimer) clearTimeout(persistTimer);
         const p = persistPath, h = hex(hash);
-        persistTimer = setTimeout(() => { persistTimer = null; void Bun.write(p, h).catch(() => {}); }, 200);
+        // Temp file + rename: an in-place rewrite cut short by a crash leaves an empty file, which silently
+        // drops the "persisted tip" startup candidate (bug 245: the producer restarted at the SQLite journal's tip).
+        persistTimer = setTimeout(() => { persistTimer = null; try { writeFileSync(p + ".tmp", h); renameSync(p + ".tmp", p); } catch { /* best effort: the ledger journal / volatile chain top are the fallbacks */ } }, 200);
     }
 }
 
@@ -141,7 +144,10 @@ export async function getBlockBySlot(store: BlockStore, slot: bigint | number): 
     if (!b.immutable && !(await onSelectedChain(store, b))) {
         // several volatile blocks at this slot: pick the one on the selected chain, if any
         const onChain = store.volatile.atSlot(Number(slot)).find((v) => tip && store.volatileChain(tip.hash).some((c) => eq(c.hash, v.hash)));
-        if (!onChain) return positionalRow(b);
+        // Nothing of ours at this slot on the selected chain: a dead fork's block is not "the block at
+        // the slot" (bug 132: the producer's orphaned 2026-09-24 02:20 block read as confirmed for 9 h,
+        // and ledger rollbacks were cross-checked against dead blocks).
+        if (!onChain) return null;
         return positionalRow({ slot: onChain.slot, hash: onChain.hash, bytes: onChain.bytes, headerOffset: onChain.headerOffset, headerSize: onChain.headerSize, immutable: false });
     }
     return positionalRow(b);

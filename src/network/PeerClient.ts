@@ -98,6 +98,7 @@ export interface IPeerClient {
         items: RollForwardBatchItem[],
     ) => void | Promise<void>;
     onRollBack?: (peerId: string, point: any) => void | Promise<void>;
+    onAwaitReply?: (peerId: string) => void;
     onNewPeers?: (peers: PeerAddress[]) => void;
 }
 
@@ -159,6 +160,10 @@ export class PeerClient implements IPeerClient {
     private csIntersectBehindTip = false;
     /** While true, replies are counted but their content is dropped (pre-restart drain). */
     private csDraining = false;
+    /** ChainSync Jumping (Genesis): a jumper sends no MsgRequestNext; it only answers single-point jumps (`csjJump`). */
+    private csjPaused = false;
+    /** The server said MsgAwaitReply (no more headers): CSJ disengages such a peer. */
+    onAwaitReply?: (peerId: string) => void;
     /**
      * PeerSharing as *negotiated* in the handshake (ours AND theirs). Starting the
      * mini-protocol when the peer did not agree to it is a protocol violation —
@@ -654,6 +659,7 @@ export class PeerClient implements IPeerClient {
         // stop stacking requests (depth 1) until it pulls ahead again.
         this.chainSyncClient.on("awaitReply", () => {
             this.csPipeline?.noteAwaitReply();
+            try { this.onAwaitReply?.(this.peerId); } catch { /* observer only */ }
         });
 
         this.chainSyncClient.on(
@@ -744,7 +750,7 @@ export class PeerClient implements IPeerClient {
      * reply regardless of which request it answers.
      */
     private chainSyncTopUp(): void {
-        if (!this.isSyncing || this.terminated || !this.csPipeline) return;
+        if (!this.isSyncing || this.terminated || !this.csPipeline || this.csjPaused) return;
         const n = this.csPipeline.toSend();
         for (let i = 0; i < n; i++) {
             try {
@@ -884,12 +890,48 @@ export class PeerClient implements IPeerClient {
         }
     }
 
+    /** CSJ: stop requesting headers (a jumper). Outstanding replies still arrive. */
+    pauseChainSync(): void { this.csjPaused = true; }
+    /** CSJ: stream headers again (dynamo, objector, disengaged). */
+    resumeChainSync(): void {
+        if (!this.csjPaused) return;
+        this.csjPaused = false;
+        this.chainSyncTopUp();
+    }
+    get chainSyncPaused(): boolean { return this.csjPaused; }
+
+    /**
+     * CSJ jump: MsgFindIntersect with the single point `point`; true when the server's intersection is
+     * that point (an accepted jump: its read pointer is there now, the positioning MsgRollBackward that
+     * follows the next MsgRequestNext is ignored). Waits for outstanding replies first: the client has
+     * agency for MsgFindIntersect only when nothing is in flight.
+     */
+    async csjJump(point: ChainPoint, drainMs = 60_000): Promise<boolean> {
+        if (this.terminated || !this.isSyncing) throw new Error(`peer ${this.peerKey} is not syncing`);
+        const deadline = Date.now() + drainMs;
+        while ((this.csPipeline?.inFlight ?? 0) > 0 && Date.now() < deadline && !this.terminated) await new Promise((r) => setTimeout(r, 25));
+        if ((this.csPipeline?.inFlight ?? 0) > 0) throw new Error(`csj jump on ${this.peerKey}: ${this.csPipeline?.inFlight} ChainSync replies still outstanding`);
+        const want = point.blockHeader;
+        const r = await this.chainSyncClient.findIntersect([point]);
+        this.notePeerTip(r.tip.point);
+        const got = r instanceof ChainSyncIntersectFound ? r.point.blockHeader : undefined;
+        if (!want || !got || BigInt(got.slotNumber) !== BigInt(want.slotNumber) || toHex(got.hash) !== toHex(want.hash)) return false;
+        this.csIntersect = { slot: BigInt(got.slotNumber), hash: toHex(got.hash) };
+        this.csIntersectBehindTip = false;
+        return true;
+    }
+
     /** True once the connection was torn down (batches still queued from it are stale). */
     get isTerminated(): boolean {
         return this.terminated;
     }
 
     /** Pipelined ChainSync requests currently in flight (for /metrics). */
+    /** ChainSync is at the peer's tip (it answered MsgAwaitReply): the GSM's "idle" peer. */
+    get chainSyncAtTip(): boolean {
+        return this.csPipeline?.isAtTip ?? false;
+    }
+
     get chainSyncInFlight(): number {
         return this.csPipeline?.inFlight ?? 0;
     }
@@ -907,6 +949,7 @@ export class PeerClient implements IPeerClient {
         this.csPipeline?.reset();
         this.csPipeline = null;
         this.csDraining = false;
+        this.csjPaused = false; // a (re)started stream runs until CSJ pauses it again
         try {
             this.chainSyncClient.removeAllListeners("awaitReply");
             this.chainSyncClient.removeAllListeners("rollForward");

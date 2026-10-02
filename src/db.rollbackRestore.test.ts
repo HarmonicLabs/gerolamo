@@ -61,4 +61,10 @@ describe("rollbackChainTo restores spent outputs to the utxo table", () => {
         await expect(rollbackChainTo(1200n)).rejects.toThrow(/crosses an epoch boundary/);
         await sql`DELETE FROM blocks WHERE slot = 5000000`;
     });
+    test("with allowEpochCross (LMDB is the ledger authority) the rollback crosses the boundary", async () => {
+        await insertBlockVolatile({ slot: 5_000_000n, blockHash: h(22), prevHash: h(13), blockNo: 22, headerData: new Uint8Array([1]), blockData: new Uint8Array([2]) } as any);
+        const r = await rollbackChainTo(1200n, { allowEpochCross: true });
+        expect(r.blocksDeleted).toBeGreaterThanOrEqual(1);
+        expect(Number(((await sql`SELECT COUNT(*) FROM blocks WHERE slot = 5000000`.values()) as unknown[][])[0]![0])).toBe(0);
+    });
 });

@@ -23,9 +23,10 @@ import { logger } from "../utils/logger";
 import { assembleBody, splitTx, type TxParts } from "./bodyAssembly";
 import { EMPTY_BODY, forgeBlock, type BodySegments } from "./forge";
 import {
-    checkOperationalCert, kesPeriodOfSlot, loadColdVerificationKey, loadKesSigningKey, loadVrfSigningKey, poolIdOf, readOperationalCert, vrfKeyHashOf,
+    checkOperationalCert, kesPeriodOfSlot, loadColdVerificationKey, loadKesSigningKey, loadVrfSigningKey, poolIdOf, readOperationalCert, vrfKeyHashOf, zeroise,
     type KesKey, type OperationalCert, type VrfKey,
 } from "./keystore";
+import { noteForgeEvent } from "../network/nodeMetrics";
 import type { LeaderSlot } from "./leaderSchedule";
 import { decideForge, SlotTicker, slotAt, slotStartMs } from "./slotClock";
 import { noteForgedBlock } from "./forgedBlocks";
@@ -66,6 +67,12 @@ export interface ProducerNode {
     maxBlockBodySize(epoch: number): Promise<number>;
     lastOnChainOpcertCounter(poolId: string): Promise<bigint | null>;
     mempoolTxs(): Promise<Array<{ hash: Uint8Array; bytes: Uint8Array }>>;
+    /**
+     * The validating mempool's snapshot for a block at `slot`: every transaction re-applied at
+     * that slot in mempool order, cut to the block's capacity. When present it replaces
+     * `mempoolTxs` + `txSanity` (and the periodic sweep: the mempool prunes itself on each tip).
+     */
+    mempoolSnapshot?(slot: bigint): Promise<Array<{ hash: Uint8Array; bytes: Uint8Array }>>;
     dropFromMempool(hashes: Uint8Array[]): Promise<void>;
     adopt(blockFetchBytes: Uint8Array): Promise<void>;
     /**
@@ -109,6 +116,25 @@ export interface ProducerEpochStats {
     luck: number | null;
     adopted: number; confirmed: number; invalid: number; missed: number; ghosted: number; stolen: number;
 }
+/** Depth (blocks) after which a confirmed block is final for the tracker: the security parameter k of the supported networks' largest value (mainnet 2160; preview/preprod 432 finalise earlier in practice). */
+const FINAL_DEPTH = 2160;
+/**
+ * KES certificate health, same thresholds as @harmoniclabs/kes `kesStatus`: rotate-soon below 14
+ * periods left (~3 weeks at 36-hour periods), rotate-now below 4 (~6 days).
+ */
+export type KesHealth = "ok" | "rotate-soon" | "rotate-now" | "expired" | "not-yet-valid";
+export function kesHealthOf(evolution: number, maxEvolutions: number): KesHealth {
+    if (evolution < 0) return "not-yet-valid";
+    const left = maxEvolutions - evolution;
+    return left <= 0 ? "expired" : left < 4 ? "rotate-now" : left < 14 ? "rotate-soon" : "ok";
+}
+
+export type CredentialReload =
+    | { ok: true; counter: bigint; kesPeriod: bigint; evolution: number }
+    | { ok: false; reason: string };
+
+const bytesEq = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
+
 /** Blocks on top of ours before an adopted block counts as confirmed. */
 export const CONFIRM_DEPTH = 10;
 
@@ -119,7 +145,7 @@ export interface ProducerStats {
     opcert: { counter: string; kesPeriod: string; chainCounter: string | null };
     kesEvolution: number;
     /** KES key life: current period, evolutions used, evolutions left, and when the certificate expires. */
-    kes: { period: string; evolution: number; remaining: number; maxEvolutions: number; expiresAt: string; expiresSlot: string };
+    kes: { period: string; evolution: number; remaining: number; maxEvolutions: number; expiresAt: string; expiresSlot: string; health: KesHealth; counter: "ok" | "behind-chain" | "ahead-of-chain" | "unknown" };
     /** Slots the wall-clock ticker never evaluated (late by more than a slot); gLiveView "Missed slot leader checks". */
     missedLeaderChecks: number;
     /** A schedule pass (VRF over an epoch) is running right now. */
@@ -143,8 +169,10 @@ export class BlockProducer {
     readonly poolId: string;
     private readonly coldVkey: Uint8Array;
     private readonly vrf: VrfKey;
-    private readonly kes: KesKey;
-    private readonly opcert: OperationalCert;
+    /** Hot credentials: replaced as a pair by reloadCredentials() (SIGHUP), never mid-forge. */
+    private kes: KesKey;
+    private opcert: OperationalCert;
+    private reloading: Promise<CredentialReload> | null = null;
     private readonly leaderSlots = new Map<string, LeaderSlot>(); // slot → entry
     private readonly scheduled = new Set<number>();
     /** The nonce each epoch's schedule was computed from: a schedule built from the evolver's peek before the epoch's last block is provisional. */
@@ -155,7 +183,7 @@ export class BlockProducer {
     /** σ per scheduled epoch (for the ideal / luck figures). */
     private readonly sigmaByEpoch = new Map<number, { num: bigint; den: bigint }>();
     /** What became of each leader slot, by slot; `upcoming` slots have no entry. */
-    private readonly outcomes = new Map<string, { outcome: LeaderSlotOutcome; hash: string | null; note: string | null }>();
+    private readonly outcomes = new Map<string, { outcome: LeaderSlotOutcome; hash: string | null; note: string | null; blockNo?: number }>();
     /** Last on-chain opcert counter for this pool, refreshed with the outcomes. */
     private chainCounter: bigint | null = null;
     private ticker: SlotTicker | null = null;
@@ -207,6 +235,60 @@ export class BlockProducer {
         this.ticker = null;
     }
 
+    /**
+     * Reload the KES signing key and operational certificate from their files (cardano-node does
+     * this on SIGHUP, so a KES rotation needs no restart). The new pair must pass the same checks
+     * as at startup — issued by our cold key with a valid cold signature, certifying this KES key,
+     * valid for the current KES period, and a counter the chain accepts (the last on-chain counter
+     * or one above it) — otherwise the running credentials stay. The swap waits for a forge in
+     * progress; the replaced KES secret is zeroed. Nothing about key material is logged.
+     */
+    reloadCredentials(): Promise<CredentialReload> {
+        if (this.reloading) return this.reloading;
+        this.reloading = this.doReload().finally(() => { this.reloading = null; });
+        return this.reloading;
+    }
+
+    private async doReload(): Promise<CredentialReload> {
+        let kes: KesKey | null = null;
+        const fail = (reason: string): CredentialReload => {
+            if (kes) zeroise(kes.skey);
+            this.lastError = `credential reload rejected: ${reason}`;
+            logger.error(`Block producer: KES / operational certificate reload rejected, keeping counter ${this.opcert.cert.counter} period ${this.opcert.cert.kesPeriod}: ${reason}`);
+            return { ok: false, reason };
+        };
+        let opcert: OperationalCert;
+        try {
+            opcert = readOperationalCert(this.cfg.opcertFile);
+            kes = loadKesSigningKey(this.cfg.kesSkeyFile);
+        } catch (err) {
+            return fail(`cannot read ${this.cfg.opcertFile} / the KES key: ${(err as Error)?.message ?? err}`);
+        }
+        if (!bytesEq(opcert.coldVkey, this.coldVkey)) return fail("operational certificate was issued by a different cold key");
+        let chainCounter: bigint | null;
+        try { chainCounter = await this.node.lastOnChainOpcertCounter(this.poolId); }
+        catch (err) { return fail(`on-chain counter unavailable: ${(err as Error)?.message ?? err}`); }
+        const slot = slotAt((this.node.now ?? Date.now)(), this.node.network);
+        const check = checkOperationalCert(opcert, {
+            currentKesPeriod: kesPeriodOfSlot(slot, BigInt(this.node.genesis.slotsPerKESPeriod)),
+            maxKesEvolutions: BigInt(this.node.genesis.maxKESEvolutions),
+            lastOnChainCounter: chainCounter,
+            kesVkey: kes.vkey,
+        });
+        if (!check.ok) return fail(check.reason);
+        for (let waited = 0; this.forging && waited < 30_000; waited += 50) await Bun.sleep(50);
+        if (this.forging) return fail("a forge is still running after 30 s; try again");
+        const old = this.kes, before = this.opcert.cert;
+        this.kes = kes;
+        this.opcert = opcert;
+        this.chainCounter = chainCounter;
+        if (old !== kes) zeroise(old.skey);
+        if (this.lastError?.startsWith("credential reload rejected")) this.lastError = null;
+        const same = before.counter === opcert.cert.counter && before.kesPeriod === opcert.cert.kesPeriod && bytesEq(before.kesVkey, opcert.cert.kesVkey);
+        logger.info(`Block producer: credentials reloaded${same ? " (unchanged certificate)" : ""}: opcert counter ${before.counter} → ${opcert.cert.counter}, KES period ${before.kesPeriod} → ${opcert.cert.kesPeriod}, evolution ${check.evolution} of ${this.node.genesis.maxKESEvolutions}`);
+        return { ok: true, counter: opcert.cert.counter, kesPeriod: opcert.cert.kesPeriod, evolution: check.evolution };
+    }
+
     stats(): ProducerStats {
         const now = (this.node.now ?? Date.now)();
         const cur = slotAt(now, this.node.network);
@@ -238,7 +320,7 @@ export class BlockProducer {
             poolId: this.poolId, vrfKeyHash: vrfKeyHashOf(this.vrf.vkey),
             opcert: { counter: this.opcert.cert.counter.toString(), kesPeriod: this.opcert.cert.kesPeriod.toString(), chainCounter: this.chainCounter?.toString() ?? null },
             kesEvolution: evolution,
-            kes: { period: period.toString(), evolution, remaining: Math.max(0, maxEvo - evolution), maxEvolutions: maxEvo, expiresAt: new Date(slotStartMs(expiresSlot, net)).toISOString(), expiresSlot: expiresSlot.toString() },
+            kes: { period: period.toString(), evolution, remaining: Math.max(0, maxEvo - evolution), maxEvolutions: maxEvo, expiresAt: new Date(slotStartMs(expiresSlot, net)).toISOString(), expiresSlot: expiresSlot.toString(), health: kesHealthOf(evolution, maxEvo), counter: this.chainCounter == null ? "unknown" : this.opcert.cert.counter < this.chainCounter ? "behind-chain" : this.opcert.cert.counter > this.chainCounter + 1n ? "ahead-of-chain" : "ok" },
             missedLeaderChecks: this.ticker?.missedSlots ?? 0,
             scheduling: this.scheduling !== null,
             carriers: this.node.carriers?.() ?? null,
@@ -268,10 +350,13 @@ export class BlockProducer {
         if (!tip) return;
         let changed = false;
         for (const [slot, o] of this.outcomes) {
-            if (o.outcome !== "adopted") continue;
+            // A confirmed block is re-checked until it is k deep: a rollback deeper than
+            // CONFIRM_DEPTH can still remove it (bug 130: the 2026-09-22 04:59 block stayed
+            // "confirmed" after the network replaced it 13 s later and our node followed).
+            if (o.outcome !== "adopted" && !(o.outcome === "confirmed" && o.blockNo != null && tip.blockNumber - BigInt(o.blockNo) < BigInt(FINAL_DEPTH))) continue;
             const b = await this.node.blockAtSlot(BigInt(slot));
             if (b && o.hash && b.hash === o.hash) {
-                if (tip.blockNumber - BigInt(b.blockNo) >= BigInt(CONFIRM_DEPTH)) { o.outcome = "confirmed"; changed = true; }
+                if (o.outcome === "adopted" && tip.blockNumber - BigInt(b.blockNo) >= BigInt(CONFIRM_DEPTH)) { o.outcome = "confirmed"; o.blockNo = b.blockNo; changed = true; }
             } else if (b) { changed = true; o.outcome = "stolen"; o.note = `slot battle lost to ${b.hash.slice(0, 16)}…`; logger.warn(`Block producer: our block at slot ${slot} was replaced by ${b.hash.slice(0, 16)}… (slot battle lost)`); this.greetingLost(o.hash); }
             else if (tip.slot > BigInt(slot) + 120n) { changed = true; o.outcome = "ghosted"; o.note = "rolled back, nothing at the slot"; logger.warn(`Block producer: our block at slot ${slot} is no longer on the chain (ghosted)`); this.greetingLost(o.hash); }
         }
@@ -348,14 +433,16 @@ export class BlockProducer {
             const msg = `Block producer: leader slot ${s.slot} in ${ahead / 60n} min — ${n} carrier(s) attached (${c.inbound.length} inbound pulling, ${c.duplex.length} duplex)${c.publicReachable === false ? "; PUBLIC PORT UNREACHABLE" : ""}`;
             if (n === 0 || c.publicReachable === false) logger.warn(msg + ": a block forged now would not leave this node"); else logger.info(msg);
         }
-        if (!this.leaderSlots.has(slot.toString())) return;
+        noteForgeEvent("about-to-lead");
+        if (!this.leaderSlots.has(slot.toString())) { noteForgeEvent("node-not-leader"); return; }
+        noteForgeEvent("node-is-leader");
         const tip = await this.node.tip();
         const verdict = decideForge(slot, nowMs, {
             leaderSlots: new Set(this.leaderSlots.keys()),
             tip: tip ? { slot: tip.slot, blockNumber: tip.blockNumber, hash: Uint8Array.from(Buffer.from(tip.hashHex, "hex")) } : null,
             lastForgedSlot: this.lastForgedSlot,
         }, { network: this.node.network });
-        if (!verdict.forge) { this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: verdict.reason }); this.writeState(this.lastForgedSlot); logger.warn(`Block producer: leader for slot ${slot} but not forging: ${verdict.reason}`); return; }
+        if (!verdict.forge) { noteForgeEvent("could-not-forge"); this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: verdict.reason }); this.writeState(this.lastForgedSlot); logger.warn(`Block producer: leader for slot ${slot} but not forging: ${verdict.reason}`); return; }
         if (this.cfg.dryRun) { this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: "dry run" }); logger.info(`Block producer (dry run): would forge slot ${slot} as block ${verdict.blockNumber} on ${tip!.hashHex.slice(0, 16)}…`); return; }
         if (this.forging) { this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: "a forge was still running" }); return; }
         this.forging = true;
@@ -379,12 +466,14 @@ export class BlockProducer {
             try { const g = await this.node.greetingTx(); if (g) { greeting = splitTx(g.hash, g.bytes); txs.push(greeting); } }
             catch (err) { logger.warn(`Block producer: greeting transaction not built: ${(err as Error)?.message ?? err}`); }
         }
-        // Mempool transactions, minus what cannot be in this block (expired, spent inputs): the
-        // mempool has no ledger validation of its own yet, and at 08:44 UTC 2026-09-12 it held 69
-        // transactions of which most were stale.
-        const candidates = await this.node.mempoolTxs();
+        // Mempool transactions: the validating mempool's snapshot for this slot (re-applied in
+        // order, within the block's capacity), or — without one — the stored transactions minus
+        // what cannot be in this block (expired, spent inputs; at 08:44 UTC 2026-09-12 an
+        // unvalidated mempool held 69 transactions of which most were stale).
+        const validated = !!this.node.mempoolSnapshot;
+        const candidates = validated ? await this.node.mempoolSnapshot!(slot) : await this.node.mempoolTxs();
         const stale = new Set<string>();
-        if (this.node.txSanity && candidates.length) {
+        if (!validated && this.node.txSanity && candidates.length) {
             try { for (const h of await this.node.txSanity(candidates, slot)) stale.add(Buffer.from(h).toString("hex")); }
             catch (err) { logger.warn(`Block producer: mempool sanity check failed: ${(err as Error)?.message ?? err}`); }
         }
@@ -406,9 +495,11 @@ export class BlockProducer {
                 era: this.node.era, blockNumber, slot, prevHash, nonce, coldVkey: this.coldVkey, vrf: this.vrf, kes: this.kes, opcert: this.opcert.cert,
                 protocolVersion, slotsPerKESPeriod: BigInt(this.node.genesis.slotsPerKESPeriod), body: attempt.body,
             });
+            noteForgeEvent("forged", slot);
             try {
                 await this.node.adopt(forged.blockFetchBytes);
             } catch (err) {
+                noteForgeEvent("forged-invalid");
                 const msg = String((err as Error)?.message ?? err);
                 this.lastError = `block for slot ${slot} rejected by our own rules (${attempt.included.length} tx): ${msg}`;
                 logger.error(`Block producer: ${this.lastError}`);
@@ -426,6 +517,7 @@ export class BlockProducer {
                 attempt = null; // → empty body next
                 continue;
             }
+            noteForgeEvent("adopted");
             this.lastForgedSlot = slot;
             this.forged++;
             this.outcomes.set(slot.toString(), { outcome: "adopted", hash: Buffer.from(forged.headerHash).toString("hex"), note: `block ${blockNumber}, ${attempt.included.length} tx` });
@@ -453,7 +545,7 @@ export class BlockProducer {
 
     /** Drop mempool transactions that can no longer be in a block (expired, inputs spent). */
     private async sweepMempool(slot: bigint): Promise<void> {
-        if (!this.node.txSanity) return;
+        if (this.node.mempoolSnapshot || !this.node.txSanity) return; // a validating mempool prunes itself
         const txs = await this.node.mempoolTxs();
         if (!txs.length) return;
         const bad = await this.node.txSanity(txs, slot);
@@ -470,7 +562,7 @@ export class BlockProducer {
             // outcomes survive a relaunch (2026-09-12 06:51 UTC: the first accepted block showed as
             // "missed" on the panel after a restart because the map lived in memory only)
             if (j.outcomes && typeof j.outcomes === "object") {
-                for (const [slot, o] of Object.entries(j.outcomes as Record<string, { outcome: LeaderSlotOutcome; hash: string | null; note: string | null }>)) {
+                for (const [slot, o] of Object.entries(j.outcomes as Record<string, { outcome: LeaderSlotOutcome; hash: string | null; note: string | null; blockNo?: number }>)) {
                     if (o && typeof o.outcome === "string") this.outcomes.set(slot, { outcome: o.outcome, hash: o.hash ?? null, note: o.note ?? null });
                 }
             }
@@ -501,6 +593,7 @@ export function nodeAdapter(opts: {
     nonceFor: (epoch: number) => Promise<string | null>;
     adopt: (bytes: Uint8Array) => Promise<unknown>;
     mempoolTxs: () => Promise<Array<{ hash: Uint8Array; bytes: Uint8Array }>>;
+    mempoolSnapshot?: (slot: bigint) => Promise<Array<{ hash: Uint8Array; bytes: Uint8Array }>>;
     greetingTx?: () => Promise<{ hash: Uint8Array; bytes: Uint8Array } | null>;
     dropFromMempool: (hashes: Uint8Array[]) => Promise<void>;
 }): ProducerNode {
@@ -533,6 +626,7 @@ export function nodeAdapter(opts: {
             return s ? BigInt(s.counter) : null;
         },
         mempoolTxs: opts.mempoolTxs,
+        mempoolSnapshot: opts.mempoolSnapshot,
         greetingTx: opts.greetingTx,
         dropFromMempool: opts.dropFromMempool,
         adopt: async (b) => { await opts.adopt(b); },

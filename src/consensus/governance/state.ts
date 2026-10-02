@@ -18,9 +18,15 @@ import { logger } from "../../utils/logger";
 import { updateToRaw } from "../pparams";
 import { readEpochParamsRaw } from "../epochParams";
 import { paramChangesOfProposal, type RawCostModels } from "./costModelUpdate";
-import { committeeAccepts, drepAccepts, poolAccepts, rationalOf, thresholdsFor, type ActionKind, type CommitteeTally, type DRepTally, type PoolTally, type ThresholdParams } from "./tally";
-import { ledgerGov, ledgerGovReads, ledgerStakeReads, sqlLedgerWrites } from "../../ledger/nodeLedgerStore";
+import { type ActionKind } from "./tally";
+import { getLedgerStore, ledgerGov, ledgerGovReads, ledgerStake, ledgerStakeReads, sqlLedgerWrites } from "../../ledger/nodeLedgerStore";
+import { primaryBlockStore } from "../../storage/nodeBlockStore";
+import { snapshotAtBoundary, storePulserSnapshot } from "./govPulser";
 import type { ProposalRow as StoreProposalRow } from "../../ledger/govStore";
+import { ccCredsOf, ccKey, drepCredOfRow, loadCommitteeView, loadLiveProposals, payloadCcAdd, payloadCcRemove } from "./govLedgerView";
+import { ratifyRound, type ProposalTally, type Purpose } from "./ratify";
+import { gatherRatifyInput, ratifyProposalOf } from "./ratifyInputs";
+import { typedOf } from "./govTxDecode";
 
 /** A stored proposal in the shape this module works with (payload parsed, deposit as bigint). */
 function fromStoreProposal(p: StoreProposalRow): ProposalRow {
@@ -57,6 +63,14 @@ export async function ensureGovernanceTables(): Promise<void> {
         stake TEXT NOT NULL,
         PRIMARY KEY (taken_at, drep_type, drep_hash)
     )`;
+    // Protocol-9 reverse delegations (the DRep's `drepDelegs`), kept until the protocol-10 hard fork (bug 165).
+    await sql`CREATE TABLE IF NOT EXISTS gov_drep_boot_delegs (
+        drep_key TEXT NOT NULL,       -- typed DRep credential
+        stake_key TEXT NOT NULL,      -- typed stake credential
+        PRIMARY KEY (drep_key, stake_key)
+    )`;
+    // The DRep pulser's frozen snapshot per epoch (bug 167), JSON of govStore.ts `PulserSnapshot`.
+    await sql`CREATE TABLE IF NOT EXISTS gov_pulser_snapshot (epoch INTEGER PRIMARY KEY, snapshot TEXT NOT NULL)`;
     await sql`CREATE TABLE IF NOT EXISTS gov_committee (
         cold_credential TEXT PRIMARY KEY,
         expires_epoch INTEGER NOT NULL,
@@ -114,24 +128,81 @@ export async function ensureGovernanceTables(): Promise<void> {
     )`;
 }
 
-/** Seed committee, constitution and thresholds from the Conway genesis once (idempotent). */
-export async function seedGovernance(db: SqlClient, conwayGenesis: any, epoch: number): Promise<void> {
+/** Typed credential of a Conway genesis key (`keyHash-…` / `scriptHash-…`, as cardano-ledger's JSON `Credential`). */
+export function genesisCred(k: string): string | null {
+    const m = /^(keyHash|scriptHash)-([0-9a-fA-F]{56})$/.exec(String(k));
+    if (m) return typedOf(m[1] === "scriptHash" ? 1 : 0, m[2]!);
+    return /^[0-9a-fA-F]{56}$/.test(String(k)) ? String(k).toLowerCase() : null; // untyped (old test genesis files): a key hash
+}
+
+/**
+ * Seed committee, constitution and thresholds from the Conway genesis once (idempotent). The
+ * committee's cold credentials are typed from the genesis keys (bug 153: the `scriptHash-` prefix
+ * was stripped and every member stored as a bare hash).
+ *
+ * `initialDReps` and `delegs` (bug 157): cardano-node injects them only into the initial ledger
+ * state of a chain that starts in Conway (consensus `mkInitExtLedgerStateCardano` →
+ * `injectIntoTestState` → `registerDRepsThenDelegs`), never on mainnet and never at a
+ * Babbage→Conway translation (`translateEra` sets committee and constitution only). `fromGenesis`
+ * says the chain starts in Conway; the delegations apply to registered stake credentials only
+ * (`processDelegation` adjusts an existing account).
+ */
+export async function seedGovernance(db: SqlClient, conwayGenesis: any, epoch: number, opts: { chainStartsInConway?: boolean; mainnet?: boolean } = {}): Promise<void> {
     const gr = ledgerGovReads(), gw = ledgerGov();
     const rows = gr ? (gr.state() ? [[1]] : []) : (await db`SELECT 1 FROM gov_state WHERE id = 1`.values()) as unknown[][];
     if (rows.length) return;
     const thr = conwayGenesis?.committee?.threshold ?? { numerator: 2, denominator: 3 };
     const cons = conwayGenesis?.constitution ?? {};
+    const members: Array<[string, number]> = [];
+    for (const [cred, expiry] of Object.entries(conwayGenesis?.committee?.members ?? {})) { const c = genesisCred(cred); if (c) members.push([ccKey(c), Number(expiry)]); }
     if (gw && !gw.reads.state()) {
+        if (cons.anchor?.url && cons.anchor?.dataHash) gw.putConstitutionAnchor({ url: String(cons.anchor.url), hash: String(cons.anchor.dataHash).toLowerCase() });
         gw.putState({ thrNum: Number(thr.numerator ?? 2), thrDen: Number(thr.denominator ?? 3), constitutionHash: cons.anchor?.dataHash ?? null, constitutionScript: cons.script ?? null, noConfidence: 0, prevPP: null, prevHF: null, prevCC: null, prevCons: null, seededEpoch: epoch, dormantEpochs: 0, pending: null });
-        for (const [cred, expiry] of Object.entries(conwayGenesis?.committee?.members ?? {})) { const c = String(cred).replace(/^(keyHash|scriptHash)-/, "").toLowerCase(); if (!gw.reads.committee().has(c)) gw.putCommittee(c, { expiresEpoch: Number(expiry), hot: null, resigned: 0 }); }
+        for (const [c, expiry] of members) if (!gw.reads.committee().has(c)) gw.putCommittee(c, { expiresEpoch: expiry, hot: null, resigned: 0 });
     }
     if (sqlLedgerWrites()) await db`INSERT INTO gov_state (id, committee_threshold_num, committee_threshold_den, constitution_hash, constitution_script, no_confidence, seeded_epoch)
         VALUES (1, ${Number(thr.numerator ?? 2)}, ${Number(thr.denominator ?? 3)}, ${cons.anchor?.dataHash ?? null}, ${cons.script ?? null}, 0, ${epoch})`;
-    for (const [cred, expiry] of Object.entries(conwayGenesis?.committee?.members ?? {})) {
-        const c = String(cred).replace(/^(keyHash|scriptHash)-/, "").toLowerCase();
-        if (sqlLedgerWrites()) await db`INSERT OR IGNORE INTO gov_committee (cold_credential, expires_epoch, hot_credential, resigned) VALUES (${c}, ${Number(expiry)}, NULL, 0)`;
+    for (const [c, expiry] of members) if (sqlLedgerWrites()) await db`INSERT OR IGNORE INTO gov_committee (cold_credential, expires_epoch, hot_credential, resigned) VALUES (${c}, ${expiry}, NULL, 0)`;
+    let dreps = 0, delegs = 0;
+    if (opts.chainStartsInConway && !opts.mainnet) {
+        for (const [k, st] of Object.entries(conwayGenesis?.initialDReps ?? {}) as Array<[string, any]>) {
+            const c = genesisCred(k);
+            if (!c) continue;
+            const expiry = Number(st?.expiry ?? 0);
+            const isScript = c.length === 58 ? 1 : 0;
+            gw?.putDRep(c, { isScript, deposit: String(st?.deposit ?? 0), registeredSlot: 0, lastActiveEpoch: expiry - Number(conwayGenesis?.dRepActivity ?? 0), expiryEpoch: expiry });
+            if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO gov_dreps (credential, is_script, deposit, registered_slot, last_active_epoch, expiry_epoch) VALUES (${c}, ${isScript}, ${String(st?.deposit ?? 0)}, 0, ${expiry - Number(conwayGenesis?.dRepActivity ?? 0)}, ${expiry})`;
+            dreps++;
+        }
+        for (const [k, d] of Object.entries(conwayGenesis?.delegs ?? {}) as Array<[string, any]>) {
+            const c = genesisCred(k);
+            const drep = parseGenesisDRep(d?.dRep);
+            if (!c || !drep) continue;
+            if (!(await stakeRegistered(c))) continue;
+            ledgerGov()?.putDRepDelegation(c, drep);
+            if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO gov_drep_delegations (stake_key, drep_type, drep_hash) VALUES (${c}, ${drep.type}, ${drep.hash})`;
+            delegs++;
+        }
     }
-    logger.info(`Governance seeded from the Conway genesis: ${Object.keys(conwayGenesis?.committee?.members ?? {}).length} committee member(s), threshold ${thr.numerator}/${thr.denominator}`);
+    logger.info(`Governance seeded from the Conway genesis: ${members.length} committee member(s), threshold ${thr.numerator}/${thr.denominator}${dreps || delegs ? `, ${dreps} initial DRep(s), ${delegs} vote delegation(s)` : ""}`);
+}
+
+/** A genesis `Delegatee`'s DRep (`drep-alwaysAbstain`, `drep-alwaysNoConfidence`, `drep-keyHash-…`, `drep-scriptHash-…`) as a delegation row. */
+export function parseGenesisDRep(t: unknown): { type: number; hash: string | null } | null {
+    if (typeof t !== "string") return null;
+    if (t === "drep-alwaysAbstain") return { type: 2, hash: null };
+    if (t === "drep-alwaysNoConfidence") return { type: 3, hash: null };
+    const m = /^drep-(keyHash|scriptHash)-([0-9a-fA-F]{56})$/.exec(t);
+    return m ? { type: m[1] === "scriptHash" ? 1 : 0, hash: m[2]!.toLowerCase() } : null;
+}
+
+async function stakeRegistered(typed: string): Promise<boolean> {
+    const { ledgerStakeReads } = await import("../../ledger/nodeLedgerStore");
+    const sr = ledgerStakeReads();
+    if (sr) return sr.isRegistered(typed);
+    const script = typed.length === 58, hash = script ? typed.slice(2) : typed;
+    const r = (await sql`SELECT 1 FROM stake WHERE stake_credentials = ${Uint8Array.from(Buffer.from(hash, "hex"))} AND (cred_type IS NULL OR cred_type = ${script ? 1 : 0}) LIMIT 1`.values()) as unknown[][];
+    return r.length > 0;
 }
 
 // ───────────────────────────── capture at apply ─────────────────────────────
@@ -156,13 +227,40 @@ export async function drepExpiryFor(db: SqlClient, epoch: number, registration: 
     return epoch + activity - (registration && major < 10 ? 0 : dormant);
 }
 
+/** Typed credential (db/stakeCred.ts convention: hash, or "01" + hash for a script) of a ledger-ts DRep credential. */
+function drepTyped(cred: any): string { return typedCredHexOf(cred) ?? hex(cred?.hash); }
+
+/**
+ * The stored row of a DRep (typed key; a row written before bug 153 is keyed by the bare hash and
+ * identified by `is_script`): [storage key, row] or null.
+ */
+async function drepStored(db: SqlClient, typed: string): Promise<{ key: string; isScript: number; registeredSlot: number } | null> {
+    const script = typed.length === 58, bare = script ? typed.slice(2) : typed;
+    const gr = ledgerGovReads();
+    if (gr) {
+        const a = gr.drep(typed); if (a && (a.isScript ? 1 : 0) === (script ? 1 : 0)) return { key: typed, isScript: a.isScript, registeredSlot: a.registeredSlot };
+        if (script) { const b = gr.drep(bare); if (b && b.isScript) return { key: bare, isScript: 1, registeredSlot: b.registeredSlot }; }
+        return null;
+    }
+    const rows = (await db`SELECT credential, is_script, registered_slot FROM gov_dreps WHERE credential IN (${typed}, ${bare})`.values()) as unknown[][];
+    const r = rows.find((x) => (Number(x[1]) ? 1 : 0) === (script ? 1 : 0));
+    return r ? { key: String(r[0]), isScript: Number(r[1]), registeredSlot: Number(r[2]) } : null;
+}
+
+/** A DRep registration: keyed by the typed credential (bug 153: a script DRep and a key DRep with the same hash are two DReps). */
 export async function recordDRepRegistration(db: SqlClient, cred: any, deposit: bigint, slot: number, epoch: number, expiryEpoch?: number): Promise<void> {
-    const isScript = cred?.type === 1 || cred?.type === "script" ? 1 : 0;
+    const typed = drepTyped(cred);
+    const isScript = typed.length === 58 ? 1 : 0;
     const expiry = expiryEpoch ?? (await drepExpiryFor(db, epoch, true));
+    const cur = await drepStored(db, typed);
+    if (!cur) await bootClear(db, typed); // a registration starts with no delegators (`drepDelegs = mempty`)
     const gw = ledgerGov();
-    if (gw) { const cur = gw.reads.drep(hex(cred?.hash)); gw.putDRep(hex(cred?.hash), { isScript: cur?.isScript ?? isScript, deposit: deposit.toString(), registeredSlot: cur?.registeredSlot ?? slot, lastActiveEpoch: epoch, expiryEpoch: expiry }); }
-    if (sqlLedgerWrites()) await db`INSERT INTO gov_dreps (credential, is_script, deposit, registered_slot, last_active_epoch, expiry_epoch) VALUES (${hex(cred?.hash)}, ${isScript}, ${deposit.toString()}, ${slot}, ${epoch}, ${expiry})
+    if (gw) { if (cur && cur.key !== typed) gw.delDRep(cur.key); gw.putDRep(typed, { isScript, deposit: deposit.toString(), registeredSlot: cur?.registeredSlot ?? slot, lastActiveEpoch: epoch, expiryEpoch: expiry }); }
+    if (sqlLedgerWrites()) {
+        if (cur && cur.key !== typed) await db`DELETE FROM gov_dreps WHERE credential = ${cur.key}`;
+        await db`INSERT INTO gov_dreps (credential, is_script, deposit, registered_slot, last_active_epoch, expiry_epoch) VALUES (${typed}, ${isScript}, ${deposit.toString()}, ${cur?.registeredSlot ?? slot}, ${epoch}, ${expiry})
         ON CONFLICT(credential) DO UPDATE SET deposit = excluded.deposit, last_active_epoch = excluded.last_active_epoch, expiry_epoch = excluded.expiry_epoch`;
+    }
 }
 /**
  * A DRep's unregistration also clears every vote delegation to it (cardano-ledger GOVCERT,
@@ -171,34 +269,106 @@ export async function recordDRepRegistration(db: SqlClient, cred: any, deposit: 
  * registered again its old delegators counted for it without re-delegating (preview epoch 1415:
  * 1 339 registered credentials with a delegation the chain no longer has, 4.1 M ADA on one
  * re-registered DRep; found by the snapshot decoder against the node's unified map).
+ * Bug 156: its votes go too — GOV removes an unregistering DRep's votes from every proposal
+ * (`GovRemovedVotes`); ours stayed and counted again if the DRep registered anew before the vote's
+ * action was decided.
  */
-export async function recordDRepUnregistration(db: SqlClient, cred: any): Promise<void> {
-    const h = hex(cred?.hash);
-    const isScript = cred?.type === 1 || cred?.type === "script" ? 1 : 0;
+export async function recordDRepUnregistration(db: SqlClient, cred: any, epoch?: number): Promise<void> {
+    const typed = drepTyped(cred);
+    const isScript = typed.length === 58 ? 1 : 0;
+    const h = isScript ? typed.slice(2) : typed;
+    const cur = await drepStored(db, typed);
     const gw = ledgerGov();
-    if (gw) { gw.delDRep(h); gw.clearDelegationsTo(isScript, h); }
-    if (sqlLedgerWrites()) await db`DELETE FROM gov_dreps WHERE credential = ${h}`;
-    if (sqlLedgerWrites()) await db`DELETE FROM gov_drep_delegations WHERE drep_type = ${isScript} AND drep_hash = ${h}`;
+    const live = await loadLiveProposals();
+    // Protocol 9: the accounts of the DRep's reverse set lose their delegation, whatever it is now (bug 165);
+    // from protocol 10 the set is exactly the accounts delegated to it.
+    const boot = (await protocolMajorAt(epoch)) === 9 ? await bootMembers(db, typed) : null;
+    if (gw) {
+        if (cur) gw.delDRep(cur.key);
+        if (boot) for (const a of boot) gw.delDRepDelegation(a); else gw.clearDelegationsTo(isScript, h);
+        for (const p of live) gw.delVote(p.id, 2 + isScript, h);
+    }
+    if (sqlLedgerWrites()) {
+        if (cur) await db`DELETE FROM gov_dreps WHERE credential = ${cur.key}`;
+        if (boot) { for (const a of boot) await db`DELETE FROM gov_drep_delegations WHERE stake_key = ${a}`; }
+        else await db`DELETE FROM gov_drep_delegations WHERE drep_type = ${isScript} AND drep_hash = ${h}`;
+        for (const p of live) await db`DELETE FROM gov_votes WHERE action_id = ${p.id} AND voter_kind = ${2 + isScript} AND voter_hash = ${h}`;
+    }
+    if (boot) await bootClear(db, typed);
 }
+/** A DRep's vote or update certificate refreshes its expiry; `credHex` is the typed credential. */
 export async function recordDRepActivity(db: SqlClient, credHex: string, epoch: number): Promise<void> {
     const expiry = await drepExpiryFor(db, epoch, false);
+    const cur = await drepStored(db, credHex.toLowerCase());
+    if (!cur) return;
     const gw = ledgerGov();
-    if (gw) { const cur = gw.reads.drep(credHex); if (cur) gw.putDRep(credHex, { ...cur, lastActiveEpoch: epoch, expiryEpoch: expiry }); }
-    if (sqlLedgerWrites()) await db`UPDATE gov_dreps SET last_active_epoch = ${epoch}, expiry_epoch = ${expiry} WHERE credential = ${credHex}`;
+    if (gw) { const r = gw.reads.drep(cur.key); if (r) gw.putDRep(cur.key, { ...r, lastActiveEpoch: epoch, expiryEpoch: expiry }); }
+    if (sqlLedgerWrites()) await db`UPDATE gov_dreps SET last_active_epoch = ${epoch}, expiry_epoch = ${expiry} WHERE credential = ${cur.key}`;
 }
 
 /** Credentials of the DReps whose expiry reaches `currentEpoch` (registered and not expired). */
 export async function activeDRepCredentials(currentEpoch: number, drepActivity: number): Promise<Set<string>> {
     const gr = ledgerGovReads();
-    if (gr) return gr.activeDRepCredentials(currentEpoch, drepActivity);
-    const reg = (await sql`SELECT credential FROM gov_dreps WHERE COALESCE(expiry_epoch, last_active_epoch + ${drepActivity}) >= ${currentEpoch}`.values()) as unknown[][];
-    return new Set(reg.map((r) => String(r[0])));
+    if (gr) { const out = new Set<string>(); for (const [k, d] of gr.dreps()) if ((d.expiryEpoch ?? d.lastActiveEpoch + drepActivity) >= currentEpoch) out.add(drepCredOfRow(k, d.isScript)); return out; }
+    const reg = (await sql`SELECT credential, is_script FROM gov_dreps WHERE COALESCE(expiry_epoch, last_active_epoch + ${drepActivity}) >= ${currentEpoch}`.values()) as unknown[][];
+    return new Set(reg.map((r) => drepCredOfRow(String(r[0]), Number(r[1]))));
 }
-export async function recordVoteDelegation(db: SqlClient, stakeCred: any, drep: any): Promise<void> {
+// ── protocol-9 reverse delegations (bug 165) ──
+//
+// cardano-ledger keeps, per DRep, the set of accounts delegated to it (`drepDelegs`) and clears their
+// delegations when the DRep unregisters. In the bootstrap phase (protocol 9) a re-delegation from
+// one DRep to another left the account in the old DRep's set (`preserveIncorrectDelegation`,
+// cardano-ledger issue 4772), and a delegation to a DRep that was not registered was allowed and
+// entered no set. So a protocol-9 unregistration cleared the delegation of every account in the set
+// — whatever it delegated to by then — and none of the others. The protocol-10 hard fork rebuilt the
+// sets from the accounts and dropped the delegations to unregistered DReps (`updateDRepDelegations`).
+// Preview: account 0a047809… delegated to DRep fd160e2b…, then to 9b239a50…; fd160e2b… unregistered
+// at epoch 724 and the chain cleared the account's delegation (NES at 1415/1420/1434: none), where
+// ours kept 9b239a50…; acab7e49… likewise.
+
+async function protocolMajorAt(epoch: number | undefined | null): Promise<number | null> {
+    if (epoch == null || !Number.isFinite(epoch)) return null;
+    const raw = await readEpochParamsRaw(epoch);
+    return raw?.protocol_major_ver == null ? null : Number(raw.protocol_major_ver);
+}
+async function bootAdd(db: SqlClient, drep: string, stake: string): Promise<void> {
+    ledgerGov()?.addBootDelegator(drep, stake);
+    if (sqlLedgerWrites()) await db`INSERT OR IGNORE INTO gov_drep_boot_delegs (drep_key, stake_key) VALUES (${drep}, ${stake})`;
+}
+async function bootDel(db: SqlClient, drep: string, stake: string): Promise<void> {
+    ledgerGov()?.delBootDelegator(drep, stake);
+    if (sqlLedgerWrites()) await db`DELETE FROM gov_drep_boot_delegs WHERE drep_key = ${drep} AND stake_key = ${stake}`;
+}
+async function bootMembers(db: SqlClient, drep: string): Promise<string[]> {
+    const gr = ledgerGovReads();
+    if (gr) return gr.bootDelegators(drep);
+    return ((await db`SELECT stake_key FROM gov_drep_boot_delegs WHERE drep_key = ${drep}`.values()) as unknown[][]).map((r) => String(r[0]));
+}
+async function bootClear(db: SqlClient, drep: string): Promise<void> {
+    const gw = ledgerGov(); if (gw) gw.clearBootDelegators(drep);
+    if (sqlLedgerWrites()) await db`DELETE FROM gov_drep_boot_delegs WHERE drep_key = ${drep}`;
+}
+async function drepDelegationOf(db: SqlClient, stakeKey: string): Promise<{ type: number; hash: string | null } | null> {
+    const gr = ledgerGovReads();
+    if (gr) return gr.drepDelegation(stakeKey);
+    const r = ((await db`SELECT drep_type, drep_hash FROM gov_drep_delegations WHERE stake_key = ${stakeKey}`.values()) as unknown[][])[0];
+    return r ? { type: Number(r[0]), hash: r[1] == null ? null : String(r[1]) } : null;
+}
+
+/**
+ * A vote delegation (certificate types 9, 10, 12, 13). `epoch` selects the bootstrap-phase reverse-set
+ * semantics (bug 165); `newAccount` for the registering certificates 12 / 13.
+ */
+export async function recordVoteDelegation(db: SqlClient, stakeCred: any, drep: any, epoch?: number, newAccount = false): Promise<void> {
     const t = Number(drep?.drepType ?? drep?.type ?? -1);
     const h = t === 0 || t === 1 ? hex(drep?.hash) : null;
-    ledgerGov()?.putDRepDelegation(typedCredHexOf(stakeCred) ?? hex(stakeCred?.hash), { type: t, hash: h });
-    if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO gov_drep_delegations (stake_key, drep_type, drep_hash) VALUES (${typedCredHexOf(stakeCred) ?? hex(stakeCred?.hash)}, ${t}, ${h})`;
+    const key = typedCredHexOf(stakeCred) ?? hex(stakeCred?.hash);
+    if ((await protocolMajorAt(epoch)) === 9) {
+        if (h) { const target = typedOf(t, h); if (await drepStored(db, target)) await bootAdd(db, target, key); } // the old DRep keeps the account
+        else if (!newAccount) { const cur = await drepDelegationOf(db, key); if (cur && (cur.type === 0 || cur.type === 1) && cur.hash) await bootDel(db, typedOf(cur.type, cur.hash), key); }
+    }
+    ledgerGov()?.putDRepDelegation(key, { type: t, hash: h });
+    if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO gov_drep_delegations (stake_key, drep_type, drep_hash) VALUES (${key}, ${t}, ${h})`;
 }
 /**
  * A stake credential's deregistration removes its DRep delegation with its pool delegation and
@@ -206,27 +376,62 @@ export async function recordVoteDelegation(db: SqlClient, stakeCred: any, drep: 
  * Bug 89: only the pool delegation was dropped, so a credential that deregistered and
  * re-registered without a new vote delegation kept voting through its old DRep (preview
  * epochs 960–962: a 91 T whale counted for drep1yg2dvrjv…, the chain counted nothing; 35b81b42…
- * ratified one epoch early).
+ * ratified one epoch early). It leaves its current DRep's reverse set only (bug 165).
  */
-export async function recordStakeDeregistration(db: SqlClient, stakeCred: any): Promise<void> {
+export async function recordStakeDeregistration(db: SqlClient, stakeCred: any, epoch?: number): Promise<void> {
     const key = typedCredHexOf(stakeCred) ?? hex(stakeCred?.hash);
     if (!key) return;
+    if ((await protocolMajorAt(epoch)) === 9) { const cur = await drepDelegationOf(db, key); if (cur && (cur.type === 0 || cur.type === 1) && cur.hash) await bootDel(db, typedOf(cur.type, cur.hash), key); }
     ledgerGov()?.delDRepDelegation(key);
     if (sqlLedgerWrites()) await db`DELETE FROM gov_drep_delegations WHERE stake_key = ${key}`;
 }
-export async function recordCommitteeHot(db: SqlClient, cold: any, hot: any): Promise<void> {
-    const c = hex(cold?.hash), h = hex(hot?.hash);
+
+/** HARDFORK to protocol 10 (`updateDRepDelegations`): delegations to unregistered DReps go, the reverse sets are rebuilt (bug 165). */
+export async function hardForkToV10(db: SqlClient): Promise<number> {
+    const registered = await activeDRepCredentials(0, Number.MAX_SAFE_INTEGER / 4); // every registered DRep (expiry irrelevant)
+    const gw = ledgerGov(), gr = ledgerGovReads();
+    let n = 0;
+    if (gw) {
+        for (const [k, d] of gw.reads.drepDelegations()) if ((d.type === 0 || d.type === 1) && d.hash && !registered.has(typedOf(d.type, d.hash))) { gw.delDRepDelegation(k); n++; }
+        for (const [drep, stake] of gw.allBootDelegations()) gw.delBootDelegator(drep, stake);
+    }
+    if (sqlLedgerWrites()) {
+        const rows = (await db`SELECT stake_key, drep_type, drep_hash FROM gov_drep_delegations WHERE drep_type IN (0, 1)`.values()) as unknown[][];
+        let m = 0;
+        for (const r of rows) if (!registered.has(typedOf(Number(r[1]), String(r[2])))) { await db`DELETE FROM gov_drep_delegations WHERE stake_key = ${String(r[0])}`; m++; }
+        await db`DELETE FROM gov_drep_boot_delegs`;
+        if (!gr) n = m;
+    }
+    return n;
+}
+
+/**
+ * A committee cold key's state (`csCommitteeCreds`: an authorised hot key, or a resignation) under
+ * its typed key ("00"/"01" + hash, bug 153). A row stored before typing under the bare hash moves
+ * to the typed key — the certificate names the type — together with the member row of that cold key.
+ */
+async function putCommitteeCred(db: SqlClient, coldTyped: string, hotTyped: string | null, resigned: 0 | 1): Promise<void> {
+    const key = ccKey(coldTyped), bare = coldTyped.length === 58 ? coldTyped.slice(2) : coldTyped;
+    const hot = hotTyped ? ccKey(hotTyped) : null;
     const gw = ledgerGov();
-    if (gw) { gw.putCommitteeAuth(c, { hot: h, resigned: 0 }); const m = gw.reads.committee().get(c); if (m) gw.putCommittee(c, { ...m, hot: h, resigned: 0 }); }
-    if (sqlLedgerWrites()) await db`INSERT INTO gov_committee_auth (cold_credential, hot_credential, resigned) VALUES (${c}, ${h}, 0) ON CONFLICT(cold_credential) DO UPDATE SET hot_credential = excluded.hot_credential, resigned = 0`;
-    if (sqlLedgerWrites()) await db`UPDATE gov_committee SET hot_credential = ${h}, resigned = 0 WHERE cold_credential = ${c}`;
+    if (gw) {
+        if (gw.reads.committeeAuth(bare)) gw.delCommitteeAuth(bare);
+        gw.putCommitteeAuth(key, { hot, resigned });
+        const members = gw.reads.committee();
+        const m = members.get(key) ?? members.get(bare);
+        if (m) { if (members.has(bare)) gw.delCommittee(bare); gw.putCommittee(key, { ...m, hot, resigned }); }
+    }
+    if (sqlLedgerWrites()) {
+        await db`DELETE FROM gov_committee_auth WHERE cold_credential = ${bare}`;
+        await db`INSERT INTO gov_committee_auth (cold_credential, hot_credential, resigned) VALUES (${key}, ${hot}, ${resigned}) ON CONFLICT(cold_credential) DO UPDATE SET hot_credential = excluded.hot_credential, resigned = excluded.resigned`;
+        await db`UPDATE gov_committee SET cold_credential = ${key}, hot_credential = ${hot}, resigned = ${resigned} WHERE cold_credential IN (${key}, ${bare})`;
+    }
+}
+export async function recordCommitteeHot(db: SqlClient, cold: any, hot: any): Promise<void> {
+    await putCommitteeCred(db, typedCredHexOf(cold) ?? hex(cold?.hash), typedCredHexOf(hot) ?? hex(hot?.hash), 0);
 }
 export async function recordCommitteeResign(db: SqlClient, cold: any): Promise<void> {
-    const c = hex(cold?.hash);
-    const gw = ledgerGov();
-    if (gw) { gw.putCommitteeAuth(c, { hot: null, resigned: 1 }); const m = gw.reads.committee().get(c); if (m) gw.putCommittee(c, { ...m, hot: null, resigned: 1 }); }
-    if (sqlLedgerWrites()) await db`INSERT INTO gov_committee_auth (cold_credential, hot_credential, resigned) VALUES (${c}, NULL, 1) ON CONFLICT(cold_credential) DO UPDATE SET hot_credential = NULL, resigned = 1`;
-    if (sqlLedgerWrites()) await db`UPDATE gov_committee SET resigned = 1, hot_credential = NULL WHERE cold_credential = ${c}`;
+    await putCommitteeCred(db, typedCredHexOf(cold) ?? hex(cold?.hash), null, 1);
 }
 
 function actionKind(a: any): ActionKind | null {
@@ -259,9 +464,11 @@ function actionPayload(kind: ActionKind, a: any, rawChanges?: Record<string, unk
             return { withdrawals: w, policy: a.policyHash ? hex(a.policyHash) : null };
         }
         case "UpdateCommittee":
+            // typed credentials (bug 153); payloads without `typed` hold bare hashes of unknown type
             return {
-                remove: ((a.toRemove ?? []) as any[]).map((c) => hex(c?.hash)),
-                add: ((a.toAdd ?? []) as any[]).map((e) => ({ cred: hex(e.coldCredential?.hash), expires: Number(e.expiration ?? e.epoch ?? 0) })),
+                typed: true,
+                remove: ((a.toRemove ?? []) as any[]).map((c) => typedCredHexOf(c) ?? hex(c?.hash)),
+                add: ((a.toAdd ?? []) as any[]).map((e) => ({ cred: typedCredHexOf(e.coldCredential) ?? hex(e.coldCredential?.hash), expires: Number(e.expiration ?? e.epoch ?? 0) })),
                 thresholdNum: String(a.threshold?.num ?? a.threshold?.numerator ?? 0), thresholdDen: String(a.threshold?.den ?? a.threshold?.denominator ?? 1),
             };
         case "NewConstitution":
@@ -324,7 +531,7 @@ export async function recordVotes(db: SqlClient, procedures: any[], slot: number
             if (vote < 0) continue;
             ledgerGov()?.putVote({ actionId, voterKind: kind, voterHash: vh, vote, slot });
             if (sqlLedgerWrites()) await db`INSERT OR REPLACE INTO gov_votes (action_id, voter_kind, voter_hash, vote, slot) VALUES (${actionId}, ${kind}, ${vh}, ${vote}, ${slot})`;
-            if (kind === 2 || kind === 3) await recordDRepActivity(db, vh, epoch);
+            if (kind === 2 || kind === 3) await recordDRepActivity(db, typedOf(kind - 2, vh), epoch);
             n++;
         }
     }
@@ -399,14 +606,6 @@ async function activeProposals(): Promise<ProposalRow[]> {
     return rows.map((r) => ({ action_id: String(r[0]), seq: Number(r[1]), kind: String(r[2]) as ActionKind, prev_action_id: r[3] == null ? null : String(r[3]), deposit: BigInt(String(r[4])), return_account: String(r[5]), payload: JSON.parse(String(r[6])), proposed_epoch: Number(r[7]), expires_epoch: Number(r[8]) }));
 }
 
-/** DRep voting stake: per DRep credential → stake, plus the two default buckets, from the epoch snapshot. */
-/**
- * DReps whose stake and votes count: registered and not expired. cardano-ledger keeps a
- * per-DRep expiry (last activity + drep_activity); an expired DRep is dropped from the
- * voting stake distribution and its votes carry no power (bug 71: with every registered
- * DRep in the denominator, preview's cost-model change of epoch 1270 tallied 11 % yes
- * instead of the chain's 83 %).
- */
 /**
  * The DRep stake distribution the pulser set up at boundary `takenAt` works from (Conway
  * `mkStakeDistrs`: the stake snapshot's per-credential stake, i.e. UTxO plus reward balance of
@@ -439,70 +638,6 @@ async function takeDRepStakeSnapshotSql(db: SqlClient, takenAt: number): Promise
     return Number(n[0]?.[0] ?? 0);
 }
 
-async function drepDistribution(takenAt: number, currentEpoch: number, drepActivity: number): Promise<{ byDrep: Map<string, bigint>; alwaysAbstain: bigint; alwaysNoConfidence: bigint; registered: Set<string> }> {
-    const gr = ledgerGovReads(), sr = ledgerStakeReads();
-    let rows = gr ? gr.drepStake(takenAt).map((r) => [r.type, r.hash, r.stake.toString()] as unknown[]) : (await sql`SELECT drep_type, drep_hash, stake FROM epoch_drep_stake WHERE taken_at = ${takenAt}`.values()) as unknown[][];
-    if (rows.length === 0 && gr && sr) {
-        logger.warn(`DRep stake snapshot ${takenAt} missing; tallying from the pool stake snapshot (pre-bug-90 approximation)`);
-        const sums = new Map<string, bigint>();
-        const dl = gr.drepDelegations();
-        for (const [c, v] of sr.snapshotCredentials(takenAt)) { const d = dl.get(c); if (d) { const k = `${d.type}:${d.hash ?? ""}`; sums.set(k, (sums.get(k) ?? 0n) + v.stake); } }
-        rows = [...sums].map(([k, v]) => { const i = k.indexOf(":"); return [Number(k.slice(0, i)), k.slice(i + 1) || null, v.toString()] as unknown[]; });
-    } else if (rows.length === 0) {
-        // databases from before bug 90 (no snapshot at this boundary): the pool-delegated approximation
-        logger.warn(`DRep stake snapshot ${takenAt} missing; tallying from the pool stake snapshot (pre-bug-90 approximation)`);
-        rows = (await sql`
-            SELECT d.drep_type, d.drep_hash, COALESCE(SUM(s.stake), 0) FROM gov_drep_delegations d
-            JOIN epoch_stake_cred s ON s.stake_key = d.stake_key AND s.taken_at = ${takenAt}
-            GROUP BY d.drep_type, d.drep_hash`.values()) as unknown[][];
-    }
-    const byDrep = new Map<string, bigint>();
-    let alwaysAbstain = 0n, alwaysNoConfidence = 0n;
-    for (const r of rows) {
-        const t = Number(r[0]), h = r[1] == null ? "" : String(r[1]), st = BigInt(String(r[2]));
-        if (t === 2) alwaysAbstain += st;
-        else if (t === 3) alwaysNoConfidence += st;
-        else if (h) byDrep.set(h, (byDrep.get(h) ?? 0n) + st);
-    }
-    const registered = await activeDRepCredentials(currentEpoch, drepActivity);
-    for (const h of [...byDrep.keys()]) if (!registered.has(h)) byDrep.delete(h); // expired or unregistered: no voting power
-    return { byDrep, alwaysAbstain, alwaysNoConfidence, registered };
-}
-
-async function poolDistribution(takenAt: number): Promise<{ byPool: Map<string, bigint>; rewardDrep: Map<string, number> }> {
-    const gr = ledgerGovReads(), sr = ledgerStakeReads();
-    if (gr && sr) {
-        const rewardDrep = new Map<string, number>();
-        for (const [id, p] of sr.pools()) { const ra = p.params?.rewardAccount ? String(p.params.rewardAccount).toLowerCase() : null; const d = ra ? gr.drepDelegation(ra) : null; if (d && (d.type === 2 || d.type === 3)) rewardDrep.set(id, d.type); }
-        return { byPool: sr.snapshotPoolStake(takenAt), rewardDrep };
-    }
-    const rows = (await sql`SELECT pool_id, stake FROM epoch_pool_stake WHERE taken_at = ${takenAt}`.values()) as unknown[][];
-    const byPool = new Map<string, bigint>();
-    for (const r of rows) byPool.set(String(r[0]), BigInt(String(r[1])));
-    // pools whose reward account delegates to a default DRep
-    const rd = (await sql`SELECT p.pool_id, d.drep_type FROM pool_params p JOIN gov_drep_delegations d ON d.stake_key = lower(json_extract(p.params_json, '$.rewardAccount')) WHERE d.drep_type IN (2, 3)`.values()) as unknown[][];
-    const rewardDrep = new Map<string, number>();
-    for (const r of rd) rewardDrep.set(String(r[0]), Number(r[1]));
-    return { byPool, rewardDrep };
-}
-
-async function thresholdParams(raw: Record<string, unknown>): Promise<ThresholdParams> {
-    const gr = ledgerGovReads();
-    const gs = gr?.state();
-    const st = gr ? (gs ? [[gs.thrNum, gs.thrDen, gs.noConfidence]] : []) : (await sql`SELECT committee_threshold_num, committee_threshold_den, no_confidence FROM gov_state WHERE id = 1`.values()) as unknown[][];
-    const drep: Record<string, any> = {}, pool: Record<string, any> = {};
-    for (const [k, v] of Object.entries(raw)) {
-        if (k.startsWith("dvt_")) drep[k] = rationalOf(v, "1");
-        if (k.startsWith("pvt_") || k === "pvtpp_security_group") pool[k === "pvtpp_security_group" ? "pvt_p_p_security_group" : k] = rationalOf(v, "1");
-    }
-    return {
-        committeeThreshold: { num: BigInt(String(st[0]?.[0] ?? 2)), den: BigInt(String(st[0]?.[1] ?? 3)) },
-        committeeMinSize: Number(raw.committee_min_size ?? 7),
-        drep, pool,
-        protocolMajor: Number(raw.protocol_major_ver ?? 9),
-    };
-}
-
 /** What one boundary ratified, to be enacted at the next (the ledger's DRep pulser: set up at `epoch`, completed one epoch later). */
 type PendingRatification = { epoch: number; ratified: string[]; expired: string[] };
 
@@ -521,10 +656,16 @@ async function proposalById(id: string): Promise<ProposalRow | null> {
 async function enactOne(db: SqlClient, p: ProposalRow, epoch: number, out: EnactmentResult, ids: ChainIds): Promise<void> {
     const gw = ledgerGov();
     switch (p.kind) {
-        case "ParameterChange":
-            Object.assign(out.paramChanges, p.payload.changes ?? {});
+        case "ParameterChange": {
+            // Two parameter changes enacted at one boundary (a chained pair ratified in one round,
+            // bug 151): the later wins per key, cost models per language (Conway `applyPPUpdates`).
+            const changes = { ...(p.payload.changes ?? {}) } as Record<string, unknown>;
+            const prevCm = out.paramChanges.cost_models as Record<string, unknown> | undefined;
+            if (prevCm && changes.cost_models) changes.cost_models = { ...prevCm, ...(changes.cost_models as Record<string, unknown>) };
+            Object.assign(out.paramChanges, changes);
             ids.prevPP = p.action_id;
             break;
+        }
         case "InitHardFork":
             out.protocolVersion = { major: Number(p.payload.major), minor: Number(p.payload.minor) };
             out.paramChanges.protocol_major_ver = out.protocolVersion.major;
@@ -535,27 +676,49 @@ async function enactOne(db: SqlClient, p: ProposalRow, epoch: number, out: Enact
             for (const w of (p.payload.withdrawals ?? []) as Array<{ account: string; amount: string }>) out.withdrawals.set(w.account, (out.withdrawals.get(w.account) ?? 0n) + BigInt(w.amount));
             break;
         case "NoConfidence":
+            // ENACT: `ensCommitteeL .~ SNothing` — the committee is gone, not just distrusted (bug 162)
             gw?.updateState({ noConfidence: 1 });
-            if (sqlLedgerWrites()) await db`UPDATE gov_state SET no_confidence = 1 WHERE id = 1`;
+            if (gw) for (const k of gw.reads.committee().keys()) gw.delCommittee(k);
+            if (sqlLedgerWrites()) { await db`UPDATE gov_state SET no_confidence = 1 WHERE id = 1`; await db`DELETE FROM gov_committee`; }
             ids.prevCC = p.action_id;
             break;
-        case "UpdateCommittee":
+        case "UpdateCommittee": {
+            // `updatedCommittee`: (members ∖ remove) ∪ add, or just add after a no-confidence (bug 162)
+            const st = await chainIds(db);
+            const fresh = st?.noConfidence === true;
+            const remove = payloadCcRemove(p.payload);
+            const add = payloadCcAdd(p.payload);
+            const typed = p.payload?.typed === true;
+            const view = await loadCommitteeView();
+            const hotFor = (creds: string[]): { hot: string | null } => {
+                // an untyped legacy hot key (it has an other-type reading) stays as stored
+                for (const c of creds) { const s = view.creds.get(c); if (s && !s.resigned && s.hot) return { hot: s.hotAlt ? s.hot : ccKey(s.hot) }; }
+                return { hot: null };
+            };
+            const keysOf = (creds: string[]) => (typed ? creds.map(ccKey) : [creds[0]!]); // legacy payload: the bare hash as stored
+            const removeKeys = new Set<string>();
+            for (const c of remove) { removeKeys.add(ccKey(c)); removeKeys.add(c.length === 58 ? c.slice(2) : c); }
             if (gw) {
-                for (const c of (p.payload.remove ?? []) as string[]) gw.delCommittee(c);
-                for (const a of (p.payload.add ?? []) as Array<{ cred: string; expires: number }>) { const au = gw.reads.committeeAuth(a.cred); const hot = au && au.resigned === 0 ? au.hot : null; gw.putCommittee(a.cred, { expiresEpoch: a.expires, hot, resigned: 0 }); }
+                if (fresh) for (const k of gw.reads.committee().keys()) gw.delCommittee(k);
+                else for (const k of gw.reads.committee().keys()) if (removeKeys.has(k) || ccCredsOf(k).some((c) => removeKeys.has(ccKey(c)))) gw.delCommittee(k);
+                for (const a of add) for (const k of keysOf(a.creds)) gw.putCommittee(k, { expiresEpoch: a.expires, hot: hotFor(a.creds).hot, resigned: 0 });
                 gw.updateState({ thrNum: Number(p.payload.thresholdNum ?? 2), thrDen: Number(p.payload.thresholdDen ?? 3), noConfidence: 0 });
             }
-            for (const c of (p.payload.remove ?? []) as string[]) await db`DELETE FROM gov_committee WHERE cold_credential = ${c}`;
-            for (const a of (p.payload.add ?? []) as Array<{ cred: string; expires: number }>) {
-                const auth = (await db`SELECT hot_credential, resigned FROM gov_committee_auth WHERE cold_credential = ${a.cred}`.values()) as unknown[][];
-                const hot = auth.length && Number(auth[0]![1]) === 0 ? (auth[0]![0] == null ? null : String(auth[0]![0])) : null;
-                if (sqlLedgerWrites()) await db`INSERT INTO gov_committee (cold_credential, expires_epoch, hot_credential, resigned) VALUES (${a.cred}, ${a.expires}, ${hot}, 0) ON CONFLICT(cold_credential) DO UPDATE SET expires_epoch = excluded.expires_epoch, hot_credential = COALESCE(excluded.hot_credential, gov_committee.hot_credential), resigned = 0`;
+            if (sqlLedgerWrites()) {
+                if (fresh) await db`DELETE FROM gov_committee`;
+                else for (const k of removeKeys) await db`DELETE FROM gov_committee WHERE cold_credential = ${k} OR cold_credential = ${k.length === 58 ? k.slice(2) : k}`;
+                for (const a of add) for (const k of keysOf(a.creds)) {
+                    const hot = hotFor(a.creds).hot;
+                    await db`INSERT INTO gov_committee (cold_credential, expires_epoch, hot_credential, resigned) VALUES (${k}, ${a.expires}, ${hot}, 0) ON CONFLICT(cold_credential) DO UPDATE SET expires_epoch = excluded.expires_epoch, hot_credential = COALESCE(excluded.hot_credential, gov_committee.hot_credential), resigned = 0`;
+                }
+                await db`UPDATE gov_state SET committee_threshold_num = ${Number(p.payload.thresholdNum ?? 2)}, committee_threshold_den = ${Number(p.payload.thresholdDen ?? 3)}, no_confidence = 0 WHERE id = 1`;
             }
-            if (sqlLedgerWrites()) await db`UPDATE gov_state SET committee_threshold_num = ${Number(p.payload.thresholdNum ?? 2)}, committee_threshold_den = ${Number(p.payload.thresholdDen ?? 3)}, no_confidence = 0 WHERE id = 1`;
             ids.prevCC = p.action_id;
             break;
+        }
         case "NewConstitution":
             gw?.updateState({ constitutionHash: p.payload.hash ?? null, constitutionScript: p.payload.script ?? null });
+            { const a = gw?.reads.constitutionProposalAnchor(p.action_id); if (gw && a) gw.putConstitutionAnchor(a); }
             if (sqlLedgerWrites()) await db`UPDATE gov_state SET constitution_hash = ${p.payload.hash ?? null}, constitution_script = ${p.payload.script ?? null} WHERE id = 1`;
             ids.prevCons = p.action_id;
             break;
@@ -570,40 +733,31 @@ async function enactOne(db: SqlClient, p: ProposalRow, epoch: number, out: Enact
     out.enacted.push(`${p.kind} ${p.action_id.slice(0, 12)}…`);
 }
 
-/** One proposal's tally at the boundary into `epoch` with the stake snapshot `takenAt` (diagnostic: `scripts/gov-tally.ts`). */
-export async function tallyProposal(db: SqlClient, epoch: number, actionId: string, prevRaw: Record<string, unknown>, takenAt = epoch, votesUntilSlot = Number.MAX_SAFE_INTEGER): Promise<{ ct: CommitteeTally; dt: DRepTally; pt: PoolTally; ccOk: boolean; drepOk: boolean; poolOk: boolean; ratified: boolean; thr: ReturnType<typeof thresholdsFor> }> {
-    const p = await proposalById(actionId);
+/**
+ * One proposal's tally at the boundary into `epoch` with the stake snapshot `takenAt`, as the
+ * round would count it on its own (diagnostic: `scripts/gov-tally.ts`; the chain, delay and
+ * treasury conditions of the round are reported, not applied).
+ */
+export async function tallyProposal(db: SqlClient, epoch: number, actionId: string, raw: Record<string, unknown>, takenAt = epoch, votesUntilSlot = Number.MAX_SAFE_INTEGER): Promise<ProposalTally> {
+    const live = await loadLiveProposals();
+    const p = live.find((x) => x.id === actionId) ?? (await loadAnyProposal(actionId));
     if (!p) throw new Error(`proposal ${actionId} not stored`);
-    const params = await thresholdParams(prevRaw);
-    const activity = Number(prevRaw.drep_activity ?? 20);
-    const dreps = await drepDistribution(takenAt, epoch - 1, activity);
-    const pools = await poolDistribution(takenAt);
+    const roots = { pparams: null, hardfork: null, committee: null, constitution: null } as Record<Purpose, string | null>;
+    const input = await gatherRatifyInput(epoch, raw, roots, { takenAt, votesUntilSlot });
+    const one = await ratifyProposalOf(p, votesUntilSlot);
+    one.prev = null; one.expiresAfter = Number.MAX_SAFE_INTEGER; // judge the votes alone
+    input.proposals = [one];
+    input.treasury = input.treasury > (one.withdrawalTotal ?? 0n) ? input.treasury : (one.withdrawalTotal ?? 0n);
+    const purpose = one.kind === "ParameterChange" ? "pparams" : one.kind === "InitHardFork" ? "hardfork" : one.kind === "NoConfidence" || one.kind === "UpdateCommittee" ? "committee" : one.kind === "NewConstitution" ? "constitution" : null;
+    if (purpose) input.roots[purpose] = null;
+    return ratifyRound(input).tallies[0]!;
+}
+
+async function loadAnyProposal(id: string) {
     const gr = ledgerGovReads();
-    const committee = gr ? (gr.committeeWithAuth() as unknown[][]) : (await db`SELECT c.cold_credential, c.expires_epoch, COALESCE(a.hot_credential, c.hot_credential), COALESCE(a.resigned, c.resigned) FROM gov_committee c LEFT JOIN gov_committee_auth a ON a.cold_credential = c.cold_credential`.values()) as unknown[][];
-    const activeMembers = committee.filter((r) => Number(r[3]) === 0 && Number(r[1]) >= epoch && r[2] != null);
-    const hotToCold = new Map<string, string>(activeMembers.map((r) => [String(r[2]), String(r[0])]));
-    const nc = gr ? [[gr.state()?.noConfidence ?? 0]] : (await db`SELECT no_confidence FROM gov_state WHERE id = 1`.values()) as unknown[][];
-    const noConfidence = Number(nc[0]?.[0]) === 1;
-    const changedKeys = p.kind === "ParameterChange" ? Object.keys(p.payload.changes ?? {}) : [];
-    const thr = thresholdsFor(p.kind, params, changedKeys, noConfidence ? "noConfidence" : "normal");
-    const votes = gr ? gr.votes(p.action_id, votesUntilSlot).map((v) => [v.voterKind, v.voterHash, v.vote] as unknown[]) : (await db`SELECT voter_kind, voter_hash, vote FROM gov_votes WHERE action_id = ${p.action_id} AND slot <= ${votesUntilSlot}`.values()) as unknown[][];
-    const ct: CommitteeTally = { yes: 0, no: 0, abstain: 0, active: activeMembers.length };
-    const dt: DRepTally = { yes: 0n, no: 0n, abstain: 0n, unvoted: 0n, alwaysNoConfidence: dreps.alwaysNoConfidence, alwaysAbstain: dreps.alwaysAbstain };
-    const pt: PoolTally = { yes: 0n, no: 0n, abstain: 0n, unvoted: 0n, unvotedAbstain: 0n, unvotedNoConfidence: 0n };
-    const votedDreps = new Set<string>(), votedPools = new Set<string>();
-    for (const v of votes) {
-        const kind = Number(v[0]), h = String(v[1]), vote = Number(v[2]);
-        if (kind === 0 || kind === 1) { if (!hotToCold.has(h)) continue; if (vote === 1) ct.yes++; else if (vote === 0) ct.no++; else ct.abstain++; }
-        else if (kind === 2 || kind === 3) { if (!dreps.registered.has(h)) continue; const st = dreps.byDrep.get(h) ?? 0n; votedDreps.add(h); if (vote === 1) dt.yes += st; else if (vote === 0) dt.no += st; else dt.abstain += st; }
-        else if (kind === 4) { const st = pools.byPool.get(h) ?? 0n; votedPools.add(h); if (vote === 1) pt.yes += st; else if (vote === 0) pt.no += st; else pt.abstain += st; }
-    }
-    for (const [h, st] of dreps.byDrep) if (!votedDreps.has(h) && dreps.registered.has(h)) dt.unvoted += st;
-    for (const [pool, st] of pools.byPool) { if (votedPools.has(pool)) continue; pt.unvoted += st; const d = pools.rewardDrep.get(pool); if (d === 2) pt.unvotedAbstain += st; if (d === 3) pt.unvotedNoConfidence += st; }
-    const ccRequired = p.kind !== "NoConfidence" && p.kind !== "UpdateCommittee";
-    const ccOk = !ccRequired ? true : noConfidence ? false : committeeAccepts(ct, thr.committee, params.committeeMinSize);
-    const drepOk = thr.drep == null || drepAccepts(dt, thr.drep, p.kind);
-    const poolOk = thr.pool == null || poolAccepts(pt, thr.pool, p.kind);
-    return { ct, dt, pt, ccOk, drepOk, poolOk, ratified: ccOk && drepOk && poolOk && p.kind !== "Info", thr };
+    if (gr) { const p = gr.proposal(id); return p ? { id: p.actionId, seq: p.seq, kind: p.kind, prev: p.prevActionId, deposit: BigInt(p.deposit), returnAccount: p.returnAccount, payload: JSON.parse(p.payload), proposedEpoch: p.proposedEpoch, expiresEpoch: p.expiresEpoch, status: p.status } : null; }
+    const r = ((await sql`SELECT action_id, seq, kind, prev_action_id, deposit, return_account, payload, proposed_epoch, expires_epoch, status FROM gov_proposals WHERE action_id = ${id}`.values()) as unknown[][])[0];
+    return r ? { id: String(r[0]), seq: Number(r[1]), kind: String(r[2]), prev: r[3] == null ? null : String(r[3]), deposit: BigInt(String(r[4])), returnAccount: String(r[5]), payload: JSON.parse(String(r[6])), proposedEpoch: Number(r[7]), expiresEpoch: Number(r[8]), status: String(r[9]) } : null;
 }
 
 /**
@@ -614,8 +768,8 @@ export async function tallyProposal(db: SqlClient, epoch: number, actionId: stri
  *    next boundary, where the ratified actions take effect and expired ones are dropped and
  *    refunded (bug 81: enacting at ratification put a new cost model one epoch early — preview
  *    epoch 735, action 1f47f3cf…, ratified 735, enacted 736 on the chain).
- * 2. Ratify for this boundary with the parameters of `epoch − 1` and the stake snapshot the
- *    ledger uses for voting (taken at the start of `epoch − 1`); record the result as pending.
+ * 2. Ratify for this boundary with the parameters of `epoch` and the stake snapshot the
+ *    ledger uses for voting (taken at `takenAt`); record the result as pending.
  *
  * Returns the effects of step 1 for the caller to apply (parameters, hard fork, treasury
  * withdrawals, deposit refunds).
@@ -637,6 +791,45 @@ async function chainIds(db: SqlClient): Promise<{ ids: ChainIds; noConfidence: b
     return { ids, noConfidence: Number(state[0]![4]) === 1, pending };
 }
 
+/**
+ * Descendants of `roots` among the active proposals (a chain of `prev` links within one purpose):
+ * EPOCH removes an expiring proposal with its whole subtree (`proposalsRemoveWithDescendants`).
+ * Bug 159: only the expiring proposal itself was removed; a child submitted later stayed active —
+ * unratifiable, its parent gone — until its own expiry, and its deposit came back that much later.
+ */
+function descendantsOf(rootIds: Iterable<string>, active: ProposalRow[]): string[] {
+    const byPrev = new Map<string, ProposalRow[]>();
+    for (const p of active) if (p.prev_action_id) { const l = byPrev.get(p.prev_action_id) ?? []; l.push(p); byPrev.set(p.prev_action_id, l); }
+    const out: string[] = [], seen = new Set<string>(rootIds), todo = [...seen];
+    while (todo.length) {
+        const id = todo.pop()!;
+        for (const c of byPrev.get(id) ?? []) { if (seen.has(c.action_id) || familyOf(c.kind) == null) continue; seen.add(c.action_id); out.push(c.action_id); todo.push(c.action_id); }
+    }
+    return out;
+}
+
+/**
+ * EPOCH's `updateCommitteeState`: after enactment the committee state keeps only the cold keys of
+ * the (new) committee's members — every other authorisation or resignation is forgotten, all of them
+ * after a no-confidence. Bug 160: authorisations of cold keys that never became members (or left)
+ * stayed forever; a key re-added later counted its old hot key where the chain has none.
+ */
+async function pruneCommitteeState(db: SqlClient): Promise<number> {
+    const view = await loadCommitteeView();
+    const memberCreds = new Set<string>(); if (view.members) for (const c of view.members.keys()) memberCreds.add(c);
+    const gw = ledgerGov();
+    let n = 0;
+    const stale = (k: string) => !ccCredsOf(k).some((c) => memberCreds.has(c));
+    if (gw) for (const k of gw.reads.committeeAuths().keys()) if (stale(k)) { gw.delCommitteeAuth(k); n++; }
+    if (sqlLedgerWrites()) {
+        const rows = (await db`SELECT cold_credential FROM gov_committee_auth`.values()) as unknown[][];
+        let m = 0;
+        for (const r of rows) { const k = String(r[0]); if (stale(k)) { await db`DELETE FROM gov_committee_auth WHERE cold_credential = ${k}`; m++; } }
+        if (!gw) n = m;
+    }
+    return n;
+}
+
 /** Step 1: enact what the previous boundary ratified (before the epoch's parameters are derived). */
 export async function enactPending(db: SqlClient, epoch: number): Promise<EnactmentResult> {
     const out: EnactmentResult = { paramChanges: {}, protocolVersion: null, withdrawals: new Map(), refunds: new Map(), enacted: [], expired: [], dropped: [] };
@@ -645,6 +838,19 @@ export async function enactPending(db: SqlClient, epoch: number): Promise<Enactm
     const { ids, pending } = st;
     if (pending) {
         if (pending.epoch !== epoch - 1) logger.warn(`Epoch ${epoch} governance: enacting the ratification recorded at epoch ${pending.epoch} (expected ${epoch - 1})`);
+        // Expired first, with their descendants (bug 159), so the orphan sweep below (which reads the
+        // still-active set) cannot refund an expiring proposal a second time (bug 98: preview 999 —
+        // 573b7228… expired and orphaned by 602d8572… in the same boundary, 100 k ADA refunded twice).
+        const activeBefore = await activeProposals();
+        const expiring = [...pending.expired, ...descendantsOf(pending.expired, activeBefore)];
+        for (const id of expiring) {
+            const p = await proposalById(id);
+            if (!p) continue;
+            ledgerGov()?.updateProposal(p.action_id, { status: "expired", decidedEpoch: epoch });
+            if (sqlLedgerWrites()) await db`UPDATE gov_proposals SET status = 'expired', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
+            out.refunds.set(p.return_account, (out.refunds.get(p.return_account) ?? 0n) + p.deposit);
+            out.expired.push(p.action_id);
+        }
         const touched = new Set<Family>();
         for (const id of pending.ratified) {
             const p = await proposalById(id);
@@ -653,136 +859,67 @@ export async function enactPending(db: SqlClient, epoch: number): Promise<Enactm
             const fam = familyOf(p.kind);
             if (fam) touched.add(fam);
         }
-        // Expired first, so the orphan sweep below (which reads the still-active set) cannot
-        // refund an expiring proposal a second time (bug 98: preview 999 — 573b7228… expired and
-        // orphaned by 602d8572… in the same boundary, 100 k ADA refunded twice to 8ff4073b…).
-        for (const id of pending.expired) {
-            const p = await proposalById(id);
-            if (!p) continue;
-            ledgerGov()?.updateProposal(p.action_id, { status: "expired", decidedEpoch: epoch });
-            if (sqlLedgerWrites()) await db`UPDATE gov_proposals SET status = 'expired', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
-            out.refunds.set(p.return_account, (out.refunds.get(p.return_account) ?? 0n) + p.deposit);
-            out.expired.push(p.action_id);
-        }
         await dropOrphans(db, epoch, out, { pparams: ids.prevPP ?? null, hardfork: ids.prevHF ?? null, committee: ids.prevCC ?? null, constitution: ids.prevCons ?? null }, touched);
         ledgerGov()?.updateState({ prevPP: ids.prevPP, prevHF: ids.prevHF, prevCC: ids.prevCC, prevCons: ids.prevCons, pending: null });
         if (sqlLedgerWrites()) await db`UPDATE gov_state SET prev_pparams = ${ids.prevPP}, prev_hardfork = ${ids.prevHF}, prev_committee = ${ids.prevCC}, prev_constitution = ${ids.prevCons}, pending = NULL WHERE id = 1`;
     }
+    if (out.protocolVersion?.major === 10) {
+        const dropped = await hardForkToV10(db);
+        logger.info(`Epoch ${epoch} governance: protocol 10 hard fork — ${dropped} vote delegation(s) to unregistered DReps dropped, reverse delegation sets rebuilt`);
+    }
+    const pruned = await pruneCommitteeState(db);
+    if (pruned) logger.info(`Epoch ${epoch} governance: ${pruned} committee credential state(s) of non-members forgotten`);
     return out;
 }
 
 /**
  * Step 2: ratify for this boundary — the pulser the ledger sets up once the epoch's parameters
- * are in force and the stake snapshot is taken (bug 82: the pool and DRep distributions are the
- * snapshot of *this* boundary and the thresholds this epoch's parameters; with the previous
- * snapshot the preview hard fork 049ae5d6… tallied 46 % of pool stake at 742 instead of the
- * chain's 62 % and moved one epoch late). `raw` = parameters of `epoch`; `takenAt` = snapshot
- * epoch (default `epoch`). The result is recorded as pending and enacted at the next boundary.
+ * are in force and the stake snapshot is taken (bug 82). `raw` = parameters of `epoch`; `takenAt` =
+ * snapshot epoch (default `epoch`). The round is `ratifyRound` (ratify.ts, bugs 151–155 and 158);
+ * the result is recorded as pending and enacted at the next boundary, and the chain ids advance
+ * now so the next pulser (set up after that enactment) sees them. Call it after the boundary's
+ * refunds and withdrawals are credited: the pulser's DRep distribution includes them (bug 155).
  */
-export async function ratifyForNext(db: SqlClient, epoch: number, raw: Record<string, unknown>, takenAt = epoch): Promise<PendingRatification> {
+export async function ratifyForNext(db: SqlClient, epoch: number, raw: Record<string, unknown>, takenAt = epoch, opts: { treasury?: bigint; drepDistr?: Map<string, bigint>; poolDistr?: Map<string, bigint> } = {}): Promise<PendingRatification> {
     const st = await chainIds(db);
     const next: PendingRatification = { epoch, ratified: [], expired: [] };
     if (!st) return next;
-    const { ids, noConfidence } = st;
-    const prevRaw = raw;
-    const params = await thresholdParams(prevRaw);
-    // A DRep is active for this pulser when its last activity plus drep_activity reaches the
-    // previous epoch (the expiry the ledger evaluates when the pulser is set up).
-    const activity = Number(prevRaw.drep_activity ?? 20);
+    const { ids } = st;
     await takeDRepStakeSnapshot(db, takenAt); // bug 90: the pulser's DRep stake, as of this boundary
-    const dreps = await drepDistribution(takenAt, epoch - 1, activity);
-    const pools = await poolDistribution(takenAt);
-    const gr = ledgerGovReads();
-    const committee = gr ? (gr.committeeWithAuth() as unknown[][]) : (await db`SELECT c.cold_credential, c.expires_epoch, COALESCE(a.hot_credential, c.hot_credential), COALESCE(a.resigned, c.resigned) FROM gov_committee c LEFT JOIN gov_committee_auth a ON a.cold_credential = c.cold_credential`.values()) as unknown[][];
-    const activeMembers = committee.filter((r) => Number(r[3]) === 0 && Number(r[1]) >= epoch && r[2] != null);
-    const hotToCold = new Map<string, string>(activeMembers.map((r) => [String(r[2]), String(r[0])]));
-    const ratifiedThisEpoch = new Set<"pparams" | "hardfork" | "committee" | "constitution">();
-    const proposals = await activeProposals();
-    // Bug 96: once a delaying action (NoConfidence, UpdateCommittee, NewConstitution, InitHardFork)
-    // is accepted in a round, every later proposal of the round is delayed to the next boundary
-    // (Conway RATIFY `delayingAction`; preview 997: UpdateCommittee 6214314b… ratified, the
-    // ParameterChange 602d8572… behind it only at 998).
-    let delayed = false;
-
-    for (const p of proposals) {
-        if (p.expires_epoch < epoch) {
-            // dropped and refunded when this boundary's pulser completes (next boundary)
-            next.expired.push(p.action_id);
-            continue;
+    const roots: Record<Purpose, string | null> = { pparams: ids.prevPP, hardfork: ids.prevHF, committee: ids.prevCC, constitution: ids.prevCons };
+    const input = await gatherRatifyInput(epoch, raw, roots, { takenAt, ...opts });
+    // The pulser's frozen snapshot of this epoch (bug 167): the very proposals, votes and distributions
+    // this round is tallied with, kept for the node-to-client queries until the next boundary.
+    try {
+        // lmdb mode reads the store; dual mode reads it through the block's writers (bug 246: the
+        // lmdb-only accessors left the dual-mode store without a snapshot)
+        const gr = ledgerGovReads() ?? ledgerGov()?.reads ?? null, sr = ledgerStakeReads() ?? ledgerStake()?.reads ?? null;
+        if (gr && sr) {
+            const tipHash = getLedgerStore()?.selectedTip() ?? null;
+            const b = tipHash ? await primaryBlockStore()?.byHash(tipHash) : null;
+            const live = (await loadLiveProposals()).filter((p) => p.status === "active");
+            await storePulserSnapshot(snapshotAtBoundary(input, { gov: gr, stake: sr, now: { gov: gr, stake: sr } }, b ? { slot: b.slot, hash: Buffer.from(b.hash).toString("hex") } : null, new Map(live.map((p) => [p.id, { returnAccount: p.returnAccount, deposit: p.deposit }]))));
         }
-        if (delayed) continue; // a delaying action was accepted earlier in this round
-        // chained purposes: the proposal must build on the last enacted action of its purpose
-        const purpose = p.kind === "ParameterChange" ? "pparams" : p.kind === "InitHardFork" ? "hardfork" : (p.kind === "NoConfidence" || p.kind === "UpdateCommittee") ? "committee" : p.kind === "NewConstitution" ? "constitution" : null;
-        if (purpose) {
-            const prevEnacted = purpose === "pparams" ? ids.prevPP : purpose === "hardfork" ? ids.prevHF : purpose === "committee" ? ids.prevCC : ids.prevCons;
-            if ((p.prev_action_id ?? null) !== (prevEnacted ?? null)) continue; // not (yet) buildable
-            if (ratifiedThisEpoch.has(purpose)) continue; // one per purpose per epoch
-        }
-        const changedKeys = p.kind === "ParameterChange" ? Object.keys(p.payload.changes ?? {}) : [];
-        const thr = thresholdsFor(p.kind, params, changedKeys, noConfidence ? "noConfidence" : "normal");
-        const votes = gr ? gr.votes(p.action_id).map((v) => [v.voterKind, v.voterHash, v.vote] as unknown[]) : (await db`SELECT voter_kind, voter_hash, vote FROM gov_votes WHERE action_id = ${p.action_id}`.values()) as unknown[][];
-        // committee
-        const ct: CommitteeTally = { yes: 0, no: 0, abstain: 0, active: activeMembers.length };
-        const dt: DRepTally = { yes: 0n, no: 0n, abstain: 0n, unvoted: 0n, alwaysNoConfidence: dreps.alwaysNoConfidence, alwaysAbstain: dreps.alwaysAbstain };
-        const pt: PoolTally = { yes: 0n, no: 0n, abstain: 0n, unvoted: 0n, unvotedAbstain: 0n, unvotedNoConfidence: 0n };
-        const votedDreps = new Set<string>(), votedPools = new Set<string>();
-        for (const v of votes) {
-            const kind = Number(v[0]), h = String(v[1]), vote = Number(v[2]);
-            if (kind === 0 || kind === 1) {
-                if (!hotToCold.has(h)) continue; // not an active, authorised member
-                if (vote === 1) ct.yes++; else if (vote === 0) ct.no++; else ct.abstain++;
-            } else if (kind === 2 || kind === 3) {
-                if (!dreps.registered.has(h)) continue;
-                const st = dreps.byDrep.get(h) ?? 0n;
-                votedDreps.add(h);
-                if (vote === 1) dt.yes += st; else if (vote === 0) dt.no += st; else dt.abstain += st;
-            } else if (kind === 4) {
-                const st = pools.byPool.get(h) ?? 0n;
-                votedPools.add(h);
-                if (vote === 1) pt.yes += st; else if (vote === 0) pt.no += st; else pt.abstain += st;
-            }
-        }
-        for (const [h, st] of dreps.byDrep) if (!votedDreps.has(h) && dreps.registered.has(h)) dt.unvoted += st;
-        for (const [pool, st] of pools.byPool) {
-            if (votedPools.has(pool)) continue;
-            pt.unvoted += st;
-            const d = pools.rewardDrep.get(pool);
-            if (d === 2) pt.unvotedAbstain += st;
-            if (d === 3) pt.unvotedNoConfidence += st;
-        }
-        // The committee does not vote on its own replacement (NoConfidence, UpdateCommittee):
-        // cardano-ledger's votingCommitteeThreshold is Nothing for both. Every other kind needs
-        // it, and none of them can pass while the committee is in a state of no confidence.
-        const ccRequired = p.kind !== "NoConfidence" && p.kind !== "UpdateCommittee";
-        const ccOk = !ccRequired ? true : noConfidence ? false : committeeAccepts(ct, thr.committee, params.committeeMinSize);
-        const drepOk = thr.drep == null || drepAccepts(dt, thr.drep, p.kind);
-        const poolOk = thr.pool == null || poolAccepts(pt, thr.pool, p.kind);
-        // NoConfidence / UpdateCommittee cannot be ratified by the CC when the CC is the subject
-        const ratified = ccOk && drepOk && poolOk && (p.kind !== "Info");
-        // One line per proposal so a tally that differs from the chain can be examined afterwards
-        // (per-credential snapshots are pruned; `scripts/gov-tally.ts` cannot recompute old epochs).
-        const pctOf = (a: bigint, b: bigint) => (b === 0n ? "n/a" : `${(Number((a * 10000n) / b) / 100).toFixed(2)}%`);
-        logger.info(`Epoch ${epoch} tally ${p.kind} ${p.action_id.slice(0, 12)}…: ${ratified ? "RATIFIED" : "not ratified"} — cc ${ct.yes}/${ct.no}/${ct.abstain} of ${ct.active} (${ccOk ? "ok" : "no"}), drep yes ${pctOf(dt.yes, dt.yes + dt.no + dt.unvoted)} of ${dt.yes + dt.no + dt.unvoted} (${dt.yes}/${dt.no}/abstain ${dt.abstain}/unvoted ${dt.unvoted}; ${drepOk ? "ok" : "no"}, thr ${thr.drep ? `${thr.drep.num}/${thr.drep.den}` : "none"}), pool yes ${pctOf(pt.yes, pt.yes + pt.no + pt.unvoted - pt.unvotedAbstain)} (${pt.yes}/${pt.no}/unvoted ${pt.unvoted}; ${poolOk ? "ok" : "no"}, thr ${thr.pool ? `${thr.pool.num}/${thr.pool.den}` : "none"})`);
-        if (!ratified) continue;
-        if (p.kind === "NoConfidence" || p.kind === "UpdateCommittee" || p.kind === "NewConstitution" || p.kind === "InitHardFork") delayed = true;
-
-        // ratified: enacted at the next boundary; the chain ids advance now so the next pulser
-        // (set up after that enactment) sees them, and so a second action of the purpose waits
-        switch (purpose) {
-            case "pparams": ids.prevPP = p.action_id; break;
-            case "hardfork": ids.prevHF = p.action_id; break;
-            case "committee": ids.prevCC = p.action_id; break;
-            case "constitution": ids.prevCons = p.action_id; break;
-        }
-        if (purpose) ratifiedThisEpoch.add(purpose);
-        ledgerGov()?.updateProposal(p.action_id, { status: "ratified", decidedEpoch: epoch });
-        if (sqlLedgerWrites()) await db`UPDATE gov_proposals SET status = 'ratified', decided_epoch = ${epoch} WHERE action_id = ${p.action_id}`;
-        next.ratified.push(p.action_id);
+    } catch (err) { logger.warn(`Epoch ${epoch} governance: pulser snapshot not stored:`, err); }
+    const result = ratifyRound(input);
+    // One line per proposal so a tally that differs from the chain can be examined afterwards.
+    for (const t of result.tallies) logger.info(`Epoch ${epoch} tally ${t.kind} ${t.id.slice(0, 12)}…: ${t.ratified ? "RATIFIED" : "not ratified"} (${t.reason}) — cc ${t.cc}, drep ${t.drep}, spo ${t.spo}`);
+    next.ratified = result.ratified;
+    next.expired = result.expired;
+    for (const id of result.ratified) {
+        ledgerGov()?.updateProposal(id, { status: "ratified", decidedEpoch: epoch });
+        if (sqlLedgerWrites()) await db`UPDATE gov_proposals SET status = 'ratified', decided_epoch = ${epoch} WHERE action_id = ${id}`;
     }
+    ids.prevPP = result.roots.pparams; ids.prevHF = result.roots.hardfork; ids.prevCC = result.roots.committee; ids.prevCons = result.roots.constitution;
     ledgerGov()?.updateState({ prevPP: ids.prevPP, prevHF: ids.prevHF, prevCC: ids.prevCC, prevCons: ids.prevCons, pending: JSON.stringify(next) });
     if (sqlLedgerWrites()) await db`UPDATE gov_state SET prev_pparams = ${ids.prevPP}, prev_hardfork = ${ids.prevHF}, prev_committee = ${ids.prevCC}, prev_constitution = ${ids.prevCons}, pending = ${JSON.stringify(next)} WHERE id = 1`;
     if (next.ratified.length || next.expired.length) logger.info(`Epoch ${epoch} governance: ratified [${next.ratified.map((a) => a.slice(0, 12) + "…").join(", ")}], expiring ${next.expired.length} — enacted at the next boundary`);
-    // An epoch with no proposal to vote on is dormant: it must not age the DReps.
-    if (proposals.length === 0) { const gw = ledgerGov(); if (gw) gw.updateState({ dormantEpochs: Number(gw.reads.state()?.dormantEpochs ?? 0) + 1 }); await db`UPDATE gov_state SET dormant_epochs = dormant_epochs + 1 WHERE id = 1`; }
+    // `updateNumDormantEpochs`: an epoch whose proposals have all expired (none with expiresAfter ≥ epoch)
+    // does not age the DReps (bug 161: any stored active proposal, even one expiring at this very
+    // boundary, kept the epoch from counting as dormant).
+    if (!input.proposals.some((p) => p.expiresAfter >= epoch)) {
+        const gw = ledgerGov(); if (gw) gw.updateState({ dormantEpochs: Number(gw.reads.state()?.dormantEpochs ?? 0) + 1 });
+        if (sqlLedgerWrites()) await db`UPDATE gov_state SET dormant_epochs = dormant_epochs + 1 WHERE id = 1`;
+    }
     return next;
 }

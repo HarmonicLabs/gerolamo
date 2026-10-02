@@ -103,7 +103,7 @@ export class ChunkRelayChainStore implements RelayChainStore {
         if (!next) return undefined;
         const data = ChunkRelayChainStore.headerPayload(next);
         if (!data) return undefined;
-        return { ...ChunkRelayChainStore.intersection(next), data };
+        return { ...ChunkRelayChainStore.intersection(next), data, prevHash: prevHashOf(next.bytes) };
     }
 
     async getBlockRange(from: ChainPoint, to: ChainPoint, maxBlocks: number): Promise<RelayBlock[] | undefined> {

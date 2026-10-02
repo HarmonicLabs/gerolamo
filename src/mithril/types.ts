@@ -111,6 +111,8 @@ export type MithrilBootstrapOptions = {
      * tip is set to the state's block. docs/PLAN_CHUNK_STORE.md phase 4.
      */
     blockStore?: string;
+    /** LMDB ledger directory (<nodeDir>/ledger): with --ledger-state the UTxO set and the state are imported straight into the store and the SQLite ledger tables are not written. */
+    ledger?: string;
 };
 
 export type MithrilBootstrapResult = {

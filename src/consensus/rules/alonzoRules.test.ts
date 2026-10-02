@@ -55,4 +55,24 @@ describe("evaluateAlonzoRules", () => {
         const heavy = evaluateAlonzoRules({ ...base, body: { inputs: [input(scriptIn)], collateralInputs: [input(collIn)], fee: 300_000n, scriptDataHash: "x" }, witnessSet: { redeemers: [rd(0, 0, 20_000_000n)] } });
         expect(heavy.failures.some((f) => f.includes("execution memory"))).toBe(true);
     });
+    test("vote and propose redeemers match Plutus voters in the ledger's Map Voter order and guarded proposals (bug 277)", () => {
+        // Map Voter: CommitteeVoter < DRepVoter < StakePoolVoter; ScriptHashObj < KeyHashObj; then the hash bytes
+        const V = (kind: number, h: string) => ({ voter: { kind, hash: { toString: () => h } }, votes: [] });
+        const PLUTUS_DREP = "c1".repeat(28), PLUTUS_CC = "f1".repeat(28), NATIVE_DREP = "a1".repeat(28), GUARD = "d1".repeat(28);
+        const gov = { ...base, era: 7, plutusScripts: new Set([PLUTUS_DREP, PLUTUS_CC, GUARD]), nativeScripts: new Set([NATIVE_DREP]) };
+        // wire order: SPO, DRep key, DRep script (native), DRep script (Plutus), CC script (Plutus)  →  ledger order: CC script, DRep scripts by hash (a1… native, c1… Plutus), DRep key, SPO
+        const votingProcedures = { procedures: [V(4, "99".repeat(28)), V(2, "11".repeat(28)), V(3, NATIVE_DREP), V(3, PLUTUS_DREP), V(1, PLUTUS_CC)] };
+        const proposalProcedures = [{ govAction: { policyHash: null } }, { govAction: { policyHash: { toString: () => GUARD } } }];
+        const body = { inputs: [input(collIn)], collateralInputs: [input(collIn)], fee: 300_000n, scriptDataHash: "x", votingProcedures, proposalProcedures };
+        const ok = evaluateAlonzoRules({ ...gov, body, witnessSet: { redeemers: [rd(4, 0), rd(4, 2), rd(5, 1)] } });
+        expect([...ok.failures, ...ok.reports].filter((m) => m.includes("redeemer"))).toEqual([]);
+        // the wire index of the Plutus DRep (3) is not its purpose index (2): rejected, as by the ledger
+        const wire = evaluateAlonzoRules({ ...gov, body, witnessSet: { redeemers: [rd(4, 0), rd(4, 3), rd(5, 1)] } });
+        expect(wire.failures).toEqual(expect.arrayContaining(["extra redeemer: vote index 3 needs no Plutus script", "missing redeemer: vote index 2"]));
+        // a native-script voter needs no redeemer; an unguarded proposal takes none
+        const extra = evaluateAlonzoRules({ ...gov, body, witnessSet: { redeemers: [rd(4, 0), rd(4, 1), rd(4, 2), rd(5, 0), rd(5, 1)] } });
+        expect(extra.failures).toEqual(expect.arrayContaining(["extra redeemer: vote index 1 needs no Plutus script", "extra redeemer: propose index 0 needs no Plutus script"]));
+        const missing = evaluateAlonzoRules({ ...gov, body, witnessSet: { redeemers: [rd(4, 2)] } });
+        expect(missing.failures).toEqual(expect.arrayContaining(["missing redeemer: vote index 0", "missing redeemer: propose index 1"]));
+    });
 });

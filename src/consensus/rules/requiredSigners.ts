@@ -11,6 +11,7 @@
  *   required_signers     — listed key hashes
  *   votes                — voter key (DRep / CC hot / SPO cold)
  *   mint                 — every policy id is a script
+ *   proposals            — the guardrail policy a proposal names
  */
 import { Address, ByronAddress, CredentialType, VoterKind } from "@harmoniclabs/cardano-ledger-ts";
 import type { ResolvedUtxo } from "./resolvedUtxo";
@@ -202,6 +203,13 @@ export function requiredWitnesses(txBody: any, resolved: Map<string, ResolvedUtx
         const h = hex(v.hash);
         if (v.kind === VoterKind.ConstitutionalCommitteScript || v.kind === VoterKind.DRepScript) out.scriptHashes.add(h);
         else out.keyHashes.add(h);
+    }
+
+    // Conway `proposingScriptsNeeded`: a ParameterChange / TreasuryWithdrawals proposal
+    // naming a guardrail policy needs that script (whether or not it is the constitution's).
+    for (const pp of (txBody.proposalProcedures ?? []) as any[]) {
+        const h = hex(pp?.govAction?.policyHash);
+        if (h) out.scriptHashes.add(h);
     }
 
     const mint = txBody.mint;

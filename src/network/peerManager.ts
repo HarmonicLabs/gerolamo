@@ -1,22 +1,24 @@
 import { logger } from "../utils/logger";
-import { openNodeLedgerStore } from "../ledger/nodeLedgerStore";
+import { ledgerBackfillRaw, ledgerStartupTipOverride, ledgerStoreMode, openNodeLedgerStore } from "../ledger/nodeLedgerStore";
+import { epochForSlot, firstSlotOfEpoch } from "../utils/epochFromSlotCalculations";
 import { blockStoreMode, catchUpFromSqlite, configureBlockStoreMode, configureRelayStore, noteSelectedTip, persistSelectedTipTo, resolveStartupTip, selectedTipPathFor, openNodeBlockStore, relayChainStoreOverride, setNodeBlockStore } from "../storage/nodeBlockStore";
-import { listPoolRelays } from "../db/leaderState";
+import { latestSnapshotEpoch, listPoolRelays, poolStakeForEpoch } from "../db/leaderState";
 import { getMaxSlot, getChainTip } from "../db";
 import { sql } from "../sql";
-import { dedupeRelays, loadLedgerRelaysFile } from "./ledgerPeers";
-import { dirname, join } from "node:path";
 import {
-    adaptLegacyTopology,
-    isLegacyTopology,
-    isTopology,
-    type Topology,
-} from "./topology";
+    dedupeRelays, LedgerPeerSource, loadLedgerRelaysFile, loadPeerSnapshotFile, poolRelaysFromStored,
+    type LedgerPeerSnapshot, type LedgerPeersKind,
+} from "./ledgerPeers";
+import { dirname, join } from "node:path";
+import { normalizeTopology, type NormalizedTopology } from "./topology";
+import { accessPointLabel, ipFamily, ipv6FromWords, isValidDestination, parseHostPort, type RelayAccessPoint } from "./relayAccessPoint";
+import { hostHasGlobalIpv6, resolveAccessPoint, type Rng } from "./dnsResolve";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import type { NetworkT } from "@harmoniclabs/cardano-ledger-ts";
 import { PeerClient } from "./PeerClient";
 import { classifyPeerNetError } from "./peerNetError";
 import { GlobalSharedMempool } from "./SharedMempool";
+import { getMempool } from "../mempool";
 import {
     ConsensusOrchestrator,
     type PeerAccessor,
@@ -28,8 +30,16 @@ import {
     type PeerGovernorSnapshot,
     type PeerGovernorTargets,
     type PeerRecord,
+    type PeerSelectionCounters,
     type PeerSource,
+    CARDANO_BIG_LEDGER_TARGETS,
     DEFAULT_PEER_GOVERNOR_TARGETS,
+    INBOUND_MATURITY_MS,
+    INBOUND_PEERS_RETRY_MS,
+    MAX_INBOUND_PEERS,
+    PEER_SHARE_MAX_IN_PROGRESS,
+    PEER_SHARE_STICKY_MS,
+    saltedHash,
 } from "./PeerGovernor";
 import type { PeerAddress } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { emitMempool, emitPeers } from "./liveEvents";
@@ -81,6 +91,25 @@ export interface PeerGovernorConfig {
     maxSharedPeerFailures?: number;
     /** Expand bootstrap/publicRoot DNS names into one peer per A record. Default true. */
     resolveDns?: boolean;
+    /**
+     * Big ledger peer targets (cardano-node targetNumberOfKnown/Established/ActiveBigLedgerPeers).
+     * Default 15 / 10 / 5 for role "relay" (cardano-node's), 0 for "producer" and "data".
+     */
+    targetKnownBigLedger?: number;
+    targetEstablishedBigLedger?: number;
+    targetActiveBigLedger?: number;
+    /**
+     * Peer churn (cardano-node Churn.hs): every ~55 min (+0–10 min; 15 min + 0–1 min while far
+     * behind) replace 20 % of the non-local-root hot, warm and cold peers. Default on for role
+     * "relay", off for "producer" and "data". `true`/`false` or `{ enabled, intervalMs, bulkIntervalMs }`.
+     */
+    churn?: boolean | { enabled?: boolean; intervalMs?: number; bulkIntervalMs?: number };
+    /**
+     * Use IPv6 peers (AAAA records, IPv6 ledger relays, IPv6 addresses learned by peer sharing).
+     * "auto" (default): when this host has a global IPv6 address. Literal IPv6 roots in
+     * topology.json are always used.
+     */
+    ipv6?: boolean | "auto";
 }
 
 export interface BlockFetchBatchConfig {
@@ -189,6 +218,23 @@ export interface GerolamoConfig {
     readonly scriptValidation?: "off" | "log" | "strict";
     /** Cold/warm/hot governor knobs (network-design v1). */
     readonly peerGovernor?: PeerGovernorConfig;
+    /**
+     * Prometheus text exposition with cardano-node metric names on its own address (off when
+     * unset). Env GEROLAMO_PROMETHEUS=host:port overrides, GEROLAMO_PROMETHEUS=0 disables. The JSON
+     * /metrics on `port` is unaffected.
+     */
+    readonly prometheus?: { host?: string; port: number; noSuffix?: boolean; enabled?: boolean };
+    /** cardano-node's legacy spelling of `prometheus`: `["127.0.0.1", 12798]`. */
+    readonly hasPrometheus?: [string, number];
+    /**
+     * Chain selection and consensus mode (consensus/chainsel/ChainSelDriver.ts). `chainSelection`:
+     * "legacy" (default: primary + verifier votes) or "praos" (ouroboros-consensus candidate
+     * fragments); `mode`: "praos" (default) or "genesis" (GSM + LoE + GDD; implies chainSelection praos).
+     * Env overrides: GEROLAMO_CHAIN_SELECTION, GEROLAMO_CONSENSUS_MODE.
+     */
+    readonly consensus?: import("../consensus/chainsel/ChainSelDriver").ConsensusConfigLike["consensus"];
+    /** A cardano-node config.json whose `Test*HardForkAtEpoch` overrides the hard-fork history uses (consensus/hfc). */
+    readonly cardanoNodeConfigFile?: string;
     /** True BlockFetch RequestRange catch-up batching. */
     readonly blockFetchBatch?: BlockFetchBatchConfig;
     /** Header-validation CPU pool. */
@@ -219,7 +265,7 @@ export interface GerolamoConfig {
     allPeers: Map<string, PeerClient>;
 }
 
-let topology: Topology;
+let topology: NormalizedTopology;
 let shelleyGenesisConfig: ShelleyGenesisConfig;
 /** Live clients keyed by stable peerKey (host:port). */
 const clientsByKey = new Map<string, PeerClient>();
@@ -237,6 +283,13 @@ let activeConfig: GerolamoConfig | undefined;
 let tickCount = 0;
 /** In-flight connects so we don't double-promote the same cold peer. */
 const connecting = new Set<string>();
+/** Connections the governor itself closes (churn, excess big ledger peers): no failure is recorded. */
+const intentionalClose = new Set<string>();
+let churnState: { enabled: boolean; intervalMs: number; bulkIntervalMs: number; nextAt: number } = { enabled: false, intervalMs: 3_300_000, bulkIntervalMs: 900_000, nextAt: Infinity };
+/** Light peer sharing: next time mature inbound peers may be picked (inboundPeersRetryTime). */
+let inboundPeersRetryAt = 0;
+/** Peer-sharing response salt and when it is re-drawn (ps_POLICY_PEER_SHARE_STICKY_TIME). */
+let shareSalt = { salt: (Math.random() * 0xffffffff) >>> 0, until: 0 };
 let tickRunning = false;
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 12_000;
@@ -247,17 +300,37 @@ function govEnabled(config: GerolamoConfig): boolean {
     return config.peerGovernor?.enabled !== false;
 }
 
-function targetsFromConfig(config: GerolamoConfig): Partial<PeerGovernorTargets> {
+export function targetsFromConfig(config: Pick<GerolamoConfig, "peerGovernor" | "role" | "n2n">): Partial<PeerGovernorTargets> {
     const g = config.peerGovernor ?? {};
     // Only pass keys the config actually sets: `{...DEFAULTS, ...{targetHot: undefined}}`
     // would erase the default and leave the governor with NaN targets (mainnet
     // config had no peerGovernor block → 1 hot peer forever).
     const out: Partial<PeerGovernorTargets> = {};
-    for (const k of ["targetHot", "targetWarm", "targetCold", "maxHot", "maxWarm", "maxCold"] as const) {
+    // Big ledger peers: cardano-node's targets for a relay; a producer / data node keeps none
+    // unless configured (a producer's peer set is its operator's business).
+    if (resolveNodeRole(config) === "relay") Object.assign(out, CARDANO_BIG_LEDGER_TARGETS);
+    for (const k of ["targetHot", "targetWarm", "targetCold", "maxHot", "maxWarm", "maxCold", "targetKnownBigLedger", "targetEstablishedBigLedger", "targetActiveBigLedger"] as const) {
         const v = g[k];
-        if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+        if (typeof v === "number" && Number.isFinite(v)) out[k] = Math.max(0, v);
     }
     return out;
+}
+
+/** Churn settings for this node (role default: on for relays). */
+export function churnConfig(config: Pick<GerolamoConfig, "peerGovernor" | "role" | "n2n">): { enabled: boolean; intervalMs: number; bulkIntervalMs: number } {
+    const c = config.peerGovernor?.churn;
+    const enabled = typeof c === "boolean" ? c : typeof c === "object" && c && typeof c.enabled === "boolean" ? c.enabled : resolveNodeRole(config) === "relay";
+    const o = typeof c === "object" && c ? c : {};
+    return {
+        enabled,
+        intervalMs: Number.isFinite(o.intervalMs) && o.intervalMs! > 0 ? o.intervalMs! : 3_300_000, // defaultDeadlineChurnInterval
+        bulkIntervalMs: Number.isFinite(o.bulkIntervalMs) && o.bulkIntervalMs! > 0 ? o.bulkIntervalMs! : 900_000, // defaultBulkChurnInterval
+    };
+}
+
+function ipv6Wanted(config: GerolamoConfig): boolean {
+    const v = config.peerGovernor?.ipv6;
+    return v === true || (v !== false && hostHasGlobalIpv6());
 }
 
 function getPeerAccessor(): PeerAccessor {
@@ -302,6 +375,7 @@ function wirePeerConsensus(peer: PeerClient): void {
             throw err;
         });
     };
+    peer.onAwaitReply = (peerId) => orch.handleAwaitReply(peerId); // Genesis: ChainSync Jumping disengages idle peers
 }
 
 /**
@@ -329,10 +403,10 @@ export function peerAddressToHostPort(
     if (typeof addr === "number" || typeof addr === "bigint") {
         return { host: ipv4NumberToString(addr), port };
     }
-    // IPv6 raw tuple — skip in v1 (no solid connect path yet)
+    // IPv6: four network-socket HostAddress6 words (the address big-endian)
     if (Array.isArray(addr)) {
-        logger.debug("Skipping IPv6 shared peer (v1)");
-        return null;
+        const host = ipv6FromWords(addr);
+        return host ? { host, port } : null;
     }
     if (typeof addr === "string" && addr.length > 0) {
         return { host: addr, port };
@@ -369,93 +443,164 @@ export async function expandAccessPoint(
     }
 }
 
+/**
+ * Addresses behind a topology / ledger access point. A domain becomes one peer per address
+ * (bootstrap and public roots are round-robin names over several relays, and cardano-node treats
+ * each address as its own peer); when resolution fails the hostname is kept, so the dialer can
+ * still try it. SRV names resolve to the drawn target's addresses (nothing on failure).
+ */
+async function expandRelay(ap: RelayAccessPoint, resolveDns: boolean, ipv6: boolean): Promise<Array<{ host: string; port: number }>> {
+    if (ap.kind === "address") return [{ host: ap.host, port: ap.port }];
+    if (!resolveDns) return ap.kind === "domain" ? [{ host: ap.host, port: ap.port }] : [];
+    const addrs = await resolveAccessPoint(ap, { ipv6 }).catch(() => [] as Array<{ host: string; port: number }>);
+    if (addrs.length === 0 && ap.kind === "domain") return [{ host: ap.host, port: ap.port }];
+    return addrs;
+}
+
 async function seedTopologyIntoGovernor(
-    topo: Topology,
+    topo: NormalizedTopology,
     gov: PeerGovernor,
     resolveDns = true,
-    resolver?: DnsResolver,
+    ipv6 = false,
 ): Promise<void> {
-    const expand = (host: string) =>
-        resolveDns ? expandAccessPoint(host, resolver) : Promise.resolve([String(host)]);
-    if (topo.bootstrapPeers) {
-        for (const ap of topo.bootstrapPeers) {
-            const hosts = await expand(String(ap.address));
-            for (const host of hosts) {
-                gov.noteKnown(host, ap.port, "bootstrap", false);
-            }
-            if (hosts.length > 1) {
-                logger.info(`Bootstrap ${ap.address}:${ap.port} → ${hosts.length} addresses`);
+    for (const ap of topo.bootstrapPeers ?? []) {
+        const addrs = await expandRelay(ap, resolveDns, ipv6);
+        for (const a of addrs) gov.noteKnown(a.host, a.port, "bootstrap", false, undefined, { advertise: false });
+        if (addrs.length > 1) logger.info(`Bootstrap ${accessPointLabel(ap)} → ${addrs.length} addresses`);
+    }
+    // Local roots: each group with its hot / warm valency (cardano-node LocalRootPeersGroup)
+    for (let i = 0; i < topo.localRoots.length; i++) {
+        const root = topo.localRoots[i]!;
+        const groupId = `lr_${i}`;
+        gov.registerLocalRootGroup(groupId, root.hotValency, root.warmValency);
+        if (root.behindFirewall) {
+            // Provenance Inbound: the peer dials us; the governor never connects to it.
+            logger.info(`Local root group ${groupId}: behindFirewall, waiting for ${root.accessPoints.map(accessPointLabel).join(", ")} to connect in`);
+            continue;
+        }
+        for (const ap of root.accessPoints) {
+            for (const a of await expandRelay(ap, resolveDns, ipv6)) {
+                gov.noteKnown(a.host, a.port, "localRoot", root.trustable, groupId, { advertise: root.advertise });
             }
         }
     }
-    if (topo.localRoots) {
-        // P1: register each localRoots[] group + hard valency
-        for (let i = 0; i < topo.localRoots.length; i++) {
-            const root = topo.localRoots[i]!;
-            const groupId = `lr_${i}`;
-            const valency = Math.max(0, Math.floor(Number(root.valency ?? 0)));
-            gov.registerLocalRootGroup(groupId, valency);
-            const trustable = (root as { trustable?: boolean }).trustable !== false;
-            for (const ap of root.accessPoints) {
-                gov.noteKnown(
-                    ap.address,
-                    ap.port,
-                    "localRoot",
-                    trustable,
-                    groupId,
-                );
-            }
-        }
-    }
-    if (topo.publicRoots) {
-        for (const root of topo.publicRoots) {
-            for (const ap of root.accessPoints) {
-                for (const host of await expand(ap.address)) {
-                    gov.noteKnown(host, ap.port, "publicRoot", false);
-                }
+    for (const root of topo.publicRoots) {
+        for (const ap of root.accessPoints) {
+            for (const a of await expandRelay(ap, resolveDns, ipv6)) {
+                gov.noteKnown(a.host, a.port, "publicRoot", false, undefined, { advertise: root.advertise });
             }
         }
     }
 }
 
-let ledgerPeerConfig: { topology: Topology; resolveDns: boolean; file: string } | null = null;
-let ledgerRelayQueue: Array<{ pool: string; host: string; port: number }> = [];
-let ledgerRelaysLoadedAt = 0;
+let ledgerPeerConfig: { topology: NormalizedTopology; resolveDns: boolean; ipv6: boolean; file: string } | null = null;
+let ledgerSource: LedgerPeerSource | null = null;
+let peerSnapshotCache: { path: string; snap: LedgerPeerSnapshot | null } | null = null;
 let ledgerSeededTotal = 0;
+let bigLedgerSeededTotal = 0;
+/** One PRNG for peer selection (stake-weighted picks, churn, coin flips); swapped in simulations. */
+let selectionRng: Rng = Math.random;
+
+/** Stake-weighted pools with their relays from the ledger (pool_relays + ledger-relays.json + the stake distribution). */
+async function ledgerPoolsNow(file: string) {
+    const fromTable = await listPoolRelays(sql).catch(() => [] as Array<{ pool: string; host: string; port: number; srv?: boolean }>);
+    const fromFile = await loadLedgerRelaysFile(file);
+    const relays = dedupeRelays([...fromTable, ...fromFile]);
+    if (relays.length === 0) return null;
+    let stake: Map<string, bigint> | null = null;
+    try {
+        const tip = BigInt(await getMaxSlot());
+        const d = (await poolStakeForEpoch(Number(epochForSlot(tip)))) ?? await (async () => { const e = await latestSnapshotEpoch(); return e == null ? null : poolStakeForEpoch(e + 1); })();
+        stake = d?.stake ?? null;
+    } catch { stake = null; }
+    if (!stake || stake.size === 0) logger.warn(`Ledger peers: no stake distribution available; weighting ${relays.length} relay(s) equally`);
+    const pools = poolRelaysFromStored(relays, stake);
+    logger.info(`Ledger peers: ${pools.length} pool(s) with relays (${fromTable.length} relay rows from certificates, ${fromFile.length} from ${file})${stake ? `, stake of ${stake.size} pool(s)` : ""}`);
+    return pools;
+}
+
+function makeLedgerSource(lp: NonNullable<typeof ledgerPeerConfig>): LedgerPeerSource {
+    return new LedgerPeerSource({
+        useLedgerAfterSlot: lp.topology.useLedgerAfterSlot,
+        ledgerSlot: async () => Number(await getMaxSlot()),
+        ledgerPools: () => ledgerPoolsNow(lp.file),
+        snapshot: async () => {
+            const path = lp.topology.peerSnapshotFile;
+            if (!path) return null;
+            if (peerSnapshotCache?.path !== path) {
+                const snap = await loadPeerSnapshotFile(path);
+                peerSnapshotCache = { path, snap };
+                if (snap) logger.info(`Big ledger peer snapshot ${path}: ${snap.big.length} pool(s) at slot ${snap.slot ?? "origin"}`);
+                else logger.warn(`Big ledger peer snapshot ${path} could not be read`);
+            }
+            return peerSnapshotCache.snap;
+        },
+        rng: () => selectionRng(),
+    });
+}
 
 /**
- * Feed registered relays (pool_relays table + <node dir>/ledger-relays.json) into the cold
- * tier, a batch per call so DNS work stays bounded; honours topology.useLedgerAfterSlot.
+ * Resolve picked ledger relays and add them to the known set. A domain contributes one random
+ * address (ledgerPeersThread `pickDomainAddrs`), an SRV name its drawn target's address.
+ */
+async function addLedgerPicks(gov: PeerGovernor, picks: Array<{ ap: RelayAccessPoint }>, source: "ledger" | "bigLedger", lp: NonNullable<typeof ledgerPeerConfig>): Promise<number> {
+    let added = 0;
+    await Promise.all(picks.map(async ({ ap }) => {
+        let addrs = await expandRelay(ap, lp.resolveDns, lp.ipv6);
+        addrs = addrs.filter((a) => isValidDestination(a.host) && (lp.ipv6 || ipFamily(a.host) !== 6));
+        if (ap.kind !== "address" && addrs.length > 1) addrs = [addrs[Math.floor(selectionRng() * addrs.length)]!];
+        for (const a of addrs) {
+            if (gov.get(peerKey(a.host, a.port))) continue;
+            gov.noteKnown(a.host, a.port, source, false);
+            added++;
+        }
+    }));
+    return added;
+}
+
+/**
+ * Ledger peers into the cold tier: stake-weighted picks for the regular deficit, and big ledger
+ * peers for their own known target. Honours topology useLedgerAfterSlot / peerSnapshotFile.
  */
 async function seedLedgerPeers(gov: PeerGovernor, config: GerolamoConfig): Promise<number> {
     const lp = ledgerPeerConfig;
-    if (!lp || !gov.needsColdPeers()) return 0;
+    if (!lp || !ledgerSource?.enabled) return 0;
     try {
-        const tip = Number(await getMaxSlot());
-        if (Number.isFinite(lp.topology.useLedgerAfterSlot) && tip < lp.topology.useLedgerAfterSlot) return 0;
-        if (ledgerRelayQueue.length === 0 && Date.now() - ledgerRelaysLoadedAt > 10 * 60_000) {
-            ledgerRelaysLoadedAt = Date.now();
-            const fromTable = await listPoolRelays(sql).catch(() => [] as Array<{ pool: string; host: string; port: number }>);
-            const fromFile = await loadLedgerRelaysFile(lp.file);
-            const all = dedupeRelays([...fromTable, ...fromFile]).filter((r) => !gov.get(peerKey(r.host, r.port)));
-            for (let i = all.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [all[i], all[j]] = [all[j]!, all[i]!]; }
-            ledgerRelayQueue = all;
-            if (all.length) logger.info(`Ledger peers: ${all.length} relay(s) to try (${fromTable.length} from certificates, ${fromFile.length} from ${lp.file})`);
-        }
-        const want = Math.min(Number(config.peerGovernor?.ledgerBatch ?? 32), Math.max(0, gov.counts().total < (gov.targets.targetCold + gov.targets.targetWarm + gov.targets.targetHot) ? gov.targets.targetCold : 0));
         let added = 0;
-        while (added < want && ledgerRelayQueue.length) {
-            const r = ledgerRelayQueue.shift()!;
-            const hosts = lp.resolveDns ? await expandAccessPoint(r.host) : [r.host];
-            for (const h of hosts) { if (!gov.get(peerKey(h, r.port))) { gov.noteKnown(h, r.port, "ledger", false); added++; } }
+        const regular = Math.min(Number(config.peerGovernor?.ledgerBatch ?? 32), Math.max(0, gov.targets.targetCold - gov.regularCounts().cold));
+        if (regular > 0) {
+            const n = await addLedgerPicks(gov, await ledgerSource.request(regular, "all"), "ledger", lp);
+            ledgerSeededTotal += n;
+            added += n;
+            if (n) logger.info(`Ledger peers: +${n} cold (stake-weighted from ${ledgerSource.stats().source}, ${ledgerSeededTotal} since start)`);
         }
-        ledgerSeededTotal += added;
-        if (added) logger.info(`Ledger peers: +${added} cold (${ledgerRelayQueue.length} left in the queue, ${ledgerSeededTotal} seeded since start)`);
+        const big = gov.needsBigLedgerKnown();
+        if (big > 0) {
+            const n = await addLedgerPicks(gov, await ledgerSource.request(big, "big"), "bigLedger", lp);
+            bigLedgerSeededTotal += n;
+            added += n;
+            if (n) logger.info(`Big ledger peers: +${n} cold (${ledgerSource.stats().bigPools} big pool(s) from ${ledgerSource.stats().source}, ${bigLedgerSeededTotal} since start)`);
+        }
         return added;
     } catch (err) {
         logger.warn("Ledger peers: seeding failed:", err);
         return 0;
     }
+}
+
+/** Ledger peer source state (for /metrics-style reporting and tests). */
+export function getLedgerPeerStats(): ReturnType<LedgerPeerSource["stats"]> | null {
+    return ledgerSource?.stats() ?? null;
+}
+
+/** Deterministic selection for offline simulations / tests. */
+export function setPeerSelectionRng(rng: Rng): void {
+    selectionRng = rng;
+}
+
+/** Test hook: request picks of a kind from the running ledger source. */
+export async function requestLedgerPeers(n: number, kind: LedgerPeersKind) {
+    return ledgerSource ? ledgerSource.request(n, kind) : [];
 }
 
 function registerClient(peer: PeerClient): void {
@@ -514,6 +659,11 @@ async function connectWarm(
                 logger.info(`Peer terminated ${peerId} key=${pKey}${reason ? ` reason=${reason}` : ""}`);
                 unregisterClient(pKey, peerId);
                 consensus?.unregisterHotPeer(pKey);
+                if (intentionalClose.delete(pKey)) {
+                    // churn / excess close: not the peer's fault, no failure recorded
+                    gov.detachClient(pKey);
+                    return;
+                }
                 if (reason?.startsWith("malicious:")) {
                     // Provably bad data (body hash / signature / divergence): 1h cold hold.
                     logger.warn(`Peer ${pKey} held cold for bad data: ${reason}`);
@@ -669,49 +819,121 @@ function rehomeOrphanClients(gov: PeerGovernor): number {
     return n;
 }
 
+/**
+ * Light peer sharing (KnownPeers.belowTarget): below the known target, pick mature duplex inbound
+ * peers when the coin flip says so (or nobody can be asked); otherwise send peer-share requests
+ * to at most 2 connected peers whose activation delay / retry time passed, asking each for
+ * min 255 (max 8 (deficit ÷ requests)) addresses, then keep a salted random subset of the new,
+ * non-big-ledger ones up to the deficit.
+ */
 async function runPeerSharing(
     gov: PeerGovernor,
-    shareBatch: number,
+    _shareBatch: number,
+    ipv6: boolean,
+    now = Date.now(),
 ): Promise<void> {
     if (!gov.needsColdPeers()) return;
+    const deficit = Math.max(0, gov.targets.targetCold - gov.regularCounts().cold);
     // Only peers that agreed to PeerSharing in the handshake may be asked.
-    const donors = [
-        ...gov.listByTier("hot"),
-        ...gov.listByTier("warm"),
-    ].filter((r) => r.client && clientsByKey.get(r.key)?.peerSharingNegotiated);
-    if (donors.length === 0) {
-        logger.debug("PeerSharing: no connected peer negotiated it; skipping");
-        return;
-    }
-
-    // Ask up to 2 connected peers (timeout — hung share must not stall tick)
-    for (const rec of donors.slice(0, 2)) {
-        const client = clientsByKey.get(rec.key);
-        if (!client) continue;
-        try {
-            const peers = await withTimeout(
-                client.askForPeers(shareBatch),
-                DEFAULT_CONNECT_TIMEOUT_MS,
-                `askForPeers ${rec.key}`,
-            );
-            let added = 0;
-            for (const p of peers) {
-                const hp = peerAddressToHostPort(p);
-                if (!hp) continue;
-                const before = gov.get(peerKey(hp.host, hp.port));
-                gov.noteKnown(hp.host, hp.port, "shared", false);
-                if (!before) added++;
-            }
-            if (added > 0) {
-                logger.info(
-                    `PeerSharing via ${rec.key}: +${added} cold (batch=${peers.length})`,
-                );
-            }
-        } catch (err) {
-            logger.debug(`PeerSharing failed on ${rec.key}:`, err);
-            // soft — don't demote solely for share failure
+    const donors = gov.pickPeerShareDonors(PEER_SHARE_MAX_IN_PROGRESS, now, (r) => !!clientsByKey.get(r.key)?.peerSharingNegotiated);
+    const useInbound = selectionRng() < 0.5;
+    if (now >= inboundPeersRetryAt && (useInbound || donors.length === 0)) {
+        const mature = matureInboundPeers(now).filter((a) => !gov.get(peerKey(a.host, a.port)) && (ipv6 || ipFamily(a.host) !== 6));
+        if (mature.length > 0) {
+            inboundPeersRetryAt = now + INBOUND_PEERS_RETRY_MS;
+            const take = mature.map((a) => ({ a, r: selectionRng() })).sort((x, y) => x.r - y.r).slice(0, Math.min(MAX_INBOUND_PEERS, deficit)).map((x) => x.a);
+            // inbound peers are advertised and count as successfully connected (they are connected)
+            for (const a of take) gov.noteKnown(a.host, a.port, "inbound", false, undefined, { advertise: true, everConnected: true });
+            logger.info(`PeerSharing: +${take.length} cold from mature inbound duplex peers (${mature.length} candidate(s))`);
+            return;
         }
     }
+    if (donors.length === 0) {
+        logger.debug("PeerSharing: no connected peer available for a request; skipping");
+        return;
+    }
+    const amount = Math.min(255, Math.max(8, Math.floor(deficit / donors.length)));
+    const salt = (selectionRng() * 0xffffffff) >>> 0;
+    const results = await Promise.all(donors.map(async (rec) => {
+        const client = clientsByKey.get(rec.key);
+        gov.notePeerShareRequested(rec.key, now);
+        if (!client) return [] as Array<{ host: string; port: number }>;
+        try {
+            const peers = await withTimeout(client.askForPeers(amount), 10_000, `askForPeers ${rec.key}`); // policyPeerShareOverallTimeout
+            return peers.map(peerAddressToHostPort).filter((x): x is { host: string; port: number } => !!x);
+        } catch (err) {
+            logger.debug(`PeerSharing failed on ${rec.key}:`, err);
+            return [];
+        }
+    }));
+    const fresh = new Map<string, { host: string; port: number }>();
+    for (const hp of results.flat()) {
+        const k = peerKey(hp.host, hp.port);
+        if (gov.get(k) || fresh.has(k) || !isValidDestination(hp.host)) continue; // known (big ledger peers included) are dropped
+        if (!ipv6 && ipFamily(hp.host) === 6) continue;
+        fresh.set(k, hp);
+    }
+    const chosen = [...fresh].sort((a, b) => saltedHash(salt, a[0]) - saltedHash(salt, b[0])).slice(0, deficit);
+    for (const [, hp] of chosen) gov.noteKnown(hp.host, hp.port, "shared", false);
+    if (chosen.length > 0) logger.info(`PeerSharing via ${donors.map((d) => d.key).join(", ")}: +${chosen.length} cold (asked ${amount} each, ${results.flat().length} received)`);
+}
+
+/** Inbound peers connected to us in duplex mode for at least INBOUND_MATURITY_MS (inbound governor "matured" peers). */
+function matureInboundPeers(now = Date.now()): Array<{ host: string; port: number }> {
+    const out: Array<{ host: string; port: number }> = [];
+    for (const c of getInboundN2NStatus().clientList ?? []) {
+        const info = c as { peer: string; since: number; duplex?: boolean | null; transport?: string };
+        if (info.duplex !== true || info.transport === "ws" || now - info.since < INBOUND_MATURITY_MS) continue;
+        const hp = parseHostPort(info.peer);
+        if (hp) out.push(hp);
+    }
+    return out;
+}
+
+/** Close a warm connection on purpose (churn / excess): the peer goes cold without a failure. */
+function closeWarm(rec: PeerRecord, gov: PeerGovernor, reason: string): void {
+    const client = clientsByKey.get(rec.key);
+    if (!client) { gov.detachClient(rec.key); return; }
+    intentionalClose.add(rec.key);
+    try { client.terminate(reason); } catch { /* */ }
+    unregisterClient(rec.key, client.peerId);
+    gov.detachClient(rec.key);
+    setTimeout(() => intentionalClose.delete(rec.key), 30_000).unref?.();
+}
+
+/**
+ * One churn round (cardano-node Churn.hs churnLoop, big ledger peers first, then the rest):
+ * demote ~20 % of the hot peers to warm, close ~20 % of the established ones, forget ~20 % of the
+ * forgettable cold ones; the next ticks promote replacements. Local roots and the chain-sync
+ * primary are never churned.
+ */
+function runChurn(gov: PeerGovernor, tickMs: number, now = Date.now()): void {
+    const primary = consensus?.primaryPeerKey();
+    const exclude = new Set<string>(primary ? [primary] : []);
+    const summary: string[] = [];
+    for (const bigLedger of [true, false]) {
+        const hot = gov.pickChurnHot(bigLedger, () => selectionRng(), exclude);
+        for (const rec of hot) { demoteHotToWarm(rec, gov); rec.churnHoldUntil = now + 2 * tickMs; }
+        const warm = gov.pickChurnWarm(bigLedger, () => selectionRng()).filter((r) => !hot.includes(r));
+        for (const rec of warm) { closeWarm(rec, gov, "churn"); rec.churnHoldUntil = now + 5 * 60_000; }
+        let forgotten = 0;
+        for (const rec of gov.pickChurnCold(bigLedger, () => selectionRng())) if (!warm.includes(rec) && gov.forget(rec.key)) forgotten++;
+        if (hot.length || warm.length || forgotten) summary.push(`${bigLedger ? "big ledger" : "regular"}: ${hot.length} hot→warm, ${warm.length} warm→cold, ${forgotten} forgotten`);
+    }
+    logger.info(`Peer churn: ${summary.join("; ") || "nothing to churn"}`);
+}
+
+async function churnDue(now: number): Promise<boolean> {
+    if (!churnState.enabled || now < churnState.nextAt) return false;
+    // Deadline mode (caught up): 3300 s + 0–600 s; bulk sync (far behind the best peer): 900 s + 0–60 s.
+    let behind = false;
+    try {
+        const best = BigInt(getBestPeerTipSlot() ?? "0");
+        behind = best > 0n && best - BigInt(await getMaxSlot()) > 2160n;
+    } catch { behind = false; }
+    const base = behind ? churnState.bulkIntervalMs : churnState.intervalMs;
+    churnState.nextAt = now + base + (behind ? 60_000 : 600_000) * selectionRng();
+    return true;
 }
 
 async function governorTick(
@@ -749,14 +971,22 @@ async function governorTick(
         // 2026-09-12), and every extra outbound duplex connection to a different relay is
         // another chance of being adopted as that relay's warm / hot peer.
         if (gcfg.peerSharing !== false && (tickCount === 1 || tickCount % shareEvery === 0)) {
-            await runPeerSharing(gov, shareBatch);
+            await runPeerSharing(gov, shareBatch, ledgerPeerConfig?.ipv6 ?? false, now);
         }
 
-        // 1b) Ledger peers (registered relays) whenever cold is short: the main source for a
-        // node that does not advertise itself, as in cardano-node.
-        if (gov.needsColdPeers() && (tickCount === 1 || tickCount % shareEvery === 0)) {
+        // 1b) Ledger peers (registered relays, stake-weighted) whenever cold is short, and big
+        // ledger peers below their known target: the main source for a node that does not
+        // advertise itself, as in cardano-node.
+        if ((gov.needsColdPeers() || gov.needsBigLedgerKnown() > 0) && (tickCount === 1 || tickCount % shareEvery === 0)) {
             await seedLedgerPeers(gov, config);
         }
+
+        // 1c) Churn round when due (relay role by default).
+        if (await churnDue(now)) runChurn(gov, config.peerGovernor?.tickMs ?? 15_000, now);
+
+        // 2a) Local-root groups below their warm valency connect regardless of the regular target.
+        const lrCold = gov.pickLocalRootColdForWarm(now).slice(0, maxConcurrent);
+        if (lrCold.length) await Promise.allSettled(lrCold.map((rec) => connectWarm(rec, config, gov)));
 
         // 2) cold → warm (capped concurrency; pickColdForWarm respects nextRetryAt)
         // Spec (network-design): maintain targetWarm even when cold peers are
@@ -784,6 +1014,16 @@ async function governorTick(
             );
         }
 
+        // 2b) big ledger peers: cold → warm up to their established target
+        const needBlWarm = gov.needsBigLedgerEstablished();
+        if (needBlWarm > 0) {
+            const picks = gov.pickColdForWarm(Math.min(needBlWarm, maxConcurrent), now, true);
+            if (picks.length) await Promise.allSettled(picks.map((rec) => connectWarm(rec, config, gov)));
+        }
+
+        // 3a) local-root groups below their hot valency
+        for (const rec of gov.pickLocalRootWarmForHot(now)) await promoteToHot(rec, gov, connectTimeoutMs);
+
         // 3) warm → hot
         const needHot = gov.needsHotSlots();
         if (needHot > 0) {
@@ -791,6 +1031,12 @@ async function governorTick(
             for (const rec of picks) {
                 await promoteToHot(rec, gov, connectTimeoutMs);
             }
+        }
+
+        // 3b) big ledger peers: warm → hot up to their active target
+        const needBlHot = gov.needsBigLedgerHot();
+        if (needBlHot > 0) {
+            for (const rec of gov.pickWarmForHot(needBlHot, now, true)) await promoteToHot(rec, gov, connectTimeoutMs);
         }
 
         // 4) silent hot→warm liveness demote (spec churn; keep bearer)
@@ -847,6 +1093,12 @@ async function governorTick(
         } else {
             for (const rec of demote) demoteHotToWarm(rec, gov);
         }
+        // 5b) big ledger peers above their targets (e.g. after a targets change): hot → warm, then close
+        for (const rec of gov.pickBigLedgerHotForDemotion(gov.excessBigLedgerHot())) demoteHotToWarm(rec, gov);
+        const blExcess = gov.excessBigLedgerEstablished();
+        if (blExcess > 0) {
+            for (const rec of gov.listByTier("warm").filter((r) => r.bigLedger).slice(0, blExcess)) closeWarm(rec, gov, "big ledger peers above target");
+        }
 
         // 6) if zero hot, emergency recover
         // Rehome orphan sockets first (warm with live bearer), then dial cold.
@@ -855,12 +1107,12 @@ async function governorTick(
             if (rehomed > 0) {
                 logger.info(`Emergency rehomed ${rehomed} orphan client(s)`);
             }
-            // Promote any warm bearer immediately (incl. rehomed).
-            for (const rec of gov.pickWarmForHot(1, now)) {
+            // Promote any warm bearer immediately (incl. rehomed, big ledger peers too).
+            for (const rec of gov.pickWarmForHot(1, now, "any")) {
                 await promoteToHot(rec, gov, connectTimeoutMs);
             }
             if (gov.counts().hot === 0) {
-                let emergency = gov.pickColdForWarm(1, now);
+                let emergency = gov.pickColdForWarm(1, now, "any");
                 if (emergency.length === 0) {
                     const best = gov.pickBestColdIgnoringBackoff();
                     if (best) {
@@ -885,7 +1137,7 @@ async function governorTick(
                         }
                     }
                 }
-                for (const rec of gov.pickWarmForHot(1, now)) {
+                for (const rec of gov.pickWarmForHot(1, now, "any")) {
                     await promoteToHot(rec, gov, connectTimeoutMs);
                 }
             }
@@ -937,31 +1189,30 @@ export function getPeerGovernor(): PeerGovernor | undefined {
  * Does not expose full PeerClient map.
  */
 /**
- * Peers we advertise to others over PeerSharing: connected hot/warm first, then
- * a sample of cold ones; IPv4 host:port keys only (IPv6 sharing not implemented).
+ * Peers we advertise to others over PeerSharing (cardano-node computePeerSharingPeers): known
+ * peers with advertise, a successful connection and no failures, in an order salted for 823 s,
+ * at most min(10, amount). IPv4 and IPv6.
  */
 export function listShareablePeers(amount: number): Array<{ host: string; port: number }> {
     if (!governor) return [];
-    const out: Array<{ host: string; port: number }> = [];
-    const seen = new Set<string>();
-    const push = (key: string) => {
-        if (seen.has(key)) return;
-        const i = key.lastIndexOf(":");
-        if (i < 0) return;
-        const host = key.slice(0, i);
-        const port = Number(key.slice(i + 1));
-        if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(host) || !Number.isInteger(port) || port <= 0) return;
-        seen.add(key);
-        out.push({ host, port });
-    };
-    for (const tier of ["hot", "warm", "cold"] as const) {
-        for (const r of governor.listByTier(tier)) {
-            if (out.length >= amount) return out;
-            if (r.malicious && r.malicious.until > Date.now()) continue;
-            push(r.key);
-        }
+    const now = Date.now();
+    if (now >= shareSalt.until) shareSalt = { salt: (selectionRng() * 0xffffffff) >>> 0, until: now + PEER_SHARE_STICKY_MS };
+    return governor.shareablePeers(amount, shareSalt.salt, now);
+}
+
+/** cardano-node peer selection counters (Prometheus peerSelection_*). */
+export function getPeerSelectionCounters(): (PeerSelectionCounters & { ColdPeersPromotions: number }) | null {
+    return governor ? { ...governor.selectionCounters(), ColdPeersPromotions: connecting.size } : null;
+}
+
+/** Outbound connection counts for the connectionManager_* metrics. */
+export function getOutboundConnectionStats(): { outbound: number; duplex: number } {
+    let outbound = 0, duplex = 0;
+    for (const c of clientsByKey.values()) {
+        outbound++;
+        if ((c as { duplexServing?: boolean }).duplexServing) duplex++;
     }
-    return out;
+    return { outbound, duplex };
 }
 
 export interface InboundN2NStatus {
@@ -1004,6 +1255,14 @@ export function createHttpPeerManager(): {
 } {
     return {
         async submitTx({ txCbor }: { txCbor: Uint8Array }) {
+            // Validating mempool: the ledger rules decide, and hot peers pull the tx from it.
+            const vm = getMempool();
+            if (vm) {
+                const r = await vm.addTx(txCbor, "http");
+                emitMempool();
+                const m = vm.measures();
+                return { status: r.ok ? "success" : `rejected: ${r.reasons.slice(0, 3).join("; ")}`, nTxs: m.txCount, availableSpace: Math.max(0, m.bytes.capacity - m.bytes.size) };
+            }
             const peer = getPeerAccessor().pickHotPeer();
             if (!peer) {
                 throw new Error("No hot peer available for tx submit");
@@ -1045,6 +1304,40 @@ export async function stopPeerManager(): Promise<void> {
     governor = undefined;
 }
 
+/** Read and normalise topology.json (cardano-node semantics); warnings go to the log. */
+async function readTopology(path: string): Promise<NormalizedTopology> {
+    let parsed: { topology: NormalizedTopology; warnings: string[] };
+    try {
+        parsed = normalizeTopology(await Bun.file(path).json(), path);
+    } catch (err) {
+        throw new Error(`invalid topology file at ${path}: ${(err as Error)?.message ?? err}`);
+    }
+    for (const w of parsed.warnings) logger.warn(`topology ${path}: ${w}`);
+    const t = parsed.topology;
+    logger.info(`Topology ${path}: ${t.localRoots.length} local root group(s), ${t.publicRoots.reduce((n, r) => n + r.accessPoints.length, 0)} public root(s), ${t.bootstrapPeers?.length ?? 0} bootstrap peer(s), ledger peers ${t.useLedgerAfterSlot < 0 ? "off" : t.useLedgerAfterSlot === 0 ? "always" : `after slot ${t.useLedgerAfterSlot}`}${t.peerSnapshotFile ? `, peer snapshot ${t.peerSnapshotFile}` : ""}`);
+    return t;
+}
+
+/**
+ * SIGHUP (as cardano-node): re-read topology.json — new local / public / bootstrap roots join the
+ * known set, local-root valencies and the ledger-peer settings (useLedgerAfterSlot,
+ * peerSnapshotFile) take effect, the peer snapshot is re-read. Peers already known stay.
+ */
+export async function reloadTopology(): Promise<string> {
+    const config = activeConfig;
+    if (!config || !governor) return "topology: peer governor not running";
+    const t = await readTopology(config.topologyFile);
+    const before = governor.counts().total;
+    const resolveDns = config.peerGovernor?.resolveDns !== false;
+    const ipv6 = ipv6Wanted(config);
+    await seedTopologyIntoGovernor(t, governor, resolveDns, ipv6);
+    topology = t;
+    ledgerPeerConfig = { topology: t, resolveDns, ipv6, file: join(dirname(config.topologyFile), "ledger-relays.json") };
+    peerSnapshotCache = null;
+    ledgerSource = makeLedgerSource(ledgerPeerConfig);
+    return `topology reloaded: ${governor.counts().total - before} new peer(s), ledger peers ${t.useLedgerAfterSlot < 0 ? "off" : "on"}`;
+}
+
 export async function initPeerManager(config: GerolamoConfig): Promise<void> {
     activeConfig = config;
     logger.setLogConfig(config.logs);
@@ -1057,15 +1350,7 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
         throw new Error("missing topology file at " + config.topologyFile);
     }
 
-    let parsedTopology = await topoFile.json();
-    parsedTopology = isLegacyTopology(parsedTopology)
-        ? adaptLegacyTopology(parsedTopology)
-        : parsedTopology;
-
-    if (!isTopology(parsedTopology)) {
-        throw new Error("invalid topology file at " + config.topologyFile);
-    }
-    topology = parsedTopology;
+    topology = await readTopology(config.topologyFile);
 
     // Load once before any peers are constructed; all validators share this promise cache.
     shelleyGenesisConfig = await getShelleyGenesisConfig(config);
@@ -1108,7 +1393,23 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
         }
         // LMDB ledger store (phase 1: UTxO), seeded from SQLite at the selected tip when empty
         const tipNow = await getChainTip();
-        await openNodeLedgerStore(config, tipNow ? { slot: Number(tipNow.slot), hash: Uint8Array.from(Buffer.from(tipNow.hashHex, "hex")) } : null);
+        const tipBytes = tipNow ? Uint8Array.from(Buffer.from(tipNow.hashHex, "hex")) : null;
+        let chain: Array<{ slot: number; hash: Uint8Array }> | undefined;
+        if (blockStoreMode() === "primary" && store && tipBytes) {
+            chain = store.volatileChain(tipBytes).map((b) => ({ slot: b.slot, hash: b.hash }));
+            const imm = await store.immutableTip(); // last resort after a crash: every volatile diff gone, the ledger at its anchor (bug 245)
+            if (imm) chain.push({ slot: imm.slot, hash: imm.hash });
+        }
+        await openNodeLedgerStore(config, tipNow && tipBytes ? { slot: Number(tipNow.slot), hash: tipBytes } : null, chain);
+        if (store && ledgerStoreMode() !== "sqlite") {
+            const tipForScan = tipBytes;
+            void ledgerBackfillRaw(store, tipForScan, Number(firstSlotOfEpoch(epochForSlot(BigInt((await getChainTip())?.slot ?? 0))))).catch((err) => logger.warn(`ledger raw backfill failed: ${(err as Error).message}`));
+        }
+        const back = ledgerStartupTipOverride();
+        if (back && blockStoreMode() === "primary" && store) {
+            noteSelectedTip(back.hash); // persisted by the block store's tip writer
+            logger.warn(`Block store: selected tip moved back to slot ${back.slot} to match the ledger store after a crash; the network re-sends the blocks above it`);
+        }
     } catch (err) {
         logger.warn(`Block store unavailable (SQLite stays primary): ${(err as Error).message}`);
     }
@@ -1122,12 +1423,18 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
     }
 
     governor = new PeerGovernor(targetsFromConfig(config));
+    { const g = governor; consensus?.setBigLedgerPeerSource({ bigLedgerPeers: () => g.bigLedgerKeys() }); } // Genesis mode (consensus/chainsel)
+    const ipv6 = ipv6Wanted(config);
     await seedTopologyIntoGovernor(
         topology,
         governor,
         config.peerGovernor?.resolveDns !== false,
+        ipv6,
     );
-    ledgerPeerConfig = { topology, resolveDns: config.peerGovernor?.resolveDns !== false, file: join(dirname(config.topologyFile), "ledger-relays.json") };
+    ledgerPeerConfig = { topology, resolveDns: config.peerGovernor?.resolveDns !== false, ipv6, file: join(dirname(config.topologyFile), "ledger-relays.json") };
+    ledgerSource = makeLedgerSource(ledgerPeerConfig);
+    churnState = { ...churnConfig(config), nextAt: Date.now() + churnConfig(config).intervalMs };
+    logger.info(`PeerGovernor: big ledger targets ${governor.targets.targetKnownBigLedger}/${governor.targets.targetEstablishedBigLedger}/${governor.targets.targetActiveBigLedger} (known/established/active), churn ${churnState.enabled ? "on" : "off"}, IPv6 peers ${ipv6 ? "on" : "off"}`);
     await seedLedgerPeers(governor, config);
     logger.info(
         `Node role: ${resolveNodeRole(config)} (peerSharing ${peerSharingAdvertised(config) ? "on" : "off"})`,
@@ -1184,26 +1491,20 @@ async function initLegacyHotFirst(config: GerolamoConfig): Promise<void> {
         }
     }
 
-    if (topology.bootstrapPeers) {
-        for (const ap of topology.bootstrapPeers) {
-            await addHot(String(ap.address), ap.port);
-        }
+    for (const ap of topology.bootstrapPeers ?? []) {
+        if (ap.kind !== "srv") await addHot(ap.host, ap.port);
     }
-    if (topology.localRoots) {
-        for (const root of topology.localRoots) {
-            for (const ap of root.accessPoints) {
-                await addHot(ap.address, ap.port);
-            }
+    for (const root of topology.localRoots) {
+        for (const ap of root.accessPoints) {
+            if (ap.kind !== "srv") await addHot(ap.host, ap.port);
         }
     }
 
     monitorInterval = setInterval(async () => {
         if (hotList.length > 0) return;
         logger.warn("Legacy: no hot peers — replenishing topology");
-        if (topology.bootstrapPeers) {
-            for (const ap of topology.bootstrapPeers) {
-                await addHot(String(ap.address), ap.port);
-            }
+        for (const ap of topology.bootstrapPeers ?? []) {
+            if (ap.kind !== "srv") await addHot(ap.host, ap.port);
         }
     }, 30_000);
 

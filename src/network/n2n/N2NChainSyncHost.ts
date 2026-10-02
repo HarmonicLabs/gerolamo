@@ -17,6 +17,7 @@ import {
 import { logger } from "../../utils/logger";
 import { isN2NInitiatorFrame, sendN2NResponder } from "./N2NDirection";
 import type { RelayChainStore, RelayHeader } from "./RelayChainStore";
+import { noteServed } from "../nodeMetrics";
 
 const log = logger.child("n2n.chainsync");
 
@@ -45,6 +46,9 @@ export class N2NChainSyncHost {
      * 01:30 UTC: 65.108.41.222 reconnected dozens of times, ran chain-sync, never fetched).
      */
     private pendingRollback: ChainPoint | null = null;
+    /** Points this session served (oldest first, bounded): where to roll the client back to when our chain switches branches. */
+    private readonly served: ChainPoint[] = [];
+    private static readonly SERVED_HISTORY = 2200; // a rollback never goes deeper than k (2160 on mainnet)
     private readonly peer: string;
     private traced = 0;
     private previousBytes: Uint8Array | undefined;
@@ -144,6 +148,8 @@ export class N2NChainSyncHost {
             }
             this.cursor = found.point;
             this.pendingRollback = found.point;
+            this.served.length = 0;
+            this.remember(found.point);
             this.send(new ChainSyncIntersectFound({ point: found.point, tip }));
             return;
         }
@@ -163,6 +169,7 @@ export class N2NChainSyncHost {
     private async sendNextOrAwait(): Promise<void> {
         const next = await this.store.getNextHeader(this.cursor);
         if (next) {
+            if (await this.rolledBackInstead(next)) return;
             await this.sendHeader(next);
             return;
         }
@@ -170,10 +177,40 @@ export class N2NChainSyncHost {
         this.schedulePoll();
     }
 
+    private remember(point: ChainPoint): void {
+        this.served.push(point);
+        if (this.served.length > N2NChainSyncHost.SERVED_HISTORY) this.served.shift();
+    }
+
+    /**
+     * The next header of our chain does not extend the client's position: our chain switched branches
+     * below it (a rollback, a fork switch). The next message must be MsgRollBackward to the newest point
+     * we served that is still on our chain — the stores serve by slot, and a header from the other branch
+     * made strict clients drop us (bug 287: the cardano-node relay's UnexpectedPrevHash on the producer,
+     * 2026-09-29 10:04:05 UTC). Returns true when it sent the rollback.
+     */
+    private async rolledBackInstead(next: RelayHeader): Promise<boolean> {
+        const cur = this.cursor.blockHeader;
+        if (!cur || next.prevHash === undefined) return false;
+        if (next.prevHash && Buffer.from(next.prevHash).equals(Buffer.from(cur.hash))) return false;
+        const back = await this.store.findIntersect([...this.served].reverse());
+        if (!back) {
+            log.warn(`ChainSync host ${this.peer}: our chain left the client's position (slot ${cur.slotNumber}) and none of the ${this.served.length} point(s) served this session is on it any more`);
+            return false;
+        }
+        if (pointEq(back.point, this.cursor)) return false; // the client's position is still on our chain: a gap in the store, not a fork
+        while (this.served.length && !pointEq(this.served[this.served.length - 1]!, back.point)) this.served.pop();
+        this.cursor = back.point;
+        this.send(new ChainSyncRollBackwards({ point: back.point, tip: await this.store.getTip() }));
+        return true;
+    }
+
     private async sendHeader(header: RelayHeader): Promise<void> {
         const tip = await this.store.getTip();
         this.cursor = header.point;
+        this.remember(header.point);
         this.send(new ChainSyncRollForward({ data: header.data, tip }));
+        noteServed("header");
     }
 
     private schedulePoll(): void {
@@ -189,6 +226,7 @@ export class N2NChainSyncHost {
         try {
             const next = await this.store.getNextHeader(this.cursor);
             if (next) {
+                if (await this.rolledBackInstead(next)) return;
                 await this.sendHeader(next);
                 return;
             }
@@ -215,3 +253,8 @@ function describe(m: any): string {
     return String(m?.constructor?.name ?? m);
 }
 
+function pointEq(a: ChainPoint, b: ChainPoint): boolean {
+    const x = a.blockHeader, y = b.blockHeader;
+    if (!x || !y) return !x && !y;
+    return BigInt(x.slotNumber) === BigInt(y.slotNumber) && Buffer.from(x.hash).equals(Buffer.from(y.hash));
+}

@@ -1,3 +1,6 @@
+/** KES certificate health from the node (same thresholds as @harmoniclabs/kes `kesStatus`). */
+export type GerolamoKesHealth = "ok" | "rotate-soon" | "rotate-now" | "expired" | "not-yet-valid";
+
 export type GerolamoNetwork = "preprod" | "mainnet" | "preview";
 
 export type MetricsPayload = {
@@ -79,7 +82,7 @@ export type GerolamoProducer = {
   vrfKeyHash: string | null;
   dryRun: boolean;
   opcert: { counter: string; kesPeriod: string; chainCounter: string | null };
-  kes: { period: string; evolution: number; remaining: number; maxEvolutions: number; expiresAt: string | null } | null;
+  kes: { period: string; evolution: number; remaining: number; maxEvolutions: number; expiresAt: string | null; health: GerolamoKesHealth | null; counter: string | null } | null;
   missedLeaderChecks: number;
   scheduledEpochs: number[];
   leaderSlotsKnown: number;
@@ -293,6 +296,8 @@ export function deriveProducer(value: unknown): GerolamoProducer | null {
           remaining: finiteNumber(kes.remaining) ?? 0,
           maxEvolutions: finiteNumber(kes.maxEvolutions) ?? 0,
           expiresAt: typeof kes.expiresAt === "string" ? kes.expiresAt : null,
+          health: typeof kes.health === "string" ? (kes.health as GerolamoKesHealth) : null,
+          counter: typeof kes.counter === "string" ? kes.counter : null,
         }
       : null,
     missedLeaderChecks: finiteNumber(v.missedLeaderChecks) ?? 0,

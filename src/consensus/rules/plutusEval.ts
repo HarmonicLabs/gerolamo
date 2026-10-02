@@ -241,7 +241,34 @@ function rebuildWitnessSet(era: number, bytes: Uint8Array): any {
     return AlonzoTxWitnessSet.fromCbor(bytes);
 }
 
+/**
+ * Phase-2 evaluation with the shadow result shape (signature kept for the mempool worker job and
+ * the tools): runs rules/phase2.ts (the CEK machine in src/consensus/plutus and Gerolamo's own
+ * script contexts). `GEROLAMO_PLUTUS_LEGACY_SHADOW=1` selects the previous evaluator below
+ * (plutus-machine + buildooor contexts), kept for differential debugging only.
+ * Mapping: a verdict that differs from the transaction's is_valid flag — or a context the
+ * ledger cannot build (collect error: the transaction is invalid either way) — is `mismatch`;
+ * "no verdict" (missing script or datum, unresolved input, unsupported builtin) is `note`.
+ */
 export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEvalResult> {
+    if (process.env.GEROLAMO_PLUTUS_LEGACY_SHADOW === "1") return shadowEvaluateTxLegacy(input);
+    const redeemersRoot: any[] = input.witnessSet?.redeemers ?? [];
+    if (redeemersRoot.length === 0) return { evaluated: 0, skipped: 0, mismatch: null };
+    if (!input.forceSample && SHADOW_SAMPLE_EVERY > 1 && (shadowCounter++ % SHADOW_SAMPLE_EVERY) !== 0) return { evaluated: 0, skipped: 0, mismatch: null };
+    if (!input.bodyBytes || !input.witnessSetBytes) return { evaluated: 0, skipped: redeemersRoot.length, mismatch: null, note: "original body/witness bytes unavailable" };
+    const { evaluatePhase2Sync, verdictOf } = await import("./phase2");
+    const p2 = { era: input.era, bodyBytes: input.bodyBytes, witnessSetBytes: input.witnessSetBytes, resolved: input.resolved, params: input.params, markedInvalid: input.markedInvalid, network: input.network };
+    const r = evaluatePhase2Sync(p2);
+    const v = verdictOf(p2, r);
+    const n = r.redeemers.length || redeemersRoot.length;
+    if (v.kind === "unknown") return { evaluated: 0, skipped: n, mismatch: null, note: v.detail };
+    if (v.kind === "collect-error") return { evaluated: 0, skipped: 0, mismatch: `collect error (the ledger cannot build the script context): ${v.detail}` };
+    if (v.kind === "tag-mismatch") return { evaluated: n, skipped: 0, mismatch: `local verdict ${r.ok ? "valid" : "invalid"} ≠ block's ${input.markedInvalid ? "invalid" : "valid"} (${v.detail})` };
+    return { evaluated: n, skipped: 0, mismatch: null };
+}
+
+/** The previous shadow evaluator (plutus-machine + buildooor contexts), for differential debugging. */
+export async function shadowEvaluateTxLegacy(input: ShadowEvalInput): Promise<ShadowEvalResult> {
     const redeemersRoot: any[] = input.witnessSet?.redeemers ?? [];
     if (redeemersRoot.length === 0) return { evaluated: 0, skipped: 0, mismatch: null };
     if (!input.forceSample && SHADOW_SAMPLE_EVERY > 1 && (shadowCounter++ % SHADOW_SAMPLE_EVERY) !== 0) return { evaluated: 0, skipped: 0, mismatch: null };

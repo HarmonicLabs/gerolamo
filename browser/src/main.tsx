@@ -20,6 +20,8 @@ function App() {
     const [stats, setStats] = createSignal<NodeStats | null>(null);
     const [lines, setLines] = createSignal<string[]>([]);
     const [recent, setRecent] = createSignal<Array<{ slot: number; blockNo: number; hash: string; txs: number; size: number }>>([]);
+    const [txCbor, setTxCbor] = createSignal("");
+    const [txs, setTxs] = createSignal<Array<{ id: string; size: number; state: string }>>([]);
     let node: BrowserNode | null = null;
 
     const log = (l: string) => setLines((xs) => [...xs.slice(-199), `${new Date().toISOString().slice(11, 19)} ${l}`]);
@@ -28,12 +30,21 @@ function App() {
         node = new BrowserNode({
             endpoint: endpoint(), networkMagic: magic(), start: start(), log, apiBase: api() || undefined,
             storeSink: persist() && OpfsSink.available() ? new OpfsSink() : undefined, chunkSlots: magic() === 764824073 ? 21600 : 4320,
-            onStats: (s) => { setStats(s); setRecent(node!.recent.slice(-12).reverse().map((b) => ({ slot: b.slot, blockNo: b.blockNo, hash: b.hash, txs: b.txs, size: b.bytes.length }))); },
+            onStats: (s) => { setStats(s); setTxs(node!.pendingTxs()); setRecent(node!.recent.slice(-12).reverse().map((b) => ({ slot: b.slot, blockNo: b.blockNo, hash: b.hash, txs: b.txs, size: b.bytes.length }))); },
         });
         log(`connecting to ${endpoint()} (magic ${magic()})`);
         await node.start();
     };
     const stop = () => node?.stop();
+    const submit = () => {
+        const h = txCbor().replace(/\s+/g, "");
+        try {
+            if (!/^([0-9a-f]{2})+$/i.test(h)) throw new Error("paste the signed transaction as hex CBOR");
+            if (!node) throw new Error("connect first");
+            const id = node.submitTx(Uint8Array.from(h.match(/../g)!.map((x) => parseInt(x, 16))));
+            log(`submitted ${id}`); setTxCbor(""); setTxs(node.pendingTxs());
+        } catch (e) { log(`submit failed: ${(e as Error).message}`); }
+    };
     const fmt = (n: number | null | undefined) => (n == null ? "–" : n.toLocaleString("en-US"));
     const s = () => stats();
 
@@ -65,6 +76,12 @@ function App() {
                 <div class="card"><b>Stored (OPFS, node chunk format)</b><span>{fmt(s()?.storedBlocks)} blocks</span><div class="muted">{((s()?.storedBytes ?? 0) / 1e6).toFixed(2)} MB in {fmt(s()?.storedChunks)} chunk file(s){s()?.resumedFrom != null ? ` · resumed from slot ${fmt(s()!.resumedFrom)}` : ""}</div></div>
                 <Show when={s()?.anchor}>{(a) => <div class="card"><b>Mithril anchor</b><span class="ok">slot {fmt(a().slot)}</span><div class="muted">snapshot {a().snapshotHash.slice(0, 12)}… epoch {a().epoch} · chunk {a().chunkNo} ({a().blocksInChunk} blocks) · {a().certificatesWalked}</div></div>}</Show>
                 <div class="card"><b>Transferred</b><span>{((s()?.bytes ?? 0) / 1e6).toFixed(2)} MB</span><div class="muted">{fmt(s()?.rollbacks)} rollbacks · intersect {s()?.intersect ?? ""}</div></div>
+            </div>
+            <div class="card" style="margin-bottom:12px">
+                <b>Submit a transaction</b>
+                <div class="muted">Signed transaction CBOR (hex, as in a cardano-cli <code>.signed</code> file's cborHex). The relay pulls it over tx-submission on this WebSocket and validates it into its mempool.</div>
+                <div class="row"><textarea style="flex:1;min-height:56px;font-family:monospace;font-size:11px" value={txCbor()} onInput={(e) => setTxCbor(e.currentTarget.value)} placeholder="84a4…" /><button onClick={submit} disabled={s()?.state !== "syncing" && s()?.state !== "at-tip"}>Submit</button></div>
+                <For each={txs()}>{(t) => <div class="muted" style="font-size:12px">{t.id.slice(0, 24)}… · {t.size} B · {t.state === "fetched" ? "sent to the relay" : t.state === "announced" ? "announced, waiting for the relay" : "queued"}</div>}</For>
             </div>
             <Show when={recent().length}>
                 <div class="card" style="margin-bottom:12px">

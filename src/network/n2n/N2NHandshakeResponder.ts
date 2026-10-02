@@ -24,6 +24,8 @@ export interface N2NHandshakeResponderOptions {
     onAccepted?: (info: {
         versionNumber: VersionNumber;
         versionData: VersionData;
+        /** What the initiator proposed for the chosen version (diffusion mode, peer sharing). */
+        remoteVersionData?: VersionData;
     }) => void;
     onRefused?: (reason: string) => void;
 }
@@ -147,7 +149,7 @@ export class N2NHandshakeResponder {
         log.info(
             `Handshake Accept version=${versionNumber} networkMagic=${this.networkMagic}`,
         );
-        this.onAccepted?.({ versionNumber, versionData });
+        this.onAccepted?.({ versionNumber, versionData, remoteVersionData: remote as VersionData | undefined });
     }
 
     private refuse(reason: string): void {

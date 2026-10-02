@@ -48,13 +48,15 @@ export async function mithrilAnchor(opts: { network: "preview" | "preprod" | "ma
     log(`Mithril: snapshot ${detail.hash.slice(0, 16)}… epoch ${detail.beacon.epoch}, immutable file ${detail.beacon.immutable_file_number}`);
 
     const genesisVkey = await fetchGenesisVkey(cfg.genesisVkeyUrl);
-    const fetcher = createAggregatorCertificateFetcher(agg);
+    const cache = certCache(opts.network);
+    const fetcher = cache.wrap(createAggregatorCertificateFetcher(agg));
     const cert = await fetcher(detail.certificate_hash);
     if (!cert) throw new Error("certificate not found");
     log(`Mithril: verifying the certificate chain from ${detail.certificate_hash.slice(0, 16)}… (this walks to genesis)`);
     const res = await pureTsVerifyCertificateChain(detail.certificate_hash, cert as any, { fetcher: fetcher as any, genesisVkey });
     if (!pureTsFullChainStagesOk(res) || !(res as any).chainOk) throw new Error(`certificate chain rejected: ${(res as any).reason ?? "unknown"}`);
-    log(`Mithril: certificate chain OK (${(res as any).reason ?? ""})`);
+    log(`Mithril: certificate chain OK (${(res as any).reason ?? ""}; ${cache.hits} of ${cache.hits + cache.misses} certificates from the browser cache)`);
+    await cache.persist();
 
     const mm = verifyCardanoDatabaseMessageMatch(cert as any, detail.merkle_root);
     if (!mm.ok) throw new Error(`certificate does not bind the snapshot's merkle root: ${mm.reason ?? ""}`);
@@ -83,4 +85,48 @@ export async function mithrilAnchor(opts: { network: "preview" | "preprod" | "ma
     const last = decodeSecondaryEntry(files.secondary, entries - 1, filled[entries - 1] === 0);
     log(`Mithril: certified point = slot ${last.slotOrEbb} hash ${hex(last.headerHash).slice(0, 16)}… (last block of chunk ${n})`);
     return { network: detail.network, snapshotHash: detail.hash, certificateHash: detail.certificate_hash, epoch: detail.beacon.epoch, immutableFileNumber: n, merkleRoot: detail.merkle_root, chunkNo: n, slot: last.slotOrEbb, hash: hex(last.headerHash), blocksInChunk: entries, certificatesWalked: String((res as any).reason ?? "") };
+}
+
+/**
+ * Mithril certificates kept in OPFS (`gerolamo/mithril-certs/<network>/<hash>.json`), so a restart
+ * does not download the whole chain back to genesis again. Every certificate is still verified on
+ * every walk; the cache only saves the downloads, and a certificate is stored only after the chain it
+ * came in verified, so a bad download is never kept.
+ */
+function certCache(network: string) {
+    type Fetch = ReturnType<typeof createAggregatorCertificateFetcher>;
+    const fresh = new Map<string, unknown>();
+    let dir: Promise<FileSystemDirectoryHandle | null> | null = null;
+    const root = () => dir ??= (async () => {
+        try {
+            if (typeof navigator === "undefined" || !navigator.storage?.getDirectory) return null;
+            let d = await navigator.storage.getDirectory();
+            for (const part of ["gerolamo", "mithril-certs", network]) d = await d.getDirectoryHandle(part, { create: true });
+            return d;
+        } catch { return null; }
+    })();
+    const self = {
+        hits: 0, misses: 0,
+        wrap(inner: Fetch): Fetch {
+            return (async (hash: string) => {
+                const d = await root();
+                if (d) {
+                    try { const f = await (await d.getFileHandle(`${hash}.json`)).getFile(); const c = JSON.parse(await f.text()); self.hits++; return c; } catch { /* not cached */ }
+                }
+                self.misses++;
+                const c = await inner(hash);
+                if (c) fresh.set(hash, c);
+                return c;
+            }) as Fetch;
+        },
+        async persist(): Promise<void> {
+            const d = await root();
+            if (!d) return;
+            const { OpfsSink } = await import("./opfsSink");
+            const sink = new OpfsSink(`gerolamo/mithril-certs/${network}`);
+            for (const [hash, c] of fresh) { try { await sink.write(`${hash}.json`, new TextEncoder().encode(JSON.stringify(c))); } catch { /* cache only */ } }
+            fresh.clear();
+        },
+    };
+    return self;
 }

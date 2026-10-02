@@ -421,6 +421,10 @@ export function Main() {
             "cardano-node-format block store (<nodeDir>/db): the chunks become the store as they are, nothing is applied into SQLite; with --ledger-state the ledger tables are imported and the node's tip pinned to the state's block",
         )
         .option(
+            "--ledger <dir>",
+            "LMDB ledger directory (<nodeDir>/ledger): with --ledger-state the UTxO set and the ledger state go straight into the store; SQLite gets no ledger tables",
+        )
+        .option(
             "--db <path>",
             "SQLite path for apply (default: GEROLAMO_DB_PATH or .live/test.db)",
             process.env.GEROLAMO_DB_PATH || "./.live/test.db",
@@ -447,6 +451,7 @@ export function Main() {
                 downloadConcurrency?: number;
                 db?: string;
                 blockStore?: string;
+                ledger?: string;
             }) => {
                 const logger = new Logger({ logLevel: LogLevel.INFO });
                 const engineRaw = (options.engine || "ts").toLowerCase();
@@ -483,6 +488,7 @@ export function Main() {
                         skipDownload: !!options.skipDownload,
                         skipApply: !!options.skipApply,
                         blockStore: options.blockStore ? resolve(options.blockStore) : undefined,
+                        ledger: options.ledger ? resolve(options.ledger) : undefined,
                         fromChunk: options.fromChunk,
                         toChunk: options.toChunk,
                         limitChunks: options.limitChunks,

@@ -1,4 +1,7 @@
+import { plutusPhase2Totals } from "../consensus/BlockBodyValidator";
 import { statsHtmlPage } from "./statsPage";
+import { govRuleSummary } from "../consensus/governance/govValidate";
+import { mempoolMetrics } from "../mempool";
 import { ledgerStoreSummary } from "../ledger/nodeLedgerStore";
 import { getBlockProducer } from "../pool/startBlockProducer";
 import { mithrilReplayStatus, readMithrilProgressCached } from "../mithril/progress";
@@ -192,9 +195,13 @@ async function buildMetricsPayload(
         epochNonce,
         bodyValidation: validation.body,
         scriptValidation: validation.script,
+        /** Plutus phase 2: mode (enforce | report | off) and totals since start (rules/phase2.ts). */
+        plutus: plutusPhase2Totals(),
         /** False on tip sync: no ledger state behind the tip, tx rules are report-only. */
         ledgerComplete: validation.ledgerComplete,
         validationNote: validation.note,
+        /** Validating mempool: size/capacity, verdict counters, admission and revalidation latency (ms). */
+        mempoolValidation: mempoolMetrics(),
         uptimeSec: Math.round(process.uptime()),
         node: "gerolamo",
         /** Node build: package version + git commit (+ -dirty when the checkout has local edits). */
@@ -205,6 +212,8 @@ async function buildMetricsPayload(
         recentBlocks: await recentBlocksCached(),
         blockStore: await blockStoreSummary(),
         ledgerStore: ledgerStoreSummary(),
+        /** Conway GOV / GOVCERT / DELEG / POOL checks: mode, transactions checked, failures by rule. */
+        governanceRules: govRuleSummary(),
         mempool: await mempoolSummaryCached(),
         /** Inbound node-to-node listener state. */
         inbound:
@@ -411,7 +420,7 @@ export async function startPeerBlockServer(
                 }
                 // shared-cardano-mempool-ts MempoolAppendStatus: 0 Ok, 1 AlreadyPresent, 2 InsufficientSpace, 3 MaxTxsReached
                 const accepted = verdict.status === "success" || verdict.status === "0" || verdict.status === "1";
-                const why = verdict.status === "2" ? "insufficient space" : verdict.status === "3" ? "max transactions reached" : verdict.status;
+                const why = verdict.status === "2" ? "insufficient space" : verdict.status === "3" ? "max transactions reached" : verdict.status.replace(/^rejected: /, "");
                 return new Response(
                     JSON.stringify({ status: accepted ? "accepted into local mempool; hot peers pull it via tx-submission" : `rejected: ${why}`, mempool: verdict }),
                     {

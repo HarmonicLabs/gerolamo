@@ -70,6 +70,8 @@ export interface RewardsOutput {
     pools: Array<{ poolId: string; maxPool: bigint; poolReward: bigint; operator: bigint; members: bigint; ownerStake: bigint; stake: bigint; blocks: bigint }>;
     /** Reserves after the epoch: reserves − (rewardPot − fees) + unclaimed... see below */
     reservesDelta: bigint;
+    /** `_R` = rewardPot − ⌊rewardPot · τ⌋, what the pools share (the ledger keeps it as `rewardPotNM`). */
+    distributable: bigint;
 }
 
 function mulDiv(a: bigint, num: bigint, den: bigint): bigint {
@@ -200,5 +202,6 @@ export function computeEpochRewards(input: RewardsInput): RewardsOutput {
         pools: perPool,
         // reserves lose what came from them; undistributed rewards flow back
         reservesDelta: -fromReserves + unclaimed,
+        distributable: R,
     };
 }

@@ -35,7 +35,7 @@
         "@harmoniclabs/cardano-math-ts": "^0.0.5",
         "@harmoniclabs/cbor": "^1.6.6",
         "@harmoniclabs/crypto": "^0.3.0",
-        "@harmoniclabs/kes": "file:vendor/harmoniclabs-kes-0.1.0-dev1.tgz",
+        "@harmoniclabs/kes": "file:vendor/harmoniclabs-kes-0.1.0-dev2.tgz",
         "@harmoniclabs/obj-utils": "^1.0.0",
         "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.5-dev7",
         "@harmoniclabs/shared-cardano-mempool-ts": "file:vendor/harmoniclabs-shared-cardano-mempool-ts-0.0.0.tgz",

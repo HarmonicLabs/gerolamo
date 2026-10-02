@@ -1,0 +1,13 @@
+[Unit]
+Description=Gerolamo node watchdog (one pass)
+
+[Service]
+Type=oneshot
+# The watchdog may relaunch node supervisors: they must outlive this oneshot unit.
+KillMode=process
+Environment=PATH=%h/.bun/bin:/usr/local/bin:/usr/bin:/bin
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/%U/bus
+EnvironmentFile=-%h/.config/gerolamo/watchdog.env
+WorkingDirectory=/media/bakon/data/Dev/HarmonicLabs/gerolamo
+ExecStart=%h/.bun/bin/bun scripts/watchdog.ts /media/bakon/data/cardano/watchdog/config.json
+TimeoutStartSec=120

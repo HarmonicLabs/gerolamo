@@ -15,6 +15,7 @@ import {
     runBlockRulesJob,
 } from "./validationJob";
 import { runWitnessVerifyJob, type WitnessVerifyJob, type WitnessVerifyResult } from "./witnessJob";
+import { runMempoolPlutusJob, type MempoolPlutusJob, type MempoolPlutusResult } from "../../mempool/plutusJob";
 
 /**
  * Pool of Bun Workers for header validation (KES/VRF are the CPU cost of
@@ -252,6 +253,21 @@ export class ValidationPool {
             if (paramsId != null) ids.params = paramsId;
             if (genesisId != null) ids.genesis = genesisId;
             worker.postMessage({ id, job: slim }, [copy.buffer]);
+        });
+    }
+
+    /** Phase 2 of a mempool transaction (its Plutus scripts) on a worker; inline without workers. */
+    evaluateMempoolPlutus(job: MempoolPlutusJob): Promise<MempoolPlutusResult> {
+        if (this.closed) return Promise.reject(new Error("ValidationPool closed"));
+        if (this.workers.length === 0) return runMempoolPlutusJob(job);
+        const worker = this.leastLoadedWorker();
+        const weight = 4;
+        this.load.set(worker, (this.load.get(worker) ?? 0) + weight);
+        const id = this.nextId++;
+        return new Promise<MempoolPlutusResult>((resolve, reject) => {
+            this.pending.set(id, { resolve, reject, worker, weight });
+            const tx = fresh(job.tx), bodyBytes = fresh(job.bodyBytes), witnessSetBytes = fresh(job.witnessSetBytes);
+            worker.postMessage({ id, job: { ...job, tx, bodyBytes, witnessSetBytes } }, [tx.buffer, bodyBytes.buffer, witnessSetBytes.buffer]);
         });
     }
 

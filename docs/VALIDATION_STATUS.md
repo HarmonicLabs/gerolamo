@@ -9,14 +9,20 @@ picture: what is verified, how, what is still open, and how to reproduce it.
 | Area | Rule | Status |
 |---|---|---|
 | Headers | KES signature, opcert cold signature, VRF proof (fast noble verifier, 600/600 agreement with the reference), Praos leader value `blake2b_256("L" ‖ vrf)`, overlay schedule, pool registration and VRF-key binding | strict |
-| Headers | σ leader threshold, opcert counter monotonicity | report-only (see open items) |
-| Withdrawals | must equal the local reward balance | report-only until the final from-genesis run shows zero disagreements (`WITHDRAWALS_STRICT`) |
+| Headers | opcert counter never decreases (`CounterTooSmallOCERT`, bug 183) | strict |
+| Headers | σ leader threshold (exact σ of the epoch's pool distribution), Praos `n ≤ m + 1` (`CounterOverIncrementedOCERT`, judged by the counters as of the header's parent) | strict on an exact ledger store (lmdb mode, store imported from a NewEpochState — `ledgerStateExact`); report-only in sqlite / dual mode and on a store seeded from SQLite (bugs 275, 276) |
+| Withdrawals | account registered (`*WithdrawalsMissingAccounts`, bug 180); Conway PV ≥ 10 key accounts DRep-delegated (`ConwayWdrlNotDelegatedToDRep`) | strict |
+| Withdrawals | must equal the reward balance (`ConwayIncompleteWithdrawals` / `WithdrawalsNotInRewards…`), earlier transactions of the block draining it | strict on an exact ledger store; report-only (with the reason) in sqlite / dual mode and on a SQLite-seeded store (bug 272) |
 | Epoch nonces | UPDN/TICKN evolver, Praos block nonce `blake2b_256(blake2b_256("N" ‖ vrf))`, ηh from the previous epoch's last block, rebuilt from stored headers on restart and rollback | strict; every preprod epoch 5–31 equals Koios |
-| Byron | tx structure, witnesses (PkWitness/Redeem), value conservation, `txFeePolicy` on the witness-less tx bytes | strict |
+| Byron | tx structure, witnesses (PkWitness/Redeem), value conservation, `validateTxAux` size limit and fee policy on the on-chain `ATxAux` bytes with the adopted parameters (bugs 297–299) | strict |
+| Byron | chain-validation state (`consensus/byron/ByronLedger`): update proposals / votes / endorsements / adoption, heavyweight delegation, header / block / EBB size limits, era of the block against the Byron→Shelley transition; persisted per block with rollback (bugs 296–301) | strict |
 | Shelley…Conway | witnesses (vkey, bootstrap, required signers), native scripts (timelocks), value conservation with deposits/refunds, min fee (+ ex-unit prices), validity interval, min UTxO (Shelley, Mary scaled, Alonzo per-word with datum, Babbage per-byte from original bytes), size limits, certificate sequence | strict |
 | Alonzo+ | datums (hashed from original bytes), collateral (incl. phase-2-invalid transactions), ex-unit caps per tx and block, redeemer ↔ purpose, byte-exact `script_data_hash`, witness script hashes from original bytes | strict |
-| Conway | tiered reference-script fee | report-only until checked on Conway history |
-| Plutus phase 2 | evaluation shadow (buildooor script contexts + plutus-machine, everything rebuilt from bytes) | report-only; evaluates real V1/V2 transactions with matching verdicts, accumulating agreement over the preprod run before going strict |
+| Conway governance | GOV (proposal deposit, return account, network ids, guardrail script, previous-action chain, hard-fork succession, committee-update bounds, well-formed parameter updates, voters and actions that exist, expired actions, voters an action admits, bootstrap-phase and protocol-11 restrictions), GOVCERT (DRep deposit / re-registration / refund, committee cold keys), DELEG / POOL (deposits, delegatee registration, pool cost / network / metadata / retirement epoch / protocol-11 VRF uniqueness), LEDGER (declared treasury, withdrawing key accounts delegated to a DRep) — against the ledger state before each transaction (bug 150) | strict (`GEROLAMO_GOV_RULES=report` to relax); the zero-balance-on-deregistration predicate and the declared treasury strict on an exact ledger store only (bugs 273, 274); report-only on tip sync |
+| Plutus phase 2 | every redeemer evaluated within its declared units by Gerolamo's evaluator (`src/consensus/plutus`: flat decoder, CEK machine, builtins, per-variant cost models, V1/V2/V3 script contexts incl. governance), verdict = is_valid (`rules/phase2.ts`, bugs 200–214) | `GEROLAMO_PLUTUS_PHASE2` (enforce / report / off), default `enforce`; preview full-history replay: 3 191 175 valid transactions pass, 241 invalid fail, 0 mismatches (bug 214) |
+| Conway | exact minimum fee incl. tiered reference-script fee, reference-script size per tx (200 KiB) and per block (1 MiB, PV 11 accumulation), inputs ∩ reference inputs (PV 9–10), header protocol version (mainnet) | strict (bugs 170–175) |
+| Conway | `current_treasury_value` against the local treasury | strict on an exact ledger store, report-only otherwise (bugs 182, 273) |
+| All eras | the UTXO/UTXOW/LEDGER predicate checklist below (bugs 170–184) | see "Conway predicate checklist" |
 | Ledger state | UTxO apply (strict presence), pool params/retirements, delegations, stake snapshots, reward pots and per-account rewards, protocol parameters (genesis → update proposals decoded from body bytes → era-genesis merges → Conway enactment), governance capture and ratification | local, no external source on a from-genesis sync |
 
 ## Verified against a reference (Koios)
@@ -31,6 +37,12 @@ picture: what is verified, how, what is still open, and how to reproduce it.
 | VRF verifier | `scripts/verify-fast-vrf.ts` | 600/600 proofs agree |
 | Script data hash | `scripts/verify-sdh-koios.ts` | 8/8 real transactions (V1, V2) |
 | Whole-chain replay | from-genesis runs (below) | preprod epoch 38 and counting, zero body-rule reports |
+| Conway governance history | `scripts/gov-replay.ts` (the node's governance code over the chunk store; Koios `proposal_list`, `totals`, `drep_history`, `pool_voting_power_history`; decoded NewEpochStates) | preview 646–1434: 218 325 governance transactions through the GOV/GOVCERT/DELEG/POOL/LEDGER checks, 0 failures; every epoch's ratified / expiring / enacted / expired / dropped set equal to Koios; NewEpochState at slots 122 316 253, 122 735 066 and 123 980 824: DReps (expiry, deposit), committee members and typed committee state, proposals, votes, roots, pulser result, dormant count and all vote delegations equal (bugs 150–165) |
+| Governance rules on the LMDB store | `scripts/gov-rules-shadow.ts` (read-only, the view pinned to each block's parent) | both preview nodes: 432 blocks, 58 governance transactions, 0 failures |
+| Reward balances, pots, pool distributions, opcert counters | `scripts/reward-accounts-compare.ts` (every registered account, query 10), `scripts/n2c-compare.ts --only …` | both preview nodes at block 124 163 389: 111 805 accounts' delegations and reward balances byte-identical with cardano-node; GetAccountState, GetPoolDistr(2), GetStakeSnapshots, DebugChainDepState byte-identical (bugs 272–276) |
+| Balance rules on the LMDB store | `scripts/ledger-rules-shadow.ts` (body + governance rules, view pinned to each block's parent), `scripts/balance-history-check.ts` (balances rebuilt from the chain and the recorded boundary credits since the import) | volatile windows of both nodes: 0 failures; epochs 1421–1437: 40 247 withdrawals and 32 deregistrations checked, 0 mismatches; all 17 Conway treasury claims equal the recorded treasury (bugs 272–274) |
+| Header rules over the whole chain | `scripts/header-rules-replay.ts` | 4 713 292 preview headers: OCERT 0 failures, the ahead-of-apply counter state equal to the chain's for every header; σ: 65 550 headers of 22 epochs with exact snapshots, 0 failures (bugs 275, 276) |
+| Voting / proposing redeemers | `scripts/gov-redeemers-replay.ts` | preview 500 transactions (70 vote, 495 propose redeemers), preprod 500 (431 vote incl. 3 multi-voter, 93 propose): 0 match messages; preview phase 2 equal to is_valid on all 467 (bug 277) |
 
 ## Bugs found by the proving runs (all fixed, each with a fixture test where a block was involved)
 
@@ -166,12 +178,12 @@ picture: what is verified, how, what is still open, and how to reproduce it.
 
 ## Open items (in order)
 
-1. Plutus phase 2 (note: the JS evaluator's BigInt arithmetic is quadratic, so a reference-speed evaluator or a WebAssembly/GMP-backed integer path is a hard requirement for strictness, not only a speed-up): the shadow now evaluates real transactions with the chain's verdict (buildooor objects rebuilt from bytes, plutus-machine size measures and hard budget limit patched). Two things block strictness: the pure-JS machine is ~1000× slower than the reference (heavy redeemers exceed the 2 s wall-clock cap and are skipped, ~15% on preprod epoch 46), so a native/WASM evaluator is needed for mainnet-scale strict evaluation; and the agreement over Babbage/Conway history has to be measured with that evaluator.
+1. Plutus phase 2: done for preview (bugs 200–214: every script runs, verdicts equal the chain's over the whole preview history). The evaluator now implements all of plutus-core 1.63.0.0 (cardano-node 11.0.1) at protocol 11 — batch 6 incl. the Value builtins and multi-scalar multiplication, the D/E argument bounds, the protocol-11 decoder bounds — and passes plutus' conformance suite (bugs 248–253). Remaining: `TimeTranslationPastHorizon` (mempool transactions whose validity bounds lie beyond the forecast horizon) is not checked; a script that does not decode (phase 1 in the ledger) is still "no verdict", not a rejection.
 2. Rewards: fixed (uncapped apparent performance, treasury forfeits, snapshot-time pool params); the clean resync must reproduce every boundary from genesis.
-3. σ threshold reports: eight canonical preprod blocks (epochs 46–54) fail our leader-threshold check by 1e-5…1e-4 relative. Recomputed offline: each leader value sits just above our threshold, and our snapshot differs from Koios by the same order (pool stake −4e-6, total active +6e-5, e.g. 186 054 761 670 632 vs 186 043 780 730 525 at snapshot 46), so the real threshold is above the value. The exact-arithmetic check is right; the snapshot is very slightly off. Find the missing/extra stake (per-pool comparison at epochs 44–54) before making σ strict.
+3. (Resolved for snapshot-imported LMDB stores, bug 275: the σ check is strict there; the reports below came from SQLite snapshots and stay reports in sqlite / dual mode.) σ threshold reports: eight canonical preprod blocks (epochs 46–54) fail our leader-threshold check by 1e-5…1e-4 relative. Recomputed offline: each leader value sits just above our threshold, and our snapshot differs from Koios by the same order (pool stake −4e-6, total active +6e-5, e.g. 186 054 761 670 632 vs 186 043 780 730 525 at snapshot 46), so the real threshold is above the value. The exact-arithmetic check is right; the snapshot is very slightly off. Find the missing/extra stake (per-pool comparison at epochs 44–54) before making σ strict.
 4. Conway on preprod (epoch 163): governance ratification, reference-script fee, V3 cost models — the run has to get there.
 5. Mainnet: reach Shelley, then run the same comparisons (the scripts take `--network mainnet`).
-6. Flip σ, opcert counter, withdrawals (`WITHDRAWALS_STRICT`) and the reference-script fee to strict once 2–5 are clean.
+6. Flip σ, opcert counter, withdrawals (`WITHDRAWALS_STRICT`) and the reference-script fee to strict once 2–5 are clean. (2026-10-01: the reference-script fee is strict since bug 170; σ, the over-incremented counter, withdrawal amounts, the treasury value and the zero-balance deregistration are strict on a snapshot-imported LMDB store — bugs 272–276 — and stay reports on SQLite-derived state until a from-genesis run is proven exact.)
 6a. Two preprod snapshots (boundaries 30 and 32) each lack one pool that registered and retired within the same epoch (2bdbd083…, 92cd3fdd…; 1.02·10¹² lovelace each), although the pool row, the delegations and the outputs were all present and a unit test of the same sequence passes; the boundary now logs any registered pool with delegations but no snapshot stake so the next occurrence carries details. Those two snapshots make the rewards of performance epochs 31 and 33 0.29 % low for every pool (apparent performance uses the active total).
 6b. MIR certificates (pre-Conway, type 6) are now queued when applied and take effect at the next boundary after the reward update (accounts credited from the pot if registered and the pot can pay; pot-to-pot transfers); untested against a real chain until mainnet reaches its first MIR (none on preprod/preview so far).
 6c. Memory: the 24 GB OOM of 2026-09-05 was bug 49 (unbounded header batch queue), fixed. The node logs a `Memory:` breakdown every 5 minutes (rss, main heap, external, worker heaps, worker external, unaccounted native) and `scripts/run-supervised.sh` relaunches a node that exits and restarts it cleanly at 14 GB RSS. Remaining baseline is ~1.1 GB native (20 worker runtimes, SQLite page cache) and stable.
@@ -180,7 +192,7 @@ picture: what is verified, how, what is still open, and how to reproduce it.
 8. Explorer projection (mb_* tables) now lives in `<db>.explorer.db`, written by a worker in ledger order (2026-09-06). The 7 724 preview blocks applied while the first worker build had died (slots 119 317 516–119 529 557, 2026-09-06) were rebuilt with `scripts/explorer-backfill.ts` (from the ledger's blocks and utxo_deltas, node stopped; 10 653 transactions, 18 s); the script serves any future range. The history copy from the ledger DB runs in the worker only while the node is not bulk-syncing; until it finishes, `/txs/{hash}` for old transactions may 404.
 9. Applier follow-up: the block-witness verdict is now awaited at apply time (≈2.5 ms/block of wait at 80 blocks/s) because the rules-ahead step no longer waits for it; either give witness jobs priority in the pool or let the rules job's own witness check stand in for it.
 10. Superseded by item 12 (rebuild from Mithril). Kept for the record: `scripts/repair-reward-balances.ts --apply` would have had to run with the node stopped — the dry run is exact for snapshots 1410/1411 (78 920 / 78 921 stake updates, totals = Koios `epoch_info`); the newest snapshot and the balances need Koios again (the free tier's daily quota was spent, HTTP 429, on 2026-09-07 03:00 UTC), and the write was refused by the session's permission classifier, so the operator runs it. The script also takes `--blockfrost <base>` (Blockfrost-compatible API, e.g. the onchainapps mirrors — preprod and mainnet only, preview has none) for the snapshots and accounts, which avoids Koios' quota. Until then every boundary pays ≈ +0.13 % (the 1413 boundary paid 393 471 912 028 for perf epoch 1411) and the pots stay −22 ppm; the later run corrects balances from the newest snapshot's excess, which is invariant under later payouts once the snapshots and pots are exact.
-11. Plutus shadow: bug 74 explained the epoch-1413 mismatches (V2 arrays read with V3 names). Residual: V1/V2 scripts that use builtins appended to the cost model after Chang (bls12_381, keccak, bitwise, …) are costed with default V3 values until the appended parameter order is mapped; the reference `uplc` crate has the same limit. Replay 2026-09-07: the 160 shadow mismatches between genesis and epoch ~630 were bugs 79 and 80 (script context order/shape, machine semantics and costing) — all resolved to the declared units. Tooling: `scripts/builtin-cost-diff.ts <costs.json> v1|v2|v3 [--edge|--edge2]` (per-builtin budget+result diff against aiken), `GEROLAMO_BUILTIN_TRACE=1` / `UPLC_BUILTIN_TRACE=1` (builtin-call traces on our machine / the vendored `tools/uplc-ref/vendor/uplc`), `GEROLAMO_ED25519_TRACE=1`.
+11. Plutus shadow: bug 74 explained the epoch-1413 mismatches (V2 arrays read with V3 names). Residual resolved by bug 205 (V1/V2 parameter names per language). Replay 2026-09-07: the 160 shadow mismatches between genesis and epoch ~630 were bugs 79 and 80 (script context order/shape, machine semantics and costing) — all resolved to the declared units. Tooling: `scripts/builtin-cost-diff.ts <costs.json> v1|v2|v3 [--edge|--edge2]` (per-builtin budget+result diff against aiken), `GEROLAMO_BUILTIN_TRACE=1` / `UPLC_BUILTIN_TRACE=1` (builtin-call traces on our machine / the vendored `tools/uplc-ref/vendor/uplc`), `GEROLAMO_ED25519_TRACE=1`.
 14. The Mithril-fed rebuild's ledger state is not exact: our total active stake sits 316 ppm below Koios at the tip (488 B lovelace), of which 383 B are bugs 84 and 85 (script reward/return accounts never credited) and the rest is the self-reinforcing lag those seeds caused — every account's reward balance a few tens to hundreds of ppm low (uncapped performance divides by our active stake), rewards paid 300 ppm below Koios per epoch, treasury +12 ppm per epoch. Block counts, the pot inputs and the formula agree with the chain. Only a replay from genesis with bugs 84/85 fixed produces an exact state; the running node is exact from here on for new credits only.
 13. Resolved and proved on replay 4 (2026-09-08 14:39 UTC): 35b81b42… ratified at 963 and enacted at 964, as on the chain (bug 90; bug 89 a related conformance fix).
 12. Preview rebuild from Mithril (2026-09-07): instead of repairing the historical balance excess (item 10) the preview ledger is replayed from genesis with the fixed code, fed by the Mithril-certified chain: `mithril-bootstrap --network preview --blocks-only` → `scripts/serve-chain.ts` (local N2N relay over the block store) → fresh node syncing from 127.0.0.1:3101 under full validation. Watch: dashboard port 3050 (Mithril card, then the sync). Expected: pots, stake and rewards exact against Koios at every boundary without any alignment — the final proof for workstream B.
@@ -207,15 +219,55 @@ bun scripts/verify-pots.ts    --db $DIR/preprod.db --network preprod
 bun scripts/verify-rewards.ts --db $DIR/preprod.db --network preprod
 # one transaction through the Plutus shadow with Koios-resolved inputs
 bun scripts/shadow-tx.ts --tx <hash> --network preprod --db $DIR/preprod.db
+# Conway governance history through the node's code (read-only inputs; 5 min pre-Conway scan, 6 min Conway)
+bun scripts/gov-replay.ts --chunks $DIR/db/immutable --ref-db $DIR/preview.db --work /tmp/gov-replay \
+  --koios-proposals proposals.json --koios-totals totals.json [--koios-dist /tmp/koios-dist] [--nes <slot>=<ledger state file> …]
+# the same rules on a running node's LMDB store, recent blocks (read-only)
+GEROLAMO_DB_PATH=/tmp/x.db bun scripts/gov-rules-shadow.ts --node $DIR
 # offline replay of a halted block
 bun scripts/validate-stored-block.ts --db $DIR/preprod.db --hex $DIR/logs/failed-block-<slot>.hex --slot <slot> --network preprod
 ```
 
 Preview: `NETWORK=preview` with `src/config/preview/` (genesis files from the local cardano-node install, magic 2, 86 400-slot epochs, Conway since 2024) gives a from-genesis proof that reaches governance in hours instead of days.
 
-Shadow tuning: `GEROLAMO_PLUTUS_SHADOW_MS` (wall-clock cap per redeemer, default 2000) and `GEROLAMO_PLUTUS_SHADOW_SAMPLE` (evaluate every n-th Plutus transaction) keep Plutus-heavy regions from slowing a report-only run.
+Plutus phase 2: `GEROLAMO_PLUTUS_PHASE2=enforce|report|off`; in `report` mode `GEROLAMO_PLUTUS_SHADOW_SAMPLE` (every n-th block) samples the detached shadow job. `GEROLAMO_PLUTUS_SHADOW_MS` and the CPU caps apply only to the legacy evaluator (`GEROLAMO_PLUTUS_LEGACY_SHADOW=1`). Whole-history replay, read-only: `bun scripts/plutus-replay.ts <immutable dir> --params <db with epoch_params> --workers 8 --out r.jsonl` (`--jobs-out` / `--jobs-in` to iterate on a range, `--dump-dir` for fixtures); one job: `bun scripts/plutus-job.ts <job.json> [--ctx dir] [--aiken dir] [--old]` (writes our contexts and a `tools/uplc-ref` bundle); builtin traces `GEROLAMO_PLUTUS_BUILTIN_TRACE=1` vs `UPLC_BUILTIN_TRACE=1`, `scripts/plutus-trace-diff.ts`; timings `scripts/plutus-bench.ts`.
 
 A strict failure halts the sync, writes the block to `$GEROLAMO_FAILED_BLOCK_DIR/failed-block-<slot>.hex`, and drops incoming headers until restart.
+
+## Bugs 200–214 — Plutus phase 2 to enforcement (2026-09-28, plutus worktree)
+
+The shadow evaluator (plutus-machine + buildooor contexts, bugs 18/66/67/74/79/80) was replaced on the validation path by Gerolamo's own evaluator in `src/consensus/plutus/` (flat decoder, CEK machine, builtins, cost models, script contexts) behind `src/consensus/rules/phase2.ts`. Found and verified by replaying every Plutus transaction of the preview chunk store read-only (`scripts/plutus-index.ts`, `scripts/plutus-replay.ts`: inputs resolved from the chain itself, 8 workers) and by per-builtin differential runs against aiken's `uplc` crate (`scripts/builtin-cost-diff.ts --new`, `--batch5`).
+
+200. Speed: every script now runs. plutus-machine cloned the environment array on every lambda, delay and argument frame, cloned values on each variable lookup, kept every binding in a heap that was never freed, computed argument sizes of constant-cost builtins (`tailList` walked the whole list, `chooseData` the whole datum) and copied lists on every `tailList`/`mkCons`; budgets were BigInt objects. The new machine uses persistent linked environments, a frame array, Number budgets (exact below 2^53) and immutable lists (array views, cons cells). Heaviest preview transactions, same inputs (`scripts/plutus-bench.ts`): slot 95148643 (51 redeemers, 4.85·10⁹ cpu) 3 615 ms → 8.6 ms; slot 95050155 (2.79·10⁹) 735 → 9.1 ms; slot 96625439 (2.28·10⁹) 597 → 9.0 ms; slot 1159325 (0.99·10⁹) 152 → 7.1 ms. The declared-cpu (3·10⁹), per-step (2·10⁷) and wall-clock (2 s) skips are gone from the validation path (they remain only in the legacy shadow, `GEROLAMO_PLUTUS_LEGACY_SHADOW=1`).
+201. Byte strings decoded from the block were `Buffer#slice` views of the block, and the delegated Ed25519 of `@harmoniclabs/crypto` mutated its signature argument in place: the oracle feeds of preview epochs 1100–1122 (3 of 3 signatures per transaction) "failed" on signatures the evaluator had itself overwritten, 3 415 of 38 423 transactions in chunks 22000–22500. Every decoded byte string is a copy, the context works on private copies, delegated builtins get copies, and Ed25519 is native (libsodium's `crypto_sign_verify_detached` rules: canonical S and key, small-order key/R blacklist, then the cofactorless equation via OpenSSL). Test: evaluating twice leaves the witness bytes untouched.
+202. `serialiseData` wrote an integer below 24 given as a bigint with a one-byte argument (`18 00` for 0): hashes of serialised data differed (preview slot 95071833, `blake2b_224 ∘ serialiseData`). Minimal heads; codec equal to the patched plutus-data encoder on bignums, chunked bytes, constructor tags 7/127/128.
+203. `verifyEcdsaSecp256k1Signature` (`@harmoniclabs/crypto`) returned False for a valid signature (preview slot 64834939, a V3 script). Native secp256k1 with libsecp256k1 semantics: malformed key / 32-byte hash / 64-byte signature or r, s ≥ n are evaluation failures, a high-S or zero signature is False; Schnorr accepts messages of any length.
+204. Cost-function shapes depend on the semantics variant, not only the language (PlutusLedgerApi.V*.EvaluationContext): V1/V2 use variant A before protocol 9, B up to 10, D from 11; V3 C, then E from 11. Variant A costs `multiplyInteger` on added sizes and `verifyEd25519Signature` linear in the signature; D/E cost division above/below the diagonal, D mod/rem memory `linear_in_y2`, and D/E string builtins by UTF-8 bytes `quot` 4. The shapes are now taken from `builtinCostModel{A..E}.json` (`src/consensus/plutus/costShapes.ts`) and compiled over the named parameters. Redeemers spending exactly their declared units in preview chunks 0–1000: 20 862 → 425 495 of 445 932; the +3 063 cpu family of preview slot 3761914 (three Ed25519 checks, slope 1 021 × 3 words) was this.
+205. Cost-model parameters are named with the language's own `ParamName` list (`src/consensus/plutus/paramNames.ts`): V1 and V2 appended the post-Alonzo parameters in different orders (V1: serialiseData at 166, integerToByteString at 223; V2: serialiseData at 133, integerToByteString at 175), extra values are ignored and missing ones are maxBound. Before, V1/V2 builtins beyond the first 166/175 parameters were costed with V3 defaults.
+206. Validity interval: before Conway an upper bound is inclusive only when it is the only bound (`PV1.to`) and exclusive with a lower bound (`strictUpperBound`); Conway is always exclusive (bug 67 used "protocol < 9 ⇒ inclusive"): 5 710 of 232 301 transactions in preview chunks 0–1000 failed on it.
+207. Before Conway, zero-quantity assets in outputs and mint are accepted on the wire and pruned by the ledger when decoding (an emptied policy also leaves the mint policies a redeemer index counts): preview slot 880204 put 18 memory units on four redeemers and all ran out of budget.
+208. Governance purposes: redeemer tags 4 (voting) and 5 (proposing) resolve to the voter's script credential (committee hot / DRep; ledger `Voter` order) and to the guardrail policy of a ParameterChange / TreasuryWithdrawals proposal; `ScriptPurpose`/`ScriptInfo` Voting / Proposing; the V3 TxInfo carries `txInfoVotes` (voters and action ids in ledger order), `txInfoProposalProcedures` (with `ChangedParameters` as the ledger's ToPlutusData: tag-ordered map, rationals as reduced `[n, d]` lists, cost models by language), `txInfoCurrentTreasuryAmount` and `txInfoTreasuryDonation` (Nothing for 0). buildooor's TxInfo (empty votes/proposals, Nothing treasury fields) is no longer used on the validation path.
+209. Certificates: V3 `TxCert` for every Conway certificate (deposit `Nothing` at protocol 9, `Just` from 10; resign-committee and DRep anchors dropped); V1/V2 `DCert` keeps the deposit forms of stake (un)registration and rejects every other Conway certificate with `CertificateNotSupported`. V1/V2 contexts reject votes, proposals, a donation and a current-treasury field, and voting/proposing purposes, as collect errors (the transaction is invalid whatever its is_valid flag); Babbage V1 rejects reference inputs, inline datums and reference scripts; Alonzo V1 keeps the historical dropping of Byron inputs/outputs; V3 at protocol 11 rejects reference inputs that are also spent.
+210. Withdrawals are ordered as the ledger's `Map RewardAccount`: script credentials before key credentials (the wire order is the opposite for testnet reward addresses), both for the Rewarding redeemer index and the TxInfo map (txpath finding 141).
+211. Rules workers never set the network (txpath finding 140): slots became POSIX time with preprod's geometry on a preview node. `runBlockRulesJob` sets it from the job, and phase 2 takes the network explicitly.
+212. Transactions with is_valid = false were never evaluated (the shadow sat after the collateral-only branch); they are now, and must fail.
+213. Enforcement (`GEROLAMO_PLUTUS_PHASE2=enforce|report|off`): in `enforce` the rules job evaluates every Plutus transaction and a verdict that differs from is_valid, or a collect error, fails the block (`tx[i]: plutus phase 2 ValidationTagMismatch: …`); "no verdict" (missing script or datum, unsupported builtin) is reported, never failed. `report` evaluates in the sampled shadow job. `/metrics` → `plutus` carries the mode and totals. Mempool: `checkMempoolTxPhase2` / `checkMempoolTxBytesPhase2` (rules/phase2.ts) return `ValidationTagMismatch` (both directions) / `CollectErrors` / `Unknown`; `shadowEvaluateTx` keeps its signature and now runs the same evaluator.
+214. BLS12-381 builtin tags: `@harmoniclabs/uplc` numbers them in its own order (hashToGroup 58 …) while the flat encoding has 58 G1_compress, 59 G1_uncompress, 60 G1_hashToGroup (and 65/66/67 for G2): every script compressing a point "failed" (919 preview transactions, ZK-proof dapps of epochs 715–1100). Fixed in the signature table and cost names; fixture `plutus-preview-61828322-0.json` (9.13·10⁹ cpu, equal to aiken). Also added for protocol 11 (van Rossem, preview since epoch 1291): `case` on builtin constants (unit, bool, integer, list, pair; Data only from Dijkstra) and the batch-6 builtins expModInteger, dropList, lengthOfArray, listToArray, indexArray with array constants; 501 preview transactions used dropList and 63 the builtin case. Not implemented: G1/G2 multiScalarMul and the Value builtins (tags 92–100) — a script using one gets "no verdict" (one preview transaction, slot 124008114).
+
+**Replay result (2026-09-28/29, preview immutable chunk store 0…28699, read-only, `scripts/plutus-replay.ts --workers 8`, 39 min wall):** 3 191 417 Plutus transactions, 10 865 494 redeemers. is_valid = true: 3 191 175 succeed, 0 fail; is_valid = false: 241 fail, 0 pass; ex-units used ≤ declared for every redeemer, 9 375 419 (86 %) spend exactly the declared units; 1 transaction without verdict (multiScalarMul). Median 2 ms per transaction, p99 13 ms, maximum 1.9 s (BLS12-381 in pure JS: a 9·10⁹-cpu proof takes ~0.3 s, the heaviest G2 script 1.9 s; the block budget of 2·10¹⁰ steps bounds a block at a few seconds in the worst case). The numbers combine the full run (983 failures, 578 no-verdict, before bug 214 and the batch-6 work) with the re-evaluation of exactly those 1 561 transactions after it (`--only`); the 76 "unresolved input" entries of the full run were transactions of the tip chunk written while the first pass was scanning (tool artefact; all resolved on the re-run). Per-builtin differential harness against aiken's `uplc` crate (`scripts/builtin-cost-diff.ts --new`, `--edge`, `--edge2`, `--batch5`, V1/V2/V3): 0 budget or result differences over 1 300 programs. Enforcement is therefore the default (`GEROLAMO_PLUTUS_PHASE2=report` reverts to the sampled shadow); the same replay should be run on preprod before a preprod producer relies on it (no local preprod chunk store exists; `scripts/plutus-replay.ts` takes cardano-node's immutable directory and a `epoch_params` SQLite with Koios cost models — a fetch script is in the report).
+
+## Bugs 248–253 — plutus-core 1.63 at protocol 11: batch 6, D/E bounds, decoder bounds (2026-10-01, plutus2 worktree)
+
+cardano-node 11.0.1 (git 97036a66) links plutus-core / plutus-ledger-api **1.63.0.0** (package ids in the binary; cabal.project pins CHaP 2026-05-02). From that tag: `builtinsIntroducedIn` puts all of `batch6` (expModInteger, dropList, lengthOfArray, listToArray, indexArray, bls12_381_G1/G2_multiScalarMul, insertCoin, lookupCoin, unionValue, valueContains, valueData, unValueData, scaleValue = flat tags 87–100) into V3 at protocol 11 and, together with batches 2–5 / 4a / 5, into V1 and V2 at protocol 11 (`vanRossemPV`); there is no tag ≥ 101. The V1/V2/V3 `ParamName` lists have 332/332/350 entries, exactly preview's on-chain cost models at protocol 11, whose values equal 1.63's `builtinCostModelD/E.json` + `cekMachineCostsD/E.json`; Gerolamo's name lists (taken from plutus master) agree on that prefix and only add 11 names (multiIndexArray, assetCount, policies) that no on-chain list reaches, and the cost shapes of every 1.63 builtin equal 1.63's JSON. `case` on builtin values (from protocol 11) covers unit, bool, integer, list and pair; Data, arrays and values are not caseable in 1.63 at any protocol version.
+
+248. Batch-6 tags 92–100 were not implemented (a script containing one decoded as "no verdict"). Now: the `value` constant type (flat tag 13; `Flat Value` through `buildValueWith`: keys ≤ 32 bytes, quantities in [−2^127, 2^127 − 1], currencies and tokens strictly ascending, no empty inner map, no zero), the Value builtins with `PlutusCore.Value`'s denotations (`src/consensus/plutus/multiasset.ts`: insertCoin with amount 0 deletes without key checks, lookupCoin of a missing entry is 0, unionValue drops cancelled entries and fails beyond 128 bits, valueContains fails on negative amounts, valueData fails above 40 000 entries, unValueData is strict, scaleValue by 0 is empty) and costs (`ValueMaxDepth` = ⌊log₂ outer⌋+1 + ⌊log₂ largest inner⌋+1, `ValueTotalSize`, `DataNodeCount`, the four-argument `linear_in_u` shape), and Σ sᵢ·Pᵢ for the multi-scalar multiplications (zip of the lists, every scalar within 4096 bits, costed on the scalar list's length).
+249. Semantics variants D/E (protocol 11, every language) bound builtin arguments (plutus-core `ensurable`, `PlutusCore.Default.Universe.Cardano`): integers of add/subtract/multiply/divide/quotient/remainder/mod/lessThan(Equals)Integer and consByteString's byte (D) within [−2^262143, 2^262143 − 1]; bytestrings of append/cons/slice/index/equals/lessThan(Equals)ByteString, every hash, decodeUtf8, the Ed25519/Schnorr message, hashToGroup's message, byteStringToInteger, and/or/xor/complementByteString, readBit, countSetBits, findFirstSetBit at most 65 536 bytes; constrData's tag a Word64; shift/rotateByteString's amount an Int (sized 1, no longer `IntegerCostedLiterally`); writeBits' input at most 4 096 bytes; bls12_381_G1/G2_scalarMul's scalar within 4 096 bits. None of this was checked: a protocol-11 script rotating by 2^63, or hashing a 70 KB bytestring built at run time, passed here and fails in cardano-node — in `enforce` mode an is_valid = false transaction of that kind would have failed a valid block. Results stay unbounded (only arguments are checked); equalsInteger and the other builtins are unchanged.
+250. `ExMemoryUsage [a]` is the list's length (no element measure; pairs are maxBound): listToArray was costed on the sum of its elements' sizes (a list of one 11-word integer: 10 × 24 838 cpu too much).
+251. expModInteger's bounds are `x > 2^8191 − 1 || x < −2^8191`: −2^8191 as base or exponent failed here.
+252. Protocol-11 decoder bounds (`maxBoundsByPV`): a constant's type of size > 32 (`defaultUniSize`: 1 per constructor + 1 per application) or a `constr` with > 1 024 fields does not deserialise from protocol 11 (any language).
+253. Flat decoder: BLS12-381 constant types were rejected outright — an empty `(list bls12_381_G1_element)`, the only way to start a point list for multiScalarMul, is a valid constant (a point value is not flat-decodable); array constants were gated on Plutus Core 1.1.0 (1.63 only knows the universe); constr tags between 2^52 and 2^64 − 1 were rejected.
+
+Verification: plutus' conformance suite at tag 1.63.0.0 (`plutus-conformance/test-cases/uplc/evaluation`, 999 cases, results up to α-equivalence and budgets, preview's cost model) — 994 pass, 0 fail, 5 not comparable (dropList by ≥ 10^19: the suite's saturating Int64 counter, beyond every real budget; both machines fail with a real one); 4 shift/rotate cases fail without bug 249. Fixture `src/consensus/__fixtures__/plutus-conformance-1.63.json.gz` (132 KB, the whole suite) run by `conformance.test.ts`; `scripts/plutus-conformance.ts <test-cases> <pp.json>` runs a checkout. Differential fuzzing against aiken's `uplc` 1.1.24 (first release with batch 6; builds with rustc 1.89 using `--ignore-rust-version`), `scripts/plutus-batch6-diff.ts`: 10 300 random Value / insertCoin-chain / multi-scalar programs (the last 4 000 on the final code), 0 result or budget differences (aiken does not implement the D/E argument bounds; those follow the plutus source, `batch6.test.ts`). A V3 script using insertCoin, valueContains, unValueData and multiScalarMul spends exactly aiken's 504 870 098 cpu / 6 891 mem. Preview replay of all protocol-11 history (chunks 25820–28730, read-only, `scripts/plutus-replay.ts --workers 6`, 7 min): 227 209 Plutus transactions, 1 118 433 redeemers; is_valid = true 227 189 succeed, 0 fail; is_valid = false 20 fail, 0 pass; 0 without verdict; 629 504 redeemers spend exactly the declared units. The same range on the baseline code differs in exactly one transaction: slot 120070481 tx 4 (97b5ef26…, a V3 script with bls12_381_G1_multiScalarMul; the "no verdict" of bug 214, whose slot is given there as 124008114), now evaluated — 4 redeemers, 9 275 251 898 cpu, each exactly its declared units and equal to aiken 1.1.24's `eval-tx` at protocol 11 (the multiScalarMul of 77 points: 7 930 226 502 cpu / 1 384 862 mem; fixture `plutus-preview-120070481-4.json`, plus a V2 protocol-11 fixture `plutus-preview-124008114-0.json`, variant D, also equal to aiken); every other verdict and spent budget is identical. No transaction in the range uses a Value builtin or reaches a D/E argument bound, so those paths are verified by the suite, the fuzzing and the source; they are enforced like every other builtin (a false failure would surface as a valid-failed mismatch).
 
 ## Bug 126 — nonce row blocked LMDB promotion (2026-09-17 00:00 → 09-18 16:20 UTC, node 3036, fixed)
 
@@ -252,3 +304,1486 @@ only becomes `expectedPrev` when it is our tip; otherwise the real tip hashes ar
 range fails as a fork. The header path's "fork below our tip" detection also covers a competing
 header in the *same* slot as our tip (`>=`), so the peer's ChainSync restarts and the intersection
 / candidate machinery decides (equal length: ours stays until the network extends the winner).
+
+## Bug 128 — aborted range could not put the ledger store back (2026-09-20 16:45 UTC, node 3036 in lmdb mode, fixed 09-21)
+
+A range failed ("range pipeline failed") right after a rollback; its first block's parent was a
+block the ledger store had already dropped, so `ledgerAbortRange` — which rolled back *to that
+parent* — refused ("neither the anchor nor a volatile block"), the store was marked unusable and
+the node halted (lmdb mode does not rebuild). Fixes: an aborted range now drops exactly its own
+diffs and re-selects the block store's tip after the orchestrator's reset (broken only if the
+store does not hold that tip); `ledgerBeginBlock` checks that every block extends the store's
+own tip or anchor, so a chain disagreement between the block store and the ledger store is
+reported at the block that introduces it rather than at the next abort.
+
+## Bug 129 — after a reboot the block store and the ledger store restarted on different chains (2026-09-22 04:23 UTC, node 3036 in lmdb mode, fixed)
+
+The laptop rebooted at 17:51 UTC on the 21st with both nodes mid-range. On restart 3036's block
+store resumed at its persisted tip while the LMDB diffs on disk described a slightly different
+last few blocks (one side had flushed a fork branch the other had not); the first range after
+the restart failed body validation ("spends inputs not in the UTxO set") and the node halted.
+Fixes: in `lmdb` mode the startup tip comes from the persisted tip before the (frozen) SQLite
+journal; when the ledger store cannot reach that tip it falls back to the newest block of the
+block store's chain that it holds, and the block store's tip is moved there (the network
+re-sends the rest); an aborted range whose "tip after" the store does not hold falls back to the
+block before the range instead of marking the store broken. The producer (dual mode) was down
+10.5 h with the machine and missed its 00:53 UTC epoch-1428 slot; it re-applied the boundary in
+513 s on restart.
+
+## Bug 130 — leader-slot tracker kept a replaced block "confirmed" (2026-09-22, fixed)
+
+The producer's block at slot 123 397 182 (04:59 UTC) was adopted locally, reached
+CONFIRM_DEPTH = 10 and was marked confirmed; the network's block for that height came 13 s later
+and our node followed it after a deeper rollback, but confirmed outcomes were never re-checked, so
+the state file and `/metrics` kept reporting the block as on chain (Koios and both nodes hold
+`4642224d…` at height 4 685 032). Fix: confirmed blocks are re-checked against the chain until
+FINAL_DEPTH = 2160 blocks deep and flip to stolen / ghosted like adopted ones. The 04:59 entry was
+corrected by hand in the state file.
+
+## Bug 131 — lmdb mode: an aborted range dropped every volatile diff since startup (2026-09-23 05:36 UTC, node 3036, fixed)
+
+`rangeDiffs` (the diffs a range committed, dropped if the range aborts) was reset only by the
+dual-run verifier, which returns early outside `dual` mode. In `lmdb` mode the list grew for the
+node's whole life; the first aborted range after 20:14 UTC the day before dropped all of them,
+the store fell back to its anchor with 0 diffs, and the next block failed ("spends inputs not in
+the UTxO set") → halt, 18 h down unnoticed. Fix: `ledgerAfterRange` clears the range's diffs and
+touched refs after every committed range in every mode.
+
+## Bug 132 — "block at slot" returned dead fork blocks from the volatile store (2026-09-24, fixed)
+
+`blockReads.getBlockBySlot` fell back to any volatile block at the slot when none was on the
+selected chain. The producer's 02:20 UTC block (slot 123 560 457) was orphaned 38 s after it was
+forged (the network built on another pool's block at the same height), but the outcome tracker kept
+finding it in the volatile files and reported it "confirmed" until volatile GC removed it 9 h later
+(then "ghosted"). The same fallback fed the ledger-rollback cross-check ("kept X but the chain's block
+there is Y" warnings) and could have pointed `rollbackSelectedTip` at a dead block. Fix: no block on
+the selected chain at the slot → null.
+
+## Bug 133 — every ledger-store read walked all volatile diffs (2026-09-26, fixed)
+
+`LedgerStore.get/getU64` rebuilt the selected chain (up to k = 432 diffs) and hex-encoded the key
+once per diff on every read. The epoch-1432 stake snapshot (≈160 k counter reads) blocked the
+producer's event loop for 19 minutes at the boundary; every block application paid the same cost
+on a smaller scale. Fix: a read overlay per chain state (one map per database, newest entry per
+key with its counter delta), extended in place when a block commits on top of it and dropped on
+rollback / promotion / dropped diffs. Benchmark: 160 k counter reads through 432 diffs 110 s →
+0.3 s, identical results; a 400-step randomized test (commits, forks, rollbacks, promotions,
+reopen) compares every read with a reference model.
+
+## Bug 134 — same-slot battle settled by vote count instead of the Praos tie-break (2026-09-26 13:36 UTC, producer, fixed)
+
+Two blocks at preview slot 123 773 790 (677ef4f1… kept by the network, d326df7e… lost). The
+outvote rule only compared the challengers with the quorum: two verifiers on d326 outvoted the
+primary (on 677e), and a second later two others on 677e outvoted the new primary. The node rolled
+back, applied the losing block, then waited ~8 minutes for a ChainSync restart to drain 12
+pipelined requests before it followed the network — serving the dead block to its peers
+meanwhile; a leader slot in that window would have been built on it. Fix: when both sides of an
+outvote end at the disputed slot (equal length), the Praos tie-break decides (same pool: higher
+opcert counter; otherwise lower VRF output) and the primary is kept if it wins; the ordinary
+outvote still applies when one chain is longer. The real headers are a test fixture
+(`src/consensus/__fixtures__/slot-battle-123773790.json`): the tie-break picks the network's block.
+
+## Bug 215 — ledger peers were a FIFO queue, not stake-weighted; no big ledger peers (2026-09-28, fixed)
+
+`seedLedgerPeers` shuffled every registered relay and dialled them in order, and
+`peer-snapshot.json` (`bigLedgerPools`) was never read. Now `LedgerPeerSource` follows
+ouroboros-network `LedgerPeers`: √-stake picks over the pools with relays, big ledger peers =
+the largest pools up to and including the one crossing 90 % (`accumulateBigLedgerStake`), picks on
+the 0.9 axis, the snapshot used when its slot is ≥ the ledger tip and `useLedgerAfterSlot`, maps
+re-read after 1847 s (30 s while empty), one random address per resolved domain. Verified
+offline against the preview relay's own view (`scripts/peer-selection-sim.ts` on
+`cardano-cli query ledger-peer-snapshot` output, slot 123 991 628): the same 67 big ledger pools,
+accumulated stake equal to 3·10⁻¹⁵; 200 k draws within 0.04 % (all) / 0.08 % (big) of the
+expected shares. Pools registering 0.0.0.0 (36 on preview) stay on the stake axis as in
+cardano-node and are never dialled.
+
+## Bug 216 — ledger relays: portless relays defaulted to 3001, SRV and IPv6 relays dropped (2026-09-28, fixed)
+
+Mapping now follows ouroboros-consensus `relayToLedgerRelayAccessPoint`: single_host_addr needs a
+port and an address (IPv4 first, else IPv6), single_host_name without a port and
+multi_host_name are SRV names resolved as `_cardano._tcp.<name>` (CIP-0155; lowest priority,
+weighted draw, `srvRecordLookupWithTTL`). Ledger IPv6 bytes are four little-endian words
+(cardano-ledger-binary `ipv6ToBytes`): confirmed on preview chunk 17236 against the relay's decode
+of 2001:861:4000:2b80:216:3eff:fe05:9009. Stored `pool_relays` rows gain `srv: true` for SRV
+entries (old rows are unaffected).
+
+## Bug 217 — topology.json: cardano-node fields ignored or mis-defaulted (2026-09-28, fixed)
+
+`useLedgerAfterSlot` was mandatory (cardano-node: absent / negative = no ledger peers, 0 =
+always); `peerSnapshotFile`, `hotValency`/`warmValency`, `behindFirewall`, `diffusionMode` were
+ignored; `trustable` defaulted to true (cardano-node: false); access points without a port (SRV)
+and IPv6 literals failed. `normalizeTopology` implements the orphan-instance parser
+(`localRootPeersGroupFromJSON`, `networkTopologyFromJSON`); paths are relative to the topology
+file; local roots stay protected from churn / excess demotion regardless of `trustable`, so the
+producer's topology (127.0.0.1 relay, no `trustable`) behaves as before. A group without
+valency is still accepted (with a warning) because existing installs rely on it.
+
+## Bug 218 — IPv6 missing from peer sharing, keys and dialling (2026-09-28, fixed)
+
+PeerSharing answers now carry IPv6 peers as `[1, w1, w2, w3, w4, port]` (HostAddress6 words,
+big-endian per word) and received IPv6 addresses are kept; peer keys bracket IPv6
+(`[2001:db8::1]:3001`), v4-mapped inbound addresses are unmapped; AAAA lookups and IPv6 ledger /
+shared peers are used when `peerGovernor.ipv6` is true or "auto" finds a global IPv6 address
+(this host has only ULA: off).
+
+## Bug 219 — governor: big ledger targets, warm valency, churn, peer-sharing policy (2026-09-28, fixed)
+
+Big ledger peers count only against `targetKnown/Established/ActiveBigLedger` (15/10/5 for the
+relay role, 0 for producer / data unless configured); local-root groups keep `warmValency`
+established and `hotValency` active connections ahead of the regular targets; churn (relay
+role default) replaces 20 % (rounded down, at least 1) of the non-local-root hot, warm and cold peers every 3300 s + 0–600 s
+(900 s + 0–60 s when > k slots behind), never the chain-sync primary or the last hot peer;
+peer-share requests wait 300 s after connecting and 900 s between requests to a peer, ≤ 2 in
+flight, asking min 255 (max 8 (deficit ÷ requests)); a coin flip (or no donor) takes mature
+(15 min) duplex inbound peers instead; our answers contain only advertised, once-connected,
+failure-free peers in an 823 s salted order, at most 10. Offline simulation in
+`PeerGovernor.test.ts`.
+
+## Bug 220 — no Prometheus endpoint (2026-09-28, fixed)
+
+`prometheus: {host, port, noSuffix}` / `hasPrometheus: [host, port]` / `GEROLAMO_PROMETHEUS`
+serves cardano-node's exposition (names checked against the preview relay's 127.0.0.1:12798
+output: `cardano_node_metrics_*_int|_counter|_real`, `basicInfo` info, `# EOF`, same content type)
+on its own port: blockNum, slotNum, epoch, slotInEpoch, density (fragmentChainDensity over k),
+GSM.state (approximated from the tip's age), txsInMempool, mempoolBytes, served.block /
+served.header, Forge.* counters and ForgingStats, forging_enabled, the four KES gauges,
+connectionManager.* and inboundGovernor.* (approximations noted in nodePrometheus.ts),
+peerSelection.* (incl. cardano-node's swapped WarmLocalRoots / HotLocalRoots), basicInfo /
+node.start.time, and RTS stand-ins where Bun has one (heap, RSS, CPU; no GC counts). The JSON
+`/metrics` is unchanged apart from additive governor-snapshot fields (`bigLedger`, per-peer
+`bigLedger`, group `warmValency`).
+
+## Bug 221 — KES rotation needed a restart; SIGHUP killed the node (2026-09-28, fixed)
+
+SIGHUP (as cardano-node) reloads the KES key + operational certificate and topology.json. The new
+pair must pass the startup checks (our cold key and signature, this KES key, valid period,
+counter = chain's or +1) or the running pair stays; the swap waits for a running forge and zeroes
+the replaced secret. Tests: `BlockProducer.reload.test.ts`. Docs: scripts/watchdog/README.md,
+`pool-register.ts rotate-kes`. Note: SIGHUP no longer terminates the process (a closed
+controlling terminal does not stop the node).
+
+## Bug 225 — Byron update proposals, votes and endorsements ignored (2026-09-28, implemented, report-only; wired and strict since bug 296)
+
+`src/consensus/byron/ByronUpdate.ts` + `byronUpdateCodec.ts` implement cardano-ledger-byron
+`Update.Validation.*`: registration (`pvCanFollow`, `canUpdate`, `svCanFollow`), votes and
+confirmation (`upAdptThd` = ⌊minThd · genesis keys⌋ = 4 on mainnet / preprod), endorsements
+(2k-stable, FADS candidates), TTL expiry, epoch-boundary adoption (candidate stable 4k slots before
+the epoch's first slot, `ProtocolVersionBump`). The codec is byte-exact against cardano-ledger's
+golden vectors (proposal, vote, payload, parameters, UpId, signed bodies) and checks
+proposal / vote signatures. Not wired into the node: the state needs the whole Byron history and
+the orchestrator rebuilds its Byron state from the last k headers.
+
+## Bug 226 — Byron replay of the real preprod and mainnet chains (2026-09-28, verified offline)
+
+`scripts/byron-update-replay.ts` over Mithril-downloaded immutable chunks, signatures checked:
+mainnet 4 490 510 main blocks, 20 proposals, 83 votes, 0 rule failures; adoptions 0.1.0 at epoch
+16, 0.2.0 at 84, 1.0.0 at 176, 2.0.0 at the tick into 208 (the Shelley hard fork); preprod 1.0.0
+at epoch 2 and 2.0.0 at epoch 4 (Shelley start; the candidate missed epoch 3 by 3 slots — the 4k
+window). Rejection paths are covered by unit tests only (the chain contains no invalid update).
+
+## Bug 227 — mainnet Byron size limits changed on chain (2026-09-28, finding; closed by bugs 297–299)
+
+maxTxSize 4096 → 65536 (epoch 16) → 8192 (epoch 84), maxBlockSize 2 000 000 → 32768 (epoch 84); the
+fee policy never changed. No Byron size limit is checked today; any such check must read
+`currentByronProtocolParameters()`, not the genesis. Open: persist the tracker snapshot, drive it
+from the orchestrator, then have `blockRules.evaluateByronBlock` take the adopted fee policy
+(`currentByronProtocolParameters()?.txFeePolicy ?? byronFeePolicyFor(ctx.config)`).
+
+## Bugs 296–305 — the Byron chain-validation state in the node (2026-10-01, fixed; 304–305 open)
+
+Reference: cardano-ledger-byron (cardano-ledger-conway-1.22.1.0) `Block.Validation`
+(`updateBody`, `headerIsValid`, `epochTransition`, `updateChainBoundary`), `Byron.API.Validation`
+(`applyChainTick`, `validateBlock`, `validateBoundary` — the path ouroboros-consensus drives),
+`UTxO.Validation.validateTxAux`, `Common.TxSizeLinear`, `Delegation.Validation.{Interface,
+Scheduling, Activation}`; ouroboros-consensus `Byron.Ledger.Ledger` (`ByronTransition`),
+`Byron.Ledger.Inspect.protocolUpdates`, `Byron.ByronHFC.byronTransition`.
+
+**296. The Byron update state was not part of the node's ledger.** Bug 225's rules ran only in the
+offline replay; Byron blocks applied with no update, delegation or adoption state. Now
+`consensus/byron/ByronLedger.ts` is the Byron `ChainValidationState` minus the UTxO, stepped the way
+cardano-node steps it: every block (EBBs included) `applyChainTick` (UPIEC epoch transition from
+`cvsLastSlot`, then the delegation tick), then for a main block header size, block size,
+`updateDelegation`, BUPI with the delegation map *after the tick*, `cvsLastSlot`, and the consensus
+`ByronTransitionInfo` (candidate version → block number); for an EBB the 2·10⁶-byte limit and
+`cvsLastSlot := epoch·10k`. `ByronLedgerDriver` holds it at the applied tip; the applier steps it
+before body validation and commits it after `applyBlock`, inside the block's scope:
+`ledger/byronStore.ts` writes LMDB `byron/{core,tip}` into the block diff and the SQLite table
+`byron_ledger` (journaled, `db/ledgerJournal.ts`), so a rollback or a failed range takes the block's
+Byron effects with it; the driver is dropped then and reloaded from the store at the next Byron
+block. `core` (update + delegation + transition info, JSON) is rewritten only when it changed; `tip`
+(`lastSlot|blockNo`) every block. A chain an older build took into Byron is rebuilt over the stored
+blocks on first use; a store seeded from SQLite (dual rebuild) copies the rows. Update and
+delegation rule failures (`ChainValidationUpdateError`, `ChainValidationDelegationSchedulingError`)
+fail the block like body rules (strict on a from-genesis node).
+
+**297. Byron body rules read the genesis parameters only.** The tx rules took `txFeePolicy` from the
+genesis file. They now get the adopted parameters of the ticked state (`ctx.byronParams`: what the
+block's header, body and transactions are checked against, after the epoch transition, before the
+block's own update payload); genesis only when no Byron state is available.
+
+**298. No Byron size limit was checked.** Now `headerLength ≤ ppMaxHeaderSize`, `blockLength ≤
+ppMaxBlockSize` (bytes of `[header, body, extra]`), EBB ≤ 2·10⁶, and `txSize ≤ ppMaxTxSize`, all
+with the adopted parameters.
+
+**299. The Byron fee basis was a lower bound.** `validateTxAux` measures `txSize` on the whole
+`ATxAux` encoding (`[tx, witnesses]`, as on chain) for both the size limit and `a + ⌈b·size⌉`; we
+used the witness-less tx bytes. `blockRules.byronTxAuxSizes` slices the body's tx payload from the
+raw block (`ctx.rawBlock`); without the raw block the old basis stays and the size is reported
+unchecked.
+
+**300. Byron delegation: genesis-only after a restart, and read before the tick.** The OBFT state
+rebuilt itself from the genesis `heavyDelegation` after every restart and rollback, forgetting
+on-chain certificates; the offline replay gave the update rules the map before the block's tick
+(CHAIN rule). `ByronLedger` implements `Delegation.Interface` (scheduling checks: genesis delegator,
+current/next epoch, once per epoch and per slot, certificate signature; activation 2k slots later
+unless the delegate already delegates or the slot does not move; pruning), persisted with the rest;
+`ByronObftState.restoreDelegation` takes the applied chain's map and schedule. Neither preprod nor
+mainnet Byron carries a single delegation certificate, so the difference never showed on the real
+chains.
+
+**301. The Byron→Shelley transition did not come from the Byron ledger.** The hard-fork history saw
+Shelley only when the first Shelley block's epoch parameters said major 2 (and slot arithmetic used
+the hard-coded geometry). Now, as in `byronTransition`: the newest candidate whose major is Shelley's
+`eraProtVerLow` (2), once stable — 2k slots after its endorsement slot, or k blocks after the block
+that made it a candidate — ends Byron at `succ (epoch (slot + 4k))`. `HardForkHistory.byronTransition`
+makes GetInterpreter report `TransitionKnown` during the last Byron epoch; at the first post-Byron
+block `crossByronBoundary` rejects it unless that epoch has been reached (`HardForkLedgerErrorWrongEra`)
+and records Shelley's start from the Byron state (`noteByronTransition`); a Byron block at or past a
+known transition is rejected. A `TestShelleyHardForkAtEpoch` network keeps its configured epoch. On
+the soft path (a node that is not strict) a post-Byron block before the Byron state's end, or with no
+stable candidate, records Shelley from that block's epoch, never later, so the history never falls
+below the tip block's own era tag (bug 237). Past the boundary the hook answers "unknown" without
+reloading the Byron state (a Mithril-bootstrapped chain whose history is still at Byron is bug 237's
+case: the tip-era floor answers).
+
+**302. An EBB moves `cvsLastSlot` on the node path** (finding). `validateBoundary` sets it to the
+epoch's first slot, so an epoch that opens with an EBB runs its UPIEC at the EBB's tick; adoption is
+the same either way.
+
+**303. Custom networks without a Shelley override** stayed on Byron geometry forever
+(`shelleyStartEpoch` 2⁴⁰): their slot/epoch geometry now takes the Shelley start from the Byron
+state once it is known (workers receive it with their jobs).
+
+**304. An LMDB ledger store cannot start from an empty chain** (finding, open, outside this area).
+`ledgerBeginBlock` marks the store broken when the first block's parent (the genesis hash) is neither
+the tip nor an anchor, and the chain never reaches an anchor, so a from-genesis sync in `lmdb` mode
+halts after the first range. `dual` rebuilds the LMDB store from SQLite after that range (the Byron
+record included) and works; a from-genesis preprod sync must start in `sqlite` or `dual` mode.
+
+**305. Byron witness roots hash with the pure-TS BigInt sha3** (finding, performance, open): about
+0.5 ms per input on the applier's thread, so roughly half an hour of main-thread CPU over mainnet's
+2.4 M Byron transactions.
+
+Verification:
+- Preprod, the whole Byron era (46 blocks, Mithril-certified chunks 0–4) through the node's own
+  apply path (`scripts/byron-node-replay.ts`: a fresh database, `ConsensusOrchestrator.applyRange`,
+  strict full validation, in `sqlite`, `dual` and `lmdb` (after a dual start; also with
+  `GEROLAMO_LEDGER_SQL_WRITES=0`)): every block applies; the persisted state after the last Byron
+  block equals the standalone replay; 1.0.0 adopted at epoch 2; the 2.0.0 candidate (slot 56163)
+  stable from slot 60486, so the hard-fork history knows the transition before the boundary; a
+  10-block rollback restores the state at that block and re-applying reproduces the tip; the first
+  Shelley block (slot 86400) passes `crossByronBoundary` and the history records Shelley@4 from the
+  Byron state; the OBFT delegation map is restored from the persisted delegation state.
+- Mainnet, the whole Byron era (Mithril chunks 0–208, 4.5 GB, deleted afterwards) through
+  `scripts/byron-ledger-replay.ts --utxo` (ByronLedger with proposal / vote signatures checked, the
+  transactions as `blockRules` decodes them through `evaluateByronTxRules` with the adopted
+  parameters and the `ATxAux` sizes; witness signatures and key-root hashes not recomputed):
+  4 490 510 main blocks + 176 EBBs (none after epoch 175), 2 400 911 transactions in 1 659 935
+  blocks, final UTxO 729 941, zero rule failures (1 152 s, ≤ 1.5 GB RSS). Adoptions: 0.1.0 at epoch
+  16 (EBB tick; maxTxSize 65 536, maxProposalSize 70 000), 0.2.0 at 84 (EBB tick; maxBlockSize
+  32 768, maxTxSize 8 192), 1.0.0 at 176 (unlockStakeEpoch). Largest tx / block against the limit in
+  force: 3 981 / 4 096 B (0.0.0), 65 519 / 65 536 B (0.1.0), 8 182 / 8 192 B and block 32 640 /
+  32 768 B (0.2.0), 8 173 / 8 192 B and 32 607 / 32 768 B (1.0.0). The Byron→Shelley transition is
+  known from slot 4 481 414 (block 4 479 125): epoch 208, the first Shelley block's (slot
+  4 492 800); the tick there adopts 2.0.0. The persisted core record changed 60 times, each
+  round-tripped. A second run without `--utxo` (436 s, 0.3 GB) prints the same adoptions with the
+  parameters they changed.
+- Unit tests: `ByronLedger.test.ts` (the preprod era as a fixture; delegation rules; transition by
+  slots and by blocks; size limits; persisted form), `ledger/byronStore.test.ts` (SQLite journal undo
+  and LMDB diff rollback / promotion, rebuild from stored blocks, wrong-era block),
+  `byronTxRules.test.ts` / `byronAdoptedParams.test.ts` (fee and size on the ATxAux bytes, adopted
+  `maxTxSize`), `hfc.test.ts` (TransitionKnown from the Byron state, Shelley start, rollback).
+
+Left for a from-genesis preprod sync: start in `sqlite` or `dual` ledger mode (bug 304); Byron
+headers are still checked against the OBFT state at header time, ahead of application, with the
+lenient active-or-scheduled delegation test (the ledger's forecast of the delegation map is not
+used there); the mempool has no Byron-era rules (no public network is in Byron).
+
+## Bugs 150–165 — Conway governance: rules, ratification, typed credentials (2026-09-28, fixed)
+
+Reference: cardano-ledger-conway 1.22.1.0, the version cardano-node 11.0.1 resolves (CHaP index
+2026-05-02; `Rules/Gov.hs`, `GovCert.hs`, `Deleg.hs`, `Ratify.hs`, `Enact.hs`, `Epoch.hs`,
+`HardFork.hs`, `Governance/DRepPulser.hs`, Shelley `Pool.hs`). Proof: `scripts/gov-replay.ts` over
+all of preview's Conway history (below) and `scripts/gov-rules-shadow.ts` on both nodes' LMDB stores.
+
+**150. Governance transactions were recorded, never validated.** Proposals, votes and certificates
+were written to the governance tables as they came. `consensus/governance/govRules.ts` now checks
+every phase-2-valid transaction as LEDGER / CERTS / GOV do, in their order — withdrawals drain the
+accounts first, then the certificates one by one (DELEG / POOL in `certificateRules.ts`, GOVCERT),
+then the proposals and the votes against the state after the certificates — over the state before the
+transaction (`GovBlockOverlay` carries the block's earlier transactions). The bodies are decoded from
+their CBOR (`govTxDecode.ts`), not from ledger-ts objects. Failures are named after the ledger's
+constructors and reach the producer as `tx[i]` (it drops those transactions). Protocol gates as in
+1.22.1: bootstrap (9) — only ParameterChange / HardFork / Info proposals, DReps vote on Info only, no
+return-account or zero-withdrawal checks, no DRep registration check on delegation; 10 — as Conway;
+11 — `UnelectedCommitteeVoters`, `DepositIncorrectDELEG` / `RefundIncorrectDELEG`, duplicate VRF keys,
+nOpt ≠ 0 in updates; the hard-fork succession test looks the parent up among the proposals before the
+transaction (1.22.1; master looks inside it). Replay: 218 325 governance-bearing transactions of preview
+epochs 646–1434, 0 failures; node shadow: 0. Strict by default; `StakeKeyHasNonZeroAccountBalanceDELEG`
+stays report-only with `WITHDRAWALS_STRICT` (our reward balances), a refund against an untracked
+deposit is a report, tip sync is report-only. Counters on `/metrics` (`governanceRules`).
+
+**151. Ratification order and the round's enact state.** Proposals were tallied in submission order
+and one action per purpose per epoch. RATIFY sorts by `actionPriority` (NoConfidence, UpdateCommittee,
+NewConstitution, HardFork, ParameterChange, TreasuryWithdrawals, Info; stable) and every ratified
+action updates the round's enact state at once: roots (a ParameterChange chained on one ratified
+earlier in the round passes in the same round), parameters (thresholds and committee bounds for the
+proposals after it), committee, protocol version, treasury. `ratify.ts` is the round, pure.
+
+**152. Committee tally.** A member with an authorised hot key that did not vote was left out; the
+ledger counts it as No (`committeeAcceptedRatio`), leaving out only Abstain, expired, resigned and
+unauthorised members. The minimum committee size applied in the bootstrap phase, where it does not;
+below the minimum the committee has no threshold (not ratified), zero threshold means accepted.
+
+**153. DReps and committee credentials keyed by bare hash.** The ledger keys them by (key | script,
+hash). DReps now use the typed hex of db/stakeCred.ts (hash / "01" + hash; `is_script` of an older row
+decides), committee cold and hot keys "00"/"01" + hash; UpdateCommittee payloads carry `typed: true`.
+The Mithril importers stripped the type (`cold.replace(/^01/, "")`) and now keep it; the genesis
+seeding reads `scriptHash-` / `keyHash-`. Stored data: `govCredMigration.ts` (`gov_cred_typed_v1`,
+once, inside the first Conway block a new build applies, so LMDB diffs and the SQLite journal hold it)
+rekeys script DReps and types committee rows whose type the genesis or the committee's votes name; a
+row of unknown type keeps its bare key and matches both types until a certificate names it
+(`ccCredsOf`). Preview's three committee members are scripts with script hot keys (NES).
+
+**154. SPO tally and distribution.** An SPO that did not vote counted by its reward account's DRep
+delegation on every action; on a hard fork it is always No, in the bootstrap phase Abstain
+(`spoAcceptedRatio`). The SPO voting stake is the mark snapshot plus the deposits of live proposals
+whose return account delegates to a pool of it (`addToPoolDistr`): Koios `pool_voting_power_history`
+at preview 742, 766, 994, 1300 exceeds our snapshot by exactly those deposits (100 k ADA multiples).
+
+**155. The DRep distribution excluded the boundary's refunds and withdrawals.** The pulser is set up
+on the EPOCH rule's output, whose accounts already hold the refunded deposits and the treasury
+withdrawals (bug 95's note that the DRep snapshot excludes them was wrong; its pool-snapshot half is
+right; `Epoch.hs`: `returnProposalDeposits` feeds `certState2`, and `setFreshDRepPulsingState` runs on
+that `epochState2`). Koios `drep_history` at 766: DRep 74519ac5… 700 000 ADA above our snapshot — the
+seven 100 k refunds of that boundary; at 1435 the only DRep that differs is b25d7204…, −1 000 ADA, the
+refund of the expired e6ed8d65…:0 to its return account 104b7df2… (the same finding as the lsq agent's
+bug 185, which makes GetDRepStakeDistr byte-identical once fixed). The orchestrator now credits the
+boundary's payouts after the pool snapshot and before the ratification (`applyBoundaryCredits` before
+`governanceRatify`); the ratification's treasury is then the post-boundary one too.
+
+**156. An unregistering DRep's votes stayed.** GOV removes them from every proposal
+(`GovRemovedVotes`); they counted again if the DRep re-registered before the action was decided.
+
+**157. Conway genesis `initialDReps` / `delegs` were never seeded.** cardano-node injects them only
+into the initial state of a chain that starts in Conway (`mkInitExtLedgerStateCardano` →
+`injectIntoTestState`), never on mainnet and never at the Babbage→Conway translation; `seedGovernance`
+does the same (delegations of registered credentials only). None of the public networks has them.
+
+**158. Treasury and committee-term conditions were missing.** A TreasuryWithdrawals is ratified only if
+it fits the treasury left by the round's earlier withdrawals; an UpdateCommittee only if every new term
+ends within `committeeMaxTermLength` of the pulser's epoch (`validCommitteeTerm`).
+
+**159. Descendants of an expiring proposal stayed.** EPOCH removes an expiring proposal with its
+subtree (`proposalsRemoveWithDescendants`); a child waited — unratifiable — for its own expiry.
+
+**160. The committee state kept non-members.** EPOCH intersects `csCommitteeCreds` with the (new)
+committee's members at every boundary (`updateCommitteeState`); authorisations of cold keys that never
+became members stayed (preview 3035: 8 rows, the chain 3). An authorisation survives a boundary only
+if the key is a member after that boundary's enactment; bug 83's test now authorises in the epoch
+between ratification and enactment. With the pruning the replay's committee state equals the chain's
+at all three NewEpochStates.
+
+**161. Dormant epochs.** An epoch counts as dormant when no proposal with `expiresAfter` ≥ the new
+epoch remains (`updateNumDormantEpochs`); any stored active proposal, even one expiring at that
+boundary, kept it from counting.
+
+**162. NoConfidence left the committee in place.** ENACT sets the committee to none; an UpdateCommittee
+after it starts from its added members only (`updatedCommittee SNothing`). Never enacted on preview.
+
+**163. DRep expiry at ratification.** A DRep counted when its expiry reached the epoch before the
+pulser's; the ledger excludes it once the pulser's epoch passes its expiry (`reCurrentEpoch > drepExpiry`).
+
+**164. The first Conway epoch had no committee or constitution.** Seeding waited for the boundary after
+the Babbage→Conway one; `translateEra` installs them at the translation, so the first epoch's
+proposals (guardrail script) and committee certificates are judged against them.
+
+**165. Protocol-9 reverse delegations.** In the bootstrap phase a re-delegation left the account in the
+old DRep's delegator set (`preserveIncorrectDelegation`, cardano-ledger issue 4772) and a delegation
+to an unregistered DRep entered no set; an unregistration cleared the delegations of the set's
+accounts only — whatever they delegated to by then. The protocol-10 hard fork dropped delegations to
+unregistered DReps and rebuilt the sets (`updateDRepDelegations`). Ours cleared every delegation to
+the unregistering DRep. Preview: 0a047809… delegated to fd160e2b…, then to 9b239a50…; fd160e2b…
+unregistered at epoch 724 and the chain cleared the account (NES 1415, 1420, 1434); acab7e49… the
+same. Fix: `gov_drep_boot_delegs` (LMDB `gov_drep_boot`) holds the sets during protocol 9,
+`hardForkToV10` at the boundary that enacts protocol 10.
+
+Proof (`scripts/gov-replay.ts`, 2026-09-28): a raw scan of preview's 2.34 M pre-Conway blocks builds the
+accounts and pools (267 s), then the node's own functions apply the 2.36 M Conway blocks — the rules
+before each block, certificates / proposals / votes as `applyTransaction` does, `enactPending` /
+POOLREAP / `ratifyForNext` at every boundary with the node's stored stake snapshots and Koios' treasury
+(349 s). Every boundary 646–1434: the ratified, expiring, enacted, expired and orphan-dropped sets equal
+Koios `proposal_list` (all 1 552 proposals, 14 enactments). With Koios' own DRep and SPO distributions
+at the 27 epochs that ratified something or precede one (`--koios-dist`): the same outcomes. The
+decoded NewEpochStates of slots 122 316 253 (Mithril), 122 735 066 and 123 980 824 (the cardano-node
+11.0.1 relay): all DReps with expiry and deposit (8 984 / 8 984 / 9 162), committee members and typed
+committee state, live proposals, their votes, the four roots, the pulser's enacted / expired lists and
+the dormant count equal; vote delegations equal (111 734 at 1434) after bug 165.
+## Bugs 230–236 — chain selection, Genesis, hard-fork combinator (2026-09-28, parity with cardano-node 11 / ouroboros-consensus 3.0.1)
+
+Reference: ouroboros-consensus `release-ouroboros-consensus-3.0.1.0` (the version cardano-node 11.0.1
+builds: `Protocol/Praos/Common.hs`, `Shelley/Ledger/Config.hs`, `Storage/ChainDB/Impl/ChainSel.hs`,
+`Util/AnchoredFragment.hs`, `Genesis/Governor.hs`, `Node/GSM.hs`, `Node/Genesis.hs`,
+`HardFork/History/*.hs`, `HardFork/Combinator/State/Infra.hs`, `Shelley/ShelleyHFC.hs`), cardano-ledger
+`Conway/Translation.hs`, cardano-diffusion `Governor/Types.hs` (HAA).
+
+230. Praos tie-break was not `comparePraos`: (a) the same-issuer rule (higher opcert issue number wins)
+    applied whenever the issuers matched; consensus arms it only when the two tips are in the **same
+    slot** and have the same issuer; (b) there was no restricted VRF tie-breaker: from Conway on
+    (`mkShelleyBlockConfig`: `RestrictedVRFTiebreaker 5`) the VRF outputs are compared only when the
+    tips are at most 5 slots apart, otherwise neither chain is preferred and the node keeps its own.
+    Real case from the preview volatile stores (2026-09-28): two blocks at height 4 706 249,
+    5f0c957a…@123 973 034 and 7b139945…@123 973 074 (40 slots apart) — the network kept the later one;
+    the unrestricted rule we had prefers the dropped one. `tieBreak.ts` is now an exact port
+    (`comparePraos`, and the unrestricted `Ord` used to rank candidates); fixture
+    `restricted-vrf-race-123973034.json`. The legacy outvote path only calls it for same-slot battles,
+    where both rules agree, so the default behaviour is unchanged. `scripts/chainsel-replay.ts` over the
+    two nodes' and the relay's volatile stores: 12 fork points, the selection picks the kept branch in
+    all 12; of the 11 same-slot races the tie-break agrees with the network in 11.
+231. A Praos node must be able to roll back up to k blocks across an epoch boundary. The SQLite guard
+    of bug 63 (`rollbackChainTo` refuses: boundary work is not journaled) ran in every mode, before the
+    LMDB rollback, so `ledgerStore: lmdb` refused too — although there the boundary work (reward update,
+    SNAP, POOLREAP, governance) is written into the epoch's first block's diff and is reverted with it
+    (nonces and epoch parameters are direct writes, but cannot change within k: the candidate nonce
+    freezes 4k/f and the proposal deadline 6k/f before the boundary; the per-epoch start state is
+    rewritten by the re-applied TICKN). Now `rollbackOurChainTo` allows the crossing when the LMDB store
+    is the ledger authority and its anchor is not above the target (`rollbackChainTo(slot, { allowEpochCross })`);
+    it also resets `lastAppliedEpoch` — without that the new branch's boundary would have been skipped
+    (`onEpochStart` returns for epochs ≤ the last applied one). sqlite/dual modes still refuse (unchanged).
+    Tests: `consensus/lmdbEpochRollback.test.ts`,
+    `db.rollbackRestore.test.ts`. The SQLite shadow tables of an lmdb node that still writes them
+    (GEROLAMO_LEDGER_SQL_WRITES≠0) keep the boundary's rows after such a rollback (logged): rebuild them
+    before switching the node back to `ledgerStore: sqlite`.
+232. GetInterpreter: the current era's end was always "the epoch after the tip's". Consensus
+    (`reconstructSummary`, `TransitionUnknown`) ends it at the first epoch boundary at or after
+    tip + 1 + safe zone (3k/f): during the last 3k/f slots of every epoch (30 % of it on every public
+    network) the relay answers epoch + 2. Now computed by `consensus/hfc/hfc.ts`; byte-identical with the
+    cardano-node 11.0.1 preview relay (`scripts/hfc-compare.ts`, 268 bytes, captured in `hfc.test.ts`).
+233. Era boundaries were hard-coded per network (`n2c/eraHistory.ts`, `txSubmissionCodec.hfcEraIndexNow`,
+    `startBlockProducer`, `ConsensusOrchestratooor` pointer-stake trigger: PV 9 crossing). A ledger-driven
+    hard-fork history (`consensus/hfc/HardForkHistory.ts`, `hfcNode.ts`) now provides them: `Test*HardForkAtEpoch`
+    triggers from the config (top level, or `cardanoNodeConfigFile`), the protocol major adopted at each
+    epoch boundary against the next era's `eraProtVerLow` (`shelleyTransition` guards with `==`;
+    Conway's successor is `TriggerHardForkNotDuringThisExecution` in node 11), persisted to
+    `hfc-eras.json`; eras the node never observed (Mithril) come from the block store (first block with
+    the era's tag, binary search over the chunks: preview Babbage@3, Conway@646 found in node 3036's
+    store, identical to the relay), and only then from the built-in history. Consumers fall back to the
+    old tables until the history reaches the tip's era (`ready`).
+234. `stabilityWindowSlots()` (genesis-delegation activation) returned 129 600 on every network; preview's
+    3k/f is 25 920, so a replay from genesis activated preview genesis delegations five times too late.
+    Now per network (geometry).
+235. A network other than mainnet/preprod/preview fell back to preprod's slot/epoch geometry
+    (`normalizeEpochNetwork`) and had no GetSystemStart/GetInterpreter. Custom testnets and SanchoNet
+    now get the geometry (epoch length, slot lengths, Shelley start, stability window) from their
+    genesis files and hard-fork history (`EPOCH_GEOMETRY.custom`, passed to the validation workers).
+236. The Babbage → Conway translation (`utxosInstantStake = ConwayInstantStake . sisCredentialStake`:
+    pointer stake dropped; the UTxO and the Babbage snapshots are kept) was applied to SQLite only. In
+    `ledgerStore: lmdb` the `stake_bal` counters kept the pointer outputs, so an lmdb node replaying
+    across the Conway boundary would have counted them in every Conway snapshot (preview: the 35 553 ADA
+    of bug 93). `consensus/conwayTranslation.ts` also rewrites the LMDB records inside the boundary
+    block's diff; triggered by the hard-fork history's Conway start (also correct when Conway starts
+    through a Test* trigger). Test: `consensus/conwayTranslation.test.ts`.
+
+### New, opt-in: ouroboros-consensus chain selection and Genesis mode
+
+`consensus.chainSelection: "praos"` (or GEROLAMO_CHAIN_SELECTION=praos; default "legacy" = primary +
+verifier votes; "shadow" runs the new selection beside legacy and only logs "Chain selection (shadow)
+would: …" and counts `chainSelection.shadowDisagreements` in the sync snapshot) runs `consensus/chainsel/`: every hot peer's validated headers form its candidate
+fragment; our chain is the applied chain (anchor = immutable tip k blocks back, reconciled with the DB
+before each decision); the node switches to the best candidate that forks at most k blocks back
+(longest, then the Praos tie-break of bug 230; candidates ranked by the unrestricted `Ord`), rolls back
+to the intersection and fetches the candidate's blocks; a primary whose stream forks onto a chain that
+is not preferable is not followed. Peers whose fork is deeper than k (ForkTooDeep) or whose candidate
+contains a block known to be invalid (deferred-VRF failures are recorded) are disconnected; headers
+still awaiting their VRF check are not part of any candidate. `consensus.mode: "genesis"` (implies
+"praos") adds the GSM (PreSyncing / Syncing / CaughtUp; HAA = ≥ 5 active big ledger peers or
+`localRootsOnly`; 20 min max caught-up age + ≤ 300 s bonus; marker file `caught-up` next to the DB),
+the Limit on Eagerness (the apply pipeline holds blocks more than k past the LoE tip; PreSyncing: LoE
+at the immutable tip) and the GDD (sgen = 3k/f, rate-limited to 1 s). ChainSync Jumping: bug 289
+(was not implemented). Big ledger peers come from peer selection through `orchestrator.setBigLedgerPeerSource({
+bigLedgerPeers(): string[] })`. Verified by unit tests and a deterministic simulator
+(`chainsel/sim.ts`: 200 random fork scenarios, deep forks, invalid blocks, LoE, sparse adversaries for
+GDD) and the real fork replay above; **not yet run on a live node** — run "shadow" on node 3036 first,
+then "praos" there, before the producer.
+## Bugs 284–289 — legacy chain following halted the producer; shadow-mode audit; ChainSync Jumping (2026-10-01)
+
+284. **Legacy mode applied a losing branch on top of the ledger store and halted (producer, 2026-09-29
+    10:03:57 UTC, 8 h 40 min without sync).** The producer, 44 min behind (bug 285), outvoted its primary
+    and switched to the local relay, whose fragment was … A, L; 0.2 s later the relay's own slot battle
+    went to N (lower VRF) and it sent RollBackward A + N. N did not chain onto our tip, its ChainSync
+    restarted and re-streamed W1 … A, N, N2 while the switch's ranges were still downloading. The switch's
+    ranges applied (tip L); the re-streamed W1 … A ranges were all duplicates, and `mirrorToBlockStore` set
+    the block store's selected tip to the last point *of each range* (A) although L was applied on top —
+    a silent rollback the ledger store never saw. N then passed the block store's continuity check and the
+    LMDB store refused it ("ledger store unusable: block 54a7c5f8…@124020237 extends a3d48c2a… but the
+    ledger store's tip is a6916d45…") → SYNC HALTED. Fixes (`ConsensusOrchestratooor.ts`,
+    `RangeScheduler.ts`, `ledger/nodeLedgerStore.ts`): the selected tip is the last block a range *applied*
+    (an all-duplicate range moves nothing); `onRange` gets `stillCurrent()` and a range dropped by a
+    primary switch / rollback (`reset()`) while it waited for the DB is discarded, not applied; in legacy
+    mode a range whose first new block continues from a block of our chain below the tip rolls back to that
+    block first (≤ k, `rollbackForForkingRange`, keeping the queued ranges of the new branch) — only when the
+    branch is preferable as cardano-node would judge it (longer counting headers still waiting for bodies,
+    or as long and preferred by `comparePraos`); otherwise the continuity check fails the range as before
+    (our own forged block is never given up for a shorter branch); `ledgerBeginBlock` given a block whose
+    parent is a block the store holds a complete state for rolls the store back to it instead of halting
+    (unknown parents still break it). Reproduced with the real orchestrator, block store (primary) and LMDB
+    store on forged Babbage blocks (`consensus/legacyFork.test.ts`: the incident, plus "as long, tie-break
+    for/against", "longer"): with the fixes reverted the test halts with the producer's exact message.
+    Node 3036 hit the same race twice on 2026-10-01 (14:02:37, 15:33:18 UTC: "range … does not extend the
+    applied chain", pipeline reset, primary terminated); the new path rolls back instead.
+285. **Stale divergence of a promoted primary stalled body fetch (producer, 2026-09-29 09:19–10:03 UTC, 44
+    min without a block).** A verifier promoted to primary kept the divergence it had recorded against the
+    old primary; `eligibleFetchPeers` skipped divergent peers, the primary included, and once every
+    verifier diverged at the next slot battle no peer could serve the head range — `RangeScheduler.pump`
+    found no peer, nothing was in flight, and nothing ever pumped again. `setPrimary` clears the new
+    primary's divergence and pending comparisons; the primary is always a body source; a head range with
+    no eligible peer and nothing in flight is re-offered after `RETRY_NO_PEER_MS` (1 s, `noPeerWaits` in
+    the scheduler stats). Tests in `CandidateSet.test.ts`, `RangeScheduler.test.ts`.
+286. **A resolved divergence fired an outvote 44 minutes later.** When the primary rolled back and followed
+    the block a verifier had diverged with, the verifier's divergence stayed recorded; at the next slot
+    battle two such verifiers mismatching the primary anywhere outvoted it *at the old slot* (124017576 —
+    the rollback of bug 284's incident went to slot 124017575). `observe` on the primary clears a verifier's
+    divergence when the primary now carries the verifier's block at that slot. Test in `CandidateSet.test.ts`.
+287. **Our ChainSync server sent the new branch straight after an abandoned block.** The relay stores serve
+    "the next header after the client's slot"; after our chain switched branches below a client's
+    position the client got N2 right after L and the cardano-node relay dropped us
+    (`UnexpectedPrevHash`, relay log 2026-09-29 10:04:05.7079Z, header 835d13d9…@124020242). The host now
+    remembers the points it served (≤ 2200) and, when the next header's parent is not the client's
+    position, sends MsgRollBackward to the newest served point still on our chain first (a store gap, the
+    position still on our chain, is served as before). `RelayHeader.prevHash` from the chunk and SQLite
+    stores. Tests in `N2NChainSyncHost.test.ts`.
+288. **Shadow-mode analysis, node 3036 2026-10-01 01:25 → 22:20 UTC (finding: praos right 10/10; no praos
+    fix needed).** `shadowDisagreements` = 10 "would" lines. Judged against the cardano-node 11.0.1 relay
+    (its ChainDB log, and N2C ChainSync FindIntersect on the relay and on 3036, read-only):
+    06:24:48 switch → 53a1161d@124179888, 08:30:18 → 583bc63c@124187418, 10:19:40 → a66750ea@124193980,
+    15:33:18/19 (2 peers) → e7546cdf@124212798, 17:27:54 → 3c7897bf@124219674 (all tie-break): the relay
+    first extended with the block legacy's primary served (f3f942af, ca06e622, 71c9535c, f32ab11b,
+    f31bd570) and switched to praos's block 0.15–0.46 s later; 14:02:37 → 760ed96f@124207357 (tie-break
+    against 30f687b1, which the relay never adopted); 15:33:22 (3 peers) → 98639582@124212802 ("longer",
+    the child of e7546cdf). Nine of the ten targets are on the relay's (and 3036's) chain today; 3c7897bf
+    was abandoned 107 s later by both the relay and 3036 for a longer branch (dafef7b6@124219781) — praos
+    had made the relay's own decision. Legacy acted on the same blocks within 0–4 s each time (outvote, or
+    a rollback its primary confirmed), but on the way two range-pipeline failures (bug 284's race) and
+    three ChainSync restarts terminated its new primary ("drain timed out"). Of legacy's 26 outvotes in the window, 25 targets are on the relay's chain (the
+    26th is 3c7897bf), and the relay's ChainDB decided each of those 26 slots for the same block (21 times
+    it adopted the other sibling first and switched 0.05–0.46 s later, 3 times it kept the first, twice it
+    never saw a second block — preview has a same-slot battle about every 50 min). The 21 outvotes with no
+    "would" line are battles legacy settled (rollback, or the primary's block not applied yet) before
+    praos's next evaluation, which then saw both siblings extending our tip: an "extend" verdict, not
+    logged; its choice there is `comparePraos`, the relay's own rule (bug 230). Checked on the real headers
+    where they still exist: `scripts/chainsel-replay.ts` over the relay's volatile DB (929 blocks, read-only,
+    22:30 UTC): 9 fork points, selection picks the kept branch in 9; in the 8 same-slot races the
+    tie-break prefers the kept block 8 times — four of them silent outvotes (124216681, 124221394,
+    124222688, 124234028) — and the 3c7897bf/f31bd570 battle is decided by length (46e0b97f…). Note: `shadowDisagreements` counts
+    praos *actions*, not disagreements. New: `chainsel/shadowAudit.ts` follows every shadow decision until
+    it resolves — `legacy-followed` (legacy applied the same tip later; latency), `legacy-kept` (our tip
+    moved 180 slots past it without it, ≥ 3 min: check the relay), `peer-dropped` / `peer-kept` for
+    disconnects — logged as "Chain selection (shadow) resolved: …" and in `/metrics`
+    `sync.chainSelection.shadow`.
+289. **ChainSync Jumping was not implemented (Genesis mode).** `consensus/genesis/csj.ts` is a port of
+    ouroboros-consensus 3.0.1 `MiniProtocol/ChainSync/Client/Jumping.hs` (+ `State.hs`): one dynamo
+    streams, every other engaged peer is a jumper answering single-point MsgFindIntersect jumps each
+    `jumpSize` slots (default `2 × 2160`, `consensus.csjJumpSize`); a rejected jump binary-searches the
+    disagreement, the dissenting jumper with the oldest one becomes the objector and streams so the GDD
+    can compare densities; dynamo/objector rollbacks before their jump/disputed point, MsgAwaitReply and
+    disconnects disengage / re-elect (`backfillDynamo`, `electNewObjector`, `rotateDynamo`). Wired in
+    `ChainSelDriver` (Genesis only, not CaughtUp; `consensus.csj: false` / GEROLAMO_CSJ=0 turns it off;
+    off in "shadow", where legacy needs every stream) and the orchestrator (`csjLoop` per hot peer: pause,
+    jump via `PeerClient.csjJump`, resume, restart; the dynamo becomes the primary). Simulator
+    `genesis/csjSim.ts` (real ChainSel + LoE + GDD + CSJ; per-peer ChainSync servers): honest sync with
+    ≤ 2 engaged downloaders, adversarial dynamo on a sparse fork, a stalling denser-looking fork, a lying
+    jumper (rejects every jump; also as objector), a dynamo rolling back before its last jump, two sparse
+    forks, and 100 random scenarios (k = 50: honest tip reached, no honest peer disconnected, about a
+    third of the header downloads of plain Genesis). Not yet run on a live node: Genesis mode is off on
+    both preview nodes.
+
+**Rollout (chainSelection).** Deploy bugs 284–287 to the producer first (it runs legacy). 3036 shadow →
+praos once, on this code, for ≥ 48 h spanning an epoch boundary and ≥ 20 recorded shadow decisions:
+every `legacy-kept` resolution checked on the relay with zero cases where the relay kept legacy's block;
+every praos switch target adopted by the relay (its log) at the time; zero shadow disconnects that the
+relay does not mirror (an invalid block it also rejects, or a fork > k); no halt, no `ledger store
+unusable`, no range-pipeline failure, and `scripts/chainsel-replay.ts` over the volatile stores picking
+the relay's branch at every fork point. Then 3036 on praos ≥ 72 h (3 boundaries): every relay "Switched to a
+fork" mirrored by 3036 within 10 s and none of its own, tip within 60 s of the relay's ≥ 99.9 % of
+minutes, zero rollbacks > 1 block that the relay did not make, chain-selection peer terminations not
+above legacy's (11 in those 21 h: 9 "drain timed out", 2 range-pipeline failures). Producer: shadow ≥ 24 h on its own peer set, then praos, switched right after
+a forged block, with the next leader slot ≥ 2 h away; legacy stays the one-line fallback. Genesis + CSJ
+only on a scratch node syncing from a Mithril snapshot first.
+
+## Bug 135 — LocalTxSubmission could not take a cardano-cli transaction, and keyed the mempool by the wrong hash (2026-09-28, fixed)
+
+cardano-node's MsgSubmitTx carries the hard-fork-wrapped transaction `[0, [6, #6.24(tx)]]`; the
+host parsed it with ouroboros-miniprotocols-ts, which only accepts bare bytes, so every real
+client got `MsgRejectTx [2, 1]` (an integer no client can decode). Transactions that did get in
+were stored under blake2b-256 of the *whole* transaction, which is nobody's id: LocalTxMonitor
+HasTx, the tx-submission id announcements and the mini-Blockfrost mempool lookups never matched
+the body-hash ids clients and peers use. Fix (`src/network/n2c/LocalTxSubmitHost.ts`,
+`src/mempool/`): both wire forms accepted, id = body hash, and a rejection carries cardano-node's
+own `HardForkApplyTxErr` — `[2, [[6, [ConwayLedgerPredFailure…]]]]` with the nested UTXOW / UTXO
+/ UTXOS failures, in the order the ledger's small-steps engine produces (a sub-rule's failures
+prepended in execution order before the parent's; `RuleRun` in `applyTxErr.ts`). Verified against
+the cardano-node 11.0.1 preview relay with unsigned (never valid) transactions,
+`scripts/tx-reject-oracle.ts`: **31 of 31 byte-identical** — all inputs spent (MEMPOOL text), bad
+inputs, missing vkey witness, fee too small, value not conserved, expired, not yet valid, output
+too small, three multi-failure combinations, wrong network (output, body id, withdrawal), required
+signer, max tx size, metadata hash / metadata missing, invalid signature, stake key already
+registered, delegation of an unregistered key, native script not satisfied, extraneous script,
+supplemental datum + script integrity hash (with preimage), too many collateral inputs, collateral
+with tokens, reference-script fee, no collateral / insufficient / total mismatch / script-locked
+collateral, execution units too big. Through the whole wire path (`scripts/n2c-mempool-harness.ts`
+serving Gerolamo's N2C hosts), `cardano-cli conway transaction submit` prints the same error text
+against both sockets for 31 of 31 cases. Not byte-compared (no safe way to provoke them, or
+Gerolamo cannot reproduce the payload): phase-2 script failures (the ledger's
+`ValidationTagMismatch` carries the evaluator's debug text and script arguments; ours carries
+plutusEval's note), MissingRedeemers, GOV failures, treasury value mismatch, withdrawal amount
+(IncompleteWithdrawals) and DRep delegation of *registered* reward accounts, pool / DRep /
+committee certificate failures, OutsideForecast, bootstrap attribute size, wrong-era submissions,
+a full mempool. Those are still rejected (the block rules' verdict is carried as a
+ConwayMempoolFailure text) but not in the ledger's encoding.
+
+## Bug 136 — the mempool validated nothing and relays never pruned it (2026-09-28, fixed)
+
+LocalTxSubmission and HTTP stored anything that parsed; inbound node-to-node tx-submission checked
+parse and hash; only the block producer swept stale entries (`txSanity`, bug 110), so a relay
+re-announced transactions long on chain or double-spent to its peers indefinitely. Now
+`src/mempool/ValidatingMempool.ts` admits a transaction only if it applies to the ledger at the
+tip ticked to the next slot (as cardano-node: validity intervals are judged at tip + 1) *after*
+every queued transaction in order — their spent inputs are gone, their outputs spendable, their
+certificates applied. Phase 1 is `conwayMempoolRules.ts` (the ledger's rule structure) together
+with the node's block rules on the same inputs (`evaluateTxRules`, which runs alonzoRules, and
+`checkCertificateSequence`); a block-rule failure the structured pass does not model still rejects.
+Signatures and phase 2 (plutusEval's `shadowEvaluateTx`, a `mempoolPlutus` job) run once per
+transaction on a dedicated worker. **Phase 2 is report-only**: `mempool-replay.ts --plutus` over the
+same blocks had plutusEval judge 498 of 1 093 valid script transactions failing (every one "exceeded
+its declared budget" on CPU by 2–4 %, e.g. 24 915 886 vs 24 123 473 declared), so a failing verdict
+is admitted and counted (`/metrics mempoolValidation.phase2.failed`); `mempool.rejectFailedPlutus:
+true` makes it strict once the evaluator agrees with the chain (same for `rejectUncheckedPlutus`). Every chain change
+(block adopted: `emitTip`; rollback: `afterRollback` → `emitChainChanged`) re-applies the whole
+mempool with the cached verdicts (cardano-node `syncWithLedger` / `reapplyTx`): included
+transactions go (all inputs spent), so do transactions a block invalidated or whose interval
+passed; after a rollback the rest is re-validated and, like cardano-node, transactions of the
+rolled-back blocks are not re-added. The forger takes `snapshotForBlock(slot)`: the mempool
+re-applied at the forge slot, cut to the block's byte / execution-unit / reference-script
+capacity (the producer's own sweep and `txSanity` remain for a node without it). N2N inbound
+transactions and HTTP / mini-Blockfrost submissions go through the same admission. Capacity is
+cardano-node's: 2 × (maxBlockBodySize − 1024) bytes, each transaction counted as sizeTxF + 4.
+False rejections: `scripts/mempool-replay.ts` re-validates the valid transactions of the last 40
+immutable chunks plus the volatile files of node 3036 (read-only; inputs from the blocks
+themselves and the explorer DB), each against its pre-block state at its block's slot: **3 853
+transactions, 0 rejected** (3 466 skipped: an input outside the 2 000-chunk look-back that the
+explorer row cannot reproduce — it keeps no reference-script bytes). Stake-registration and
+withdrawal checks are inactive in that replay (no historical registration state). The first run rejected one — a guardrail-script proposal (redeemer purpose
+5) — which is fixed (voting and proposing purposes, proposal policy scripts). Latency
+(`scripts/mempool-bench.ts`, 300 chained signed transactions): admission p50 2.0–2.3 ms, p90
+2.9–3.1 ms with the signature worker (the main thread's share is phase 1, 0.7–2.4 ms per real
+preview transaction in the replay); re-applying 300 queued transactions on a new tip 74–100 ms
+(0.25–0.33 ms each, signatures and scripts not re-run); worst event-loop stall 4 ms during
+admission and 8–9 ms during a revalidation (it yields every 4 ms of work, and every admission
+yields once before it starts). `/metrics` → `mempoolValidation`.
+
+## Bug 137 — LocalTxMonitor answered in the library's format, not cardano-node's (2026-09-28, fixed)
+
+MsgReplyNextTx sent bare transaction bytes (cardano-node: `[6, [6, #6.24(tx)]]`), MsgHasTx compared
+against whole-transaction hashes, MsgAcquired carried the tip slot (cardano-node: the snapshot's
+slot, tip + 1), MsgReplyGetSizes reported a 256 KiB capacity and store bytes (cardano-node: 2 ×
+(maxBlockBodySize − 1024) and Σ sizeTxF + 4), MsgAwaitAcquire answered at once instead of when the
+snapshot changes, and MsgGetMeasures (N2C v20+) did not exist. The host now has its own codec over
+the validating mempool's snapshot; MsgReplyGetMeasures is `[12, txCount, {text: [size, capacity]}]`
+with `ex_units_memory`, `ex_units_steps`, `reference_scripts_bytes`, `transaction_bytes` in that
+(Map) order. Byte-identical to the preview relay for GetSizes and GetMeasures (empty mempool: the
+relay's mempool stayed empty through a multi-hour poll every 2 s); cardano-cli 11 decodes
+Gerolamo's replies with a transaction queued (`query tx-mempool info` 1 tx, 228 bytes;
+`next-tx` prints the body-hash id), and `info` / `next-tx` print identically against both sockets
+when both are empty.
+
+## Bug 138 — ledger-ts drops `total_collateral`, so its check never ran (finding, open)
+
+`ConwayTxBody`'s constructor guards the field with an inverted condition
+(`if (!(totCollateral === undefined || canBeUInteger(totCollateral)))`), so `body.totCollateral`
+is always undefined and alonzoRules' `total_collateral ≠ collateral − return` check (and db.ts's
+collateral pot, which then uses consumed − returned) never sees the declared value. The mempool
+reads key 17 from the body bytes (IncorrectTotalCollateralField byte-identical to the relay).
+Fixing ledger-ts (or reading the bytes in alonzoRules) is left to the rules owner: the check must
+be replayed before it can be strict.
+
+## Bug 139 — txRules sizes reference scripts by their whole `[lang, bytes]` CBOR (finding, open)
+
+The ledger's `txNonDistinctRefScriptsSize` counts `originalBytesSize` — the Plutus binary (the
+bytestring payload) or the timelock's bytes. txRules adds `referenceScriptCbor.length / 2`, five
+bytes more for the captured 14 144-byte script (fee 212 235 vs the ledger's 212 160). Harmless
+while `REF_SCRIPT_FEE_VERIFIED` keeps that check report-only; the mempool computes it the
+ledger's way (the relay's FeeTooSmallUTxO minimum reproduced exactly).
+
+## Bug 140 — Plutus shadow jobs on workers use preprod slot geometry (finding by reading, open)
+
+`runBlockRulesJob` never calls `setEpochNetwork` (only the header job does), so a validation
+worker keeps the module default `preprod` and plutusEval's `shelleyStartSlot()` — the system start
+of the script context's POSIX validity range — is preprod's on preview and mainnet. Scripts that
+read the validity range would disagree with the chain. Not reproduced; the mempool's Plutus job
+sets the network explicitly.
+
+## Bug 141 — withdrawal redeemer indexes follow the wire order (finding, unverified)
+
+The ledger orders a transaction's withdrawals by `AccountAddress` (network, then the credential
+with `ScriptHashObj` *before* `KeyHashObj`, then the hash); canonical CBOR orders the map by bytes,
+which puts key accounts (`e0…`) before script accounts (`f0…`). alonzoRules and plutusEval index
+Rewarding redeemers by the wire order, so a transaction withdrawing from a key and a script account
+at once would get the wrong index (a false "extra redeemer" failure in the block rules). The mempool
+uses the ledger order. No such transaction was found to confirm it.
+
+## Bug 142 — txRules treats the validity upper bound as inclusive from Allegra on (finding, open)
+
+`evaluateTxRules` fails a transaction as expired only when `slot > ttl`. From Allegra the ledger's
+`inInterval` requires `slot < invalid_hereafter` (only Shelley's TTL was inclusive), so a block
+carrying a transaction at exactly its `invalid_hereafter` slot passes Gerolamo's block rules while
+cardano-node rejects the block — a missed rejection, not a false one. The mempool's own check is
+exclusive (unit test "the validity upper bound is exclusive"; the relay's OutsideValidityIntervalUTxO
+reproduced byte for byte). For the rules owner: make the bound exclusive for era ≥ 3 after a replay.
+
+## Bug 143 — the mempool handed the Plutus evaluator the wrong network name (fixed, integration 2026-09-29)
+
+Phase 2 in the mempool is now strict (`mempool.rejectFailedPlutus` default on). The mempool path passed the
+mainnet/testnet address flag as the slot-geometry network; "testnet" normalises to preprod, so on preview every
+script context carried a validity range computed from preprod's system start. 2 of 20 valid script transactions
+(slots 124016238, 124016250) were judged failing while the block path passed them with their declared units. The
+old shadow wrapper ignored the field, which is why this surfaced only with the new evaluator (bugs 200–214).
+Fixed in `src/mempool/plutusJob.ts` by passing the geometry name and calling `checkMempoolTxPhase2`. Replay of
+1 137 preview script transactions through the mempool path: 0 disagreements, 0 unchecked; phase 1: 4 051
+transactions, 0 false rejections. Unchecked transactions (missing script or builtin) are admitted and counted but
+never forged. CollectErrors rejections are carried as MEMPOOL text, not the ledger's per-redeemer payload.
+
+## Bug 144 — the block path took the Plutus geometry name from `config.network` (fixed, integration 2026-09-29)
+
+Same confusion as bug 143 on the block side: `blockRulesPure` passed `ctx.config.network` to phase 2, which is the
+address flag ("testnet") in the offline replay harnesses and absent in a node's config.json. "testnet" normalises
+to preprod, so the from-genesis UTxO replay (scripts/utxo-rules-replay.ts) reported 6 valid V2 transactions at
+slots 1 184 573–1 193 537 as "budget exceeded" (scripts that loop on a wrong validity range). The live node was
+not affected — its rules jobs carry `network: getEpochNetwork()` — but the check now reads `getEpochNetwork()`
+directly, which the worker pins from the job, and the replay script calls `setEpochNetwork`.
+
+## LocalStateQuery parity with cardano-node 11.0.1 (2026-09-28, bugs 185–190)
+
+Every Conway `BlockQuery` of ouroboros-consensus-cardano 3.0.1 (tags 0–39) is answered from the
+acquired ledger state (`src/network/n2c/lsq/`: `view.ts` acquire and frozen read view, `queries.ts`
+encoders, `govIndex.ts` governance facts from the chain, `govAdapter.ts` the one reader of gov-store
+keys, `txOut.ts` the ledger's output forms), plus QueryAnytime GetEraStart. Verified on preview
+against the relay with `scripts/n2c-compare.ts` (both sides acquire the same block): 59 of 61
+answers byte-identical at the tip and at a point 250 blocks back, including GetGovState (1.4 MB)
+except one value, GetDRepState (1.26 MB), GetFilteredVoteDelegatees (2.8 MB), GetDRepDelegations,
+GetProposals, GetRatifyState, GetCommitteeMembersState, DebugChainDepState, GetLedgerPeerSnapshot
+(all / big / legacy), GetPoolState, GetStakeDistribution2; 2 004 sampled UTxO outputs identical by
+TxIn. The acquire failures and the connection drop on undecodable queries match. cardano-cli 11
+against `scripts/lsq-host.ts` (this build serving node 3036's stores read-only): tip,
+protocol-parameters, stake-distribution, stake-address-info, gov-state, drep-state, committee-state,
+constitution, treasury, utxo, stake-snapshot, pool-params, pool-state, spo-stake-distribution,
+proposals, ratify-state, future-pparams, stake-pools, ledger-peer-snapshot, era-history,
+protocol-state print the relay's output exactly; `drep-state --include-stake` differs by bug 185.
+Not served at the time (the connection was closed with a log line): DebugEpochState,
+DebugNewEpochState, GetRewardInfoPools, GetNonMyopicMemberRewards for a non-empty set, the top-level
+DebugLedgerConfig, and GetRatifyState / GetGovState / GetFuturePParams while an action is ratified
+and not yet enacted — all served since bugs 260–266 (2026-10-01). GetUTxOWhole is served (preview: 650 MB, 72 s, 2.4 GB anonymous memory) but was not
+compared whole with the relay, to spare it.
+
+## Bug 185 — the DRep stake distribution missed refunded proposal deposits (found 2026-09-28, OPEN, governance)
+
+GetDRepStakeDistr at preview epoch 1435: drep b25d7204… 939 611 081 113 here, 940 611 081 113 on
+cardano-node, the only difference among 3 055 DReps. Proposal e6ed8d65…:0 expired at the 1435
+boundary and its 1 000 ADA deposit went back to 104b7df2…, whose vote is delegated to b25d7204…. The
+relay's distribution counts it (as the account's reward balance: the DRep pulser is set up after the
+EPOCH rule returned the deposits); here the proposal no longer counts as a live deposit and the refund
+is credited only afterwards (`applyBoundaryCredits`, bug 95's ordering, right for the pool SNAP), so it
+counts nowhere. Treasury withdrawals are presumably affected the same way (not observed yet).
+Consensus-relevant: the ratification tally uses this distribution. Not fixed here (governance area):
+take the DRep snapshot (`takeDRepStakeSnapshot` in `ratifyForNext`) after the boundary credits, or add
+the pending refunds to it, and replay the boundaries with refunds before making it strict.
+
+## Bug 186 — LocalStateQuery answered from the tip whatever was acquired, and answered unknown queries (2026-09-28, fixed)
+
+MsgAcquire of any point on the chain was acknowledged and every query then answered from the tip;
+[10] / [11] (ImmutableTip) were not parsed at all (the library knows only [0, p] / [8]); an unknown or
+unsupported query got an empty list (cardano-cli fails to decode it). Now: VolatileTip, ImmutableTip
+(the ledger store's anchor) and any block of the selected chain within the ledger store's volatile
+diffs are acquired as frozen views (LMDB + the chain's diffs down from that block, rebuilt after a
+promotion); other points fail as LedgerDB's `openStateRefAtTarget` does — slot below the anchor
+PointTooOld (whatever the hash), else PointNotOnChain. An undecodable query (unknown tag, wrong
+arity, a Conway-only query for an earlier era) closes the connection, as cardano-node's codec
+failure does. sqlite mode keeps no history: only the tip can be acquired, an older point is
+PointTooOld.
+
+## Bug 187 — N2C answers over 64 kB corrupted the mux framing (2026-09-28, fixed)
+
+The library multiplexer writes a message as one segment and masks its length to 16 bits, so any
+LocalStateQuery answer above 65 535 bytes carried a wrong length header followed by the whole payload
+(GetGovState 1.4 MB, the vote delegatee map 2.8 MB). Answers are now sent in 12 288-byte segments.
+
+## Bug 188 — pool parameters and pool distributions not in the ledger's bytes (2026-09-28, fixed at encoding)
+
+GetPoolState(all) differed for one pool: the stored parameters are the certificate's bytes, and it
+wrote the margin unreduced (0 / 1000000; the ledger answers 0 / 1) and the relay list
+indefinite-length. `normalizePoolParams` re-encodes both. GetPoolDistr / GetPoolDistr2 / the ledger
+peer snapshot lacked the 36 pools the `set` snapshot lists at zero stake (delegators with nothing):
+zero-stake pools are recorded only for snapshots taken from 2026-09-29 on; for older snapshots they
+are now derived from the pools registered at the snapshot with a delegation today (exactly the 36 for
+epoch 1434). GetStakeDistribution2 is the *current* stake over the circulation (not the set
+snapshot), pools with delegators and no stake included.
+
+## Bug 189 — UTxO answers in the wrong output form and key order (2026-09-28, fixed)
+
+GetUTxOByAddress / GetUTxOByTxIn wrote every output in map form, sorted the entries by the
+"txid:ix" string (index 10 before 2) and always used a definite-length map. The Conway ledger writes
+an output without inline datum or script as [address, value] (with a datum hash
+[address, value, hash]), orders entries by TxIn (id, then index number) and uses an indefinite map
+beyond 23 entries.
+
+## Bug 190 — sets, maps and lists in LocalStateQuery answers (2026-09-28, fixed, encoding notes)
+
+cardano-node writes the same Haskell type two ways depending on the encoder: `EncCBOR` (the era's
+results) uses definite length up to 23 elements and indefinite beyond for maps, sequences and sets
+(tag 258); cardano-binary's `ToCBOR` (GetStakePools, the op-cert counter map of DebugChainDepState,
+the ledger peer snapshot) writes sets and maps definite at any size and lists indefinite. Map keys
+follow the key type's `Ord`: a `Credential` puts script hashes before key hashes, a `DRep` orders
+key, script, abstain, no confidence. Recorded in `src/network/n2c/lsq/cborWriter.ts` and
+`queries.ts`.
+## Bugs 170–184 — UTXO / UTXOW / LEDGER / BBODY parity with cardano-node 11 (2026-09-28, fixed)
+
+Semantics and protocol-version gates were taken from cardano-ledger master (Babbage and Conway
+`Rules/Utxo.hs`, `Rules/Utxow.hs`, `Rules/Ledger.hs`, `Rules/Bbody.hs`, `TxCert.hs`, `Tx.hs`,
+`UTxO.hs`; Alonzo `Rules/Utxo(w).hs`; Shelley `Rules/Ledger.hs`; ouroboros-consensus
+`Protocol/Praos.hs`). Each check is one function in `src/consensus/rules/ledgerChecks.ts` (the
+mempool reuses them); failures are named after the ledger constructor. Proof:
+`scripts/utxo-rules-replay.ts` rebuilds UTxO, pools, stake registrations and DRep delegations from
+genesis over node 3036's immutable chunks (read-only) and runs the full body rules on every block
+(signatures taken as verified, no Plutus, no reward balances). Run of 2026-09-29 (3 h 52 min, RSS
+≤ 1.6 GB with the UTxO set in a scratch SQLite file): **4 707 894 blocks, 6 935 607 transactions,
+genesis → slot 124 018 519 (the immutable tip), Alonzo 13 012 blocks / 4 txs, Babbage 2 330 997 /
+4 820 144, Conway 2 363 885 / 2 115 459 (PV 9, 10 and 11), 241 phase-2-invalid txs — zero
+failures.** Coverage of the new rules in that run: 1 125 977 txs with reference scripts (largest
+179 414 B per tx, 430 197 B per block), 4 txs with an input also referenced (all outside PV 9–10),
+294 616 withdrawals under PV ≥ 10 (4 523 key accounts, 290 093 script), 1 551 260 txs with
+auxiliary data, 859 110 with witness datums, 2 240 187 collateral returns, 5 283 bootstrap outputs,
+1 022 592 script-witness txs, 15 629 DRep registrations, 7 198 deregistrations, 70 vote and 495
+propose redeemers, 495 guardrail-guarded proposals, 17 `current_treasury_value` claims; the
+opcert counter rule held on all 4 707 894 headers (0 too small, 0 over-incremented). Remaining
+reports: 4 613 duplicate list-form redeemers (Map.fromList, known) and the 17 treasury claims
+(treasury not modelled by the script).
+
+- **170** The reference-script fee priced each reference script by its whole `[lang, bytes]`
+  wrapper; the ledger's `txNonDistinctRefScriptsSize` uses `originalBytesSize` of the `Script`
+  (Plutus flat bytes, a native script's own CBOR). Too many bytes → a fee "below minimum": the
+  15 reports of 2026-09-23 (preview slots 123 476 723–123 477 466) and txpath's 212 235 vs 212 160
+  (txpath bug 139). `refScriptOriginalSize`.
+- **171** An input listed both as spent and as reference input was priced twice (the ledger
+  takes `refInputs ∪ inputs`, a set). `txRefScriptsSize`.
+- **172** Not checked: Conway LEDGER `ConwayTxRefScriptsSizeTooBig` (200 KiB per phase-2-valid
+  tx), BBODY `BodyRefScriptsSizeTooBig` (1 MiB per block, every tx; up to PV 10 measured against
+  the block-start UTxO, from PV 11 earlier txs' outputs — collateral return for an invalid tx —
+  count too, `totalRefScriptSizeInBlock`), BBODY `HeaderProtVerTooHigh` (mainnet only).
+  `BlockRefScriptSize`, `checkHeaderProtVer`.
+- **173** Not checked: `BabbageNonDisjointRefInputs` — `disjointRefInputs` enforces
+  inputs ∩ reference inputs = ∅ for `pvMajor > 8 && pvMajor < 11` only, i.e. protocol 9–10; PV 11
+  lifts it again. `checkDisjointRefInputs`.
+- **174** `BadInputsUTxO` covered spent inputs only; the ledger requires collateral inputs from
+  Alonzo (`txins ∪ collateral`, with or without redeemers) and reference inputs from Babbage
+  (`allInputs`) to exist. `checkBadCollateralAndRefInputs`.
+- **175** The ex-unit fee was `Math.ceil` over doubles, which overshoots by one at integer
+  boundaries (10 000 mem + 430 000 000 steps at 577/10⁴, 721/10⁷: 31 581 instead of 31 580 — a
+  false rejection of a tx paying the exact minimum). Prices are now read back as the exact
+  decimal they stand for (`rationalOf`) and `txscriptfee` / `tierRefScriptFee` are computed in
+  rationals. `minFeeTx`, `scriptExecutionFee`, `tierRefScriptFeeExact`; `REF_SCRIPT_FEE_VERIFIED`
+  is now true.
+- **176** Certificate deposits in the balance came from the certificates' own fields (Conway
+  reg/reg-deleg, DRep registration); the ledger (`conwayTotalDepositsTxCerts`) takes `keyDeposit`
+  and `drepDeposit` from the protocol parameters, refunds a deregistration by the deposit held
+  (`keyDeposit` when registered earlier in the same tx), a DRep deregistration by its own field,
+  and charges `poolDeposit` once per new pool even when a tx registers it twice.
+  `certDepositsAndRefunds` (the held deposit is `keyDeposit` until the store keeps per-account
+  deposits: `keyDeposit` never changed on preview, preprod or mainnet).
+- **177** `maxValSize` was loaded but unused: `OutputTooBigUTxO` (ledger serialisation of each
+  output value ≤ 5 000 B, Alonzo+; Babbage+ the collateral return too). The collateral return also
+  escaped the min-UTxO (`BabbageOutputTooSmallUTxO`) and network rules. `serializedValueSize`,
+  `checkOutputsTooBig`.
+- **178** Not checked: `OutputBootAddrAttrsTooBig` (bootstrap address attributes ≤ 64 B:
+  derivation-path payload + unknown attributes), `WrongNetworkWithdrawal`.
+- **179** From Allegra the validity upper bound is exclusive (`inInterval`: `slot < ttl`); a tx
+  in exactly its ttl slot was accepted (Shelley keeps `ttl ≥ slot`). Same finding as txpath bug
+  142. `checkValidityInterval`.
+- **180** Withdrawals: (a) Conway PV ≥ 10 (`unless hardforkConwayBootstrapPhase`, i.e. not PV 9)
+  every key-hash reward account must be DRep-delegated in the state before the tx's certificates
+  (`ConwayWdrlNotDelegatedToDRep`); script accounts exempt. (b) The account must be registered
+  (`Shelley/ConwayWithdrawalsMissingAccounts`), also judged before the tx's certificates in every
+  era — preview slot 3 836 003 tx 42 withdraws 0 from a script account and deregisters it in the
+  same tx. (c) Reward-account keys were untyped for script accounts: ledger-ts decodes both kinds
+  with a `StakeKeyHash` credential and marks scripts only in the address `type`, so
+  `typedCredHexOf` fell back to the bare hash and balance lookups missed script accounts
+  (`rewardAccountKey`). The block inputs now carry DRep delegation and registration of the
+  withdrawn accounts (`drepDelegatedFor`, `stakeRegisteredFor`), advanced across in-flight
+  blocks by the overlay and across earlier txs of the block.
+- **181** UTXOW: `ExtraneousScriptWitnessesUTXOW` (up to Alonzo witness scripts = needed; from
+  Babbage witness = needed − reference scripts), `NotAllowedSupplementalDatums` (a witness datum
+  no Plutus-locked input needs must be an output's datum hash — Babbage: collateral return and
+  reference inputs' outputs too), the guardrail script named by a ParameterChange /
+  TreasuryWithdrawals proposal is a needed script, and voting (tag 4, voters in the ledger's
+  `Map Voter` order) and proposing (tag 5) redeemers are matched to Plutus voters / proposals
+  (`GOV_REDEEMERS_STRICT = false`: report-only until more script votes are replayed — strict since bug 277).
+- **182** `ConwayTreasuryValueMismatch` (`current_treasury_value` = the epoch's treasury) is
+  checked against the local pots, report-only (`TREASURY_VALUE_STRICT`): the pots are not yet
+  proven exact against the reference node. (Strict on an exact ledger store since bug 273.)
+- **183** OCERT: `CounterTooSmallOCERT` (n < m) is strict. Praos `CounterOverIncrementedOCERT`
+  (n > m + 1, Babbage+) and the m = 0 default for a pool without a counter are evaluated and
+  reported only: headers are checked before the blocks between our tip and them are applied, so
+  a pool that rotated its certificate twice inside that window would be rejected though valid.
+  σ stays report-only (open item 3). `opcertCounterVerdict`. (Both strict on an exact ledger store since
+  bugs 275 and 276.)
+- **184** Not checked: `MissingTxBodyMetadataHash`, `MissingTxMetadata`, `ConflictingMetadataHash`
+  (blake2b-256 of the auxiliary data's original bytes) and `InvalidMetadata` (text / bytes ≤ 64 B,
+  PV > 2). ledger-ts keeps no slice for some auxiliary-data forms (preview slot 2 032 466 tx 1, an
+  Allegra `[metadata, scripts]` array), which also left those txs' minimum fee unchecked ("tx size
+  unknown"); the entries are now sliced from the block bytes (`blockAuxDataBytes`).
+- Also (txpath bug 138): ledger-ts drops `total_collateral` (body key 17), so
+  `IncorrectTotalCollateralField` never ran; it is read from the original body bytes
+  (`bodyUintField`).
+
+### Conway predicate checklist (cardano-ledger master constructors)
+
+UTXO (`ConwayUtxoPredFailure`): UtxosFailure — Plutus phase 2, shadow only (open item 1) ·
+BadInputsUTxO ✓ (174) · OutsideValidityIntervalUTxO ✓ (179) · MaxTxSizeUTxO ✓ · InputSetEmptyUTxO ✓ ·
+FeeTooSmallUTxO ✓ (170, 171, 175) · ValueNotConservedUTxO ✓ (176) · WrongNetwork ✓ (177) ·
+WrongNetworkWithdrawal ✓ (178) · OutputTooSmallUTxO ✓ · OutputBootAddrAttrsTooBig ✓ (178) ·
+OutputTooBigUTxO ✓ (177) · InsufficientCollateral ✓ · ScriptsNotPaidUTxO ✓ · ExUnitsTooBigUTxO ✓ ·
+CollateralContainsNonADA ✓ · WrongNetworkInTxBody ✓ · OutsideForecast — cannot fail (the rule
+extends the epoch info linearly from the current slot, `unsafeLinearExtendEpochInfo`) ·
+TooManyCollateralInputs ✓ · NoCollateralInputs ✓ · IncorrectTotalCollateralField ✓ (138) ·
+BabbageOutputTooSmallUTxO ✓ (177) · BabbageNonDisjointRefInputs ✓ (173).
+
+UTXOW (`ConwayUtxowPredFailure`): InvalidWitnessesUTXOW ✓ · MissingVKeyWitnessesUTXOW ✓ ·
+MissingScriptWitnessesUTXOW ✓ · ScriptWitnessNotValidatingUTXOW ✓ (native) ·
+MissingTxBodyMetadataHash / MissingTxMetadata / ConflictingMetadataHash / InvalidMetadata ✓ (184) ·
+ExtraneousScriptWitnessesUTXOW ✓ (181) · MissingRedeemers / ExtraRedeemers ✓ (spend, mint, cert,
+reward; vote and propose ✓ since 277) · MissingRequiredDatums ✓ · NotAllowedSupplementalDatums ✓
+(181) · PPViewHashesDontMatch / ScriptIntegrityHashMismatch ✓ · UnspendableUTxONoDatumHash ✓
+(report when the script's language is unknown) · MalformedScriptWitnesses / MalformedReferenceScripts
+✗ (Plutus deserialisation per protocol version; Plutus area).
+
+LEDGER (`ConwayLedgerPredFailure`): ConwayCertsFailure / ConwayGovFailure — certificate and
+governance rules (certificateRules.ts, governance/) · ConwayWdrlNotDelegatedToDRep ✓ (180) ·
+ConwayTreasuryValueMismatch ✓ on an exact store (182, 273) · ConwayTxRefScriptsSizeTooBig ✓ (172) ·
+ConwayMempoolFailure — mempool only · ConwayWithdrawalsMissingAccounts ✓ (180) ·
+ConwayIncompleteWithdrawals ✓ on an exact store (272).
+
+BBODY (`ConwayBbodyPredFailure`): WrongBlockBodySizeBBODY / InvalidBodyHashBBODY ✓ (header/body
+validators) · TooManyExUnits ✓ · BodyRefScriptsSizeTooBig ✓ (172) · HeaderProtVerTooHigh ✓ mainnet
+(172).
+
+## Bug 166 — stale DRep votes from before bug 156 on the running nodes (2026-09-29, fixed by a one-time repair)
+
+Found by the lsq agent's live byte-compare of node 3036 against the relay: `GetProposals` /
+`GetGovState` differed in one place, a DRep vote by e8cfbc95… on 56348457…:0 that the relay does not
+hold. Koios `drep_updates`: the DRep registered on 2026-09-29 (tx 44755cd3…), deregistered three
+minutes later (80cb01f9…) and registered again a minute after that (18e7bca6…), while the build
+before bug 156 ran, which kept an unregistering DRep's votes; the re-registered DRep has a delegator,
+so RATIFY would have counted a vote the ledger discarded. Both preview nodes' stores carry it; a
+fresh sync would not.
+
+The ledger's vote semantics (cardano-ledger-conway 1.22.1 `Rules/Gov.hs`): a vote replaces the voter's
+earlier vote on the action; after a transaction's votes are in, the DRep votes of every DRep its
+certificates unregister are removed from every live action (`cleanupProposalVotes`, also when the same
+transaction registers it again). Nothing else removes a vote — a committee member's resignation or
+expiry and a pool's retirement leave their votes in the state (`Ratify.hs` skips them at tally time),
+and a vote leaves only with its action at a boundary.
+
+Fix: `govVotesRepair.ts` recomputes the votes of the live proposals from the node's own chain (the
+selected chain from the first slot of the oldest live proposal's epoch to the tip, chunk store and
+volatile files, `govTxDecode`) with exactly those rules, and deletes, adds or rewrites stored votes so
+they equal the result. It runs once per store from the same hook as the credential migration (inside
+the first Conway block a restarted node applies, before the block's own transactions; the block is
+not on the walked chain yet): SQLite marker `gov_votes_repaired_v1`, LMDB `gov_state.credSchema` = 2.
+`scripts/gov-votes-repair.ts --node <dir> --dry-run` prints the plan for a node's stores read-only.
+Unit test `govVotesRepair.test.ts` (removal through re-registration, same-transaction unregistration,
+script DReps by type, resignation / retirement / dead actions unchanged, the plan, a SQLite store).
+
+Dry run against node 3036 (2026-09-29, read-only, 6.1 s): 15 live proposals, 80 616 blocks walked
+from slot 121 824 000 to 124 074 915, 1 177 transactions with certificates or votes — one change:
+`REMOVE 5634845753337bc2bd7c3146c65a30940a9f2f80da84be388142fb941dec41e5:0 DRep key
+e8cfbc95aca05eb2591f0bb6a9121354e318194e6210a2c892764608 vote 1 (stored at slot 124039523)`, no
+additions, no other differences. The producer's store (still on the build before bug 156): that
+removal and one more on the same proposal, DRep e11ab000…, which voted in the same transaction and
+deregistered on 2026-09-30 01:15 UTC (tx 17b10ad1…) — after node 3036 had restarted with the fixed
+build at 01:02 UTC, so 3036 dropped that vote itself and only the producer kept it.
+
+## Bug 167 — the node-to-client governance answers were derived from the live state, not from the DRep pulser's frozen snapshot (2026-09-29, fixed)
+
+Ground truth (cardano-ledger-conway 1.22.1 `Governance.hs`, ledger-api `Query.hs`): the pulser is
+set up at the start of every epoch with a copy of the live proposals (votes included), the DRep
+distribution it computes for them, `vsDReps` and the pool distribution, and that copy is frozen
+until the next boundary. `queryProposals` (GetProposals, 31) answers from it (`psProposals`),
+`queryDRepStakeDistr` (26) from `psDRepDistr`, and `queryGovState` (24) embeds the pulser with its
+snapshot. So after DRep e11ab000… voted on 56348457…:0 before the 1436 boundary and deregistered
+after it, the relay keeps the vote in 31 / 24 (and the DRep in 26) for the rest of epoch 1436 while
+its live `cgsProposals` no longer hold it — and after e8cfbc95…'s vote was removed before the
+boundary (bug 166) it is in neither. Ours rebuilt the pulser part from the live proposals (votes
+filtered by slot) and today's DReps, so 24, 26 and 31 differed from the relay's for the epoch.
+
+RATIFY itself was right: `ratifyForNext` runs at the boundary, and `gatherRatifyInput`
+(ratifyInputs.ts) takes the live proposals and their votes as they stand at that moment (after the
+boundary's removals, before any block of the new epoch), the DRep distribution `takeDRepStakeSnapshot`
+computes at the boundary (`epoch_drep_stake`), the DRep expiries stored then, the mark pool snapshot
+plus proposal deposits, and the committee state — exactly `finishDRepPulser`'s inputs; only the
+proposals-with-votes and DRep states were not kept for the queries (790 preview epochs verified against
+Koios, bug 150).
+
+Fix: `govPulser.ts`. At every boundary `ratifyForNext` stores the round's proposals with their full
+CC / DRep / SPO vote maps, the DRep distribution (zero entries included, as `computeDRepDistr` lists
+every DRep someone delegates to), the DRep states (raw expiry, deposit, delegators) and the pool
+distribution as the epoch's frozen snapshot (`gov_pulser`, four parts per epoch, DRep states binary;
+SQLite `gov_pulser_snapshot`; pruned with the retention window). Queries 24 (pulser part), 26, 30
+and 31 answer from it (`queries.ts` `pulserOf`; DRep anchors from the gov index as of the boundary
+block), falling back to the former derivation for epochs without one. A restarted node whose
+boundary ran before this build backfills the current epoch once (`backfillPulserSnapshotOnce`, the
+migration hook): proposals and votes from the chain up to the epoch's first slot (bug 166's rules),
+the DRep distribution from the boundary's `epoch_drep_stake`, and the DRep states, delegations and
+pool delegations from the ledger store's view at the last block before the epoch — exact while that
+block is within the volatile window (k blocks, ≈ 2.4 h on preview), else from today's state
+("backfill-approx", the epoch's registrations and re-delegations leak in). `scripts/gov-pulser-backfill.ts
+--dry-run` prints the reconstruction for a node read-only; `scripts/lsq-host.ts` with
+`GEROLAMO_LSQ_PULSER_BACKFILL=1` serves it in memory for a node that has not restarted yet. Tests
+`govPulser.test.ts` (store round trip, boundary snapshot contents, backfill from a pinned view).
+
+Dry run against 3036 (2026-09-30 01:50 UTC, read-only): `epoch 1436 (backfill-exact; boundary block
+124070374 85d249cd9135c38c…): 15 proposal(s), 3057 DRep distribution entr(y|ies), 9164 DRep state(s),
+681 pool(s)`; the one difference from the live proposals: `563484575333… drep e11ab0000138456d2f71e12
+7992503df016c33b5728903956bae0d6b vote 1: in the epoch's snapshot, not in the live proposals`.
+`scripts/n2c-compare.ts` through `scripts/lsq-host.ts` on 3036's stores against the relay, both at
+block 124075095:06f9f738…: `[24] GetGovState` 1 421 441 B, `[26] GetDRepStakeDistr(all)` 113 900 B,
+`[26] (some)`, `[31] GetProposals(all)` 4 767 B, `[31] (some)`, `[32] GetRatifyState` — 6 of 6
+byte-identical (before the fix: 24, 26(all) and 31(all) differed by exactly e11ab000…'s vote and
+distribution entry).
+
+Also checked: the pre-repair votes a compare saw for ~30 s after bug 166's repair ran are not a
+stale read view. The repair is written inside the block that runs it (the LMDB diff of that block,
+so a rollback undoes it), and a LocalStateQuery client that acquired the block *before* it — the
+tip at that moment, since a block commits after its apply — correctly sees the state without the
+repair until it re-acquires; the relay at the same block never had the vote. Views are cached per
+acquired block and rebuilt when the anchor moves; no invalidation is missing.
+
+## Bug 168 — rules workers pinned to preprod's clock: a valid preview block rejected by phase 2 (2026-09-30 01:19 UTC, node 3036, fixed)
+
+Block 36613e98… (slot 124075124, one V2 transaction, on the chain) failed `plutus phase 2 ValidationTagMismatch: is_valid = true but redeemer 0:0 (V2) budget exceeded [cpu 855634542/585654985, mem 491745/1874286]` and halted the sync. Offline reproduction (`src/consensus/__fixtures__/plutus-preview-124075124-0.json`: the raw block, its seven inputs from Koios `utxo_info`, epoch-1436 parameters): with preview's slot→POSIX clock the transaction passes spending exactly the declared units (585 654 985 / 1 874 286); with preprod's clock it reproduces the live numbers to the unit. The script derives a step count from the validity range (`interestMultiplierFromRate called with timeSteps = 2` vs `−4619` in its trace): 9.2 Ms into the past it loops until the budget is gone — the bug 143/144 class.
+
+Cause: `src/config/preview/config.json` (and preprod's) say `"network": "testnet"`; the blockRules job alone carried `config.network = this.config.network` while every other job carries `getEpochNetwork()`; the worker pins its geometry with `setEpochNetwork(job.config.network)`, and `normalizeEpochNetwork` maps any name it does not know to **preprod**. Every rules worker on a preview node therefore ran with preprod's clock; the shadow evaluator had the same defect (the "exceeded its declared budget" shadow warnings of 2026-09-26/28 on this node are the same class), and it only surfaced as a halt once phase 2 became enforcing.
+
+Fix: the rules job carries `getEpochNetwork()` (ConsensusOrchestratooor); workers accept only a network the geometry table knows (`pinJobNetwork` in validationJob.ts, warns once and keeps the current geometry otherwise) — both header and rules jobs; `slotToPosixMs` (rules/phase2.ts) likewise ignores an unknown name instead of normalising it to preprod. Tests (`src/consensus/plutus/phase2.test.ts`): the block passes with preview's clock at the exact units, preprod's clock reproduces the rejection, `"testnet"` keeps the active clock, and a rules job naming `"testnet"` does not re-pin the worker.
+
+## Bug 237 — the producer forged an Alonzo-tagged block in Conway: hard-fork history "ready" with only the config's eras (2026-09-30 03:32 UTC, producer, fixed in integ)
+
+The preview producer's leader block at 03:32:04 UTC failed its own `adoptLocalBlock` ("header does
+not parse: Invalid CBOR format for AlonzoHeaderBody", 0 tx): `startBlockProducer` took the era from
+the new ledger-driven hard-fork history (bug 233), which on both Mithril-bootstrapped nodes knew only
+Byron..Alonzo (the `Test*HardForkAtEpoch 0` eras of preview's config) and yet answered as complete.
+Root cause, in order: (1) `attachBlockStore` resolved the history against `getChainTipFromHeader()`
+— but it runs before `setNodeBlockStore`, so the global getter read the SQLite `blocks` table, which
+is empty in `blockStoreMode: primary`, and returned null; (2) `resolveEraStarts` treated a missing
+tip as "nothing to reach" and set `ready = true` without running the block-store search or the
+built-in fallback (neither log line exists in either node's log); (3) `installHardForkHistory` had
+already persisted the five config eras to `hfc-eras.json` at startup, so every restart reloaded the
+same incomplete history. `scripts/hfc-compare.ts` passed because it passes the relay's era as the
+tip, and the LSQ interpreter fell back to the built-in table when `currentEra()` did not match.
+Fixes: the tip for the resolution comes from the attached store itself (`blockReads.getChainTipFromHeader(store)`);
+the history is ready only through `markReady(tipEra)` (known eras reach the tip block's era tag) and is
+never ready without a tip; the tip block's era tag is recorded as a floor (`noteTipEra`) and
+`eraOfSlot` never answers below it at or after the tip; `hfc-eras.json` is written only once ready
+and carries `complete: true` — the files both nodes hold (five eras, no flag) are ignored on load;
+the block-store search reports eras already in progress at the store's first block as unknown
+instead of dating them from that block; producer and tx-submission era come from `eraIndexAt`
+(history if ready, tip era tag, built-in table — the highest wins, capped at Conway). With their
+full chunk stores both nodes will resolve Byron@0 Shelley@0 Allegra@0 Mary@0 Alonzo@0 (config),
+Babbage@3 and Conway@646 (block store, first block of the era), tip era Conway → block era tag 7,
+tx-submission era 6 — as before the regression. Tests in `hfc.test.ts` (Conway-only store, the
+live nodes' incomplete file, a custom network without fallback, the forging era).
+
+## Bug 245 — after the 2026-09-30 reboot the producer halted on every restart: a promoted block's diff file survived the crash and the recovery picked a tip whose chain was broken below it (2026-09-30 17:04 UTC, producer, fixed in integ)
+
+The laptop rebooted at 17:04:44 UTC with both preview nodes running; 3036 (lmdb, SQL writes off)
+came back, the producer (lmdb, SQL writes still on) halted at 17:06:25 and again at 17:12:02 after
+the watchdog restart ("the selected tip … does not reach the anchor through the 436 / 466 volatile
+diff(s)"). Its log stops at 16:52:34 and its tip stopped at slot 124 131 151 (= 16:52:31), so the
+machine was wedged for 12 minutes before the reset; whatever was still in the page cache then never
+reached the disk.
+
+Found in a copy of the halted store (483 diff files, anchor `2f7cc00d…` @ 124 119 870): every file
+decodes completely (no torn or partial diff), every tip in the log walks down through all its
+diffs — and the oldest diff is the **anchor block's own** (`2f7cc00d….diff`, written 13:44:30 UTC
+when the block was applied), whose parent `13c11caf…` was promoted long ago and has no diff. All 44
+of its writes are already in LMDB (18 hold the after-image, 26 deleted keys are absent, none holds
+the before-image): the last promotion before the wedge committed to LMDB (`mdb_txn_commit` fsyncs)
+but the `rmSync` of the promoted block's diff — a directory update that only the journal carries —
+was lost. `chainReachesAnchor` walked through the anchor's diff to the missing parent and said
+false; `chain()` also kept that diff in the read overlay, where its 6 u64 adds (stake balances,
+fee pot, blocks made) would have been counted a second time on top of LMDB.
+
+Why the recovery did not help: the bug-129 fallback took the newest block of the block store's
+chain that the ledger store *had a diff for* (`knows`), which was the tip itself (c9775388 @
+124 131 151, then 8ff35711 @ 124 131 924) — "moved back" to the same slot — and the first range's
+`ledgerAfterRange` re-ran the real check and halted. A second, smaller hole: the persisted
+selected tip is rewritten in place (`Bun.write`), so an empty file after the crash dropped the
+"persisted tip" candidate silently and the startup tip came from the SQLite journal (harmless here
+because SQL writes were still on; on 3036 that source is frozen). Meanwhile each short run let the
+block store promote (immutable tip 124 119 870 → 124 120 601) while the ledger anchor stayed.
+
+Fixes (`src/ledger/LedgerDiff.ts`, `LedgerStore.ts`, `nodeLedgerStore.ts`, `src/network/peerManager.ts`,
+`src/storage/blockReads.ts`): diff files are `LDF2` — body + `u32 length | u32 crc32` trailer — and
+`decodeDiff` is strict (bounds-checked, trailer verified, no bytes past the body; `LDF1` files
+from before still load when fully consumed), so a file cut short or zero-filled by a crash is
+absent; `saveDiff` writes temp → fsync → rename (`GEROLAMO_LEDGER_DIFF_FSYNC=0` skips the fsync)
+and a leftover `.tmp` is swept at open; a diff of a block at or below the anchor is ignored and
+removed at open (`staleDiffs`, logged), and `chain()` never walks through the anchor; the startup
+fallback is `LedgerStore.recoveryTip`: the newest block of the block store's chain (volatile chain
+plus its immutable tip as the last candidate) whose diffs reach the anchor, with `chainGap`
+naming the missing link in the warning; the persisted tip is written temp + rename. Tests in
+`LedgerStore.test.ts`: trailer/legacy decoding, a kill between the block store's commit and the
+diff write, a truncated diff and a stray `.tmp`, a persisted tip two blocks past the diffs (and a
+gap below → the anchor), and the incident itself (promoted diffs re-appearing: dropped, no double
+counting, the next promotion clean). Live repair of the producer: the store was being rebuilt from
+SQLite; for a node without SQL writes the fix alone recovers it (the stale anchor diff is removed at
+open and the chain reaches the anchor).
+
+## Bug 246 — a dual-mode rebuild from SQLite did not reproduce the LMDB governance state (2026-09-30, fixed)
+
+After the 17:04 UTC reboot the producer ran in dual mode and `rebuildFromSqlite` rebuilt its LMDB
+store from its SQLite ledger; the dual verifier saw 0 differences (it compares LMDB with the SQLite
+it was built from) while `n2c-compare` against the relay at 23:41 UTC found 55 of 61 identical.
+`scripts/gov-store-compare.ts --node …mithril` (read-only: the SQLite governance tables copied to a
+scratch file, the seed run on the copy, the result compared with the node's LMDB) names the three:
+
+1. **GetDRepState (25), expiries +11.** `gov_dreps.expiry_epoch` is NULL on 8 980 of the producer's
+   9 165 rows (rows from before bug 102, epoch ≤ 1414); the seed copied the NULL and every reader
+   derived `last_active + drep_activity` with today's 31, where the ledger stored `last_active +
+   drep_activity in force then` (20 before preview epoch 964: DRep 01186e32…, last active 646, relay
+   666, ours 677). Node 3036's store came from a NewEpochState and holds the ledger's values. Only
+   DReps last active before 964 differ, all expired under both rules: RATIFY's active set is the same
+   (a NULL row last active at e ≥ 964 derives e + 31 = the ledger's value, preview having had 0
+   dormant epochs at every checked boundary). Fix: `govStoreSync.ts` `legacyDRepExpiry` (the
+   parameter history in `epoch_params`), applied by the seed to NULL rows and, once, to both stores
+   by `migrateDRepExpiryOnce` (`gov_drep_expiry_v1`, `credSchema` 3).
+2. **GetCommitteeMembersState (27), 8 rows vs 3.** The producer's `gov_committee_auth` still holds the
+   8 rows bug 160's boundary pruning removes (its 1436 boundary ran on the old build; 3036's store
+   was imported with the chain's 3); the 5 extra are authorisations of cold keys that are not
+   members, reported as Unrecognized. No effect on RATIFY (the tally counts members only); the 1437
+   boundary prunes them in both stores.
+3. **GetGovState / GetDRepStakeDistr / GetProposals (24, 26, 31).** The epoch-1436 pulser snapshot was
+   in the SQLite mirror (`gov_pulser_snapshot`, written by the producer's earlier restart) but the
+   seed never read it back, and in dual mode neither the boundary write nor the backfill ran (they
+   used the lmdb-only read accessors), so the rebuilt store answered from the live state — without
+   e11ab000…'s frozen vote. No effect on RATIFY (the round is tallied from live data at the boundary).
+   Fix: the seed imports the mirror (and `gov_drep_boot_delegs`), the snapshot writers read the
+   store through the block's writers in dual mode too, and `credSchema` comes from
+   `schema_migrations` so a rebuilt store does not re-run the migrations.
+
+Test `govStoreSync.test.ts`: a store written in dual mode (genesis seeding, committee, DReps, a
+legacy NULL-expiry row, delegations, a proposal with votes, a pulser snapshot, the migration) and a
+store seeded from its SQLite mirror hold byte-identical governance databases.
+
+Producer, read-only, 2026-09-30 23:55 UTC (`gov-store-compare`): gov_dreps 9 165 rows, 8 980 changed
+(the NULL expiries); gov_pulser 0 in LMDB, 4 keys SQLite-derived (epoch 1436); gov_constitution_anchor
+1 only in LMDB (the raw backfill, not mirrored — rebuilt from the chain after any rebuild);
+delegations, committee, auths, state, proposals, votes, enacted, DRep stake, parameters and nonces
+equal. RATIFY at the 1437 boundary is unaffected by all three.
+
+## Bug 247 — the boundary-written pulser snapshot left the zero-stake pools out of its pool distribution (2026-10-01, fixed)
+
+Node 3036 crossed into epoch 1437 on bug 167's code and the first snapshot `snapshotAtBoundary`
+wrote (rather than the backfill) differed from the relay in `GetSPOStakeDistr(all)` (30; ours 24 906 B,
+relay 26 022 B) and in the pulser part of `GetGovState` (24): the relay lists 36 pools more. They are
+exactly the stake snapshot's pools whose delegators hold nothing (`snap_pool_zero`, bug 188's
+`snapshotZeroPools(1437)`: 36 pools, all registered, none retiring; e.g. 045e7dd9…, 06e8504b…,
+1d6e46e4…). The ledger's `calculatePoolDistr'` (cardano-ledger-core 1.22.1 `State/SnapShots.hs`) lists every
+pool of the stake-pool snapshot with `spssNumDelegators > 0`, its stake `spssStake` — 0 when the
+delegators hold nothing; `setFreshDRepPulsingState` copies that `ssStakeMarkPoolDistr` into the
+pulser (`dpStakePoolDistr`, later `psPoolDistr`) and `addToPoolDistr` adds proposal deposits to pools
+already in it. The boundary path took `gatherRatifyInput`'s distribution — the snapshot's non-zero
+sums plus deposits — while the backfill (`poolDistrOf`) added the zero-stake pools, which is why
+epoch 1436's backfilled snapshot was byte-identical. 36 entries × 31 bytes = the 1 116-byte gap.
+No effect on RATIFY (a zero-stake pool adds nothing to the SPO total), except the edge case of a
+proposal deposit whose return account delegates to such a pool: the ledger counts it, the round
+did not — now included (`gatherRatifyInput` lists the zero-stake pools before the deposits).
+
+Fix: `completePulserPoolDistr` (govPulser.ts) adds the snapshot's zero-stake pools (with any live
+deposit landing on them) and stamps `version` 2; `snapshotAtBoundary` and the backfill write
+version 2; the query layer completes a version-1 snapshot on read, and `fixPulserPoolDistrOnce`
+(the migration hook) rewrites every stored version-1 snapshot at the next restart — on 3036 and on
+the producer, which wrote its own 1437 snapshot in dual mode. Test in `govPulser.test.ts` (a
+zero-stake pool in the boundary snapshot; completion of a legacy snapshot, deposit included,
+idempotent). Verified with `scripts/lsq-host.ts` on 3036's stores read-only against the relay, both at
+block 124157487 (epoch 1437): `[24] GetGovState` 1 421 725 B, `[26]`, `[30] GetSPOStakeDistr(all)`
+26 022 B, `[30] (pools)`, `[31]`, `[32]` — 6 of 6 byte-identical.
+
+## Bug 308 — verification against the relay during the soak was manual (2026-10-01, fixed: continuous verification in the watchdog)
+
+Bugs 246 and 247 were found by running `scripts/n2c-compare.ts` by hand: the dual-mode rebuild's
+own check compares LMDB with the SQLite it was built from, so a store that disagrees with the
+network passes it, and a boundary-written snapshot is only wrong after a boundary. The watchdog
+watched liveness, halts, lag, KES, leader-slot outcomes and the public port, nothing about state.
+Now (`scripts/lib/parityProbe.ts`, `scripts/parity-probe.ts`, wired into `scripts/watchdog.ts`,
+documented in `scripts/watchdog/README.md`), for every node with an N2C socket:
+
+1. **parity** — the n2c-compare query set (moved to `scripts/lib/n2cCompare.ts`, shared with the
+   CLI) on the node and on the relay at one acquired block, every 30 min and, after each epoch
+   boundary, from +3 min until a run has acquired a block of the new epoch; GetUTxOWhole and the
+   two debug dumps skipped by default. A query that differs in two consecutive runs alerts, naming
+   it with sizes and the first differing byte; a clean run sends "OK again". Not run on a producer
+   within 180 s of a leader slot, nor on a node more than 10 min behind.
+2. **schedule** — `cardano-cli conway query leadership-schedule --current` on the relay socket (the
+   producer config's `vrfSkeyFile` passed as a path; only slot numbers are kept) against
+   `/metrics producer.leaderSlots`, once per epoch and after each producer restart; every tick then
+   compares the producer's live schedule with that answer.
+3. **forge** — each forged block whose outcome the producer has settled against the relay's chain
+   (N2C ChainSync `FindIntersect` at our block, once the relay is 15 min past the slot, re-checked
+   for 36 h): `adopted`/`confirmed` must be on it, `ghosted`/`stolen` must not.
+
+The tick only reads `parity-history.json` (atomic replace) and starts the probe detached under a lock
+file when a check is due: a tick stays at ~80 ms. An unreadable history keeps the open parity
+problems instead of clearing them. Also fixed in the oracle tooling: a differing answer waited 3 s
+after its last attempt (every DIFF cost 3 s in n2c-compare), and `scripts/lib/lsq.ts` `close()` sent
+MsgDone while still acquired — valid only in StIdle, so the relay logged a `DecoderFailure …
+(SingAcquired) unexpected key (7, 1)` for every oracle connection (150 of the 856 DecoderFailures in its log); it now sends
+MsgRelease first (0 such lines from the probe since).
+
+Verified 2026-10-01 01:45 UTC (scratch config, read-only N2C and cardano-cli against the running
+nodes): producer 61 of 61 and node 3036 61 of 61 byte-identical at block 124163052 (one block on
+both sides, ~4 s each); epoch 1437 schedule cardano-cli [124191912, 124223229, 124232541] = producer;
+forged slot 124117188 `confirmed` and on the relay's chain; a watchdog tick with an empty history
+started the probe detached (18.5 s, lock released), the next tick started nothing; a crafted
+history with `[30] GetSPOStakeDistr(all)` differing in two runs raised the alert and a clean one the
+"OK again". Tests `scripts/lib/parityProbe.test.ts` (fake N2C sockets speaking handshake,
+LocalStateQuery and ChainSync; a fake cardano-cli): 15 cases.
+## Bugs 272–277 — the balance-dependent ledger rules and the σ / counter header rules made strict (2026-10-01)
+
+Six checks were report-only because the state they read was not proven exact: withdrawal amounts
+(`WITHDRAWALS_STRICT`), `current_treasury_value` (`TREASURY_VALUE_STRICT`),
+`StakeKeyHasNonZeroAccountBalanceDELEG`, the σ leader threshold, `CounterOverIncrementedOCERT` and
+the voting / proposing redeemers (`GOV_REDEEMERS_STRICT`). Both preview nodes now run an LMDB store
+imported from a Mithril NewEpochState. Audit of the validation path in lmdb mode: every reward
+balance, registration, DRep delegation, pot and stake-snapshot read goes through the store —
+`rewardBalancesFor`, `stakeRegisteredFor`, `drepDelegatedFor`, `localTreasury`, `registeredPools`
+(db/rulesQueries.ts), `buildGovLedgerView` and `readRewardPots` (governance), `poolStakeForEpoch` and
+`opcertCounterState` (headers); workers get the maps from the main thread; the SQLite branches run only
+in sqlite / dual mode. The mempool's own lookups (mempool/ledgerViewDb.ts) are outside this change.
+
+**272 — withdrawal amounts.** (a) Within a block every transaction was compared with the balance
+before the block: a second withdrawal from an account an earlier transaction of the block had emptied
+was reported against the old balance (and a second full withdrawal passed). The block now keeps a
+running copy of the balances and empties each valid transaction's withdrawn accounts (`drainAccounts`).
+(b) lmdb mode is not enough: a store seeded from SQLite carries SQLite's balances. The producer's store,
+rebuilt from SQLite in dual mode on 2026-09-30, reported `withdrawal 19105183 ≠ local reward balance
+19105182` (slot 124 157 182) and `638220378 ≠ 638220367` (slot 124 161 011) before it was replaced with a
+copy of 3036's at 01:21 UTC; the same blocks pass on 3036's store. The store now records its provenance
+(meta `ledger_source`: "snapshot" from importLmdb.ts, "sqlite" from the SQLite seed); a store without the
+key counts as an import when the pots' initialized epoch equals the governance seed epoch (both preview
+stores: 1420; the producer's old store: 0 and 647). `ledgerStateExact()` (nodeLedgerStore.ts) is true
+only in lmdb mode on a snapshot import; the rule fails the block then (`ConwayIncompleteWithdrawals`,
+before PV 11 `WithdrawalsNotInRewardsCERTS` / `…DELEGS`) and otherwise reports with the reason
+(`(report-only: ledger store mode sqlite)`, `… seeded from SQLite`, `… not imported from a snapshot`).
+
+**273 — `current_treasury_value`.** Strict on an exact store, in txRules.ts and in the governance
+LEDGER copy (govRules.ts), which had been strict in every mode; both report with the reason otherwise.
+
+**274 — `StakeKeyHasNonZeroAccountBalanceDELEG`.** Strict when the governance view's balances are
+exact (`CertLedgerView.balancesExact`).
+
+**275 — σ.** The value is the ledger's `individualPoolStake` = `spssStake / ssTotalActiveStake` of
+the epoch's distribution (`nesPd`: the snapshot taken at the start of the previous epoch;
+cardano-ledger-core 1.22.1 `calculatePoolDistr'`), compared with the Praos threshold by the ledger's
+Taylor comparison (leaderMath.ts). Open item 3's reports came from SQLite snapshots a few ppm off, not
+from the comparison; strict on an exact store, reported with the reason otherwise.
+
+**276 — `CounterOverIncrementedOCERT`.** Headers were judged against the applied tip's counters, which
+lag a header checked ahead of apply. `LeaderChecker` now records every validated header (parent,
+issuer, counter; VRF-deferred headers too: their opcert is verified) and evaluates the rule against the
+counter state as of the header's parent on its own chain (`counterAsOf`): walking back from the parent,
+the first block the store holds answers from the store's state after it (`LedgerStore.viewAt` /
+`knowsHex`: the anchor or any volatile diff, whatever the selected tip), a validated header of the same
+pool on the way answers with its counter. `CounterTooSmallOCERT` reads the same state. The
+over-increment fails the header when that state is found and the store is exact; otherwise it is
+reported (tip counters, the old slot guard). Stale counters are the second reason for the exactness
+gate: the producer's SQLite-seeded store held 520 for pool a8e65680… (set at slot 123 968 361) and
+reported 525 at slots 124 133 758 / 124 134 759 (2026-09-30 17:57 UTC) as over-incremented, while the
+chain stepped through every counter (replay below).
+
+**277 — voting / proposing redeemers.** Phase 2 evaluates both purposes (plutus/context.ts: voter /
+proposal by redeemer index, the V3 Voting / Proposing script purposes); the UTXOW match (alonzoRules.ts)
+orders voters as the ledger's derived `Ord Voter` (committee < DRep < pool, script before key, then
+the hash bytes). `GOV_REDEEMERS_STRICT = true`.
+
+Verification (all read-only):
+- `scripts/reward-accounts-compare.ts`: every registered stake credential of the store (111 805), query
+  10 in 56 batches, byte-identical with the preview relay on both nodes at block 124 163 389;
+  `scripts/n2c-compare.ts --only …`: GetAccountState, GetFilteredDelegationsAndRewardAccounts,
+  GetStakeSnapshots (snapshots 1435–1437), GetPoolDistr / GetPoolDistr2 (epoch 1437), DebugChainDepState
+  (the opcert counters) — 14 of 14 (3036) and 11 of 11 (producer) byte-identical at block 124 163 340.
+- `scripts/ledger-rules-shadow.ts` (body rules as the validator gathers them, governance rules, view
+  pinned to each block's parent, the epoch's first block judged after the boundary): 3036 432 blocks
+  (slots 124 151 954–124 163 597), 414 transactions, 128 withdrawals from 13 accounts, 0 failures;
+  producer 432 blocks, 122 withdrawals, 0 failures; the producer's pre-transplant store: not exact, its
+  two drifted withdrawals reported, not failed. Neither window held a treasury claim or a deregistration.
+- `scripts/balance-history-check.ts` over 3036's epochs 1421–1437 (balances rebuilt from the chain and
+  the payouts the store recorded): 49 988 blocks, 46 188 valid transactions, 40 328 withdrawals —
+  40 247 checked (81 first withdrawals after the import have no rebuilt balance): 40 246 equal, 1 equal
+  to the rebuilt balance plus a 500 ADA pool-deposit refund, 0 mismatches; 40 deregistrations, the 32
+  of tracked accounts at 0. Treasury claims: none since the import; all 17 since the Conway hard fork
+  (epochs 646–1437, 2 120 187 valid transactions) equal the treasury recorded for their epoch.
+- Node 3036's own log since 2026-09-14 (59 process starts; a process logs its first 20 body-rule and
+  header-rule reports, and none exceeded 15): no withdrawal, treasury, deregistration-balance, σ or
+  counter report.
+- `scripts/header-rules-replay.ts` over the whole preview chain (4 713 292 headers, 155 s): the counter
+  rule along the chain 0 failures; the node's mechanism with the store 500 headers behind (everything
+  in between only validated) gives the chain's counter for 4 713 285 headers, 0 differences, 7 with no
+  state (the first after Byron). σ with exact snapshots (3036's store, epochs 1419–1437; a store imported
+  at slot 122 316 253, epochs 1414–1416): 65 550 headers, 0 failures; the producer's SQLite-derived
+  snapshots equal them pool for pool (epochs 1414–1437) and clear all 89 528 headers of 1408–1437.
+- `scripts/gov-redeemers-replay.ts`: every Conway transaction with a script voter, a guarded proposal or
+  a tag 4/5 redeemer — preview 500 (103 script votes, 33 native; 70 vote and 495 propose redeemers, 98
+  at a non-zero index), preprod (cardano-node db to slot 133.5 M) 500 (464 script votes, 30 native; 431
+  vote redeemers, 3 in multi-voter transactions at a non-zero index; 93 propose, 54 at a non-zero
+  index): 0 match messages; preview phase 2 equal to is_valid on all 467 with redeemers.
+
+Not covered: the zero-balance deregistration and the treasury claim were not met inside the volatile
+windows (only through the rebuilt balances and the recorded pots); a node synced from genesis in lmdb
+mode (no snapshot import) keeps the five balance and header checks report-only until such a run is
+proven exact. Tests: `withdrawalBalances.test.ts`, `ledgerSource.test.ts`, `leaderCheck.test.ts`
+(σ strictness, counters as of the parent across validated headers and forks), `govRules.test.ts`,
+`alonzoRules.test.ts` (voter order).
+## Bugs 260–266 — the LocalStateQuery answers that still closed the connection (2026-10-01, fixed)
+
+Before this round a node answered 61 of the 61 compared queries byte-identically with the cardano-node
+11.0.1 relay, but closed the connection on GetNonMyopicMemberRewards [2] for a non-empty set,
+DebugEpochState [8], DebugNewEpochState [12], GetRewardInfoPools [18], the top-level
+DebugLedgerConfig, and GetRatifyState / GetGovState / GetFuturePParams between a boundary that
+ratifies an action and the one that enacts it. The ledger state they need is now kept (bugs 262,
+263) or derived (264, 266). Sources: cardano-ledger tag cardano-ledger-conway-1.22.1.0
+(cardano-ledger-shelley 1.18: PoolRank.hs, Rewards.hs, RewardUpdate.hs, LedgerState/PulsingReward.hs,
+Rules/Rupd.hs, API/Wallet.hs; cardano-ledger-core State/SnapShots.hs; cardano-ledger-conway
+Governance.hs, Rules/Ratify.hs, Rules/Enact.hs) and ouroboros-consensus 3.0.1. Compared with
+`scripts/n2c-compare.ts` (now on `scripts/lib/n2cCompare.ts`; the new queries are its `extra` set,
+`--huge` for the dumps, `--save` + `scripts/cbor-diff.ts` for a structural diff) through
+`scripts/lsq-host.ts` on node 3036's stores read-only, both sides acquiring the same block: 64 of 64
+byte-identical at block 124240736 (epoch 1437; the 61 plus DebugLedgerConfig, [2] for coins and
+credentials, [18]) and again at 124244059 after the 1438 boundary, the dumps identical but for bug
+263's legacy snapshots.
+
+### Bug 260 — DebugEpochState [8] and DebugNewEpochState [12] (served)
+
+`lsq/epochState.ts` rebuilds the ledger's `NewEpochState` / `EpochState` from the acquired view: the
+pots, `CertState` (VState: DReps with anchors, deposits and delegators, committee authorisations,
+dormant epochs; PState: VRF key counts, pools as `StakePoolState` with their delegators, future
+parameters, retirements; DState: accounts with balance, deposit, pool and DRep, genesis delegations),
+`UTxOState` (the UTxO map itself empty as under UTxO-HD, deposits, fees, GovState, instant stake,
+donations), the mark / set / go snapshots, `esNonMyopic`, both `BlocksMade` maps, the reward update
+in progress (bug 264) and the pool distribution. The first build wrote CertState's three parts
+without CertState's own list header: a 23 MB item followed by stray items, which a client waits on
+forever (found because n2c-compare timed out while the answer was ready in 5 s). Fixed before use.
+Preview, epoch 1437, block 124239436 / 124239946: [8] 40 433 444 B vs 40 437 869 B and [12]
+46 201 977 B vs 46 206 402 B; `scripts/cbor-diff.ts` finds one difference only, bug 263's
+`spssNumDelegators` (155 of 728 pools) and `spssSelfDelegatedOwners` (85 pools: owners delegating
+without stake) in the three snapshots, which 3036 took before that was recorded. Everything else —
+pots, PState and VState byte for byte, accounts, instant stake, GovState, fees, the nonmyopic state,
+`nesRu` (Complete), `nesPd`, blocks made — is identical. The same after the 1438 boundary (block
+124244059: [8] 40 434 648 B, [12] 40 500 328 B with `nesRu` SNothing).
+
+### Bug 261 — GetNonMyopicMemberRewards [2] and GetRewardInfoPools [18] (served)
+
+`consensus/nonMyopic.ts` mirrors the ledger's pool ranking in GHC's floating point: `LogWeight` as
+32-bit `Float` (every operation rounded with `Math.fround`), samples in `Double` rounded once,
+`fromRational` reproduced exactly for bigint ratios (`rationalToDouble`, ties to even), the Beta(40, 1)
+prior, `percentile'` at 0.5, `maxPool'`, `calcStakePoolDesirability`, `getTopRankedPools` (stable
+sort) and `calcNonMyopicMemberReward`. `lsq/rewardQueries.ts` answers both over the current stake
+(`currentSnapshot`: instant stake plus rewards of credentials delegated to a registered pool, every
+registered pool) with the epoch's `esNonMyopic` (bug 262). Byte-identical with the relay at block
+124237561: [2] for three coin amounts and four credentials 165 992 B, [18] 52 259 B; again after the
+1438 boundary (block 124244059: 165 996 B, 52 259 B), the relay's 1437 state advanced in memory over
+3036's 1438 boundary records.
+
+### Bug 262 — `esNonMyopic` was not kept (fixed)
+
+The per-pool likelihoods and `rewardPotNM` the ranking needs accumulate over every epoch (each reward
+update: 0.9 × the old likelihood + the new one, normalised, for the pools of the go snapshot; others
+dropped). Now kept per epoch: LMDB `nonmyopic` (u32 epoch → reward pot, pools × 100 f32), written in
+the boundary block's diff and rolled back with it, three earlier epochs kept; SQLite mirror
+`epoch_nonmyopic`. `runEpochRewards` advances it at every boundary (`advanceNonMyopic`: the go
+snapshot's pools, their blocks in the performance epoch, σ over the circulation, the update's R);
+a Mithril import takes it from the snapshot's `NewEpochState`. A store bootstrapped before this has
+none: `scripts/nonmyopic-seed.ts --config … --state <cardano-node ledger state file> [--yes]` (node
+stopped) reads it from a relay's `db/ledger/<slot>/state` and advances it over the store's own
+boundaries; `GEROLAMO_LSQ_NONMYOPIC_SEED=<state file>` does the same in memory for the query layer
+(lsq-host). Until then [2] (non-empty), [8], [12] and [18] stay unanswered with a log line.
+Verified: the relay's epoch-1436 state advanced over 3036's 1437 boundary records equals the relay's
+own 1437 `esNonMyopic` bit for bit (728 pools, reward pot 13 130 493 748 437); unit fixture
+`nonmyopic-preview-1437.json` (every pool's 100 floats and performance estimate).
+
+### Bug 263 — stake snapshots kept no delegator counts or self-delegated owners (fixed, exact three boundaries on)
+
+The ledger's `StakePoolSnapShot` keeps `spssNumDelegators` (every delegator, zero-stake ones too) and
+`spssSelfDelegatedOwners` (the owners delegating to the pool); the store kept only the stake-holding
+credentials. `takeStakeSnapshot` now records both (`snap_pool_meta`, pruned with the snapshot); the
+Mithril import writes the node's own. A snapshot taken before counts its stake-holding delegators
+(the remaining difference in [8], [12] and the pulser's `PoolRewardInfo`). No effect on rewards:
+the owners' stake the pledge check uses is the same.
+
+### Bug 264 — the reward update in progress (`nesRu`) was not modelled (fixed)
+
+`lsq/rewardUpdate.ts`: SNothing until the first block past 4k/f slots into the epoch; then `Pulsing`
+(the `RewardSnapShot` — fees, protocol version, `esNonMyopic`, ΔR1, R, ΔT1, every go pool's new
+likelihood, the leader rewards — and the RSLP pulser: pulse size ⌈|go stake| / 4k⌉, `FreeVars` with
+the registered accounts at the window's first block, the circulation and each block-producing
+pool's `PoolRewardInfo`, the stake not yet visited, the accumulated member rewards and the last
+pulse's events); `Complete` (ΔT1, −ΔR, every reward as a set per credential — leader rewards first —,
+−ΔF, the advanced `NonMyopic`) at the block after the stake is used up or the first past 8k/f. The
+number of pulses and the registered accounts at the window's start come from walking the window's
+blocks (the gov index's certificate walk, recording each credential's first (de)registration and
+undoing it). Verified on preview epoch 1437: `Complete` byte-identical with the relay's ledger-state
+snapshot at slot 124226511 (5 701 016 B) and live inside [12]; `Pulsing` at slot 124225609
+(9 469 118 B: 1 321 blocks into the window, pulse size 47) identical except bug 263's delegator
+counts in 31 `PoolRewardInfo` snapshots. Unit tests in `rewardUpdate.test.ts`.
+
+### Bug 265 — DebugLedgerConfig (top-level [4]) was not served (fixed)
+
+`lsq/ledgerConfig.ts` builds the hard-fork combinator's ledger config from the network's genesis
+files: the eight eras' `EraParams` (epoch size, slot length, safe zone, genesis window), Byron's
+`Genesis.Config` (boot stakeholders, heavy delegation certificates, start time, non-AVVM balances in
+`Ord Address` order, the 14 protocol parameters with the fee policy CBOR-in-CBOR, k, protocol magic,
+AVVM balances, genesis hash, RequiresNetworkMagic; definite lengths, as Byron encodes), and per
+Shelley-based era the CompactGenesis (GetGenesisConfig's bytes), the `Globals`, the translation
+context (Shelley: genesis delegations, parameters, max supply; Alonzo: `AlonzoGenesis` with the V1
+cost model as a definite list under today's parameter names — the genesis still says `blake2b-…` and
+`verifySignature-…`; Conway: `ConwayGenesis`; Dijkstra: cardano-node 11's built-in genesis) and the
+hard-fork trigger (preview: Shelley…Alonzo at epoch 0 from `Test*HardForkAtEpoch`; otherwise at
+protocol versions 2, 3, 4, 5, 7, 9; Conway → Dijkstra never without experimental hard forks).
+Refused before node-to-client v20 (QueryVersion3), as cardano-node's codec does. Byte-identical with
+the preview relay (10 626 B; `ledgerConfig.test.ts` keeps the capture); preprod and mainnet are built
+the same way but were not compared (no relay).
+
+### Bug 266 — ratified, not yet enacted: GetRatifyState, GetGovState, GetFuturePParams, GetProposals, GetCommitteeMembersState (fixed)
+
+Between the boundary whose ratification decided actions (the store's `pending` decision) and the
+next, `lsq/ratifyView.ts` derives the pulser's `RatifyState`: the enact state the ratified actions
+lead to (ENACT in ratification order: ParameterChange applies the update with cost models replaced
+per language, HardForkInitiation the protocol version, TreasuryWithdrawals sums per credential,
+NoConfidence / UpdateCommittee / NewConstitution), the epoch's previous parameters, treasury 0 (as
+RATIFY leaves it), the chain roots, the ratified actions as the pulser's snapshot holds them, the
+expiring ids and `rsDelayed`. GetFuturePParams / `cgsFuturePParams` follow `predictFuturePParams`:
+potential (the enact state's parameters when a ParameterChange or hard fork is ratified) until two
+stability windows before the epoch's end, definite after; GetCommitteeMembersState marks the next
+committee's changes (ToBeRemoved, an added member Unrecognized and ToBeEnacted); GetProposals keeps
+the ratified actions until the enacting boundary. Offline test `govWindow.test.ts` on preview's
+ParameterChange dd4fbc61…:0 (ratified at 1366, enacted at 1367; Koios `proposal_list` and
+`epoch_params` 1367 agree): the future parameters are exactly what preview adopted at 1367; plus a
+ratified UpdateCommittee and TreasuryWithdrawals. Not observable live today (nothing ratified on
+preview); outside the window all five stay byte-identical with the relay.

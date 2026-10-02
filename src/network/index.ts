@@ -1,3 +1,4 @@
+import { installHardForkHistory, type HfcNodeConfig } from "../consensus/hfc/hfcNode";
 import { startExplorerIndexer, stopExplorerIndexer } from "../db/minibf/explorerIndexer";
 import * as path from "node:path/posix";
 
@@ -23,8 +24,12 @@ import { relayChainStoreOverride } from "../storage/nodeBlockStore";
 import { getShelleyGenesisConfig } from "../utils/paths";
 import { connect as netConnect } from "node:net";
 import { GlobalSharedMempool } from "./SharedMempool";
+import { initMempool, stopMempool } from "../mempool";
 import { resolveN2NConfig } from "./n2n/config";
-import { listShareablePeers, setInboundN2NStatusProvider } from "./peerManager";
+import { listShareablePeers, reloadTopology, setInboundN2NStatusProvider } from "./peerManager";
+import { resolvePrometheusConfig, startPrometheusServer, type PrometheusHandle } from "./prometheus";
+import { collectNodeMetrics } from "./nodePrometheus";
+import { getBlockProducer } from "../pool/startBlockProducer";
 import { resolveNodeRole } from "./nodeRole";
 import { ignoredValidationKeys, resolveValidationPolicy } from "../consensus/validationPolicy";
 import { getBuildInfo } from "../utils/buildInfo";
@@ -208,10 +213,35 @@ function installCrashGuards(): void {
     });
 }
 
+/**
+ * SIGHUP, as cardano-node: re-read topology.json (roots, valencies, ledger-peer settings, peer
+ * snapshot) and the block producer's KES key + operational certificate. Installed first thing:
+ * without a handler SIGHUP would terminate the process.
+ */
+function installSighup(): void {
+    let running = false;
+    process.on("SIGHUP", () => {
+        if (running) { logger.warn("SIGHUP: a reload is already running"); return; }
+        running = true;
+        void (async () => {
+            logger.info("SIGHUP: reloading topology and block producer credentials");
+            try { logger.info(`SIGHUP: ${await reloadTopology()}`); }
+            catch (err) { logger.error("SIGHUP: topology reload failed (previous topology stays):", err); }
+            const bp = getBlockProducer();
+            if (bp) {
+                const r = await bp.reloadCredentials();
+                if (r.ok) logger.info(`SIGHUP: block producer now uses opcert counter ${r.counter}, KES period ${r.kesPeriod}`);
+                else logger.error(`SIGHUP: block producer kept its credentials: ${r.reason}`);
+            }
+        })().finally(() => { running = false; });
+    });
+}
+
 export async function start() {
     const network = process.env.NETWORK ?? "preprod";
     setEpochNetwork(network); // slot→epoch math for every later caller
     installCrashGuards();
+    installSighup();
     console.log(
         `Gerolamo Network Node ${getBuildInfo().label} starting on ${network} network...`,
     );
@@ -219,6 +249,7 @@ export async function start() {
     console.log(`Loading config for ${network} network`);
 
     const config = await loadConfig(network);
+    await installHardForkHistory(config as unknown as HfcNodeConfig, network); // era boundaries from the genesis files + ledger (consensus/hfc)
 
     if (config.tuiEnabled) {
         setupKeyboard();
@@ -295,6 +326,12 @@ export async function start() {
             maxRangeBlocks: config.n2n.maxRangeBlocks,
         });
     }
+    // Validating mempool before any transaction can arrive (N2C, N2N, HTTP); `mempool.validate:
+    // false` in the config keeps the old parse-only store.
+    if ((config as any).mempool?.validate !== false) {
+        try { await initMempool(config); }
+        catch (err) { logger.error("Validating mempool failed to start (transactions are stored unvalidated):", err); }
+    }
     logger.info("Starting peer manager...");
 
     await initPeerManager(config);
@@ -303,6 +340,19 @@ export async function start() {
 
     await startPeerBlockServer(config, createHttpPeerManager());
     logger.info("Peer block server started.");
+
+    // Prometheus text exposition with cardano-node metric names (hasPrometheus-style, own port).
+    let promHandle: PrometheusHandle | undefined;
+    const promCfg = resolvePrometheusConfig(config);
+    if (promCfg) {
+        try {
+            const startedAtMs = Date.now() - Math.round(process.uptime() * 1000);
+            const k = Number((await getShelleyGenesisConfig(config) as { securityParam?: number } | null)?.securityParam) || 2160;
+            promHandle = startPrometheusServer(promCfg, () => collectNodeMetrics({ config, startedAtMs, securityParam: k }));
+        } catch (err) {
+            logger.error(`Prometheus endpoint ${promCfg.host}:${promCfg.port} failed to start:`, err);
+        }
+    }
 
     let n2nHandle: N2NServerHandle | undefined;
     if (config.n2n) {
@@ -410,12 +460,16 @@ export async function start() {
             process.exit(1);
         }, 30_000);
         try {
+            promHandle?.stop();
+        } catch { /* ignore */ }
+        try {
             await n2nHandle?.stop();
         } catch (err) {
             logger.error("N2N shutdown error:", err);
         }
         try {
             await stopPeerManager(); // stops the applier (finishes its transaction), then peers
+            stopMempool();
         } catch (err) {
             logger.error("PeerManager shutdown error:", err);
         }

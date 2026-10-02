@@ -16,6 +16,7 @@ export class OpfsSink implements FileSink {
     }
     async write(name: string, bytes: Uint8Array): Promise<void> {
         const fh = await (await this.root()).getFileHandle(name, { create: true });
+        if (typeof (fh as any).createWritable !== "function") return writeInWorker(this.path, name, bytes);
         const w = await fh.createWritable();
         await w.write(bytes as unknown as BufferSource);
         await w.close();
@@ -35,4 +36,26 @@ export class OpfsSink implements FileSink {
         for (const n of await this.list()) { const b = await this.read(n); if (b) { bytes += b.length; files++; } }
         return { bytes, files };
     }
+}
+
+/** One shared worker for every sink without `createWritable` (see opfsWorker.ts). */
+let worker: Worker | null = null;
+let nextId = 0;
+const waiting = new Map<number, { resolve: () => void; reject: (e: Error) => void }>();
+function writeInWorker(path: string, name: string, bytes: Uint8Array): Promise<void> {
+    if (!worker) {
+        worker = new Worker(new URL("./opfsWorker.ts", import.meta.url), { type: "module" });
+        worker.onmessage = (ev: MessageEvent<{ id: number; ok: boolean; error?: string }>) => {
+            const w = waiting.get(ev.data.id);
+            if (!w) return;
+            waiting.delete(ev.data.id);
+            if (ev.data.ok) w.resolve(); else w.reject(new Error(`OPFS write ${ev.data.error ?? "failed"}`));
+        };
+    }
+    const id = nextId++;
+    return new Promise((resolve, reject) => {
+        waiting.set(id, { resolve, reject });
+        const copy = bytes.slice(); // transfer a private copy; the caller keeps its buffer
+        worker!.postMessage({ id, path, name, bytes: copy }, [copy.buffer]);
+    });
 }

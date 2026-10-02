@@ -12,6 +12,7 @@
 import { sql } from "../sql";
 import type { SqlClient } from "../db";
 import { ledgerStake, ledgerStakeReads, ledgerUtxoReads, sqlLedgerWrites } from "../ledger/nodeLedgerStore";
+import { decodeNonMyopic, encodeNonMyopic, type NonMyopicState } from "../consensus/nonMyopic";
 
 export async function ensureLeaderStateTables(): Promise<void> {
     await sql`CREATE TABLE IF NOT EXISTS pool_params (
@@ -790,6 +791,36 @@ export async function poolParamsAt(takenAt: number): Promise<Map<string, { vrf: 
         out.set(String(r[0]), { vrf: String(r[1]), params });
     }
     return out;
+}
+
+/**
+ * The pools of the snapshot taken at `takenAt` — every pool registered then, with or without stake
+ * (the reward update's `go` pools) — or null when the snapshot's pool parameters were not kept.
+ */
+export async function snapshotPoolIds(takenAt: number): Promise<string[] | null> {
+    const lr = ledgerStakeReads();
+    if (lr) { const m = lr.snapshotPoolParams(takenAt); return m.size ? [...m.keys()] : null; }
+    try {
+        const rows = (await sql`SELECT pool_id FROM epoch_pool_params WHERE taken_at = ${takenAt}`.values()) as unknown[][];
+        return rows.length ? rows.map((r) => String(r[0])) : null;
+    } catch { return null; }
+}
+
+/** `esNonMyopic` written at the boundary into `epoch` (consensus/nonMyopic.ts); three earlier epochs are kept. */
+export async function recordNonMyopic(db: SqlClient, epoch: number, nm: { rewardPot: bigint; likelihoods: ReadonlyMap<string, Float32Array> }): Promise<void> {
+    ledgerStake()?.putNonMyopic(epoch, nm);
+    if (!sqlLedgerWrites()) return;
+    await db`CREATE TABLE IF NOT EXISTS epoch_nonmyopic (epoch INTEGER PRIMARY KEY, reward_pot TEXT NOT NULL, likelihoods TEXT NOT NULL)`;
+    await db`INSERT OR REPLACE INTO epoch_nonmyopic (epoch, reward_pot, likelihoods) VALUES (${epoch}, ${String(nm.rewardPot)}, ${Buffer.from(encodeNonMyopic(nm)).toString("hex")})`;
+    await db`DELETE FROM epoch_nonmyopic WHERE epoch < ${epoch - 3}`;
+}
+export async function readNonMyopic(epoch: number): Promise<NonMyopicState | null> {
+    const lr = ledgerStakeReads();
+    if (lr) return lr.nonMyopic(epoch);
+    try {
+        const rows = (await sql`SELECT likelihoods FROM epoch_nonmyopic WHERE epoch = ${epoch}`.values()) as unknown[][];
+        return rows.length ? decodeNonMyopic(epoch, Uint8Array.from(Buffer.from(String(rows[0]![0]), "hex"))) : null;
+    } catch { return null; }
 }
 
 // ───────────────────────────── pool relays (ledger peers) ─────────────────────────────

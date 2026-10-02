@@ -224,6 +224,17 @@ export class ByronObftState {
         }
     }
 
+    /**
+     * Take the delegation state of the applied chain (ByronLedger: genesis certificates plus the
+     * on-chain ones, activated or still scheduled) instead of genesis alone — after a restart or a
+     * rollback the in-memory state is rebuilt, and on-chain certificates must survive it.
+     */
+    restoreDelegation(map: ReadonlyMap<string, string>, scheduled: ReadonlyArray<{ slot: bigint; delegator: string; delegate: string }>): void {
+        this.activeDelegation.clear();
+        for (const [g, d] of map) if (this.genesisKeys.has(g)) this.activeDelegation.set(g, d);
+        this.scheduled = scheduled.map((s) => ({ activateAtSlot: s.slot, issuerKeyHash: s.delegator, delegateKeyHash: s.delegate }));
+    }
+
     /** Seed the window / last slot from previously applied main-block headers (oldest first). */
     seed(headers: Array<{ rawHeader: Uint8Array; slot: bigint }>): void {
         this.window = [];

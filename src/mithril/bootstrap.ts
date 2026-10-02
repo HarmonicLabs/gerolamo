@@ -68,7 +68,7 @@ async function applyChunkRange(
  * UTxO table from `tables` and every other ledger table from `state` (docs/PLAN_SNAPSHOT_BOOTSTRAP.md
  * phases B–D). The chunk store must already hold the blocks up to the snapshot slot.
  */
-async function importLedgerStateFromAncillary(a: { downloadDir: string; ancillaryDir: string; network: string; vkey?: string; logger: Logger; prog: (p: Partial<MithrilProgress>) => void; trimSqliteBlocks?: boolean }): Promise<{ slot: number; blockHash: string; blockNo: number; epoch: number }> {
+async function importLedgerStateFromAncillary(a: { ledger?: string; downloadDir: string; ancillaryDir: string; network: string; vkey?: string; logger: Logger; prog: (p: Partial<MithrilProgress>) => void; trimSqliteBlocks?: boolean }): Promise<{ slot: number; blockHash: string; blockNo: number; epoch: number }> {
     const { logger } = a;
     const vkeyRaw = a.vkey ? (a.vkey.startsWith("http") || a.vkey.includes("/") ? await fetchGenesisVkey(a.vkey) : a.vkey) : ANCILLARY_VKEYS[a.network];
     if (!vkeyRaw) throw new Error(`--ledger-state: no ancillary verification key known for network ${a.network} (pass --ancillary-vkey)`);
@@ -79,12 +79,28 @@ async function importLedgerStateFromAncillary(a: { downloadDir: string; ancillar
     const slot = slots[slots.length - 1];
     if (slot == null) throw new Error(`--ledger-state: no ledger/<slot> under ${a.ancillaryDir}`);
     const ledgerDir = join(a.ancillaryDir, String(slot));
+    const { decodeLedgerSnapshot } = await import("./nesDecoder");
+    if (a.ledger) {
+        // Direct LMDB import (docs/PLAN_LMDB_LEDGER.md §5): no SQLite ledger tables are written.
+        const { importUtxoToLmdb, importStateToLmdb } = await import("./importLmdb");
+        a.prog({ phase: "apply", message: `importing the UTxO set at slot ${slot} into LMDB` });
+        const u = await importUtxoToLmdb({ tablesPath: join(ledgerDir, "tables"), ledgerDir: a.ledger, log: (m) => logInfo(logger, m) });
+        logInfo(logger, `UTxO import (lmdb): ${u.inserted} rows, ${u.errors} error(s), ${u.seconds.toFixed(1)}s`);
+        if (u.errors) throw new Error(`UTxO import: ${u.errors} error(s)`);
+        let nodeVersion: string | null = null;
+        try { nodeVersion = String(JSON.parse(await Bun.file(join(ledgerDir, "meta")).text())?.cardano_node_version ?? "") || null; } catch { /* optional */ }
+        a.prog({ phase: "apply", message: `importing the ledger state at slot ${slot} into LMDB` });
+        const snapshot = decodeLedgerSnapshot(await Bun.file(join(ledgerDir, "state")).bytes());
+        const r = await importStateToLmdb({ ledgerDir: a.ledger, snapshot, nodeVersion, log: (m) => logInfo(logger, m) });
+        for (const w of r.warnings) logWarn(logger, `import-state (lmdb): ${w}`);
+        logInfo(logger, `Ledger state imported into ${a.ledger}: anchor slot ${snapshot.slot} block ${snapshot.blockHash.slice(0, 16)}… (${r.seconds.toFixed(1)}s); start the node with ledgerStore "lmdb"`);
+        return { slot: snapshot.slot, blockHash: snapshot.blockHash, blockNo: snapshot.blockNo, epoch: snapshot.epoch };
+    }
     const dbPath = process.env.GEROLAMO_DB_PATH;
     if (!dbPath) throw new Error("--ledger-state: GEROLAMO_DB_PATH unset");
     const { closeSql } = await import("../sql");
     await closeSql(); // the importers write through their own bun:sqlite connection
     const { importUtxoFromTables } = await import("./importUtxo");
-    const { decodeLedgerSnapshot } = await import("./nesDecoder");
     const { importLedgerState } = await import("./importState");
     a.prog({ phase: "apply", message: `importing the UTxO set at slot ${slot}` });
     const u = await importUtxoFromTables({ tablesPath: join(ledgerDir, "tables"), dbPath, log: (m) => logInfo(logger, m) });
@@ -370,7 +386,7 @@ async function runTsBootstrapInner(
         let state: { slot: number; blockHash: string } | null = null;
         if (opts.ledgerState) {
             if (!ancillaryDir) throw new Error(`--ledger-state: no ancillary ledger directory under ${downloadDir}`);
-            state = await importLedgerStateFromAncillary({ downloadDir, ancillaryDir, network: opts.network, vkey: opts.ancillaryVkey, logger, prog, trimSqliteBlocks: false });
+            state = await importLedgerStateFromAncillary({ ledger: opts.ledger, downloadDir, ancillaryDir, network: opts.network, vkey: opts.ancillaryVkey, logger, prog, trimSqliteBlocks: false });
         }
         await finishBlockStore({ blockStore: resolve(opts.blockStore), immutableDir, logger, prog, state });
         return { engine, snapshotHash: selected.hash, certificateHash: selected.certificate_hash, immutableDir, ancillaryDir, downloadedChunks: downloaded, appliedChunks: [], verified: true };
@@ -411,7 +427,7 @@ async function runTsBootstrapInner(
     if (opts.ledgerState) {
         if (opts.skipApply) throw new Error("--ledger-state needs the apply step (drop --skip-apply)");
         if (!ancillaryDir) throw new Error(`--ledger-state: no ancillary ledger directory under ${downloadDir}`);
-        await importLedgerStateFromAncillary({ downloadDir, ancillaryDir, network: opts.network, vkey: opts.ancillaryVkey, logger, prog });
+        await importLedgerStateFromAncillary({ ledger: opts.ledger, downloadDir, ancillaryDir, network: opts.network, vkey: opts.ancillaryVkey, logger, prog });
     }
 
     return {

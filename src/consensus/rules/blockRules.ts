@@ -9,8 +9,12 @@ import { outputAddressString } from "../../utils/byronAddressString";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { readFileSync } from "node:fs";
-import { getUtxoRowsByRefs, registeredPools, rewardBalancesFor, type UtxoRow } from "../../db/rulesQueries";
+import { Cbor, LazyCborArray } from "@harmoniclabs/cbor";
+import { splitEraBlock } from "../bodyHash";
+import { byronProtocolParametersFromGenesis, type ByronProtocolParameters } from "../byron/byronUpdateCodec";
+import { drepDelegatedFor, getUtxoRowsByRefs, localTreasury, registeredPools, rewardBalancesFor, stakeRegisteredFor, type UtxoRow } from "../../db/rulesQueries";
 import { typedCredHexOf } from "../../db/stakeCred";
+import { ledgerStateExact } from "../../ledger/nodeLedgerStore";
 import { getByronTxPayloads, isByronBlock } from "../../utils/eraAccessors";
 import type { EpochBodyParams } from "../epochParams";
 import type { ValidationPool } from "../workers/ValidationPool";
@@ -45,21 +49,41 @@ async function resolveInputs(refs: Set<string>): Promise<{ resolved: Map<string,
     return { resolved, rows };
 }
 
-let byronFeePolicy: { file: string; policy: { summand: bigint; multiplier: bigint } | null } | null = null;
-function byronFeePolicyFor(config: any): { summand: bigint; multiplier: bigint } | null {
+let byronGenesisParams: { file: string; params: ByronProtocolParameters | null } | null = null;
+/** The Byron genesis parameters (`blockVersionData`) of the configured genesis file: the fallback when no adopted parameters are passed. */
+export function byronGenesisParamsFor(config: any): ByronProtocolParameters | null {
     const file = String(config?.byronGenesisFile ?? "");
     if (!file) return null;
-    if (byronFeePolicy?.file === file) return byronFeePolicy.policy;
-    let policy: { summand: bigint; multiplier: bigint } | null = null;
+    if (byronGenesisParams?.file === file) return byronGenesisParams.params;
+    let params: ByronProtocolParameters | null = null;
     try {
-        const g = JSON.parse(readFileSync(file, "utf8"));
-        const p = g?.blockVersionData?.txFeePolicy;
-        if (p?.summand != null && p?.multiplier != null) policy = { summand: BigInt(String(p.summand)), multiplier: BigInt(String(p.multiplier)) };
+        params = byronProtocolParametersFromGenesis(JSON.parse(readFileSync(file, "utf8"))?.blockVersionData);
     } catch {
-        policy = null;
+        params = null;
     }
-    byronFeePolicy = { file, policy };
-    return policy;
+    byronGenesisParams = { file, params };
+    return params;
+}
+
+/**
+ * Byte lengths of the `ATxAux` (`[tx, [* witness]]`) entries of a Byron main block, as encoded on
+ * chain — the `txSize` of `validateTxAux` (the size limit and the fee basis). Null when the raw
+ * block is not at hand or does not slice.
+ */
+export function byronTxAuxSizes(blockData: Uint8Array | null | undefined): number[] | null {
+    if (!blockData) return null;
+    try {
+        const { era, rawBlock } = splitEraBlock(blockData);
+        if (era !== 1) return null;
+        const blk = Cbor.parseLazy(rawBlock);
+        if (!(blk instanceof LazyCborArray) || blk.array.length !== 3) return null;
+        const body = Cbor.parseLazy(blk.array[1]!);
+        if (!(body instanceof LazyCborArray) || body.array.length !== 4) return null;
+        const txs = Cbor.parseLazy(body.array[0]!);
+        return txs instanceof LazyCborArray ? txs.array.map((t) => t.length) : null;
+    } catch {
+        return null;
+    }
 }
 
 export async function evaluateBlockRules(block: MultiEraBlock, ctx: BlockRuleContext): Promise<BlockRuleOutcome> {
@@ -71,8 +95,16 @@ export async function evaluateBlockRules(block: MultiEraBlock, ctx: BlockRuleCon
 /** Step 1: resolve inputs, pools and reward balances from the database (main thread). */
 export async function gatherShelleyBlockInputs(block: MultiEraBlock): Promise<BlockRuleInputs> {
     const { refs, poolIds, wdCreds } = shelleyBlockReads(block);
-    const [{ resolved, rows }, pools, rewardBalances] = await Promise.all([resolveInputs(refs), registeredPools(poolIds), rewardBalancesFor(wdCreds)]);
-    return { resolved, pools, rewardBalances, rows };
+    const conway = Number(block.era) >= 7;
+    const claimsTreasury = conway && (((block.block as any).transactionBodies ?? []) as any[]).some((b) => b?.currentTreasuryValue != null);
+    const [{ resolved, rows }, pools, rewardBalances, drepDelegated, stakeRegistered, treasury] = await Promise.all([
+        resolveInputs(refs), registeredPools(poolIds), rewardBalancesFor(wdCreds),
+        conway ? drepDelegatedFor(wdCreds) : Promise.resolve(undefined),
+        stakeRegisteredFor(wdCreds),
+        claimsTreasury ? localTreasury() : Promise.resolve(null),
+    ]);
+    // balances and treasury are only as exact as the store they came from (strict rules then, bugs 272/273)
+    return { resolved, pools, rewardBalances, rows, drepDelegated, stakeRegistered, treasury, exactness: ledgerStateExact() };
 }
 
 
@@ -85,23 +117,19 @@ async function evaluateShelleyBlock(block: MultiEraBlock, ctx: BlockRuleContext)
 }
 
 
-async function evaluateByronBlock(block: MultiEraBlock, ctx: BlockRuleContext): Promise<BlockRuleOutcome> {
-    const entries = getByronTxPayloads(block.block as any);
-    const out: BlockRuleOutcome = { failures: [], reports: [], txs: entries.length, witnessesVerified: 0, plutus: { evaluated: 0, skipped: 0, mismatches: 0, skipReasons: {} } };
-    if (entries.length === 0) return out;
-    const magic = Number(ctx.config?.networkMagic);
-    const feePolicy = byronFeePolicyFor(ctx.config);
-
+/** Byron transactions of a block with their ids and spent references (no database access). */
+export function byronBlockTxs(block: MultiEraBlock): { txs: Array<{ tx: any; witnesses: any[]; hash: Uint8Array; refs: string[] }>; refs: Set<string>; failures: string[] } {
     const refs = new Set<string>();
+    const failures: string[] = [];
     const txs: Array<{ tx: any; witnesses: any[]; hash: Uint8Array; refs: string[] }> = [];
-    for (const e of entries) {
+    for (const e of getByronTxPayloads(block.block as any)) {
         const tx = e?.tx ?? e;
         const witnesses: any[] = e?.witnesses ?? [];
         let hash: Uint8Array;
         try {
             hash = blake2b_256(tx.toCborBytes());
         } catch {
-            out.failures.push("byron tx: cannot serialise for hashing");
+            failures.push("byron tx: cannot serialise for hashing");
             continue;
         }
         const list: string[] = [];
@@ -114,7 +142,30 @@ async function evaluateByronBlock(block: MultiEraBlock, ctx: BlockRuleContext): 
         }
         txs.push({ tx, witnesses, hash, refs: list });
     }
+    return { txs, refs, failures };
+}
+
+async function evaluateByronBlock(block: MultiEraBlock, ctx: BlockRuleContext): Promise<BlockRuleOutcome> {
+    const { refs } = byronBlockTxs(block);
     const { resolved } = await resolveInputs(refs);
+    return evaluateByronBlockWithInputs(block, ctx, resolved);
+}
+
+/**
+ * The Byron UTXO / UTXOW rules over a resolved input map (`resolved` is extended with the block's
+ * own outputs and advanced tx by tx). Size limit and fee policy come from `ctx.byronParams` (the
+ * adopted parameters of the ticked Byron ledger), else the genesis file's; the size basis is the
+ * on-chain `ATxAux` length when `ctx.rawBlock` is given.
+ */
+export async function evaluateByronBlockWithInputs(block: MultiEraBlock, ctx: BlockRuleContext, resolved: Map<string, ResolvedUtxo>): Promise<BlockRuleOutcome> {
+    const { txs, failures } = byronBlockTxs(block);
+    const out: BlockRuleOutcome = { failures, reports: [], txs: txs.length + failures.length, witnessesVerified: 0, plutus: { evaluated: 0, skipped: 0, mismatches: 0, skipReasons: {} } };
+    if (txs.length === 0) return out;
+    const magic = Number(ctx.config?.networkMagic);
+    const pp = ctx.byronParams ?? byronGenesisParamsFor(ctx.config);
+    const sliced = byronTxAuxSizes(ctx.rawBlock);
+    const auxSizes = sliced && failures.length === 0 && sliced.length === txs.length ? sliced : null;
+    if (!auxSizes) out.reports.push(`byron tx sizes: ${ctx.rawBlock ? "raw block does not slice into the decoded transactions" : "no raw block"}; size limit unchecked, fee on the witness-less size`);
     // Same-block chaining: an input may be an earlier tx's output. Seed those
     // outputs up front (address + value) so witness roots can be matched, then
     // the per-tx pass below removes spent inputs as it goes.
@@ -152,8 +203,10 @@ async function evaluateByronBlock(block: MultiEraBlock, ctx: BlockRuleContext): 
             witnesses: c,
             witnessOk: ok.slice(start, start + c.items.length),
             witnessTypes: c.types,
-            feePolicy,
+            feePolicy: pp?.txFeePolicy ?? null,
             txSizeBytes: (() => { try { return t.tx.toCborBytes().length; } catch { return null; } })(),
+            txAuxSizeBytes: auxSizes ? auxSizes[i]! : null,
+            maxTxSize: pp?.maxTxSize ?? null,
         });
         for (const f of r.failures) out.failures.push(`tx[${i}] ${toHex(t.hash).slice(0, 12)}…: ${f}`);
         for (const f of r.reports) out.reports.push(`tx[${i}]: ${f}`);

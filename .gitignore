@@ -18,7 +18,7 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 # Db
 store/
 tx/
-ledger/
+/ledger/
 /snapshots/
 .live/
 output/

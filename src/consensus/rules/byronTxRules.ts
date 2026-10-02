@@ -1,10 +1,12 @@
 /**
  * Byron transaction rules (cardano-ledger-byron UTXO / UTXOW):
  * inputs and outputs non-empty, outputs positive, no duplicate inputs, inputs
- * exist, value conserved (Σin ≥ Σout, the difference is the fee), fee ≥
- * txFeePolicy (a + b·size with the witness-less tx bytes as a lower-bound basis),
- * and one witness per input whose key hashes to the spent address root and
- * signs the tx id.
+ * exist, value conserved (Σin ≥ Σout, the difference is the fee), and one
+ * witness per input whose key hashes to the spent address root and signs the
+ * tx id; `validateTxAux`: size ≤ ppMaxTxSize and fee ≥ a + ⌈b·size⌉, both on the
+ * on-chain `ATxAux` bytes (`[tx, witnesses]`), with the *adopted* parameters
+ * (mainnet changed maxTxSize twice). Without those bytes the fee falls back to
+ * the witness-less tx size (a lower bound) and the size is not checked.
  */
 import type { ResolvedUtxo } from "./resolvedUtxo";
 import { utxoRefOf } from "./resolvedUtxo";
@@ -21,7 +23,12 @@ export interface ByronRuleInput {
     /** Per witness item: Byron witness type (0 PkWitness, 2 RedeemWitness). */
     witnessTypes?: number[];
     feePolicy: { summand: bigint; multiplier: bigint } | null;
+    /** Witness-less tx bytes (fallback fee basis only). */
     txSizeBytes: number | null;
+    /** On-chain `ATxAux` length: `txSize` of `validateTxAux`. */
+    txAuxSizeBytes?: number | null;
+    /** `ppMaxTxSize` of the adopted parameters. */
+    maxTxSize?: bigint | null;
 }
 
 export function evaluateByronTxRules(tx: ByronRuleInput): { failures: string[]; reports: string[] } {
@@ -55,16 +62,19 @@ export function evaluateByronTxRules(tx: ByronRuleInput): { failures: string[]; 
         outSum += amt;
     }
     if (missing.length === 0 && inSum < outSum) failures.push(`value not conserved: inputs ${inSum} < outputs ${outSum}`);
-    // Redemption transactions (every witness a RedeemWitness, spending AVVM outputs) pay no fee.
+    const size = tx.txAuxSizeBytes ?? tx.txSizeBytes;
+    if (tx.txAuxSizeBytes != null && tx.maxTxSize != null && BigInt(tx.txAuxSizeBytes) > tx.maxTxSize) {
+        failures.push(`TxValidationTxTooLarge ${tx.txAuxSizeBytes} > maxTxSize ${tx.maxTxSize}`);
+    }
+    // Redemption transactions (every witness a RedeemWitness, spending AVVM outputs) pay no fee
+    // (`isRedeemUTxO`: the witness type must match the address type, so this is the same set).
     const allRedeem = tx.witnesses.items.length > 0 && tx.witnesses.roots.every((_, i) => tx.witnessTypes?.[i] === 2);
-    if (missing.length === 0 && tx.feePolicy && tx.txSizeBytes != null && !allRedeem) {
-        // fee policy is in nanocoins (10^-9 lovelace): fee ≥ ceil((summand + multiplier·size) / 1e9)
-        const need = (tx.feePolicy.summand + tx.feePolicy.multiplier * BigInt(tx.txSizeBytes) + 999_999_999n) / 1_000_000_000n;
+    if (missing.length === 0 && tx.feePolicy && size != null && !allRedeem) {
+        // fee policy is in nanocoins (10^-9 lovelace) with a whole-lovelace summand:
+        // ⌈(summand + multiplier·size) / 1e9⌉ = a + ⌈b·size⌉ (`calculateTxSizeLinear`, scaleLovelaceRationalUp)
+        const need = (tx.feePolicy.summand + tx.feePolicy.multiplier * BigInt(size) + 999_999_999n) / 1_000_000_000n;
         const fee = inSum - outSum;
-        // Size basis: the transaction bytes without witnesses — a lower bound on any
-        // basis the policy could use, so a shortfall here is a real violation. Zero
-        // reports over the mainnet Byron history (325k blocks) with this basis.
-        if (fee < need) failures.push(`fee ${fee} below policy minimum ${need} (a + b·size, size ${tx.txSizeBytes})`);
+        if (fee < need) failures.push(`fee ${fee} below policy minimum ${need} (a + b·size, ${tx.txAuxSizeBytes != null ? "ATxAux" : "witness-less tx"} size ${size})`);
     }
 
     for (const p of tx.witnesses.problems) failures.push(p);

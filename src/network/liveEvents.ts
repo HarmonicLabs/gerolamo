@@ -32,7 +32,25 @@ export function setPeersListener(cb: PeersListener | null): void {
     peersListener = cb;
 }
 
+/**
+ * The selected chain changed (a block adopted or a rollback): the validating mempool re-applies
+ * its transactions. Called synchronously on every change; the listener coalesces.
+ */
+type ChainChangedListener = () => void;
+let chainChangedListener: ChainChangedListener | null = null;
+export function setChainChangedListener(cb: ChainChangedListener | null): void {
+    chainChangedListener = cb;
+}
+export function emitChainChanged(): void {
+    try {
+        chainChangedListener?.();
+    } catch {
+        /* */
+    }
+}
+
 export function emitTip(tip: TipEvent): void {
+    emitChainChanged();
     pendingTip = tip;
     if (tipTimer != null) return;
     tipTimer = setTimeout(() => {

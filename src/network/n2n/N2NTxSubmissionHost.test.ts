@@ -65,4 +65,21 @@ describe("inbound tx-submission responder", () => {
         expect(await r.receive(Buffer.from("8104", "hex"))).toHaveLength(0);
         expect(await r.receive(encodeReplyTxIds(6, []))).toHaveLength(0);
     });
+
+    test("with ledger admission the validating mempool decides; a ledger rejection is dropped without a reply", async () => {
+        const mempool = new FakeMempool();
+        const seen: string[] = [];
+        const a = sampleTx(5), b = sampleTx(6);
+        const r = new TxSubmissionResponder({
+            mempool, era: () => 6, window: 4,
+            admit: async (bytes) => { seen.push(toHex(bytes)); return toHex(bytes) === toHex(a.bytes) ? { ok: true } : { ok: false, reason: "BadInputsUTxO" }; },
+        });
+        await r.receive(encodeInit());
+        await r.receive(encodeReplyTxIds(6, [{ hash: a.hash, size: a.bytes.length }, { hash: b.hash, size: b.bytes.length }]));
+        const next = await r.receive(encodeReplyTxs(6, [a.bytes, b.bytes]));
+        expect(seen).toEqual([toHex(a.bytes), toHex(b.bytes)]);
+        expect(mempool.txs.size).toBe(0); // the admission path stores, not the raw append
+        expect(r.stats).toEqual({ announced: 2, fetched: 2, accepted: 1, rejected: 1 });
+        expect(parseTxSubmissionMessages(next[0]!)[0]).toEqual({ kind: "requestTxIds", blocking: true, ack: 2, req: 4 });
+    });
 });

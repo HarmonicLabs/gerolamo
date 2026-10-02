@@ -30,6 +30,7 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 import { arrayElements, bytesAt, uintAt } from "./cbor";
 import { parseHeaderCrypto, verifyHeaderCrypto } from "./headerVerify";
 import { LightQueryClient } from "./lightQuery";
+import { TxSubmitClient, type QueuedTx } from "./txSubmit";
 import { ChunkWriter, type FileSink } from "./chunkWriter";
 import { mithrilAnchor, type MithrilAnchor } from "./mithrilAnchor";
 import { blake2b_224 } from "@harmoniclabs/crypto";
@@ -164,6 +165,15 @@ export class BrowserNode {
 
     /** η0 of an epoch from the relay's `/api/v0/epochs/{n}` (`epoch_nonce`), cached; null when unavailable. */
     private lq: LightQueryClient | null = null;
+    private txc: TxSubmitClient | null = null;
+
+    /** Offer a signed transaction (CBOR bytes) to the relay; returns its id. Needs a live connection. */
+    submitTx(tx: Uint8Array): string {
+        if (!this.txc) throw new Error("not connected");
+        return this.txc.submit(tx);
+    }
+    /** Transactions offered this connection that the relay has not acknowledged yet. */
+    pendingTxs(): QueuedTx[] { return this.txc?.list() ?? []; }
     private writer: ChunkWriter | null = null;
     private stakeCache = new Map<string, Awaited<ReturnType<LightQueryClient["poolStake"]>>>();
 
@@ -216,6 +226,7 @@ export class BrowserNode {
         this.stats.version = Number((accepted as any).versionNumber ?? 0);
         this.log(`handshake accepted, N2N version ${this.stats.version}`);
         this.lq = new LightQueryClient(this.mux);
+        this.txc = new TxSubmitClient(this.mux, (l) => this.log(l), () => this.emit());
         this.stats.lightQuery = await this.lq.supported;
         this.log(this.stats.lightQuery ? "relay speaks the Gerolamo light-query protocol (nonce + stake over the WebSocket)" : "relay has no light-query protocol; header crypto needs the HTTP API fallback");
         const keepAlive = new KeepAliveClient(this.mux);
@@ -338,6 +349,7 @@ export class BrowserNode {
         if (this.stopped) return;
         this.stopped = true;
         this.stats.state = "stopped";
+        this.txc?.dispose(); this.txc = null;
         try { this.mux?.close({ closeSocket: true }); } catch { /* ignore */ }
         this.emit();
     }

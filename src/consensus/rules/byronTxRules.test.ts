@@ -38,3 +38,31 @@ describe("evaluateByronTxRules", () => {
         expect(r.failures).toContain("1 witnesses for 2 inputs");
     });
 });
+
+describe("validateTxAux with the adopted parameters (size limit and fee on the ATxAux bytes)", () => {
+    const base = {
+        txHashHex: TXH,
+        inputs: [input(`${TXH}:0`)],
+        outputs: [{ amount: 9_830_000n }],
+        resolved: new Map([[`${TXH}:0`, utxo(`${TXH}:0`, 10_000_000n)]]),
+        witnesses: { items: [], roots: [], types: [], problems: [] },
+        witnessOk: [],
+        feePolicy: { summand: 155381_000_000_000n, multiplier: 43946_000_000n },
+        txSizeBytes: 200,
+    };
+    // fee 170 000: covers 155 381 + 43.946·200 = 164 171 (witness-less), not 155 381 + ⌈43.946·400⌉ = 172 960 (with witnesses)
+    test("the fee basis is the whole [tx, witnesses] encoding when it is known", () => {
+        expect(evaluateByronTxRules(base).failures).toEqual([]);
+        const r = evaluateByronTxRules({ ...base, txAuxSizeBytes: 400 });
+        expect(r.failures).toEqual(["fee 170000 below policy minimum 172960 (a + b·size, ATxAux size 400)"]);
+        // a + ⌈b·size⌉: 155 381 + ⌈43.946 · 333⌉ = 155 381 + ⌈14 634.018⌉ = 170 016
+        expect(evaluateByronTxRules({ ...base, txAuxSizeBytes: 333, outputs: [{ amount: 10_000_000n - 170_016n }] }).failures).toEqual([]);
+        expect(evaluateByronTxRules({ ...base, txAuxSizeBytes: 333, outputs: [{ amount: 10_000_000n - 170_015n }] }).failures.length).toBe(1);
+    });
+    test("size ≤ ppMaxTxSize of the adopted parameters", () => {
+        expect(evaluateByronTxRules({ ...base, txAuxSizeBytes: 300, maxTxSize: 300n }).failures).toEqual([]);
+        expect(evaluateByronTxRules({ ...base, txAuxSizeBytes: 301, maxTxSize: 300n, outputs: [{ amount: 9_000_000n }] }).failures).toEqual(["TxValidationTxTooLarge 301 > maxTxSize 300"]);
+        // without the on-chain bytes the size is not checked
+        expect(evaluateByronTxRules({ ...base, maxTxSize: 10n }).failures).toEqual([]);
+    });
+});

@@ -330,3 +330,38 @@ describe("slot battles", () => {
         expect(c.knownAtSlot(11n, "aa".repeat(32))).toBe(false);
     });
 });
+
+describe("CandidateSet: stale divergences (producer 2026-09-29, bugs 285 and 286)", () => {
+    test("a verifier promoted to primary forgets its own divergence (it now defines the fragment)", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("old"); cs.addPeer("next"); cs.addPeer("third");
+        cs.observe("old", { slot: 10n, hash: h("x") });
+        cs.observe("next", { slot: 10n, hash: h("y") });
+        cs.observe("third", { slot: 10n, hash: h("y") });
+        expect(cs.primaryOutvoted(2).outvoted).toBe(true);
+        cs.setPrimary("next");
+        // still divergent, it would be skipped as a body source although it is the primary
+        expect(cs.agreement("next")!.divergence).toBeNull();
+        expect(cs.agreesThrough("next", 10n)).toBe(true);
+    });
+
+    test("a verifier's divergence clears when the primary later carries the verifier's block", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("p"); cs.addPeer("v1"); cs.addPeer("v2");
+        // slot battle at 576: the primary first serves its own block, both verifiers the network's
+        cs.observe("p", { slot: 576n, hash: h("a") });
+        cs.observe("v1", { slot: 576n, hash: h("w") });
+        cs.observe("v2", { slot: 576n, hash: h("w") });
+        expect(cs.divergentPeers().sort()).toEqual(["v1", "v2"]);
+        // the primary rolls back and follows the network's block: no fork any more
+        cs.observe("p", { slot: 576n, hash: h("w") });
+        expect(cs.divergentPeers()).toEqual([]);
+        expect(cs.agreement("v1")!.status).toBe("agrees");
+        // 44 minutes later a slot battle at the tip: one verifier mismatches the primary once — no outvote
+        // naming slot 576 (the stale divergence fired one, and the switch rolled back to slot 575)
+        cs.observe("p", { slot: 2237n, hash: h("l") });
+        expect(cs.observe("v1", { slot: 2237n, hash: h("n") }).kind).toBe("divergent");
+        expect(cs.primaryOutvoted(2).outvoted).toBe(false);
+        expect(cs.agreement("v1")!.divergence?.slot).toBe(2237n);
+    });
+});

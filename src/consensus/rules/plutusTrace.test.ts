@@ -5,6 +5,7 @@
  */
 process.env.GEROLAMO_PLUTUS_TRACE = "1";
 process.env.GEROLAMO_PLUTUS_SHADOW_MS = "120000";
+process.env.GEROLAMO_PLUTUS_LEGACY_SHADOW = "1"; // this test pins the legacy evaluator's builtin trace
 import { describe, expect, test } from "bun:test";
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { resolvedFromRow, type ResolvedUtxo } from "./resolvedUtxo";

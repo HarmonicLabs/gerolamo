@@ -9,6 +9,7 @@
  * N+1 before block N is applied).
  */
 import type { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
+import type { ByronProtocolParameters } from "../byron/byronUpdateCodec";
 import { effectiveRedeemers, evaluateAlonzoRules } from "./alonzoRules";
 import { outputAddressString } from "../../utils/byronAddressString";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
@@ -23,7 +24,10 @@ import { extractLedgerTxOutMetadata } from "../../db/minibf/txOutMetadata";
 import { evaluateTxRules, type TxRuleParams } from "./txRules";
 import { unitsOf } from "./value";
 import { collectShelleyWitnesses } from "./witnesses";
-import { shadowEvaluateTx } from "./plutusEval";
+import { checkBlockTxPhase2, phase2Mode } from "./phase2";
+import { getEpochNetwork } from "../../utils/epochFromSlotCalculations";
+import { BlockRefScriptSize, checkHeaderProtVer, rewardAccountKey, txRefScriptsSize } from "./ledgerChecks";
+import { blockAuxDataBytes } from "./scriptDataHash";
 
 export interface BlockRuleContext {
     config: any;
@@ -39,6 +43,10 @@ export interface BlockRuleContext {
      * budget held the applier for ~120 ms on 2 % of blocks); "both" (default): inline path.
      */
     phase?: "rules" | "shadow" | "both";
+    /** Byron: the adopted protocol parameters of the ticked Byron ledger (consensus/byron/ByronLedger); null = the genesis file's. */
+    byronParams?: ByronProtocolParameters | null;
+    /** Byron: the block's `[era, block]` bytes, for the on-chain transaction sizes. */
+    rawBlock?: Uint8Array | null;
 }
 
 export interface BlockRuleOutcome {
@@ -111,6 +119,9 @@ export function ruleParams(params: EpochBodyParams | null, genesis: any, era: nu
         maxCollateralInputs: params?.maxCollateralInputs ?? null,
         maxTxExMem: raw.max_tx_ex_mem != null ? big(raw.max_tx_ex_mem, 0n) : null,
         maxTxExSteps: raw.max_tx_ex_steps != null ? big(raw.max_tx_ex_steps, 0n) : null,
+        protocolMajor: params?.protocolMajor ?? numOrNull(raw.protocol_major_ver),
+        maxValSize: era >= 5 ? params?.maxValSize ?? numOrNull(raw.max_val_size) : null,
+        drepDeposit: era >= 7 && raw.drep_deposit != null ? big(raw.drep_deposit, 0n) : null,
     };
 }
 
@@ -172,6 +183,17 @@ export interface BlockRuleInputs {
      * to workers.
      */
     rows?: Map<string, UtxoRow>;
+    /**
+     * Conway: DRep delegation of the key-hash reward accounts the block withdraws from
+     * (typed hex → delegated), as of the block's start. Absent: the rule reports.
+     */
+    drepDelegated?: Map<string, boolean>;
+    /** Registration of the reward accounts the block withdraws from (typed hex), as of the block's start. */
+    stakeRegistered?: Map<string, boolean>;
+    /** Treasury for `current_treasury_value` (constant within an epoch); absent/null: reported. */
+    treasury?: bigint | null;
+    /** Are the balances and the treasury exact (nodeLedgerStore `ledgerStateExact`)? Their rules are strict only then. */
+    exactness?: { exact: boolean; why: string };
 }
 
 /** What a block reads from the ledger (refs, pool ids, withdrawal credentials). */
@@ -193,7 +215,7 @@ export function shelleyBlockReads(block: MultiEraBlock): { refs: Set<string>; po
     }
     const wdCreds: string[] = [];
     for (const body of bodies) for (const w of (body.withdrawals?.map ?? []) as any[]) {
-        const c = typedCredHexOf(w.rewardAccount?.credentials) ?? String((w.rewardAccount?.credentials?.hash ?? w.rewardAccount?.credentials)?.toString?.() ?? "").toLowerCase();
+        const c = rewardAccountKey(w.rewardAccount);
         if (c) wdCreds.push(c);
     }
     return { refs, poolIds, wdCreds };
@@ -211,6 +233,31 @@ export interface BlockOverlay {
     spent: Set<string>;
     poolsRegistered: Set<string>;
     withdrawnCreds: Set<string>;
+    /** DRep delegation set (true) or dropped with the account (false) by the block's certificates, typed hex. */
+    drepDelegation?: Map<string, boolean>;
+    /** Stake registrations (true) and deregistrations (false) by the block's certificates, typed hex. */
+    stakeRegistration?: Map<string, boolean>;
+}
+
+/** Stake-registration effect of one certificate: registrations 0, 7, 11, 12, 13; deregistrations 1, 8. */
+export function stakeRegistrationEffect(cert: any): { key: string; registered: boolean } | null {
+    const t = Number(cert?.certType);
+    const reg = t === 0 || t === 7 || t === 11 || t === 12 || t === 13;
+    if (!reg && t !== 1 && t !== 8) return null;
+    const key = typedCredHexOf(cert?.stakeCredential);
+    return key ? { key, registered: reg } : null;
+}
+
+/**
+ * DRep-delegation effect of one certificate on its stake credential: vote delegations (9, 10,
+ * 12, 13) set it, deregistrations (1, 8) drop the account with it; null = no effect.
+ */
+export function drepDelegationEffect(cert: any): { key: string; delegated: boolean } | null {
+    const t = Number(cert?.certType);
+    const set = t === 9 || t === 10 || t === 12 || t === 13;
+    if (!set && t !== 1 && t !== 8) return null;
+    const key = typedCredHexOf(cert?.stakeCredential);
+    return key ? { key, delegated: set } : null;
 }
 
 export function shelleyBlockOverlay(block: MultiEraBlock): BlockOverlay {
@@ -221,6 +268,8 @@ export function shelleyBlockOverlay(block: MultiEraBlock): BlockOverlay {
     const spent = new Set<string>();
     const poolsRegistered = new Set<string>();
     const withdrawnCreds = new Set<string>();
+    const drepDelegation = new Map<string, boolean>();
+    const stakeRegistration = new Map<string, boolean>();
     bodies.forEach((body: any, i: number) => {
         const txHashHex = String(body.hash?.toString?.() ?? "").toLowerCase();
         if (!txHashHex) return;
@@ -234,13 +283,17 @@ export function shelleyBlockOverlay(block: MultiEraBlock): BlockOverlay {
         advanceResolved(created, txHashHex, [], ((body.outputs ?? []) as any[]).map(outputLike));
         for (const c of (body.certs ?? []) as any[]) {
             if (Number(c.certType) === 3) poolsRegistered.add(String(c.poolParams?.operator?.toString?.() ?? "").toLowerCase());
+            const d = drepDelegationEffect(c);
+            if (d) drepDelegation.set(d.key, d.delegated);
+            const r = stakeRegistrationEffect(c);
+            if (r) stakeRegistration.set(r.key, r.registered);
         }
         for (const w of (body.withdrawals?.map ?? []) as any[]) {
-            const c = typedCredHexOf(w.rewardAccount?.credentials) ?? String((w.rewardAccount?.credentials?.hash ?? w.rewardAccount?.credentials)?.toString?.() ?? "").toLowerCase();
+            const c = rewardAccountKey(w.rewardAccount);
             if (c) withdrawnCreds.add(c);
         }
     });
-    return { created, spent, poolsRegistered, withdrawnCreds };
+    return { created, spent, poolsRegistered, withdrawnCreds, drepDelegation, stakeRegistration };
 }
 
 /** Inputs for the next block as the ledger will look after `prev` is applied. */
@@ -263,7 +316,17 @@ export function applyOverlay(inputs: BlockRuleInputs, prev: BlockOverlay): Block
         rewardBalances = new Map(rewardBalances);
         for (const c of prev.withdrawnCreds) if (rewardBalances.has(c)) rewardBalances.set(c, 0n);
     }
-    return { resolved, pools, rewardBalances, rows };
+    let drepDelegated = inputs.drepDelegated;
+    if (drepDelegated && prev.drepDelegation?.size) {
+        drepDelegated = new Map(drepDelegated);
+        for (const [k, v] of prev.drepDelegation) drepDelegated.set(k, v);
+    }
+    let stakeRegistered = inputs.stakeRegistered;
+    if (stakeRegistered && prev.stakeRegistration?.size) {
+        stakeRegistered = new Map(stakeRegistered);
+        for (const [k, v] of prev.stakeRegistration) stakeRegistered.set(k, v);
+    }
+    return { resolved, pools, rewardBalances, rows, drepDelegated, stakeRegistered, treasury: inputs.treasury, exactness: inputs.exactness };
 }
 
 /**
@@ -280,7 +343,11 @@ export function applyOverlays(inputs: BlockRuleInputs, prevs: readonly BlockOver
     const pools = new Set(inputs.pools);
     let rewardBalances = inputs.rewardBalances;
     let balancesCopied = false;
+    const drepDelegated = inputs.drepDelegated ? new Map(inputs.drepDelegated) : undefined;
+    const stakeRegistered = inputs.stakeRegistered ? new Map(inputs.stakeRegistered) : undefined;
     for (const prev of prevs) {
+        if (drepDelegated && prev.drepDelegation) for (const [k, v] of prev.drepDelegation) drepDelegated.set(k, v);
+        if (stakeRegistered && prev.stakeRegistration) for (const [k, v] of prev.stakeRegistration) stakeRegistered.set(k, v);
         for (const [r, u] of prev.created) if (!resolved.has(r)) resolved.set(r, u);
         for (const r of prev.spent) resolved.delete(r);
         if (rows && prev.spent.size) for (const r of prev.spent) rows.delete(r);
@@ -290,7 +357,7 @@ export function applyOverlays(inputs: BlockRuleInputs, prevs: readonly BlockOver
             for (const c of prev.withdrawnCreds) if (rewardBalances.has(c)) rewardBalances.set(c, 0n);
         }
     }
-    return { resolved, pools, rewardBalances, rows };
+    return { resolved, pools, rewardBalances, rows, drepDelegated, stakeRegistered, treasury: inputs.treasury, exactness: inputs.exactness };
 }
 
 
@@ -306,7 +373,10 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
     // the block's own transactions spend from / add to this map as they are evaluated in order
     const resolved = new Map(inputs.resolved);
     const pools = inputs.pools;
-    const rewardBalances = inputs.rewardBalances;
+    // Reward balances before each tx: a valid tx's withdrawals drain its accounts (`drainAccounts`), so a
+    // later tx of the block withdrawing from the same account must take 0 (bug 272: every tx was
+    // compared with the balance before the block).
+    const rewardBalances = inputs.rewardBalances ? new Map(inputs.rewardBalances) : undefined;
     // 2. every witness signature in one pool job
     const items: WitnessItem[] = [];
     const perTx: Array<{ start: number; proves: Array<{ kind: "key" | "root"; hash: string }>; problems: string[] }> = [];
@@ -324,7 +394,49 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
 
     // 3. rules per transaction
     const params = ruleParams(ctx.params, ctx.genesis, block.era, String(ctx.config?.network ?? "mainnet"));
+    // Plutus phase 2 (rules/phase2.ts): enforced in the rules phase, or evaluated report-only in
+    // the detached shadow job, per GEROLAMO_PLUTUS_PHASE2 (enforce | report | off).
+    const p2mode = phase2Mode();
+    const phase2Here = p2mode !== "off" && (phase === "shadow" ? p2mode === "report" : phase === "rules" ? p2mode === "enforce" : true);
+    const p2enforce = p2mode === "enforce" && phase !== "shadow";
+    const runPhase2 = (i: number, markedInvalid: boolean) => {
+        const bodyBytes: Uint8Array | null = bodies[i].cborRef?.toBuffer?.() ?? null, witnessSetBytes: Uint8Array | null = wits[i]?.cborRef?.toBuffer?.() ?? null;
+        if (!bodyBytes || !witnessSetBytes) { out.plutus.skipped++; out.reports.push(`tx[${i}]: plutus phase 2 not evaluated: original bytes unavailable`); return; }
+        // network = the slot-geometry name (preview/preprod/mainnet/custom) the job set, never config.network,
+        // whose "testnet" is the address flag and normalises to preprod (bug 144).
+        let res: ReturnType<typeof checkBlockTxPhase2>;
+        try { res = checkBlockTxPhase2({ era: block.era, bodyBytes, witnessSetBytes, resolved, params: ctx.params, markedInvalid, network: getEpochNetwork() }); }
+        catch (err) { out.plutus.skipped++; out.reports.push(`tx[${i}]: plutus phase 2 not evaluated: ${err instanceof Error ? err.message : String(err)}`); return; }
+        const v = res.verdict;
+        const n = res.result.redeemers.length;
+        if (v.kind === "unknown") {
+            out.plutus.skipped += n;
+            out.reports.push(`tx[${i}]: plutus phase 2 not evaluated: ${v.detail}`);
+            const key = v.detail.replace(/[0-9a-f]{12,}…?/g, "X").replace(/\d+/g, "N").slice(0, 80);
+            out.plutus.skipReasons[key] = (out.plutus.skipReasons[key] ?? 0) + 1;
+            return;
+        }
+        out.plutus.evaluated += n;
+        if (v.kind === "ok") return;
+        out.plutus.mismatches++;
+        const msg = `tx[${i}]: plutus phase 2 ${v.kind === "collect-error" ? "collect error" : "ValidationTagMismatch"}: ${v.detail}`;
+        (p2enforce ? out.failures : out.reports).push(msg);
+    };
     let blockMem = 0n, blockSteps = 0n;
+    // Conway BBODY: reference-script bytes of the whole block (valid and invalid txs)
+    const blockRefScripts = new BlockRefScriptSize(inputs.resolved, params.protocolMajor ?? null);
+    // Conway LEDGER: DRep delegation before each tx (earlier txs of the block included)
+    const drepState = inputs.drepDelegated ? new Map(inputs.drepDelegated) : null;
+    const drepDelegated = drepState ? (k: string) => drepState.get(k) ?? null : undefined;
+    const regState = inputs.stakeRegistered ? new Map(inputs.stakeRegistered) : null;
+    const stakeRegistered = regState ? (k: string) => regState.get(k) ?? null : undefined;
+    // Auxiliary data bytes: the decoder's slice, else sliced from the block (bug 184)
+    let auxSlices: Map<number, Uint8Array> | null | undefined;
+    const auxBytesOf = (i: number): Uint8Array | undefined => {
+        try { const own = aux[i]?.cborRef?.toBuffer?.(); if (own) return own; } catch { /* */ }
+        if (auxSlices === undefined) { let bb: Uint8Array | null = null; try { bb = b.cborRef?.toBuffer?.() ?? null; } catch { bb = null; } auxSlices = bb ? blockAuxDataBytes(bb) : null; }
+        return auxSlices?.get(i);
+    };
     for (let i = 0; i < bodies.length; i++) {
         const body = bodies[i];
         const w = perTx[i]!;
@@ -343,16 +455,19 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
             // (and the collateral return produced) instead of the inputs and outputs.
             const a = evaluateAlonzoRules({ era: block.era, collateralOnly: true, body, witnessSet: wits[i], resolved, plutusScripts: new Set(), nativeScripts: new Set(), params });
             for (const f of a.failures) out.failures.push(`tx[${i}]: ${f}`);
+            // …and its scripts must really fail (UTXOS: ValidationTagMismatch otherwise)
+            if (phase2Here && block.era >= 5 && ((wits[i]?.redeemers ?? []) as any[]).length > 0) runPhase2(i, true);
             const txHashHex = String(body.hash?.toString?.() ?? "").toLowerCase();
-            if (txHashHex) {
-                const ret = body.collateralReturn;
-                advanceResolved(resolved, txHashHex, [...(body.collateralInputs ?? [])], [], (body.outputs ?? []).length, ret ? [outputLike(ret)] : []);
-            }
+            const ret = body.collateralReturn ? outputLike(body.collateralReturn) : null;
+            blockRefScripts.add(body, true, txHashHex, ret ? [ret] : []);
+            if (txHashHex) advanceResolved(resolved, txHashHex, [...(body.collateralInputs ?? [])], [], (body.outputs ?? []).length, ret ? [ret] : []);
             continue;
         }
         const bodyLen = sliceLength(body), witLen = sliceLength(wits[i]);
-        const auxLen = aux[i] ? sliceLength(aux[i]) : 1;
+        const auxDataBytes = aux[i] ? auxBytesOf(i) : null;
+        const auxLen = aux[i] ? (auxDataBytes?.length ?? null) : 1;
         const txSizeBytes = bodyLen != null && witLen != null && auxLen != null ? feeSizeBytes(bodyLen, witLen, auxLen) : null;
+        const refScriptBytes = block.era >= 7 ? txRefScriptsSize(body, (r) => resolved.get(r)) : 0;
         const r = phase === "shadow" ? { failures: [] as string[], reports: [] as string[] } : evaluateTxRules({
             era: block.era,
             body,
@@ -365,6 +480,12 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
             params,
             txSizeBytes,
             rewardBalances,
+            auxDataBytes,
+            drepDelegated,
+            stakeRegistered,
+            treasury: inputs.treasury,
+            refScriptBytes,
+            exactness: inputs.exactness,
         });
         for (const f of r.failures) out.failures.push(`tx[${i}]: ${f}`);
         for (const f of r.reports) out.reports.push(`tx[${i}]: ${f}`);
@@ -372,32 +493,23 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
             blockMem += BigInt(rd.execUnits?.mem ?? 0);
             blockSteps += BigInt(rd.execUnits?.steps ?? rd.execUnits?.cpu ?? 0);
         }
-        // Phase-2 shadow: run the scripts and compare with the block's verdict (never halts).
-        if (phase !== "rules" && block.era >= 5 && r.failures.length === 0 && ((wits[i]?.redeemers ?? []) as any[]).length > 0) {
-            try {
-                const ev = await shadowEvaluateTx({ forceSample: phase === "shadow", era: block.era, body, witnessSet: wits[i], bodyBytes: body.cborRef?.toBuffer?.() ?? null, witnessSetBytes: wits[i]?.cborRef?.toBuffer?.() ?? null, resolved, params: ctx.params, genesis: ctx.genesis, network: String(ctx.config?.network ?? "mainnet"), markedInvalid: invalid.has(i) });
-                out.plutus.evaluated += ev.evaluated;
-                out.plutus.skipped += ev.skipped;
-                if (ev.mismatch) {
-                    out.plutus.mismatches++;
-                    out.reports.push(`tx[${i}]: plutus shadow: ${ev.mismatch}`);
-                }
-                if (ev.note) {
-                    // coverage gap (budget, decoding), not a verdict disagreement
-                    out.reports.push(`tx[${i}]: plutus shadow skipped: ${ev.note}`);
-                    const key = ev.note.replace(/[0-9a-f]{12,}…?/g, "X").replace(/\d+/g, "N").slice(0, 80);
-                    out.plutus.skipReasons[key] = (out.plutus.skipReasons[key] ?? 0) + 1;
-                }
-            } catch (err) {
-                out.plutus.skipped++;
-                out.reports.push(`tx[${i}]: plutus shadow skipped: ${err instanceof Error ? err.message : String(err)}`);
-            }
-        }
+        // Phase 2: every script succeeds within its declared units (rules/phase2.ts)
+        if (phase2Here && block.era >= 5 && r.failures.length === 0 && ((wits[i]?.redeemers ?? []) as any[]).length > 0) runPhase2(i, false);
         const txHashHex = String(body.hash?.toString?.() ?? "").toLowerCase();
-        if (txHashHex) {
-            advanceResolved(resolved, txHashHex, [...(body.inputs ?? [])], ((body.outputs ?? []) as any[]).map(outputLike));
+        const created = ((body.outputs ?? []) as any[]).map(outputLike);
+        blockRefScripts.add(body, false, txHashHex, created);
+        if (rewardBalances) for (const w of (body.withdrawals?.map ?? []) as any[]) { const c = rewardAccountKey(w.rewardAccount); if (c && rewardBalances.has(c)) rewardBalances.set(c, 0n); }
+        for (const c of (body.certs ?? []) as any[]) {
+            const d = drepState ? drepDelegationEffect(c) : null;
+            if (d) drepState!.set(d.key, d.delegated);
+            const r = regState ? stakeRegistrationEffect(c) : null;
+            if (r) regState!.set(r.key, r.registered);
         }
+        if (txHashHex) advanceResolved(resolved, txHashHex, [...(body.inputs ?? [])], created);
     }
+    const blockSink = { failures: out.failures, reports: out.reports };
+    blockRefScripts.check(blockSink, block.era);
+    checkHeaderProtVer(blockSink, block.era, String(ctx.config?.network ?? "mainnet"), numOrNull(b.header?.body?.protocolVersion?.major), params.protocolMajor ?? null);
     const raw = ctx.params?.raw ?? {};
     const maxBlockMem = raw.max_block_ex_mem != null ? big(raw.max_block_ex_mem, 0n) : null;
     const maxBlockSteps = raw.max_block_ex_steps != null ? big(raw.max_block_ex_steps, 0n) : null;

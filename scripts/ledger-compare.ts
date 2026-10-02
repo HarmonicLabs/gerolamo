@@ -59,7 +59,8 @@ const rows = (q: string): any[] => { try { return sq.query(q).values() as any[];
     const n = (sq.query("SELECT COUNT(*) AS n FROM utxo").get() as any).n as number;
     const diffs: string[] = [];
     let checked = 0;
-    const q = sq.query(allUtxo ? "SELECT utxo_ref, tx_out, lovelace, stake_key, address, reference_script_hash FROM utxo" : `SELECT utxo_ref, tx_out, lovelace, stake_key, address, reference_script_hash FROM utxo ORDER BY random() LIMIT ${sampleN}`);
+    // CAST: bun:sqlite returns INTEGER as a JS number and loses precision above 2^53 (the preview faucet output holds 2.27e16 lovelace)
+    const q = sq.query(allUtxo ? "SELECT utxo_ref, tx_out, CAST(lovelace AS TEXT) AS lovelace, stake_key, address, reference_script_hash FROM utxo" : `SELECT utxo_ref, tx_out, CAST(lovelace AS TEXT) AS lovelace, stake_key, address, reference_script_hash FROM utxo ORDER BY random() LIMIT ${sampleN}`);
     for (const r of q.iterate() as Iterable<any>) {
         checked++;
         const b = ur.get(String(r.utxo_ref));
@@ -68,7 +69,7 @@ const rows = (q: string): any[] => { try { return sq.query(q).values() as any[];
     }
     report(`utxo (${allUtxo ? "all" : checked + " sampled"})`, n, ur.count(), diffs);
     // stake balances: SQLite stake_balance vs LMDB counters (full)
-    const sb = new Map<string, string>(); for (const r of rows("SELECT stake_key, lovelace FROM stake_balance WHERE lovelace <> 0")) sb.set(String(r[0]), String(r[1]));
+    const sb = new Map<string, string>(); for (const r of rows("SELECT stake_key, CAST(lovelace AS TEXT) FROM stake_balance WHERE lovelace <> 0")) sb.set(String(r[0]), String(r[1]));
     const lb = new Map<string, string>(); for (const [k, v] of st.range("stake_bal", new Uint8Array(0))) lb.set(Buffer.from(k).toString("hex"), new DataView(v.buffer, v.byteOffset).getBigUint64(0, false).toString());
     cmpMaps("stake_balance", sb, lb);
 }
@@ -80,8 +81,13 @@ cmpMaps("stake_pointers", new Map(rows("SELECT slot, tx_ix, cert_ix, stake_key F
 cmpMaps("pool_params", new Map(rows("SELECT pool_id, vrf_key_hash, registered_slot, retiring_epoch, params_json FROM pool_params").map((r) => [String(r[0]), { vrf: String(r[1]), registeredSlot: Number(r[2]), retiringEpoch: r[3] == null ? null : Number(r[3]), params: r[4] == null ? null : JSON.parse(String(r[4])) }])), sr.pools() as Map<string, any>);
 cmpMaps("pool_params_pending", new Map(rows("SELECT pool_id, vrf_key_hash, registered_slot, params_json FROM pool_params_pending").map((r) => [String(r[0]), { vrf: String(r[1]), registeredSlot: Number(r[2]), params: r[3] == null ? null : JSON.parse(String(r[3])) }])), sr.pendingPools() as Map<string, any>);
 cmpMaps("opcert_counters", new Map(rows("SELECT pool_id, counter, slot FROM opcert_counters").map((r) => [String(r[0]), { counter: Number(r[1]), slot: Number(r[2]) }])), new Map([...st.range("opcert", new Uint8Array(0))].map(([k]) => { const id = Buffer.from(k).toString("hex"); return [id, sr.opcert(id)!]; })));
+// report history below the store's retention window (GEROLAMO_LEDGER_KEEP_EPOCHS, default 30) is not in LMDB
+const keepEpochs = Number(process.env.GEROLAMO_LEDGER_KEEP_EPOCHS) >= 4 ? Number(process.env.GEROLAMO_LEDGER_KEEP_EPOCHS) : 30;
+const curEpoch = Number((sq.query("SELECT MAX(taken_at) m FROM epoch_stake_totals").get() as any)?.m ?? 0);
+const minEpoch = curEpoch - keepEpochs;
+console.log(`history tables compared from epoch ${minEpoch} (retention ${keepEpochs} epochs)`);
 {
-    const a = new Map<string, number>(); for (const r of rows("SELECT epoch, pool_id, blocks FROM blocks_made_by_epoch")) a.set(`${r[0]}/${r[1]}`, Number(r[2]));
+    const a = new Map<string, number>(); for (const r of rows(`SELECT epoch, pool_id, blocks FROM blocks_made_by_epoch WHERE epoch >= ${minEpoch}`)) a.set(`${r[0]}/${r[1]}`, Number(r[2]));
     const b = new Map<string, number>(); for (const [k, v] of st.range("blocks_made", new Uint8Array(0))) b.set(`${new DataView(k.buffer, k.byteOffset).getUint32(0, false)}/${Buffer.from(k.subarray(4)).toString("hex")}`, Number(new DataView(v.buffer, v.byteOffset).getBigUint64(0, false)));
     cmpMaps("blocks_made_by_epoch", a, b);
 }
@@ -96,7 +102,7 @@ cmpMaps("mir_pending", new Map(rows("SELECT id, recorded_epoch, source, stake_ke
 }
 cmpMaps("epoch_stake_totals", new Map(rows("SELECT taken_at, total_active, pools FROM epoch_stake_totals").map((r) => [String(r[0]), { total: String(r[1]), pools: Number(r[2]) }])), new Map(sr.snapshotEpochs().map((e) => { const t = sr.snapshotTotals(e)!; return [String(e), { total: t.total.toString(), pools: t.pools }]; })));
 {
-    const a = new Map<string, string>(); for (const r of rows("SELECT taken_at, pool_id, stake FROM epoch_pool_stake")) a.set(`${r[0]}/${r[1]}`, String(r[2]));
+    const a = new Map<string, string>(); for (const r of rows(`SELECT taken_at, pool_id, stake FROM epoch_pool_stake WHERE taken_at >= ${minEpoch}`)) a.set(`${r[0]}/${r[1]}`, String(r[2]));
     const b = new Map<string, string>(); for (const e of sr.snapshotEpochs()) for (const [id, v] of sr.snapshotPoolStake(e)) b.set(`${e}/${id}`, v.toString());
     cmpMaps("epoch_pool_stake", a, b);
     const ac = new Map<string, string>(); for (const r of rows("SELECT taken_at, stake_key, pool_id, stake FROM epoch_stake_cred")) ac.set(`${r[0]}/${r[1]}`, `${r[2]}:${r[3]}`);
@@ -113,10 +119,10 @@ cmpMaps("epoch_stake_totals", new Map(rows("SELECT taken_at, total_active, pools
 }
 cmpMaps("reward_epochs", new Map(rows("SELECT performance_epoch, reward_pot, treasury_delta, paid, unclaimed, pools, accounts FROM reward_epochs").map((r) => [String(r[0]), { rewardPot: String(r[1]), treasuryDelta: String(r[2]), paid: String(r[3]), unclaimed: String(r[4]), pools: Number(r[5]), accounts: Number(r[6]) }])), new Map([...st.range("reward_epochs", new Uint8Array(0))].map(([k]) => { const e = new DataView(k.buffer, k.byteOffset).getUint32(0, false); return [String(e), sr.rewardEpoch(e)!]; })));
 {
-    const a = new Map<string, string>(); for (const r of rows("SELECT performance_epoch, stake_key, amount FROM reward_payouts")) a.set(`${r[0]}/${r[1]}`, String(r[2]));
+    const a = new Map<string, string>(); for (const r of rows(`SELECT performance_epoch, stake_key, amount FROM reward_payouts WHERE performance_epoch >= ${minEpoch}`)) a.set(`${r[0]}/${r[1]}`, String(r[2]));
     const b = new Map<string, string>(); for (const [k, v] of st.range("reward_payouts", new Uint8Array(0))) b.set(`${new DataView(k.buffer, k.byteOffset).getUint32(0, false)}/${Buffer.from(k.subarray(4)).toString("hex")}`, new DataView(v.buffer, v.byteOffset).getBigUint64(0, false).toString());
     cmpMaps("reward_payouts", a, b);
-    const ap = new Map<string, any>(); for (const r of rows("SELECT performance_epoch, pool_id, max_pool, pool_reward, operator, members, owner_stake, stake, blocks FROM reward_pool_epochs")) ap.set(`${r[0]}/${r[1]}`, { maxPool: String(r[2]), poolReward: String(r[3]), operator: String(r[4]), members: String(r[5]), ownerStake: String(r[6]), stake: String(r[7]), blocks: Number(r[8]) });
+    const ap = new Map<string, any>(); for (const r of rows(`SELECT performance_epoch, pool_id, max_pool, pool_reward, operator, members, owner_stake, stake, blocks FROM reward_pool_epochs WHERE performance_epoch >= ${minEpoch}`)) ap.set(`${r[0]}/${r[1]}`, { maxPool: String(r[2]), poolReward: String(r[3]), operator: String(r[4]), members: String(r[5]), ownerStake: String(r[6]), stake: String(r[7]), blocks: Number(r[8]) });
     const bp = new Map<string, any>(); for (const [k, v] of st.range("reward_pool_epochs", new Uint8Array(0))) bp.set(`${new DataView(k.buffer, k.byteOffset).getUint32(0, false)}/${Buffer.from(k.subarray(4)).toString("hex")}`, JSON.parse(new TextDecoder().decode(v)));
     cmpMaps("reward_pool_epochs", ap, bp);
 }
@@ -141,7 +147,7 @@ cmpMaps("pool_relays", new Map(rows("SELECT pool_id, relays_json FROM pool_relay
     const ae = new Map<string, any>(); for (const r of rows("SELECT epoch, action_id, kind, detail FROM gov_enacted")) ae.set(`${r[0]}/${r[1]}`, { kind: String(r[2]), detail: strv(r[3]) });
     const be = new Map<string, any>(); for (const [k, v] of st.range("gov_enacted", new Uint8Array(0))) { const e = new DataView(k.buffer, k.byteOffset).getUint32(0, false); be.set(`${e}/${keyAction(k.subarray(4))}`, JSON.parse(new TextDecoder().decode(v))); }
     cmpMaps("gov_enacted", ae, be);
-    const ads = new Map<string, string>(); for (const r of rows("SELECT taken_at, drep_type, drep_hash, stake FROM epoch_drep_stake")) ads.set(`${r[0]}/${r[1]}/${r[2] ?? ""}`, String(r[3]));
+    const ads = new Map<string, string>(); for (const r of rows(`SELECT taken_at, drep_type, drep_hash, stake FROM epoch_drep_stake WHERE taken_at >= ${minEpoch}`)) ads.set(`${r[0]}/${r[1]}/${r[2] ?? ""}`, String(r[3]));
     const bds = new Map<string, string>(); for (const [k, v] of st.range("drep_stake", new Uint8Array(0))) bds.set(`${new DataView(k.buffer, k.byteOffset).getUint32(0, false)}/${k[4]}/${Buffer.from(k.subarray(5)).toString("hex")}`, new DataView(v.buffer, v.byteOffset).getBigUint64(0, false).toString());
     cmpMaps("epoch_drep_stake", ads, bds);
     cmpMaps("epoch_params", new Map(rows("SELECT epoch, params, source FROM epoch_params").map((r) => [String(r[0]), { params: JSON.parse(String(r[1])), source: strv(r[2]) }])), new Map(gr.epochParamEpochs().map((e) => [String(e), gr.epochParams(e)])) as Map<string, any>, undefined, (k, x, y) => `${k}: ${x ? "sqlite" : "-"} vs ${y ? "lmdb" : "-"}${x && y ? " content differs" : ""}`);

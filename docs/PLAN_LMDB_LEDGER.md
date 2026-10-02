@@ -368,7 +368,12 @@ restarting returns to the previous path (the block store is shared and unaffecte
   loaded and the selected tip must reach the anchor through them; a torn file is discarded. A store
   that cannot reach the tip (crash between the SQLite commit and the diff file) or was seeded by an
   older seed version is rebuilt from SQLite in `dual` mode (about 2 min on preview) and refused in
-  `lmdb` mode.
+  `lmdb` mode. Since bug 245 (2026-09-30): diff files carry a length + CRC-32 trailer and are
+  written temp → fsync → rename (an incomplete file is absent, a leftover `.tmp` is swept); a diff
+  of a block at or below the anchor (a promotion whose unlink was lost in the crash) is ignored and
+  removed; in `lmdb` mode the node lands on the newest block of the block store's chain whose diffs
+  reach the anchor (`LedgerStore.recoveryTip`, the block store's immutable tip as the last
+  candidate) and the block store's tip follows — refused only when no block of that chain does.
 - **Phase 2 — `src/ledger/stakeStore.ts`:** `stake`, `deleg`, `pointer`, `reward` (counter),
   `pool`, `pool_pending`, `pool_relays`, `opcert`, `blocks_made` (counter), `gdeleg`, `mir`,
   `pots` (counters), the three-plus-one snapshots (`snap_cred`, `snap_pool`, `snap_pparams`,
@@ -463,3 +468,38 @@ restarting returns to the previous path (the block store is shared and unaffecte
   ledger journal frozen while the node applies blocks from the store alone; address UTxOs, epoch
   parameters and the block/tx endpoints answer from LMDB. `/epochs/latest/parameters` now serves
   the node's own record (the Koios live fetch tried to write inside a read-only connection).
+
+### 2026-09-21 17:05 UTC — bug 128 fixed; 3036 re-applied a day of blocks on LMDB alone
+
+- 3036 (lmdb, SQLite writes off) had halted 2026-09-20 16:45 UTC on bug 128 (aborted range after a
+  rollback). With the fix it re-applied slots 123 266 740 → 123 354 394 (24 h of chain, ~4 400
+  blocks incl. the 1427 boundary) from the store alone and sits at the producer's tip; anchors of
+  both nodes equal (123 342 894). Producer (dual): 43 004 keys, 0 differences across the 1427
+  boundary; 5 leader slots in epoch 1428 (04:59 … 18:34 UTC).
+- 17:47 UTC: report-history retention (`GEROLAMO_LEDGER_KEEP_EPOCHS`, default 30): reward
+  payouts, pool reward reports, blocks made, per-pool snapshot stake and DRep stake below the
+  window are pruned at seed, at open and at each boundary, one epoch slice per LMDB transaction
+  via raw cursors (the first version walked the overlay-merging `range` and hit 16.8 GB RSS —
+  supervisor restart loop for 10 min). Producer: 10 620 290 keys pruned in 108 s, RSS 2.6 GB.
+  docs/RUNBOOK_PREPROD_NODE.md written for the user's new server.
+
+### 2026-09-22 05:05 UTC — reboot outage, bug 129, direct LMDB importer
+
+- The laptop rebooted 2026-09-21 17:51 UTC; the supervisors are plain processes and stayed down
+  10.5 h. Producer relaunched 04:22, re-applied the 1428 boundary (513 s, 75 789 reward
+  accounts in dual mode), reached the tip 04:42, recomputed 6 leader slots. 00:53 slot missed
+  (down); 04:59 slot forged but orphaned — no inbound peer was pulling yet. 3036 hit bug 129
+  (block store and ledger store on different last blocks after the crash; fixed: persisted tip
+  first in lmdb mode, newest-common-block fallback moves the block store's tip).
+- Direct LMDB importer written: `mithril-bootstrap … --ledger-state --ledger <nodeDir>/ledger`
+  imports the UTxO set and the NewEpochState into the store (`src/mithril/importLmdb.ts`,
+  anchored at the snapshot block, seed version stamped); SQLite gets no ledger tables. The
+  equivalence test against the SQLite importer on the 2026-09-09 preview snapshot is still to be
+  run (the first attempt was interrupted by the producer's catch-up).
+- 22:50 UTC: direct LMDB importer verified against the SQLite importer on the 2026-09-09 preview
+  snapshot (epoch 1415, slot 122 316 253): UTxO 3 167 873 rows in 218 s into LMDB (SQLite path
+  320 s), state 4.1 s; every one of the 36 tables identical. The one "difference" was the compare
+  script reading a 2.27e16-lovelace faucet output through bun:sqlite as a JS number (2^53
+  rounding) — fixed with CAST AS TEXT; the LMDB record was exact. Bug 130 (tracker kept a
+  replaced block "confirmed") fixed; both nodes at the tip, producer's remaining 1428 slots all
+  forged and on chain.

@@ -234,7 +234,8 @@ export class SqliteRelayChainStore implements RelayChainStore {
         const intersection = rowIntersection(row);
         const data = headerData(row);
         if (!intersection || !data) return undefined;
-        return { ...intersection, data };
+        const prev = asBytes(row.prev_hash);
+        return { ...intersection, data, ...(prev && prev.length === 32 ? { prevHash: prev } : {}) };
     }
 
     async getBlockRange(

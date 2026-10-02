@@ -20,11 +20,14 @@
  *     (pending = the completed pulser's ratification) / gov_proposals / gov_votes ← GovState
  *   epoch_drep_stake[E] ← the pulser's DRep distribution
  *   genesis_delegs ← genesis delegations; schema_migrations ← the one-off repair markers
+ *   epoch_nonmyopic[E] ← esNonMyopic (pool-ranking likelihoods and reward pot; bug 262)
  * Not imported: the pulsing reward update (recomputed by our reward code at the next boundary),
- * non-myopic likelihoods (unused), stashed AVVM addresses (mainnet only; refused for now).
+ * stashed AVVM addresses (mainnet only; refused for now).
  */
+import { ccKey } from "../consensus/governance/govLedgerView";
 import { Database } from "bun:sqlite";
 import { paramChangesOfUpdateMap } from "../consensus/governance/costModelUpdate";
+import { encodeNonMyopic } from "../consensus/nonMyopic";
 import { conwayPParamsToRaw, typedHex, type Cred, type DRep, type GovAction, type LedgerSnapshot, type PoolState, type SnapshotPool, type StakeSnapshot } from "./nesDecoder";
 
 export interface ImportStateOptions {
@@ -42,11 +45,11 @@ export interface ImportStateResult {
     seconds: number;
 }
 
-const MIGRATION_MARKERS = ["stake_cred_types_rebuilt", "delegations_rebuilt_poolreap", "utxo_byron_addresses_rebuilt", "orphaned_utxo_deltas_reverted", "stake_pointers_built", "utxo_stake_key_typed"];
+const MIGRATION_MARKERS = ["stake_cred_types_rebuilt", "delegations_rebuilt_poolreap", "utxo_byron_addresses_rebuilt", "orphaned_utxo_deltas_reverted", "stake_pointers_built", "utxo_stake_key_typed", "gov_cred_typed_v1"];
 
 function credBytes(c: Cred): Uint8Array { return Buffer.from(c.hash, "hex"); }
 function typedCredBytes(c: Cred): Uint8Array { return Buffer.from(typedHex(c), "hex"); }
-function poolParamsJson(p: { pledge: bigint; cost: bigint; marginNum: bigint; marginDen: bigint; rewardAccount: Cred; owners: string[] }): string {
+export function poolParamsJson(p: { pledge: bigint; cost: bigint; marginNum: bigint; marginDen: bigint; rewardAccount: Cred; owners: string[] }): string {
     return JSON.stringify({ pledge: String(p.pledge), cost: String(p.cost), marginNum: String(p.marginNum), marginDen: String(p.marginDen), rewardAccount: typedHex(p.rewardAccount), owners: p.owners });
 }
 /**
@@ -54,20 +57,20 @@ function poolParamsJson(p: { pledge: bigint; cost: bigint; marginNum: bigint; ma
  * counts toward the pledge), which is reward-equivalent; the replay's rows carry every owner of
  * the registration. When the current registration is otherwise the same, restore the full list.
  */
-function withAllOwners(p: SnapshotPool, current: PoolState | undefined): SnapshotPool {
+export function withAllOwners(p: SnapshotPool, current: PoolState | undefined): SnapshotPool {
     if (!current || current.vrf !== p.vrf || current.pledge !== p.pledge || current.cost !== p.cost || current.marginNum * p.marginDen !== p.marginNum * current.marginDen
         || typedHex(current.rewardAccount) !== typedHex(p.rewardAccount) || !p.owners.every((o) => current.owners.includes(o))) return p;
     return { ...p, owners: current.owners };
 }
-function drepColumns(d: DRep): { type: number; hash: string | null } {
+export function drepColumns(d: DRep): { type: number; hash: string | null } {
     return d.kind <= 1 ? { type: d.kind, hash: (d as { hash: string }).hash } : { type: d.kind, hash: null };
 }
-function payloadOf(a: GovAction): Record<string, unknown> {
+export function payloadOf(a: GovAction): Record<string, unknown> {
     switch (a.kind) {
         case "ParameterChange": return { changes: paramChangesOfUpdateMap(a.update), policy: a.policy ?? null };
         case "InitHardFork": return { major: a.protocolVersion!.major, minor: a.protocolVersion!.minor };
         case "TreasuryWithdrawals": return { withdrawals: a.withdrawals!.map((w) => ({ account: typedHex(w.account), amount: String(w.amount) })), policy: a.policy ?? null };
-        case "UpdateCommittee": return { remove: a.remove!.map((c) => c.hash), add: a.add!.map((e) => ({ cred: e.cred.hash, expires: e.expires })), thresholdNum: String(a.threshold!.num), thresholdDen: String(a.threshold!.den) };
+        case "UpdateCommittee": return { typed: true, remove: a.remove!.map((c) => typedHex(c)), add: a.add!.map((e) => ({ cred: typedHex(e.cred), expires: e.expires })), thresholdNum: String(a.threshold!.num), thresholdDen: String(a.threshold!.den) };
         case "NewConstitution": return { hash: a.constitution!.anchor.hash, script: a.constitution!.script };
         default: return {};
     }
@@ -176,6 +179,9 @@ export function importLedgerState(opts: ImportStateOptions): ImportStateResult {
             db.prepare("INSERT INTO reward_pots (id, reserves, treasury, fee_pot, initialized_epoch, donation_pot) VALUES (1, ?, ?, ?, ?, ?)").run(s.reserves, s.treasury, feePot, E, s.donation);
             db.prepare("INSERT OR REPLACE INTO pot_snapshots (epoch, reserves, treasury, fees_collected) VALUES (?, ?, ?, ?)").run(E, String(s.reserves), String(s.treasury), String(s.snapshots.fee));
             count("reward_pots", 1); count("pot_snapshots", 1);
+            db.exec("CREATE TABLE IF NOT EXISTS epoch_nonmyopic (epoch INTEGER PRIMARY KEY, reward_pot TEXT NOT NULL, likelihoods TEXT NOT NULL)");
+            db.prepare("INSERT OR REPLACE INTO epoch_nonmyopic (epoch, reward_pot, likelihoods) VALUES (?, ?, ?)").run(E, String(s.nonMyopicRewardPot), Buffer.from(encodeNonMyopic({ rewardPot: s.nonMyopicRewardPot, likelihoods: s.nonMyopicLikelihoods })).toString("hex"));
+            count("epoch_nonmyopic", 1);
             // ── parameters ──
             const insParams = db.prepare("INSERT OR REPLACE INTO epoch_params (epoch, params, source) VALUES (?, ?, 'local')");
             for (const [epoch, pp] of [[E, s.gov.curPParams], [E - 1, s.gov.prevPParams]] as const) {
@@ -195,17 +201,17 @@ export function importLedgerState(opts: ImportStateOptions): ImportStateResult {
             const activity = Number(raw.drep_activity ?? 20);
             db.exec("DELETE FROM gov_dreps; DELETE FROM gov_committee; DELETE FROM gov_committee_auth; DELETE FROM gov_state; DELETE FROM gov_proposals; DELETE FROM gov_votes");
             const insDrep = db.prepare("INSERT INTO gov_dreps (credential, is_script, deposit, registered_slot, last_active_epoch, expiry_epoch) VALUES (?, ?, ?, 0, ?, ?)");
-            for (const d of s.dreps) insDrep.run(d.cred.hash, d.cred.type, d.deposit, d.expiry - activity, d.expiry);
+            for (const d of s.dreps) insDrep.run(typedHex(d.cred), d.cred.type, d.deposit, d.expiry - activity, d.expiry); // typed key (bug 153)
             count("gov_dreps", s.dreps.length);
             const hotOf = (coldTyped: string): { hot: string | null; resigned: number } => {
                 const a = s.committeeState.get(coldTyped);
                 if (!a) return { hot: null, resigned: 0 };
-                return "hot" in a ? { hot: a.hot.hash, resigned: 0 } : { hot: null, resigned: 1 };
+                return "hot" in a ? { hot: ccKey(typedHex(a.hot)), resigned: 0 } : { hot: null, resigned: 1 }; // typed, "00"/"01" + hash (bug 153)
             };
             const insMember = db.prepare("INSERT INTO gov_committee (cold_credential, expires_epoch, hot_credential, resigned) VALUES (?, ?, ?, ?)");
-            if (s.gov.committee) for (const [cold, expiry] of s.gov.committee.members) { const h = hotOf(cold); insMember.run(cold.replace(/^01/, "").slice(-56), expiry, h.hot, h.resigned); count("gov_committee", 1); }
+            if (s.gov.committee) for (const [cold, expiry] of s.gov.committee.members) { const h = hotOf(cold); insMember.run(ccKey(cold), expiry, h.hot, h.resigned); count("gov_committee", 1); }
             const insAuth = db.prepare("INSERT INTO gov_committee_auth (cold_credential, hot_credential, resigned) VALUES (?, ?, ?)");
-            for (const [cold, a] of s.committeeState) { insAuth.run(cold.slice(-56), "hot" in a ? a.hot.hash : null, "hot" in a ? 0 : 1); count("gov_committee_auth", 1); }
+            for (const [cold, a] of s.committeeState) { insAuth.run(ccKey(cold), "hot" in a ? ccKey(typedHex(a.hot)) : null, "hot" in a ? 0 : 1); count("gov_committee_auth", 1); }
             const pending = { epoch: E, ratified: s.gov.pulsing.enacted, expired: s.gov.pulsing.expired };
             db.prepare("INSERT INTO gov_state (id, committee_threshold_num, committee_threshold_den, constitution_hash, constitution_script, no_confidence, prev_pparams, prev_hardfork, prev_committee, prev_constitution, seeded_epoch, dormant_epochs, pending) VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
                 .run(String(s.gov.committee?.thresholdNum ?? 0n), String(s.gov.committee?.thresholdDen ?? 1n), s.gov.constitution.anchor.hash, s.gov.constitution.script, s.gov.committee ? 0 : 1,

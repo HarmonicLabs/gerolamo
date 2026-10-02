@@ -1,6 +1,7 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { applyByronTxPayload, applyInvalidTransaction, applyTransaction, deleteBlockSpends, newBlockSpends, type KnownUtxoRow, type SqlClient, flushPendingUtxoWrites } from "../db";
 import { logger } from "../utils/logger";
+import { migrateGovCredentials } from "./governance/govCredMigration";
 import { sql } from "../sql";
 import { addDonationToPot, addFeeToPot } from "../db/leaderState";
 import {
@@ -39,6 +40,9 @@ export async function applyBlock(
         await flushPendingUtxoWrites(client ?? sql);
         return;
     }
+
+    // One-off, inside the first Conway block this build applies (bug 153): typed governance credentials.
+    if (Number(opts.era ?? 0) >= 7) await migrateGovCredentials();
 
     // Shelley+ txs (writes go through optional client for batch hydrate)
     // Forward Mini-BF indexes (tx_index / address_tx / block_tx) via indexCtx.

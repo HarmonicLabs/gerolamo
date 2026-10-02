@@ -176,6 +176,11 @@ export class CandidateSet {
         }
         p.role = "primary";
         this.primaryKey = key;
+        // Its verifier-era divergence named the old primary's fork, which this peer now defines. Kept, it
+        // ruled the primary out of serving bodies, and once every verifier diverged at the next slot battle
+        // no peer could serve a range (bug 285, the producer 2026-09-29: 44 minutes without a block).
+        p.divergence = null;
+        p.pending.clear();
         // Re-evaluate every verifier against the new primary fragment.
         for (const v of this.peers.values()) {
             if (v.role !== "verifier") continue;
@@ -307,6 +312,14 @@ export class CandidateSet {
             // (5 verifiers × hundreds of pending entries — 4 % of the applier thread).
             const slotNum = Number(pt.slot);
             for (const v of this.peers.values()) {
+                // The primary now carries the block a verifier diverged with (it rolled back and followed that
+                // branch): the fork resolved the verifier's way. Left recorded, the stale divergence kept the
+                // verifier from serving bodies and fired an outvote 44 minutes later, at the old slot, the moment
+                // two of them mismatched the primary anywhere (bug 286, the producer 2026-09-29).
+                if (v.role === "verifier" && v.divergence && v.divergence.slot === pt.slot && v.divergence.peerHash === pt.hash) {
+                    v.divergence = null;
+                    if (v.agreedAtSlot == null || pt.slot > v.agreedAtSlot) v.agreedAtSlot = pt.slot;
+                }
                 if (v.role !== "verifier" || v.pending.size === 0) continue;
                 // Snapshot the due entries first: compareAgainstPrimary may re-add an entry
                 // (the EBB deferral), and a Map for-of visits entries added during iteration —

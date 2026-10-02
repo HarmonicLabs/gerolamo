@@ -15,6 +15,7 @@ import { logger } from "../../utils/logger";
 import { isN2NInitiatorFrame, sendN2NResponder } from "./N2NDirection";
 import { forgedAgoMs } from "../../pool/forgedBlocks";
 import type { RelayChainStore } from "./RelayChainStore";
+import { noteServed } from "../nodeMetrics";
 
 const log = logger.child("n2n.blockfetch");
 
@@ -137,6 +138,7 @@ export class N2NBlockFetchHost {
         this.send(new BlockFetchStartBatch());
         for (const block of blocks) {
             this.send(new BlockFetchBlock({ blockData: block.blockData }));
+            noteServed("block");
             try {
                 const h = (block as any).point?.blockHeader?.hash;
                 const hex = h instanceof Uint8Array ? Buffer.from(h).toString("hex") : typeof h === "string" ? h : null;

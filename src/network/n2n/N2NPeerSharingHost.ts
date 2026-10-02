@@ -3,6 +3,7 @@ import {
     MiniProtocol,
     Multiplexer,
     PeerAddressIPv4,
+    PeerAddressIPv6,
     PeerSharingDone,
     PeerSharingRequest,
     PeerSharingResponse,
@@ -11,13 +12,14 @@ import {
     type PeerAddress,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { isN2NInitiatorFrame, sendN2NResponder } from "./N2NDirection";
+import { ipFamily, ipv6ToWords, normalizeHost } from "../relayAccessPoint";
 
 export interface ShareablePeer {
     host: string;
     port: number;
 }
 
-/** Supplies up to `amount` peers we are willing to advertise (IPv4 only for now). */
+/** Supplies up to `amount` peers we are willing to advertise (IPv4 or IPv6 literals). */
 export type SharePeersProvider = (amount: number) => ShareablePeer[];
 
 /** IPv4 dotted quad → the raw Word32 PeerSharing encodes (least-significant octet first, see peerManager.ipv4NumberToString). */
@@ -35,8 +37,8 @@ export function ipv4ToWord32(host: string): number | null {
 
 /**
  * PeerSharing responder (network-spec §3.11). A node that advertises
- * PeerSharing in the handshake must answer MsgShareRequest; we return known
- * hot/warm/cold IPv4 addresses. Without this, peers that took our
+ * PeerSharing in the handshake must answer MsgShareRequest; we return the
+ * known peers we may advertise (IPv4 and IPv6). Without this, peers that took our
  * advertisement at face value would hit an unhandled protocol on our side.
  */
 export class N2NPeerSharingHost {
@@ -68,9 +70,19 @@ export class N2NPeerSharingHost {
         const addresses: PeerAddress[] = [];
         if (want > 0) {
             for (const p of provider(want)) {
-                const word = ipv4ToWord32(p.host);
-                if (word == null || !Number.isInteger(p.port) || p.port <= 0 || p.port > 65535) continue;
-                addresses.push(new PeerAddressIPv4({ address: word, portNumber: p.port }));
+                if (!Number.isInteger(p.port) || p.port <= 0 || p.port > 65535) continue;
+                const host = normalizeHost(p.host);
+                const fam = ipFamily(host);
+                if (fam === 4) {
+                    const word = ipv4ToWord32(host);
+                    if (word == null) continue;
+                    addresses.push(new PeerAddressIPv4({ address: word, portNumber: p.port }));
+                } else if (fam === 6) {
+                    // NodeToNode ≥ v13: [1, w1, w2, w3, w4, port], words = network-socket HostAddress6
+                    const words = ipv6ToWords(host);
+                    if (!words) continue;
+                    addresses.push(new PeerAddressIPv6({ address: words, portNumber: p.port }));
+                } else continue; // names are never shared: PeerSharing carries socket addresses
                 if (addresses.length >= want) break;
             }
         }

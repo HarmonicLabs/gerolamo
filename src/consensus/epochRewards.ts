@@ -36,7 +36,11 @@ import {
     readPotSnapshot,
     recordPotSnapshot,
     settleDonations,
+    readNonMyopic,
+    recordNonMyopic,
+    snapshotPoolIds,
 } from "../db/leaderState";
+import { freshLikelihoods, updateLikelihoods, type GoPool } from "./nonMyopic";
 import { rationalFromDecimal } from "./rules/overlay";
 
 function ratio(v: unknown, fallback: string): { num: bigint; den: bigint } {
@@ -57,7 +61,7 @@ function ratio(v: unknown, fallback: string): { num: bigint; den: bigint } {
  * Verified against Koios `totals` per boundary (scripts/verify-pots.ts).
  */
 /** Everything `computeEpochRewards` needs for the update applied at the boundary into `epoch` (null when nothing applies yet). */
-export async function buildRewardInputs(epoch: number, genesis: any, shelleyStart: number, slotsPerEpoch: bigint): Promise<{ perfEpoch: number; input: Parameters<typeof computeEpochRewards>[0]; prevReserves: bigint; fees: bigint; totalBlocks: bigint; expectedBlocks: bigint; pools: number } | null> {
+export async function buildRewardInputs(epoch: number, genesis: any, shelleyStart: number, slotsPerEpoch: bigint): Promise<{ perfEpoch: number; input: Parameters<typeof computeEpochRewards>[0]; prevReserves: bigint; fees: bigint; totalBlocks: bigint; expectedBlocks: bigint; pools: number; go: { takenAt: number; stake: Map<string, bigint> } | null; blocks: Map<string, number> } | null> {
     const maxSupply = BigInt(String(genesis?.maxLovelaceSupply ?? 45_000_000_000_000_000n));
     const perfEpoch = epoch - 2;
     const prev = await readPotSnapshot(epoch - 1);
@@ -125,7 +129,34 @@ export async function buildRewardInputs(epoch: number, genesis: any, shelleyStar
         pools,
         registered,
     };
-    return { perfEpoch, input, prevReserves: prev.reserves, fees, totalBlocks, expectedBlocks, pools: pools.length };
+    return { perfEpoch, input, prevReserves: prev.reserves, fees, totalBlocks, expectedBlocks, pools: pools.length, go: dist ? { takenAt: dist.takenAt, stake: dist.stake } : null, blocks };
+}
+
+let nonMyopicGapLogged = false;
+/**
+ * The pool-ranking half of the reward update (`startStep` / `completeRupd` → `updateNonMyopic`):
+ * esNonMyopic of `epoch` = every pool of the `go` snapshot with its decayed likelihood history plus
+ * the likelihood of its blocks in the performance epoch, and the pools' share `_R` as the reward
+ * pot. Needs the previous epoch's state: a store bootstrapped without it (a Mithril import from
+ * before bug 262, or before its seeding) records nothing until `scripts/nonmyopic-seed.ts` seeds it.
+ */
+async function advanceNonMyopic(epoch: number, built: NonNullable<Awaited<ReturnType<typeof buildRewardInputs>>>, distributable: bigint, genesis: any, slotsPerEpoch: bigint): Promise<void> {
+    const prev = await readNonMyopic(epoch - 1);
+    if (!prev) {
+        if (!nonMyopicGapLogged) logger.info(`Epoch ${epoch}: pool-ranking likelihoods of epoch ${epoch - 1} not recorded (store bootstrapped without them); GetNonMyopicMemberRewards / GetRewardInfoPools stay unanswered until scripts/nonmyopic-seed.ts seeds them`);
+        nonMyopicGapLogged = true;
+        return;
+    }
+    const go = new Map<string, GoPool>();
+    if (built.go) {
+        const ids = await snapshotPoolIds(built.go.takenAt);
+        if (!ids) { logger.warn(`Epoch ${epoch}: the pools of the snapshot taken at ${built.go.takenAt} were not kept; pool-ranking likelihoods not advanced`); return; }
+        for (const id of ids) go.set(id, { stake: built.go.stake.get(id) ?? 0n, blocks: built.blocks.get(id) ?? 0 });
+    }
+    const f = rationalFromDecimal(String(genesis?.activeSlotsCoeff ?? 0.05));
+    const p = built.input.params;
+    const fresh = freshLikelihoods(go, built.input.totalStake, [f.num, f.den], [p.dNum, p.dDen], Number(slotsPerEpoch));
+    await recordNonMyopic(sql, epoch, { rewardPot: distributable, likelihoods: updateLikelihoods(prev.likelihoods, fresh) });
 }
 
 export async function runEpochRewards(epoch: number, genesis: any, shelleyStart: number, slotsPerEpoch: bigint): Promise<void> {
@@ -139,6 +170,7 @@ export async function runEpochRewards(epoch: number, genesis: any, shelleyStart:
         await recordPotSnapshot(sql, epoch, { reserves: cur.reserves, treasury: cur.treasury, feesCollected: cur.feePot });
         await updateRewardPots(sql, { reserves: 0n, treasury: 0n, resetFees: true });
         await settleDonations(sql);
+        if (epoch === shelleyStart) await recordNonMyopic(sql, epoch, { rewardPot: 0n, likelihoods: new Map() }); // the ledger's initial `NonMyopic` (def)
         return;
     }
     const perfEpoch = epoch - 2;
@@ -152,6 +184,8 @@ export async function runEpochRewards(epoch: number, genesis: any, shelleyStart:
     if (!built) return;
     const { input, prevReserves: prevReservesUsed, fees, totalBlocks, expectedBlocks } = built;
     const out = computeEpochRewards(input);
+    try { await advanceNonMyopic(epoch, built, out.distributable, genesis, slotsPerEpoch); }
+    catch (err) { logger.warn(`Epoch ${epoch}: pool-ranking likelihoods not advanced:`, err); }
     const pools = input.pools;
     let paidTotal = 0n;
     for (const v of out.paid.values()) paidTotal += v;

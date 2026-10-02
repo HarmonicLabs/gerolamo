@@ -29,8 +29,11 @@ export interface RangeSchedulerOptions<Pt extends RangePoint, Blk> {
     fetch: (peer: string, points: Pt[]) => Promise<Blk[]>;
     /** Throw when `blocks` do not match `points` (hash/slot/body). */
     verify: (points: Pt[], blocks: Blk[], peer: string) => void | Promise<void>;
-    /** Apply a verified range. Called strictly in submission order, one at a time. */
-    onRange: (points: Pt[], blocks: Blk[], peer: string) => Promise<void>;
+    /**
+     * Apply a verified range. Called strictly in submission order, one at a time. `stillCurrent` turns
+     * false once `reset()` has dropped the range (a primary switch while it waited to apply).
+     */
+    onRange: (points: Pt[], blocks: Blk[], peer: string, stillCurrent: () => boolean) => Promise<void>;
     /** Stop starting downloads while this many verified ranges wait for apply (default 2×maxInFlight). */
     maxAwaitingApply?: number;
     /** A peer failed a range (network) or served bad data (`malicious`). */
@@ -59,6 +62,8 @@ export interface RangeSchedulerStats {
     applied: number;
     retries: number;
     nextApplySeq: number;
+    /** Times the head range found no eligible peer with nothing in flight (re-asked after RETRY_NO_PEER_MS). */
+    noPeerWaits?: number;
 }
 
 function deferred(): { promise: Promise<void>; resolve: () => void; reject: (e: unknown) => void } {
@@ -88,6 +93,11 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
     private readonly busyPeers = new Set<string>();
     /** Bumped by reset(); stale downloads must not touch counters afterwards. */
     private generation = 0;
+    /** Re-pump timer while the head range has no eligible peer and nothing else would wake the queue. */
+    private retryTimer: ReturnType<typeof setTimeout> | null = null;
+    /** How long a range waits before the eligible peers are asked again (no peer could serve it). */
+    static RETRY_NO_PEER_MS = 1000;
+    private noPeerWaits = 0;
 
     constructor(opts: RangeSchedulerOptions<Pt, Blk>) {
         this.opts = { retryLimit: 3, ...opts, maxInFlight: Math.max(1, opts.maxInFlight) };
@@ -150,6 +160,7 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
             applied: this.appliedCount,
             retries: this.retries,
             nextApplySeq: this.nextApplySeq,
+            ...(this.noPeerWaits ? { noPeerWaits: this.noPeerWaits } : {}),
         };
     }
 
@@ -169,6 +180,7 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
         }
         this.jobs.clear();
         this.waitingForSlot.length = 0;
+        if (this.retryTimer) { clearTimeout(this.retryTimer); this.retryTimer = null; }
         this.inFlight = 0;
         this.busyPeers.clear();
         this.generation++;
@@ -192,7 +204,17 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
             const job = this.waitingForSlot[0]!;
             // Only start when a peer is free: never two ranges on one connection.
             const peer = this.choosePeer(job);
-            if (!peer) break;
+            if (!peer) {
+                // No peer may serve it right now. A download finishing or a new submission pumps again; with
+                // neither, the queue slept for good (bug 285, the producer 2026-09-29: 44 minutes without a
+                // block while every hot peer was ruled out) — so look again after a while.
+                if (this.inFlight === 0 && !this.retryTimer) {
+                    this.noPeerWaits++;
+                    this.retryTimer = setTimeout(() => { this.retryTimer = null; this.pump(); }, RangeScheduler.RETRY_NO_PEER_MS);
+                    (this.retryTimer as { unref?: () => void }).unref?.();
+                }
+                break;
+            }
             this.waitingForSlot.shift();
             this.inFlight++;
             this.busyPeers.add(peer);
@@ -297,7 +319,7 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
                 let failure: unknown = null;
                 let failed = false;
                 try {
-                    await this.opts.onRange(job.points, job.blocks, job.peer!);
+                    await this.opts.onRange(job.points, job.blocks, job.peer!, () => gen === this.generation);
                 } catch (err) {
                     failed = true;
                     failure = err;

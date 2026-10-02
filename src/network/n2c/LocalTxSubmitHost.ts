@@ -1,33 +1,30 @@
-import { Cbor, type CborObj } from "@harmoniclabs/cbor";
-import {
-    LocalTxSubmitAccept,
-    LocalTxSubmitDone,
-    LocalTxSubmitReject,
-    LocalTxSubmitSubmit,
-    MiniProtocol,
-    Multiplexer,
-    localTxSubmitMessageFromCborObj,
-} from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { blake2b_256 } from "@harmoniclabs/crypto";
+import { Cbor, CborArray, CborUInt, type CborObj } from "@harmoniclabs/cbor";
+import { MiniProtocol, Multiplexer } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { GlobalSharedMempool } from "../SharedMempool";
 import { logger } from "../../utils/logger";
-
-/** Mirrors MempoolAppendStatus without importing the tgz package path (Bun-safe). */
-const MEMPOOL_OK = 0;
-const MEMPOOL_ALREADY_PRESENT = 1;
+import { getMempool } from "../../mempool";
+import { ACCEPT_MESSAGE, CONWAY_ERA_INDEX, LedgerF, rejectMessageBytes } from "../../mempool/applyTxErr";
+import { parseMempoolTx, unwrapHfcTx } from "../../mempool/mempoolTx";
 
 const log = logger.child("n2c.localtxsubmit");
 const PROTO = MiniProtocol.LocalTxSubmission;
 
 /**
- * N2C LocalTxSubmission server (protocol 6).
- * Accepts raw tx bytes into the process mempool (light validation).
+ * N2C LocalTxSubmission server (protocol 6), cardano-node wire format:
+ *   MsgSubmitTx [0, [eraIndex, #6.24(tx)]]  →  MsgAcceptTx [1]  |  MsgRejectTx [2, HardForkApplyTxErr]
+ *   MsgDone [3]
+ * The transaction goes through the validating mempool (ledger rules at the tip, after the
+ * transactions already queued); a rejection carries the Conway ApplyTxErr cardano-node would
+ * send (byte-identical for the classes `scripts/tx-reject-oracle.ts` checks). Bare tx bytes
+ * (the ouroboros-miniprotocols-ts client's form) are accepted too.
  */
 export class LocalTxSubmitHost {
     readonly mplexer: Multiplexer;
     private disposed = false;
     private prevBytes: Uint8Array | undefined;
     private readonly listener: (chunk: Uint8Array) => void;
+    /** Requests are answered in order (the protocol has one outstanding submission at a time). */
+    private queue: Promise<void> = Promise.resolve();
 
     constructor(mplexer: Multiplexer) {
         this.mplexer = mplexer;
@@ -47,8 +44,9 @@ export class LocalTxSubmitHost {
         }
     }
 
-    private send(msg: { toCbor: () => { toBuffer: () => Uint8Array } }): void {
-        this.mplexer.send(msg.toCbor().toBuffer(), {
+    private sendBytes(bytes: Uint8Array): void {
+        if (this.disposed) return;
+        this.mplexer.send(bytes, {
             hasAgency: false, // responder direction (the 0x8000 bit on the wire): a client rejects replies on its own initiator side (cardano-cli, 2026-09-14)
             protocol: PROTO,
         });
@@ -75,44 +73,56 @@ export class LocalTxSubmitHost {
                 this.prevBytes = Uint8Array.prototype.slice.call(data);
                 return;
             }
-            try {
-                const msg = localTxSubmitMessageFromCborObj(parsed);
-                void this.handle(msg);
-            } catch (err) {
-                log.error("LocalTxSubmit parse error:", err);
-                this.send(new LocalTxSubmitReject({ reason: 1 }));
-            }
+            this.queue = this.queue.then(() => this.handle(parsed)).catch((err) => log.error("LocalTxSubmit handler failed:", err));
             if (offset >= data.length) break;
             data = data.subarray(offset);
         }
     }
 
-    private async handle(msg: unknown): Promise<void> {
-        if (msg instanceof LocalTxSubmitDone) {
-            this.dispose();
+    private async handle(msg: CborObj): Promise<void> {
+        if (!(msg instanceof CborArray) || !(msg.array[0] instanceof CborUInt)) {
+            this.sendBytes(rejectMessageBytes([LedgerF.mempoolFailure("malformed LocalTxSubmission message")]));
             return;
         }
-        if (!(msg instanceof LocalTxSubmitSubmit)) return;
-
-        const tx = msg.tx;
-        if (!(tx instanceof Uint8Array) || tx.length === 0) {
-            this.send(new LocalTxSubmitReject({ reason: 1 }));
+        const tag = Number((msg.array[0] as CborUInt).num);
+        if (tag === 3) { this.dispose(); return; }
+        if (tag !== 0 || !msg.array[1]) return;
+        const tx = unwrapHfcTx(msg.array[1]);
+        if (!tx || tx.bytes.length === 0) {
+            this.sendBytes(rejectMessageBytes([LedgerF.mempoolFailure("MsgSubmitTx without a transaction")]));
+            return;
+        }
+        if (tx.era != null && tx.era !== CONWAY_ERA_INDEX) {
+            this.sendBytes(rejectMessageBytes([LedgerF.mempoolFailure(`transactions of era ${tx.era} are not accepted in the current era`)]));
+            return;
+        }
+        const mempool = getMempool();
+        if (!mempool) {
+            this.sendBytes(await appendUnvalidated(tx.bytes));
             return;
         }
         try {
-            const hash = blake2b_256(tx);
-            const res = await GlobalSharedMempool.getInstance().append(hash, tx);
-            const status = Number((res as { status: number }).status);
-            if (status === MEMPOOL_OK || status === MEMPOOL_ALREADY_PRESENT) {
-                log.info(`LocalTxSubmit accept ${tx.length} bytes`);
-                this.send(new LocalTxSubmitAccept());
-            } else {
-                log.info(`LocalTxSubmit reject status=${status}`);
-                this.send(new LocalTxSubmitReject({ reason: 2 }));
-            }
+            const r = await mempool.addTx(tx.bytes, "n2c");
+            this.sendBytes(r.ok ? ACCEPT_MESSAGE : rejectMessageBytes(r.failures));
         } catch (err) {
-            log.error("LocalTxSubmit append failed:", err);
-            this.send(new LocalTxSubmitReject({ reason: 3 }));
+            log.error("LocalTxSubmit validation failed:", err);
+            this.sendBytes(rejectMessageBytes([LedgerF.mempoolFailure(`validation error: ${err instanceof Error ? err.message : String(err)}`)]));
         }
+    }
+}
+
+/**
+ * No validating mempool in this process (embedded use, tests): parse, key by the *body* hash
+ * (the tx id; the whole-transaction hash used before was nobody's id), store.
+ */
+export async function appendUnvalidated(bytes: Uint8Array): Promise<Uint8Array> {
+    try {
+        const tx = parseMempoolTx(bytes);
+        const res: any = await GlobalSharedMempool.getInstance().append(tx.txIdBytes, bytes);
+        const status = Number(res?.status);
+        if (status === 0 || status === 1) return ACCEPT_MESSAGE;
+        return rejectMessageBytes([LedgerF.mempoolFailure(status === 2 ? "mempool is full" : `mempool append status ${status}`)]);
+    } catch (err) {
+        return rejectMessageBytes([LedgerF.mempoolFailure(`transaction does not decode: ${err instanceof Error ? err.message : String(err)}`)]);
     }
 }

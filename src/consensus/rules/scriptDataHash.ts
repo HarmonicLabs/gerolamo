@@ -198,6 +198,63 @@ export function bodyOutputBytes(bodyBytes: Uint8Array): Uint8Array[] | null {
     }
 }
 
+/**
+ * Original bytes of each auxiliary-data entry of a Shelley+ block (`[header, bodies,
+ * witnesses, {txIndex: auxData}, invalid?]`), by transaction index; null when the block
+ * cannot be sliced. ledger-ts keeps no slice for some auxiliary-data forms (preview slot
+ * 2032466, tx 1), which left the fee and the metadata hash of those transactions unchecked.
+ */
+export function blockAuxDataBytes(blockBytes: Uint8Array): Map<number, Uint8Array> | null {
+    try {
+        const root: any = Cbor.parse(blockBytes, { keepRef: true } as any);
+        const set: any = root?.array?.[3];
+        if (!(set instanceof CborMap)) return null;
+        const out = new Map<number, Uint8Array>();
+        for (const { k, v } of set.map) {
+            if (!(k instanceof CborUInt)) continue;
+            const ref: any = (v as any).subCborRef ?? (v as any).cborRef;
+            out.set(Number(k.num), ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v).toBuffer());
+        }
+        return out;
+    } catch {
+        return null;
+    }
+}
+
+/**
+ * An unsigned-integer field of a transaction body read from its original bytes, or null when
+ * absent / not sliceable. cardano-ledger-ts drops `total_collateral` (key 17) on decode (an
+ * inverted guard, txpath bug 138), so the collateral rule reads it here.
+ */
+/** Original bytes of one body field (map key), or null when absent / not sliceable. */
+export function bodyFieldBytes(body: any, key: number): Uint8Array | null {
+    let bytes: Uint8Array | null = null;
+    try { bytes = body?.cborRef?.toBuffer?.() ?? null; } catch { bytes = null; }
+    if (!bytes) return null;
+    try {
+        const root: any = Cbor.parse(bytes, { keepRef: true } as any);
+        if (!(root instanceof CborMap)) return null;
+        for (const { k, v } of root.map) if (k instanceof CborUInt && Number(k.num) === key) { const ref: any = (v as any).subCborRef ?? (v as any).cborRef; return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v).toBuffer(); }
+    } catch {
+        /* */
+    }
+    return null;
+}
+
+export function bodyUintField(body: any, key: number): bigint | null {
+    let bytes: Uint8Array | null = null;
+    try { bytes = body?.cborRef?.toBuffer?.() ?? null; } catch { bytes = null; }
+    if (!bytes) return null;
+    try {
+        const root = Cbor.parse(bytes);
+        if (!(root instanceof CborMap)) return null;
+        for (const { k, v } of root.map) if (k instanceof CborUInt && Number(k.num) === key) return v instanceof CborUInt ? BigInt(v.num) : null;
+    } catch {
+        /* */
+    }
+    return null;
+}
+
 export interface WitnessScript {
     kind: "native" | "plutus";
     language: PlutusLanguage | null;

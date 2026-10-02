@@ -15,7 +15,7 @@
  * Fund the payment address (payment.addr) from the faucet first; the transaction spends every
  * lovelace-only UTxO at that address and returns the change minus deposits and fee.
  */
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Cbor, CborArray } from "@harmoniclabs/cbor";
 import {
@@ -85,6 +85,31 @@ if (cmd === "keygen") {
     writeTextEnvelope(file("node.cert"), encodeOperationalCert(opcert));
     writeTextEnvelope(file("node.counter"), encodeIssueCounter(nextCounter));
     console.log(`node.cert issued: counter ${opcert.cert.counter}, KES period ${period} (tip slot ${tipSlot}); node.counter now ${nextCounter.next}`);
+} else if (cmd === "rotate-kes") {
+    // KES rotation for an existing pool (@harmoniclabs/kes `rotateKes`): new KES key pair + a new
+    // operational certificate signed by the cold key at the current KES period, counter from
+    // node.counter, refused when it would break the OCERT rule against the chain's counter
+    // (m ≤ n ≤ m + 1). The old files are kept with a timestamp suffix. Then send the running node
+    // SIGHUP: it re-reads kes.skey + node.cert, checks them (cold key, KES key, period, counter) and
+    // swaps them in without a restart, keeping the old pair if a check fails (see its log). Run this where the cold key lives; on a production pool
+    // that is an offline machine, and only kes.skey / kes.vkey / node.cert travel to the producer.
+    const K = await import("@harmoniclabs/kes");
+    const { tipSlot, genesis } = await tipAndParams();
+    const read = (f: string) => K.parseTextEnvelope(readFileSync(file(f), "utf8"));
+    const cold = K.coldKeyFromSecret(K.envelopeBytes(read("cold.skey"), 32));
+    const counter = K.decodeIssueCounter(read("node.counter"));
+    const onChain = await fetch(`${arg("node", "http://localhost:3035")}/metrics`).then((r) => r.json()).then((m: any) => m?.producer?.opcert?.chainCounter ?? null).catch(() => null);
+    if (onChain == null && arg("allow-unknown-chain-counter") !== "true") { console.error("could not read the chain's opcert counter from --node (…/metrics producer.opcert.chainCounter); pass --allow-unknown-chain-counter true for a pool that has never forged"); process.exit(1); }
+    const r = K.rotateKes({ cold, counter, currentSlot: tipSlot, genesis, lastOnChainCounter: onChain == null ? null : BigInt(onChain) });
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    for (const f of ["kes.skey", "kes.vkey", "node.cert", "node.counter"]) if (existsSync(file(f))) copyFileSync(file(f), file(`${f}.${stamp}`));
+    const write = (f: string, e: { type: string; description: string; cborHex: string }) => writeFileSync(file(f), K.serializeTextEnvelope(e), { mode: 0o600 });
+    write("kes.skey", r.envelopes.kesSkey);
+    write("kes.vkey", r.envelopes.kesVkey);
+    write("node.cert", K.encodeOperationalCert(r.opcert));
+    write("node.counter", K.encodeIssueCounter(r.nextCounter));
+    K.zeroise(r.kes.skey, cold.skey);
+    console.log(`KES rotated: node.cert counter ${r.opcert.cert.counter}, KES period ${r.opcert.cert.kesPeriod} (tip slot ${tipSlot}), ${r.status.remainingPeriods} periods, valid until slot ${r.status.expiresSlot}; old files kept with suffix .${stamp}. Load them without a restart: kill -HUP <producer node pid> (the node logs "credentials reloaded" or why it kept the old ones).`);
 } else if (cmd === "register") {
     const { tipSlot, epoch, params, network } = await tipAndParams();
     const pay = loadSigningKey(file("payment.skey"), KeyEnvelopeType.paymentSigning);

@@ -18,11 +18,37 @@ import { ledgerInputs, utxoRefOf } from "./resolvedUtxo";
 import { parseStoredAddress } from "./requiredSigners";
 import { unitsOf, type UnitMap } from "./value";
 import { Address, ByronAddress, CredentialType } from "@harmoniclabs/cardano-ledger-ts";
-import { costModelArrays, expectedScriptDataHash, scriptLanguageOfCbor, witnessDatumBytes, type PlutusLanguage } from "./scriptDataHash";
+import { bodyUintField, costModelArrays, expectedScriptDataHash, scriptLanguageOfCbor, witnessDatumBytes, type PlutusLanguage } from "./scriptDataHash";
 import { blake2b_256 } from "@harmoniclabs/crypto";
+import { checkSupplementalDatums } from "./ledgerChecks";
+
+const PURPOSES = ["spend", "mint", "cert", "withdraw", "vote", "propose"];
+
+/**
+ * Voters of a transaction in the ledger's `Map Voter` key order, with whether the
+ * credential is a script. ledger-ts `VoterKind`: 0 CC hot key, 1 CC hot script, 2 DRep
+ * key, 3 DRep script, 4 stake pool.
+ */
+export function sortedVoters(procedures: readonly any[]): Array<{ kind: number; script: boolean; hash: string }> {
+    const vs = procedures.map((e) => {
+        const kind = Number(e?.voter?.kind);
+        return { kind, script: kind === 1 || kind === 3, hash: hex(e?.voter?.hash) };
+    });
+    const group = (k: number) => (k <= 1 ? 0 : k <= 3 ? 1 : 2);
+    return vs.sort((a, b) => group(a.kind) - group(b.kind) || (a.script === b.script ? 0 : a.script ? -1 : 1) || (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
+}
 
 /** Strict: the recomputation matched 8/8 real preprod Babbage transactions (V1 and V2, with and without datums). */
 export const SCRIPT_DATA_HASH_STRICT = true;
+
+/**
+ * Voting (tag 4) and proposing (tag 5) redeemers ↔ Plutus voters / guardrail proposals (bug 181).
+ * Strict since bug 277: every preview transaction since the Conway hard fork with a script voter, a
+ * guarded proposal or a tag 4/5 redeemer (500: 103 script votes, 33 of them native, 70 vote and 495
+ * propose redeemers, 98 of those at a non-zero index) matched with no message
+ * (scripts/gov-redeemers-replay.ts), and phase 2 agreed with every is_valid flag.
+ */
+export const GOV_REDEEMERS_STRICT = true;
 
 export interface AlonzoParams {
     collateralPercent: number;
@@ -48,6 +74,12 @@ export interface AlonzoRuleInput {
     /** Script hashes known to be native (witness set). */
     nativeScripts: Set<string>;
     params: AlonzoParams;
+    /**
+     * Datum hashes a witness datum may carry without an input needing it (outputs of the tx,
+     * Babbage: collateral return and reference inputs' outputs). Absent: the supplemental
+     * datum rule is not evaluated.
+     */
+    supplementalAllowed?: ReadonlySet<string>;
 }
 
 const hex = (h: any): string => String(h?.toString?.() ?? h ?? "").toLowerCase();
@@ -93,6 +125,8 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
     // --- witness datums by hash: the ledger hashes the datum's *original bytes*, so
     // take them from the witness-set slice; re-encoding (hashData) is the fallback.
     const datumHashes = new Set<string>();
+    /** Datum hashes the spent Plutus-locked inputs need (`getInputDataHashesTxBody`). */
+    const inputDatumHashes = new Set<string>();
     const rawDatums = tx.witnessSetBytes ? witnessDatumBytes(tx.witnessSetBytes) : null;
     if (rawDatums) {
         for (const bytes of rawDatums) datumHashes.add(toHex(blake2b_256(bytes)));
@@ -121,6 +155,7 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
         neededHashes.add(pc.hash);
         const inline = !!u.inlineDatumCbor;
         const dh = u.datumHash;
+        if (!inline && dh) inputDatumHashes.add(dh.toLowerCase());
         if (!inline && !dh) {
             // Conway (CIP-69): a PlutusV3 spending script takes an optional datum, so an output
             // without one is spendable. V1/V2 spends still need a datum.
@@ -165,17 +200,17 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
 
     // --- Conway: votes cast by script credentials (CC / DRep scripts) and proposals guarded
     // by a policy script (the constitution's guardrail script) run Plutus scripts too.
-    for (const entry of ((body.votingProcedures?.procedures ?? []) as any[])) {
-        const kind = Number(entry?.voter?.kind);
-        if (kind === 1 || kind === 3) { // ConstitutionalCommitteeScript, DRepScript
-            const h = hex(entry.voter?.hash);
-            if (h && tx.plutusScripts.has(h)) neededHashes.add(h);
-        }
-    }
-    for (const pp of ((body.proposalProcedures ?? []) as any[])) {
+    // Redeemer index of a vote = position of its voter in the ledger's `Map Voter` order
+    // (CommitteeVoter < DRepVoter < StakePoolVoter; ScriptHashObj < KeyHashObj; hash bytes).
+    const neededVote = new Set<number>();
+    sortedVoters((body.votingProcedures?.procedures ?? []) as any[]).forEach((v, idx) => {
+        if (v.script && v.hash && tx.plutusScripts.has(v.hash)) { neededVote.add(idx); neededHashes.add(v.hash); }
+    });
+    const neededPropose = new Set<number>();
+    ((body.proposalProcedures ?? []) as any[]).forEach((pp, idx) => {
         const h = hex(pp?.govAction?.policyHash);
-        if (h && tx.plutusScripts.has(h)) neededHashes.add(h);
-    }
+        if (h && tx.plutusScripts.has(h)) { neededPropose.add(idx); neededHashes.add(h); }
+    });
 
     // --- redeemers ↔ purposes
     // The list form of the redeemers is decoded with Map.fromList in every era (a later entry
@@ -191,13 +226,21 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
             continue;
         }
         seen.add(key);
-        const needed = tag === 0 ? neededSpend : tag === 1 ? neededMint : tag === 2 ? neededCert : tag === 3 ? neededWd : null;
-        if (needed && !needed.has(idx)) failures.push(`extra redeemer: ${["spend", "mint", "cert", "withdraw"][tag]} index ${idx} needs no Plutus script`);
+        const needed = tag === 0 ? neededSpend : tag === 1 ? neededMint : tag === 2 ? neededCert : tag === 3 ? neededWd : tag === 4 ? neededVote : tag === 5 ? neededPropose : null;
+        if (!needed) { (tag > 5 ? failures : reports).push(`extra redeemer: unknown purpose tag ${tag}`); continue; }
+        if (!needed.has(idx)) (tag >= 4 && !GOV_REDEEMERS_STRICT ? reports : failures).push(`extra redeemer: ${PURPOSES[tag]} index ${idx} needs no Plutus script`);
     }
-    for (const [tag, needed] of [[0, neededSpend], [1, neededMint], [2, neededCert], [3, neededWd]] as const) {
+    for (const [tag, needed] of [[0, neededSpend], [1, neededMint], [2, neededCert], [3, neededWd], [4, neededVote], [5, neededPropose]] as const) {
         for (const idx of needed) {
-            if (!seen.has(`${tag}:${idx}`)) failures.push(`missing redeemer: ${["spend", "mint", "cert", "withdraw"][tag]} index ${idx}`);
+            if (!seen.has(`${tag}:${idx}`)) (tag >= 4 && !GOV_REDEEMERS_STRICT ? reports : failures).push(`missing redeemer: ${PURPOSES[tag]} index ${idx}`);
         }
+    }
+
+    // --- supplemental datums (NotAllowedSupplementalDatums): only from the original bytes
+    if (tx.supplementalAllowed) {
+        const sink = { failures: [] as string[], reports: [] as string[] };
+        checkSupplementalDatums(sink, datumHashes, inputDatumHashes, tx.supplementalAllowed);
+        (rawDatums ? failures : reports).push(...sink.failures);
     }
 
     // --- ex units
@@ -209,7 +252,7 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
     if (tx.params.maxTxExMem != null && mem > tx.params.maxTxExMem) failures.push(`execution memory ${mem} > max ${tx.params.maxTxExMem}`);
     if (tx.params.maxTxExSteps != null && steps > tx.params.maxTxExSteps) failures.push(`execution steps ${steps} > max ${tx.params.maxTxExSteps}`);
 
-    const runsPlutus = neededSpend.size + neededMint.size + neededCert.size + neededWd.size > 0 || redeemers.length > 0;
+    const runsPlutus = neededSpend.size + neededMint.size + neededCert.size + neededWd.size + neededVote.size + neededPropose.size > 0 || redeemers.length > 0;
     checkCollateral(tx, failures, runsPlutus);
     if (!redeemers.length && runsPlutus) failures.push("Plutus scripts needed but no redeemers");
 
@@ -258,7 +301,9 @@ function checkCollateral(tx: AlonzoRuleInput, failures: string[], runsPlutus: bo
     const fee = BigInt(body.fee ?? 0);
     const need = (fee * BigInt(tx.params.collateralPercent) + 99n) / 100n;
     if (colls.length && netAda < need) failures.push(`collateral ${netAda} < required ${need} (fee ${fee} × ${tx.params.collateralPercent}%)`);
-    if (body.totCollateral != null && BigInt(body.totCollateral) !== netAda) failures.push(`total_collateral ${body.totCollateral} ≠ collateral − return ${netAda}`);
+    // Babbage+ `total_collateral` (key 17): ledger-ts drops it on decode (txpath bug 138), so read the original bytes
+    const tot = body.totCollateral != null ? BigInt(body.totCollateral) : tx.era >= 6 ? bodyUintField(body, 17) : null;
+    if (tot != null && tot !== netAda) failures.push(`IncorrectTotalCollateralField: total_collateral ${tot} ≠ collateral − return ${netAda}`);
 }
 
 /**

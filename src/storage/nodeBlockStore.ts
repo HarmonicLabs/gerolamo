@@ -10,6 +10,7 @@
  * k deep into the chunks.
  */
 import { dirname, join } from "node:path";
+import { ledgerStoreMode } from "../ledger/nodeLedgerStore";
 import { sql } from "../sql";
 import { logger } from "../utils/logger";
 import { BlockStore } from "./blockStore";
@@ -152,16 +153,22 @@ export function noteSelectedTip(hash: Uint8Array): void {
 export async function resolveStartupTip(store: BlockStore, dir: string): Promise<{ hash: Uint8Array; slot: number; source: string } | null> {
     const imm = await store.immutableTip();
     const candidates: { hash: string; source: string }[] = [];
+    // With the ledger in LMDB the SQLite journal is frozen (bug 129: a node restarted at a day-old
+    // journal tip after a reboot); the persisted tip is then the authority and comes first.
+    const journalFirst = ledgerStoreMode() !== "lmdb";
+    const journal: { hash: string; source: string }[] = [];
     try {
         const j = (await sql`SELECT block_hash FROM ledger_journal ORDER BY id DESC LIMIT 1`.values()) as unknown[][];
         const raw = j[0]?.[0];
         const h = raw instanceof Uint8Array ? Buffer.from(raw).toString("hex") : typeof raw === "string" ? raw : null;
-        if (h && /^[0-9a-f]{64}$/i.test(h)) candidates.push({ hash: h.toLowerCase(), source: "ledger journal" });
+        if (h && /^[0-9a-f]{64}$/i.test(h)) journal.push({ hash: h.toLowerCase(), source: "ledger journal" });
     } catch { /* table may not exist */ }
+    if (journalFirst) candidates.push(...journal);
     try {
         const f = Bun.file(join(dir, "gerolamo", "selected-tip.hex"));
         if (await f.exists()) { const h = (await f.text()).trim(); if (/^[0-9a-f]{64}$/i.test(h)) candidates.push({ hash: h.toLowerCase(), source: "persisted tip" }); }
     } catch { /* ignore */ }
+    if (!journalFirst) candidates.push(...journal);
     try {
         const r = (await sql`SELECT hash FROM blocks WHERE is_valid = TRUE ORDER BY slot DESC LIMIT 1`.values()) as unknown[][];
         const raw = r[0]?.[0];

@@ -97,3 +97,59 @@ describe("N2NChainSyncHost", () => {
         expect(second.data).toEqual(store.headers[2]!.data);
     });
 });
+
+describe("N2NChainSyncHost: our chain switches branches under a client (bug 287)", () => {
+    const hash = (b: number) => new Uint8Array(32).fill(b);
+    class ForkStore extends FakeStore {
+        chain: RelayHeader[] = [
+            { point: point(10n, 1), blockNo: 1n, data: new CborArray([new CborUInt(10)]), prevHash: hash(0) },
+            { point: point(14n, 2), blockNo: 2n, data: new CborArray([new CborUInt(14)]), prevHash: hash(1) },
+            { point: point(21n, 3), blockNo: 3n, data: new CborArray([new CborUInt(21)]), prevHash: hash(2) }, // L
+        ];
+        override async getTip() { const t = this.chain[this.chain.length - 1]!; return new ChainTip({ point: t.point, blockNo: t.blockNo }); }
+        override async findIntersect(points: readonly ChainPoint[]) {
+            for (const c of points) { const f = this.chain.find((h) => ChainPoint.eq(h.point, c)); if (f) return { point: f.point, blockNo: f.blockNo }; }
+            return undefined;
+        }
+        override async getNextHeader(after: ChainPoint) {
+            const slot = after.blockHeader?.slotNumber ?? -1n;
+            return this.chain.find((h) => h.point.blockHeader!.slotNumber > slot);
+        }
+    }
+
+    test("the client on the abandoned block gets MsgRollBackward to the common block, then the new branch", async () => {
+        const mux = new FakeMux();
+        const store = new ForkStore();
+        new N2NChainSyncHost(mux as unknown as Multiplexer, store, { pollIntervalMs: 1_000 });
+        const send = async (m: { toCborBytes(): Uint8Array }) => { mux.emit(MiniProtocol.ChainSync as any, m.toCborBytes()); await Bun.sleep(0); };
+        await send(new ChainSyncFindIntersect({ points: [store.chain[0]!.point] }));
+        await send(new ChainSyncRequestNext()); // rollback to the intersection
+        await send(new ChainSyncRequestNext()); // 14
+        await send(new ChainSyncRequestNext()); // 21 (L)
+        expect(decode(mux.sent[3]!)).toBeInstanceOf(ChainSyncRollForward);
+        // our chain drops L for N (same parent, same slot) and grows N2
+        store.chain = [store.chain[0]!, store.chain[1]!,
+            { point: point(21n, 4), blockNo: 3n, data: new CborArray([new CborUInt(2104)]), prevHash: hash(2) },
+            { point: point(26n, 5), blockNo: 4n, data: new CborArray([new CborUInt(26)]), prevHash: hash(4) }];
+        await send(new ChainSyncRequestNext());
+        const back = decode(mux.sent[4]!) as ChainSyncRollBackwards;
+        expect(back).toBeInstanceOf(ChainSyncRollBackwards); // was: N2 straight after L → UnexpectedPrevHash at the client
+        expect(String(back.point.blockHeader?.slotNumber)).toBe("14");
+        await send(new ChainSyncRequestNext());
+        await send(new ChainSyncRequestNext());
+        const enc = (o: any) => Buffer.from(Cbor.encode(o).toBuffer()).toString("hex");
+        expect(enc((decode(mux.sent[5]!) as ChainSyncRollForward).data)).toBe(enc(new CborArray([new CborUInt(2104)])));
+        expect(enc((decode(mux.sent[6]!) as ChainSyncRollForward).data)).toBe(enc(new CborArray([new CborUInt(26)])));
+    });
+
+    test("a header whose parent is not the client's position, the position still on our chain (a store gap): served, no rollback loop", async () => {
+        const mux = new FakeMux();
+        const store = new ForkStore();
+        store.chain[2] = { ...store.chain[2]!, prevHash: hash(9) };
+        new N2NChainSyncHost(mux as unknown as Multiplexer, store, { pollIntervalMs: 1_000 });
+        const send = async (m: { toCborBytes(): Uint8Array }) => { mux.emit(MiniProtocol.ChainSync as any, m.toCborBytes()); await Bun.sleep(0); };
+        await send(new ChainSyncFindIntersect({ points: [store.chain[0]!.point] }));
+        for (let i = 0; i < 3; i++) await send(new ChainSyncRequestNext());
+        expect(decode(mux.sent[3]!)).toBeInstanceOf(ChainSyncRollForward);
+    });
+});

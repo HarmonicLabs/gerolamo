@@ -254,7 +254,8 @@ function renderProducer(m) {
     ["Pool", '<code title="' + esc(p.poolId) + '">' + short(p.poolId, 16) + "</code>", true],
     ["VRF key hash", short(p.vrfKeyHash, 16)],
     ["KES current | remaining | exp", kes ? kes.period + " | " + kes.remaining + " of " + kes.maxEvolutions + " | " + when(kes.expiresAt) : "period " + oc.kesPeriod + " · evolution " + p.kesEvolution],
-    ["OP cert disk | chain", badge(chainBad ? "bad" : "ok", oc.counter + " | " + (oc.chainCounter == null ? "none yet" : oc.chainCounter)), true],
+    ["OP cert disk | chain", badge(chainBad || (kes && kes.counter === "ahead-of-chain") ? "bad" : "ok", oc.counter + " | " + (oc.chainCounter == null ? "none yet" : oc.chainCounter)), true],
+    ["KES health", kes && kes.health ? badge({ ok: "ok", "rotate-soon": "warn", "rotate-now": "bad", expired: "bad", "not-yet-valid": "bad" }[kes.health] || "muted", { ok: "ok", "rotate-soon": "rotate soon", "rotate-now": "ROTATE NOW", expired: "EXPIRED: no blocks", "not-yet-valid": "certificate not valid yet" }[kes.health] || kes.health) : "—", true],
     ["Missed slot leader checks", badge(Number(p.missedLeaderChecks) > 0 ? "warn" : "ok", String(p.missedLeaderChecks || 0)), true],
     ["Schedules", (p.scheduledEpochs && p.scheduledEpochs.length ? "epochs " + p.scheduledEpochs.join(", ") : "none yet") + " · " + p.leaderSlotsKnown + " leader slot(s)"],
     ["Forged (all time)", fmt(p.forged) + (p.lastForgedSlot != null ? " · last slot " + fmt(p.lastForgedSlot) : "")],
@@ -262,8 +263,11 @@ function renderProducer(m) {
   ]);
   if (kes) {
     el("kesBar").style.width = barPct(kes.evolution, kes.maxEvolutions) + "%";
+    el("kesBar").style.background = kes.health === "ok" ? "" : kes.health === "rotate-soon" ? "var(--y)" : "var(--r)";
     const left = (new Date(kes.expiresAt).getTime() - Date.now()) / 86400000;
-    el("kesNote").textContent = "KES evolution " + kes.evolution + " of " + kes.maxEvolutions + (isFinite(left) ? " · certificate expires in " + left.toFixed(1) + " days" : "");
+    el("kesNote").textContent = "KES evolution " + kes.evolution + " of " + kes.maxEvolutions + (isFinite(left) ? " · certificate expires in " + left.toFixed(1) + " days" : "")
+      + (kes.health === "ok" ? "" : " · rotate: bun scripts/pool-register.ts rotate-kes --dir <pool keys> (where the cold key lives), copy kes.skey / kes.vkey / node.cert to the producer, restart it")
+      + (kes.counter === "ahead-of-chain" ? " · certificate counter is more than one above the chain's: blocks will be rejected" : "");
   }
   const es = p.epochStats;
   el("prodEpoch").textContent = es ? String(es.epoch) : "";

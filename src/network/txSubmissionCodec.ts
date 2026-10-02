@@ -7,6 +7,8 @@
  * @harmoniclabs/ouroboros-miniprotocols-ts encodes bare hashes in definite lists and decodes the
  * request's blocking flag (a CBOR boolean) as false, hence this module.
  */
+import { getHardForkHistory } from "../consensus/hfc/hfcNode";
+import { eraIndexAt } from "../consensus/hfc/eraOfTip";
 import { Cbor, CborArray, CborBytes, type CborObj, CborSimple, CborTag, CborUInt } from "@harmoniclabs/cbor";
 import { epochForSlot, getEpochNetwork } from "../utils/epochFromSlotCalculations";
 import { slotAt } from "../pool/slotClock";
@@ -78,9 +80,12 @@ export function encodeInit(): Uint8Array {
 /** Hard-fork-combinator era index of the current wall-clock epoch (Byron 0 … Babbage 5, Conway 6). */
 export function hfcEraIndexNow(): HfcEraIndex {
     const net = getEpochNetwork();
+    const hfc = getHardForkHistory(); // ledger-driven era history (consensus/hfc); the table is the fallback
     const conwayEpoch = net === "preview" ? 646 : net === "preprod" ? 163 : 507;
     const epoch = Number(epochForSlot(slotAt(Date.now(), net), net));
-    return epoch >= conwayEpoch ? 6 : 5;
+    const table: HfcEraIndex = epoch >= conwayEpoch ? 6 : 5;
+    // the known history is the floor (bug 237: an incomplete history answered Alonzo on preview)
+    return eraIndexAt(hfc, slotAt(Date.now(), net), table) as HfcEraIndex;
 }
 
 // ───────────── the server (responder) side: what an inbound peer sends us, what we ask it ─────────────

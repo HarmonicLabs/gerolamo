@@ -1,6 +1,7 @@
 import { Cbor, CborArray, CborUInt, LazyCborArray } from "@harmoniclabs/cbor";
 import { getSqlFilename, sql } from "./sql";
 import { ensureLedgerJournal, undoLedgerJournal } from "./db/ledgerJournal";
+import { BYRON_LEDGER_TABLE_SQL } from "./ledger/byronStore";
 import { outputAddressString } from "./utils/byronAddressString";
 import { shelleyStartSlot, epochForSlot } from "./utils/epochFromSlotCalculations";
 import { bech32HeaderByte, credTypeOf, headerStakeIsScript, pointerFromAddressBytes, rawAddressBytesOf, rewardAccountTypedHex, shelleyAddressBech32, typedCredBytes, typedCredHex, typedCredHexOf } from "./db/stakeCred";
@@ -14,7 +15,9 @@ import { stabilityWindowSlots } from "./utils/epochFromSlotCalculations";
 import { ensurePParamsTables, recordUpdateProposal } from "./consensus/pparams";
 import { primaryBlockStore } from "./storage/nodeBlockStore";
 import * as blockReads from "./storage/blockReads";
-import { ledgerGovDirect, ledgerGovReads, ledgerStake, ledgerStakeReads, ledgerUtxoDel, ledgerUtxoPut, ledgerUtxoReads, sqlLedgerWrites } from "./ledger/nodeLedgerStore";
+import { ledgerGov, ledgerGovDirect, ledgerGovReads, ledgerStake, ledgerStakeReads, ledgerUtxoDel, ledgerUtxoPut, ledgerUtxoReads, sqlLedgerWrites } from "./ledger/nodeLedgerStore";
+import { scanTxBody } from "./ledger/certScan";
+import { clearRawPoolParams, noteRawPoolParams } from "./ledger/stakeStore";
 import { ensureGovernanceTables, recordCommitteeHot, recordCommitteeResign, recordDRepActivity, recordDRepRegistration, recordDRepUnregistration, recordProposals, recordStakeDeregistration, recordVoteDelegation, recordVotes } from "./consensus/governance/state";
 import {
     AllegraTxBody,
@@ -341,6 +344,8 @@ export async function ensureInitialized(): Promise<void> {
     await ensureLeaderStateTables();
     await ensurePParamsTables();
     await ensureGovernanceTables();
+    // Byron chain-validation state (ledger/byronStore.ts); before the journal so its triggers exist.
+    await sql.unsafe(BYRON_LEDGER_TABLE_SQL);
     // Before-image journal for the state tables (rollback of certificates, pots, governance).
     await ensureLedgerJournal(sql as any);
     await sql`CREATE INDEX IF NOT EXISTS idx_utxo_address ON utxo(address)`;
@@ -1304,6 +1309,8 @@ export async function getUtxosByRefs(
     utxoRefs: string[],
 ): Promise<Array<{ utxo_ref: string; amount: string | null }>> {
     if (utxoRefs.length === 0) return [];
+    const ur = ledgerUtxoReads();
+    if (ur) return ur.getMany(utxoRefs).map((u) => ({ utxo_ref: u.utxo_ref, amount: u.lovelace }));
     // Bun SQL .values() returns row arrays [[ref, amount], ...], not objects.
     // Callers (BlockBodyValidator) destructure { utxo_ref, amount }.
     const rows = await sql`
@@ -2349,7 +2356,8 @@ export async function applyTransaction(
                 for (const r of inputRefs) { bs.refs.push(r); bs.txOfRef.set(r, txId); }
                 bs.expected += existingUtxos.length;
             } else {
-                const delRows = (await db`DELETE FROM utxo WHERE utxo_ref IN ${db(inputRefs)} RETURNING utxo_ref`.values()) as unknown[][];
+                const goneInStore = ledgerUtxoDel(inputRefs);
+                const delRows = sqlLedgerWrites() ? (await db`DELETE FROM utxo WHERE utxo_ref IN ${db(inputRefs)} RETURNING utxo_ref`.values()) as unknown[][] : goneInStore.map((r) => [r]);
                 const deleted = delRows.length;
                 if (strictUtxoApply && indexCtx?.knownInputs && deleted !== existingUtxos.length) {
                     throw new Error(`tx ${txId}: ${existingUtxos.length} input row(s) known but ${deleted} deleted from the UTxO set (stale rules-stage rows)`);
@@ -2413,9 +2421,21 @@ export async function applyTransaction(
         }
     }
 
+    // Raw facts the node-to-client queries report verbatim (pool relays / metadata, constitution anchors).
+    if (ledgerStake() && ((Array.isArray(txBody.certs) && txBody.certs.some((c: any) => Number(c?.certType) === 3)) || (txBody as any).proposalProcedures?.length)) {
+        try {
+            const raw = (txBody as any).cborRef?.toBuffer?.() as Uint8Array | undefined;
+            if (raw) {
+                const r = scanTxBody(raw);
+                for (const p of r.pools) noteRawPoolParams(p.poolId, p.paramsCbor);
+                for (const c of r.constitutions) ledgerGov()?.putConstitutionProposalAnchor(c.actionId, { url: c.url, hash: c.hash });
+            }
+        } catch (err) { logger.warn(`raw certificate scan failed for tx ${txId.slice(0, 16)}…: ${(err as Error).message}`); }
+    }
     if (txBody.certs && Array.isArray(txBody.certs)) {
         await applyCertificates(txBody.certs, blockHash, client, indexCtx ? { slot: indexCtx.slot, epoch: indexCtx.epoch, txIndex: indexCtx.txIndex } : undefined);
     }
+    clearRawPoolParams();
     if (indexCtx) {
         const body: any = txBody;
         try {
@@ -2535,7 +2555,7 @@ export async function applyCertificates(
                 // vote delegations are recorded in this pass, and preview tx 190fdc6e… (slot
                 // 60 215 405) deregisters, re-registers and vote-delegates the same credential in
                 // one transaction; dropping it in the later stake pass lost the new delegation.
-                if (certStakeEffect(t).deregisters && c.stakeCredential) await recordStakeDeregistration(db, c.stakeCredential);
+                if (certStakeEffect(t).deregisters && c.stakeCredential) await recordStakeDeregistration(db, c.stakeCredential, Number(ctx.epoch));
                 if (t === 3 && c.poolParams?.operator && c.poolParams?.vrfKeyHash) {
                     const pp = c.poolParams;
                     const margin = pp.margin ?? {};
@@ -2575,7 +2595,7 @@ export async function applyCertificates(
                 } else if (t === 5 && c.genesisHash && c.genesisDelegateHash && c.vrfKeyHash) {
                     await recordGenesisDelegation(db, String(c.genesisHash.toString()), String(c.genesisDelegateHash.toString()), String(c.vrfKeyHash.toString()), ctx.slot + stabilityWindowSlots());
                 } else if (t === 9 || t === 10 || t === 12 || t === 13) {
-                    if (c.stakeCredential && c.drep) await recordVoteDelegation(db, c.stakeCredential, c.drep);
+                    if (c.stakeCredential && c.drep) await recordVoteDelegation(db, c.stakeCredential, c.drep, Number(ctx.epoch), t === 12 || t === 13); // epoch: protocol-9 reverse sets (bug 165)
                 } else if (t === 14 && c.coldCredential && c.hotCredential) {
                     await recordCommitteeHot(db, c.coldCredential, c.hotCredential);
                 } else if (t === 15 && c.coldCredential) {
@@ -2583,9 +2603,9 @@ export async function applyCertificates(
                 } else if (t === 16 && c.drepCredential) {
                     await recordDRepRegistration(db, c.drepCredential, BigInt(c.coin ?? 0), ctx.slot, Number(ctx.epoch ?? 0));
                 } else if (t === 17 && c.drepCredential) {
-                    await recordDRepUnregistration(db, c.drepCredential);
+                    await recordDRepUnregistration(db, c.drepCredential, Number(ctx.epoch));
                 } else if (t === 18 && c.drepCredential) {
-                    await recordDRepActivity(db, String(c.drepCredential.hash?.toString?.() ?? "").toLowerCase(), Number(ctx.epoch ?? 0));
+                    await recordDRepActivity(db, typedCredHexOf(c.drepCredential) ?? String(c.drepCredential.hash?.toString?.() ?? "").toLowerCase(), Number(ctx.epoch ?? 0)); // typed (bug 153)
                 }
             } catch (err) {
                 logger.warn(`leader-state update failed for certificate type ${t}:`, err);
@@ -2814,6 +2834,13 @@ export async function countBlocksAfterSlot(slot: bigint): Promise<number> {
 
 export async function rollbackChainTo(
     slot: bigint,
+    /**
+     * Allow a rollback that crosses an epoch boundary. Only for a node whose ledger authority is the
+     * LMDB store (`ledgerStore: lmdb`): the boundary work is part of the boundary block's LMDB diff
+     * and is reverted with it; the SQLite ledger tables, if still written as a shadow, keep their
+     * non-journaled boundary rows (bug 231).
+     */
+    opts: { allowEpochCross?: boolean } = {},
 ): Promise<
     {
         blocksDeleted: number;
@@ -2856,7 +2883,9 @@ export async function rollbackChainTo(
         // journaled: a rollback across a boundary cannot be undone exactly. cardano-node bounds
         // rollbacks by k, so this is rare; refuse rather than leave the ledger half-reverted.
         const tipBefore = await getMaxSlot();
-        if (tipBefore > slot && epochForSlot(tipBefore) !== epochForSlot(slot)) {
+        if (tipBefore > slot && epochForSlot(tipBefore) !== epochForSlot(slot) && opts.allowEpochCross) {
+            logger.warn(`rollback from slot ${tipBefore} (epoch ${epochForSlot(tipBefore)}) to slot ${slot} (epoch ${epochForSlot(slot)}) crosses an epoch boundary: the LMDB ledger store reverts the boundary with its diff; SQLite ledger shadow tables (if written) keep the boundary's rows — rebuild them before switching back to ledgerStore sqlite`);
+        } else if (tipBefore > slot && epochForSlot(tipBefore) !== epochForSlot(slot)) {
             throw new Error(`rollback from slot ${tipBefore} (epoch ${epochForSlot(tipBefore)}) to slot ${slot} (epoch ${epochForSlot(slot)}) crosses an epoch boundary; the boundary state is not journaled — resync from a snapshot before epoch ${epochForSlot(slot) + 1n} is required`);
         }
     }    // Only the deltas of the gone blocks, through the block_hash index; the previous

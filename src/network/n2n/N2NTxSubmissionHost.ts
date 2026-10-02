@@ -12,6 +12,7 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 import { logger } from "../../utils/logger";
 import { encodeRequestTxIds, encodeRequestTxs, hashBytes, hfcEraIndexNow, parseTxSubmissionClientMessages, type HfcEraIndex, type TxIdAnnouncement } from "../txSubmissionCodec";
 import { isN2NInitiatorFrame, sendN2NResponder } from "./N2NDirection";
+import { getMempool } from "../../mempool";
 
 const log = logger.child("n2n");
 
@@ -31,6 +32,11 @@ export interface TxSubmissionResponderOptions {
     maxTxBytes?: number;
     /** Reject a body before it reaches the mempool (light check: hash matches the announced id). */
     validate?: (bytes: Uint8Array) => Promise<{ ok: true; hash: Uint8Array } | { ok: false; reason: string }>;
+    /**
+     * Ledger admission (the validating mempool, which also stores the transaction). Undefined:
+     * the process's validating mempool when one runs; null: append to `mempool` unvalidated.
+     */
+    admit?: ((bytes: Uint8Array, source: string) => Promise<{ ok: boolean; reason?: string }>) | null;
     peer?: string;
 }
 
@@ -100,6 +106,21 @@ export class TxSubmissionResponder {
         if (!v.ok) { this.stats.rejected++; log.debug(`tx-submission ${this.opts.peer ?? ""}: rejected transaction: ${v.reason}`); return; }
         const wanted = this.fetching.some((h) => toHex(h) === toHex(v.hash));
         if (!wanted) { this.stats.rejected++; log.debug(`tx-submission ${this.opts.peer ?? ""}: unrequested transaction ${toHex(v.hash).slice(0, 12)}…`); return; }
+        // Full ledger validation (validating mempool) when the node runs one: a relay must not
+        // pass on, and a producer must not forge, what the ledger rejects. cardano-node drops a
+        // rejected transaction silently on node-to-node (no reply carries the reason).
+        const admit = this.opts.admit === undefined ? defaultAdmit() : this.opts.admit;
+        if (admit) {
+            try {
+                const r = await admit(bytes, this.opts.peer ?? "n2n");
+                if (r.ok) this.stats.accepted++;
+                else { this.stats.rejected++; log.debug(`tx-submission ${this.opts.peer ?? ""}: ledger rejected ${toHex(v.hash).slice(0, 12)}…: ${r.reason}`); }
+            } catch (err) {
+                this.stats.rejected++;
+                log.warn(`tx-submission ${this.opts.peer ?? ""}: validation failed: ${err instanceof Error ? err.message : String(err)}`);
+            }
+            return;
+        }
         try {
             await this.opts.mempool.append(v.hash, bytes);
             this.stats.accepted++;
@@ -108,6 +129,15 @@ export class TxSubmissionResponder {
             log.warn(`tx-submission ${this.opts.peer ?? ""}: mempool append failed: ${err instanceof Error ? err.message : String(err)}`);
         }
     }
+}
+
+function defaultAdmit(): ((bytes: Uint8Array, source: string) => Promise<{ ok: boolean; reason?: string }>) | null {
+    const mp = getMempool();
+    if (!mp) return null;
+    return async (bytes, source) => {
+        const r = await mp.addTx(bytes, `n2n ${source}`);
+        return r.ok ? { ok: true } : { ok: false, reason: r.reasons.slice(0, 3).join("; ") };
+    };
 }
 
 /** The body must parse as a transaction; its id is the body hash. */

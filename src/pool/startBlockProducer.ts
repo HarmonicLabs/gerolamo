@@ -1,9 +1,12 @@
 /** Wire the BlockProducer to the running node (orchestrator, DB, shared mempool). */
+import { getHardForkHistory } from "../consensus/hfc/hfcNode";
+import { eraIndexAt } from "../consensus/hfc/eraOfTip";
 import { getConsensus } from "../network/peerManager";
 import { ledgerUtxoReads } from "../ledger/nodeLedgerStore";
 import type { GerolamoConfig } from "../network/peerManager";
 import { getInboundN2NStatus } from "../network/peerManager";
 import { GlobalSharedMempool } from "../network/SharedMempool";
+import { getMempool } from "../mempool";
 import { hashBytes } from "../network/txSubmissionCodec";
 import { getChainTip } from "../db";
 import { sql } from "../sql";
@@ -32,8 +35,12 @@ export async function startBlockProducer(config: GerolamoConfig): Promise<BlockP
     logger.info(`Block producer: network ${network}, genesis ${config.shelleyGenesisFile}`);
     const tip = await getChainTip();
     // era of the tip: Conway from the network's Conway epoch; the header layout is the same for Babbage/Conway
+    const hfc = getHardForkHistory(); // ledger-driven era history; ledger era numbering = HFC index + 1
     const conwayEpoch = network === "preview" ? 646 : network === "preprod" ? 163 : 507;
-    const era = tip && Number(tip.slot) >= 0 && epochOf(network, tip.slot) >= conwayEpoch ? 7 : 6;
+    const tableEra = tip && Number(tip.slot) >= 0 && epochOf(network, tip.slot) >= conwayEpoch ? 7 : 6;
+    // Bug 237 (2026-09-30 03:32 UTC): the history was "ready" with only the config eras (Byron..Alonzo) on a
+    // Mithril-bootstrapped node and the forged block got era tag 5; the known history is the floor.
+    const era = tip ? eraIndexAt(hfc, BigInt(tip.slot), tableEra - 1) + 1 : tableEra; // ledger era = HFC index + 1
     const node = nodeAdapter({
         network, era, genesis,
         nonceFor: (e) => consensus.epochNonceFor(e),
@@ -44,7 +51,8 @@ export async function startBlockProducer(config: GerolamoConfig): Promise<BlockP
             const txs = await mp.getTxs(hs.map((h) => h.hash as any));
             return txs.map((t) => ({ hash: hashBytes(t.hash), bytes: t.bytes }));
         },
-        dropFromMempool: async (hashes) => { await GlobalSharedMempool.getInstance().drop(hashes as any); },
+        mempoolSnapshot: getMempool() ? (slot) => getMempool()!.snapshotForBlock(slot) : undefined,
+        dropFromMempool: async (hashes) => { const vm = getMempool(); if (vm) await vm.remove(hashes); else await GlobalSharedMempool.getInstance().drop(hashes as any); },
         greetingTx: pc.greeting ? greetingBuilder(pc.greeting, network) : undefined,
     });
     node.carriers = () => {

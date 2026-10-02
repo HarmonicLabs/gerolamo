@@ -146,6 +146,8 @@ export interface LedgerSnapshot {
     snapshots: { mark: StakeSnapshot; set: StakeSnapshot; go: StakeSnapshot; fee: bigint };
     poolDistr: { pools: Map<string, { stake: bigint; vrf: string }>; total: bigint };
     nonMyopicRewardPot: bigint;
+    /** `esNonMyopic`'s per-pool likelihoods (100 Float log-weights each), for the pool-ranking queries. */
+    nonMyopicLikelihoods: Map<string, Float32Array>;
     stashedAvvm: boolean;
     praos: PraosState;
 }
@@ -451,6 +453,11 @@ export function decodeLedgerSnapshot(stateBytes: Uint8Array): LedgerSnapshot {
     const pdPools = new Map<string, { stake: bigint; vrf: string }>();
     for (const { k, v } of map(pd[0], "poolDistr.pools")) { const a = arr(v, "poolDistr.value", 3); pdPools.set(bytes(k, "poolDistr.key", 28), { stake: big(a[1], "poolDistr.stake"), vrf: bytes(a[2], "poolDistr.vrf", 32) }); }
     const nonMyopic = arr(es[3], "epochState.nonMyopic", 2);
+    const nonMyopicLikelihoods = new Map<string, Float32Array>();
+    for (const { k, v } of map(nonMyopic[0], "nonMyopic.likelihoods")) {
+        const ws = arr(v, "nonMyopic.likelihood");
+        nonMyopicLikelihoods.set(bytes(k, "nonMyopic.pool", 28), Float32Array.from(ws, (x) => { if (!(x instanceof CborSimple) || typeof x.simple !== "number") fail("nonMyopic.likelihood", "float", x); return x.simple; }));
+    }
 
     // Header state
     const header = arr(root[1], "header", 2);
@@ -483,6 +490,7 @@ export function decodeLedgerSnapshot(stateBytes: Uint8Array): LedgerSnapshot {
         incrementalStake, gov, snapshots,
         poolDistr: { pools: pdPools, total: big(pd[1], "poolDistr.total") },
         nonMyopicRewardPot: big(nonMyopic[1], "nonMyopic.rewardPot"),
+        nonMyopicLikelihoods,
         stashedAvvm: !isNull(nes[6]),
         praos,
     };

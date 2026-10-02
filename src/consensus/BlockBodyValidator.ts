@@ -1,3 +1,4 @@
+import { phase2Mode } from "./rules/phase2";
 import {
     AllegraBlock,
     AlonzoBlock,
@@ -18,11 +19,15 @@ import { getShelleyGenesisConfig } from "../utils/paths";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger, LogLevel } from "../utils/logger";
 import { evaluateBlockRules, type BlockRuleOutcome } from "./rules/blockRules";
+import type { ByronProtocolParameters } from "./byron/byronUpdateCodec";
 import type { ValidationPool } from "./workers/ValidationPool";
 import type { EpochBodyParams } from "./epochParams";
 
 import { getUtxosByRefs, getStakeByCredentials, getDelegationsByCredentials, countUtxosWithReferenceScript } from "../db";
 import { resolveValidationPolicy } from "./validationPolicy";
+import { validateBlockGovernance } from "./governance/govValidate";
+import { noteGovGenesisConfig } from "./governance/govCredMigration";
+import { getEpochNetwork } from "../utils/epochFromSlotCalculations";
 import { checkCertificateSequence, stakeCredentialsTouched, type CertView, credKey } from "./certificateRules";
 
 /** Safe BigInt from DB amount (string | number | null). Null/invalid → 0n. */
@@ -727,6 +732,9 @@ export interface BlockValidationContext {
     preVerified?: boolean[] | null;
     /** Rule outcome computed ahead of time by a worker (ValidationPool.evaluateBlockRules); null = evaluate here. */
     ruleOutcome?: BlockRuleOutcome | null;
+    /** Byron: adopted protocol parameters of the ticked Byron ledger (null = genesis) and the block's `[era, block]` bytes. */
+    byronParams?: ByronProtocolParameters | null;
+    rawBlock?: Uint8Array | null;
 }
 
 /** Rule reports (checks this node cannot yet enforce exactly) are logged sparsely. */
@@ -734,6 +742,12 @@ let reportCount = 0;
 /** Phase-2 shadow totals since start, logged whenever they grow past the next threshold. */
 const plutusTotals = { evaluated: 0, skipped: 0, mismatches: 0, nextLogAt: 1 };
 const plutusReasons: Record<string, number> = {};
+
+/** Phase-2 totals since start (`/metrics` → `plutus`): redeemers evaluated / not evaluated, tx verdict mismatches, top reasons. */
+export function plutusPhase2Totals(): { mode: string; evaluated: number; notEvaluated: number; mismatches: number; reasons: Record<string, number> } {
+    const top = Object.fromEntries(Object.entries(plutusReasons).sort((a, b) => b[1] - a[1]).slice(0, 5));
+    return { mode: phase2Mode(), evaluated: plutusTotals.evaluated, notEvaluated: plutusTotals.skipped, mismatches: plutusTotals.mismatches, reasons: top };
+}
 
 /** Aggregate Plutus shadow statistics of one block (from the inline path or the detached shadow job) and log the running totals. */
 export function recordPlutusShadow(outcome: { plutus?: { evaluated: number; skipped: number; mismatches: number; skipReasons?: Record<string, number> } | null }): void {
@@ -746,7 +760,7 @@ export function recordPlutusShadow(outcome: { plutus?: { evaluated: number; skip
     if (plutusTotals.evaluated + plutusTotals.skipped >= plutusTotals.nextLogAt) {
         plutusTotals.nextLogAt *= 4;
         const top = Object.entries(plutusReasons).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([k, n]) => `${n}× ${k}`).join("; ");
-        logger.info(`Plutus shadow so far: ${plutusTotals.evaluated} redeemer(s) evaluated, ${plutusTotals.skipped} skipped, ${plutusTotals.mismatches} tx verdict mismatch(es)${top ? ` — ${top}` : ""}`);
+        logger.info(`Plutus phase 2 (${phase2Mode()}) so far: ${plutusTotals.evaluated} redeemer(s) evaluated, ${plutusTotals.skipped} skipped, ${plutusTotals.mismatches} tx verdict mismatch(es)${top ? ` — ${top}` : ""}`);
     }
 }
 
@@ -763,7 +777,7 @@ export async function validateBlock(
 ): Promise<boolean> {
     if (ctx) {
         const genesis = block.era >= 2 ? await getCachedShelleyGenesis(config) : null;
-        const outcome = ctx.ruleOutcome ?? await evaluateBlockRules(block, { config, pool: ctx.pool, params, genesis, slot: ctx.slot, preVerified: ctx.preVerified ?? null , phase: "rules" /* Plutus shadow never runs on the main thread: a 2 s budget stalled the applier (preview epoch 898) */ });
+        const outcome = ctx.ruleOutcome ?? await evaluateBlockRules(block, { config, pool: ctx.pool, params, genesis, slot: ctx.slot, preVerified: ctx.preVerified ?? null, byronParams: ctx.byronParams ?? null, rawBlock: ctx.rawBlock ?? null, phase: "rules" /* Plutus shadow never runs on the main thread: a 2 s budget stalled the applier (preview epoch 898) */ });
         if (outcome.failures.length) {
             logger.error(`Block body validation failed at slot ${ctx.slot} (era ${block.era}, ${outcome.txs} tx): ${outcome.failures.slice(0, 5).join(" | ")}${outcome.failures.length > 5 ? ` | +${outcome.failures.length - 5} more` : ""}`);
             (ctx as any).failures = outcome.failures.slice(); // the caller's error carries them (the producer drops the named transactions and retries)
@@ -776,6 +790,16 @@ export async function validateBlock(
                 logger.info(`Body rule report at slot ${ctx.slot}: ${outcome.reports.slice(0, 3).join(" | ")} (reports so far: ${reportCount})`);
             }
         }
+    }
+    // Conway GOV / GOVCERT / DELEG / POOL against the ledger state (bug 150); the verdict names `tx[i]`.
+    if (block.era >= 7 && params?.raw && block.block) {
+        noteGovGenesisConfig(config);
+        const b: any = block.block;
+        const bodies = ((b.transactionBodies ?? []) as any[]).map((t) => { let bytes: Uint8Array | null = null; try { bytes = t?.cborRef?.toBuffer?.() ?? null; } catch { bytes = null; } return { bytes, txId: String(t?.hash?.toString?.() ?? "") || undefined }; });
+        const invalid = new Set<number>(((b.invalidTransactions ?? []) as Array<number | bigint>).map((i) => Number(i)));
+        const slot = Number(ctx?.slot ?? (block as any).header?.body?.slot ?? 0);
+        const gov = await validateBlockGovernance({ slot, epoch: params.epoch, bodies, invalid, raw: params.raw, networkId: Number(config?.networkMagic) === 764824073 || getEpochNetwork() === "mainnet" ? 1 : 0 }, resolveValidationPolicy(config).ledgerComplete);
+        if (!gov.ok) { if (ctx) (ctx as any).failures = gov.failures.slice(); return false; }
     }
     const validator = new BlockBodyValidator(config);
     const result = await validator.validate(block, params, ctx != null);

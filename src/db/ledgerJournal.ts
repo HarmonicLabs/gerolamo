@@ -31,12 +31,15 @@ export const JOURNALED_TABLES = [
     "gov_dreps",
     "gov_committee",
     "gov_drep_delegations",
+    "gov_drep_boot_delegs",
     "gov_state",
     "gov_enacted",
     // Bug 104: a rolled-back block's leader stayed counted for the epoch (the tip node had 23
     // phantom blocks in preview epoch 1415 after 1-block forks) and its op-cert counter stayed.
     "blocks_made_by_epoch",
     "opcert_counters",
+    // Byron update / delegation state (ledger/byronStore.ts): rolled back with its block.
+    "byron_ledger",
 ] as const;
 
 const TRIGGER_VERSION = 1;

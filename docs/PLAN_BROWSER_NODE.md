@@ -197,6 +197,19 @@ relay.example {
 nginx: `location /n2n { proxy_pass http://127.0.0.1:3003; proxy_http_version 1.1;
 proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; proxy_read_timeout 1h; }`.
 
-Remaining from the plan: tx-submission from the page (wallet use), a Worker with sync access
-handles for Safari's OPFS, certificate caching, and ledger rules in the browser after the LMDB
-ledger lands.
+## Stage 5 built (2026-09-28): tx-submission, Safari OPFS, certificate cache
+
+- `browser/src/node/txSubmit.ts`: the tx-submission2 client. It sends MsgInit after the handshake,
+  holds the relay's blocking id request until a transaction is queued, then announces it as
+  `[6, txid]` (the txid is the blake2b-256 hash of the body) and replies with `[6, #6.24(tx)]`. All
+  lists are indefinite-length, as cardano-node expects. The page has a box to paste signed
+  transaction CBOR. The test in `txSubmit.test.ts` runs the client against the relay's own
+  `TxSubmissionResponder`: two real transactions are announced, fetched, accepted and
+  acknowledged.
+- `opfsWorker.ts`: when `createWritable` is missing (Safari before 26), `OpfsSink.write` sends the
+  write to a dedicated worker, which uses `createSyncAccessHandle`.
+- Mithril certificates are cached in OPFS under `gerolamo/mithril-certs/<network>/`. Each walk
+  still verifies every certificate; the cache only saves the downloads. A certificate is stored
+  only after its chain verified.
+
+Remaining: ledger rules in the browser, built on the LMDB ledger.

@@ -470,6 +470,15 @@ export class LedgerStore {
         return new LedgerView(this.env, chain);
     }
 
+    /** Blocks whose complete state the store can show (store-compare picks a common one): the anchor and every volatile block whose diffs reach it. */
+    heldBlocks(): Array<{ slot: number; hash: string }> {
+        const out: Array<{ slot: number; hash: string }> = [];
+        const a = this.anchor();
+        if (a) out.push({ slot: a.slot, hash: hex(a.hash) });
+        for (const d of this.diffs.values()) if (this.chainReachesAnchor(d.hash)) out.push({ slot: d.slot, hash: hex(d.hash) });
+        return out.sort((x, y) => x.slot - y.slot);
+    }
+
     /** Frozen read view (no open block, no later mutations affect it): a snapshot of the chain now. */
     snapshot(): LedgerView {
         const chain = this.chain();
@@ -506,19 +515,65 @@ function applyDiff(t: LmdbTxn, d: LedgerDiff): void {
 
 /** Read-only view over LMDB plus a fixed list of diffs (newest first). */
 export class LedgerView {
-    constructor(private readonly env: LmdbEnv, private readonly chain: LedgerDiff[]) {}
+    constructor(private readonly env: LmdbEnv, private readonly chain: LedgerDiff[], private readonly txn?: LmdbTxn) {}
+    /**
+     * The same view reading LMDB through `txn` only: a tool beside a running node must not mix the
+     * diffs it loaded with an LMDB state the node promoted those diffs into meanwhile (counters
+     * counted twice — store-compare, ledger-koios-check).
+     */
+    withTxn(txn: LmdbTxn): LedgerView { return new LedgerView(this.env, this.chain, txn); }
+    private base(db: string, key: Uint8Array): Uint8Array | undefined { return this.txn ? this.txn.get(db, key) : this.env.read((t) => t.get(db, key)); }
+    /** Volatile blocks the view stands on above the LMDB state (newest first). */
+    get depth(): number { return this.chain.length; }
+    /** Databases the view's volatile blocks write (a database may exist only there before its first promotion). */
+    touchedDatabases(): Set<string> { const out = new Set<string>(); for (const d of this.chain) { for (const db of d.writes.keys()) out.add(db); for (const db of d.adds.keys()) out.add(db); } return out; }
+    /**
+     * Every entry of `db` in key order, streamed: an LMDB cursor merged with the chain's touched keys
+     * (newest value wins, deletions masked, counters with their deltas) — `range` without holding the
+     * database in memory. `txn` pins the LMDB state (store-compare reads a live node's environment).
+     */
+    *scan(db: string, txn?: LmdbTxn): Generator<[Uint8Array, Uint8Array]> {
+        const keys = new Set<string>();
+        for (const d of this.chain) for (const k of d.touchedKeys(db)) keys.add(k);
+        const touched = [...keys].sort();
+        const own = txn ?? this.txn ? null : this.env.beginRead();
+        const t = txn ?? this.txn ?? own!;
+        const effective = (kh: string): Uint8Array | undefined => {
+            const key = unhex(kh);
+            let delta = 0n, hasAdd = false;
+            for (const d of this.chain) {
+                const dd = d.addDelta(db, key);
+                if (dd !== 0n) { delta += dd; hasAdd = true; }
+                const hit = d.lookup(db, key);
+                if (hit) { if (!hasAdd) return hit.value; const v = readU64(hit.value) + delta; return v === 0n ? undefined : u64(v); }
+            }
+            if (!hasAdd) return t.get(db, key);
+            const v = readU64(t.get(db, key)) + delta;
+            return v === 0n ? undefined : u64(v);
+        };
+        try {
+            let i = 0;
+            for (const [k, v] of t.range(db)) {
+                const kh = hex(k);
+                while (i < touched.length && touched[i]! < kh) { const e = effective(touched[i]!); if (e !== undefined) yield [unhex(touched[i]!), e]; i++; }
+                if (i < touched.length && touched[i] === kh) { const e = effective(kh); i++; if (e !== undefined) yield [k, e]; continue; }
+                yield [k, v];
+            }
+            for (; i < touched.length; i++) { const e = effective(touched[i]!); if (e !== undefined) yield [unhex(touched[i]!), e]; }
+        } finally { own?.commit(); }
+    }
     get(db: string, key: Uint8Array): Uint8Array | undefined {
         for (const d of this.chain) { const hit = d.lookup(db, key); if (hit) return hit.value; }
-        return this.env.read((t) => t.get(db, key));
+        return this.base(db, key);
     }
     getU64(db: string, key: Uint8Array): bigint {
         let delta = 0n, base: Uint8Array | undefined, found = false;
         for (const d of this.chain) { delta += d.addDelta(db, key); const hit = d.lookup(db, key); if (hit) { base = hit.value; found = true; break; } }
-        if (!found) base = this.env.read((t) => t.get(db, key));
+        if (!found) base = this.base(db, key);
         return readU64(base) + delta;
     }
     *range(db: string, prefix: Uint8Array, opts: { limit?: number } = {}): Generator<[Uint8Array, Uint8Array]> {
-        yield* mergedRange(this.env, this.chain, (k) => this.getU64(db, k), db, prefix, opts);
+        yield* mergedRange(this.txn ?? this.env, this.chain, (k) => this.getU64(db, k), db, prefix, opts);
     }
 }
 
@@ -527,7 +582,7 @@ export class LedgerView {
  * key takes its newest value, a deleted key is masked, a counter key (u64 adds) takes its
  * effective value (absent when it is zero, as `applyDiff` would store it).
  */
-function* mergedRange(env: LmdbEnv, chain: LedgerDiff[], getU64: (key: Uint8Array) => bigint, db: string, prefix: Uint8Array, opts: { limit?: number }): Generator<[Uint8Array, Uint8Array]> {
+function* mergedRange(src: LmdbEnv | LmdbTxn, chain: LedgerDiff[], getU64: (key: Uint8Array) => bigint, db: string, prefix: Uint8Array, opts: { limit?: number }): Generator<[Uint8Array, Uint8Array]> {
     const prefixHex = hex(prefix);
     const keys = new Set<string>();
     for (const d of chain) for (const k of d.touchedKeys(db)) if (k.startsWith(prefixHex)) keys.add(k);
@@ -540,14 +595,15 @@ function* mergedRange(env: LmdbEnv, chain: LedgerDiff[], getU64: (key: Uint8Arra
         for (const d of chain) { const hit = d.lookup(db, key); if (hit) { overlay.set(k, hit.value); break; } }
     }
     const merged: Array<[string, Uint8Array]> = [];
-    const txn = env.beginRead();
+    const own = src instanceof LmdbEnv ? src.beginRead() : null;
+    const txn = own ?? (src as LmdbTxn);
     try {
         for (const [k, v] of txn.range(db, { prefix })) {
             const kh = hex(k);
             if (overlay.has(kh)) { const ov = overlay.get(kh); overlay.delete(kh); if (ov !== undefined) merged.push([kh, ov]); }
             else merged.push([kh, v]);
         }
-    } finally { txn.commit(); }
+    } finally { own?.commit(); }
     for (const [k, v] of overlay) if (v !== undefined) merged.push([k, v]);
     merged.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
     let n = 0;

@@ -183,7 +183,7 @@ picture: what is verified, how, what is still open, and how to reproduce it.
 3. (Resolved for snapshot-imported LMDB stores, bug 275: the σ check is strict there; the reports below came from SQLite snapshots and stay reports in sqlite / dual mode.) σ threshold reports: eight canonical preprod blocks (epochs 46–54) fail our leader-threshold check by 1e-5…1e-4 relative. Recomputed offline: each leader value sits just above our threshold, and our snapshot differs from Koios by the same order (pool stake −4e-6, total active +6e-5, e.g. 186 054 761 670 632 vs 186 043 780 730 525 at snapshot 46), so the real threshold is above the value. The exact-arithmetic check is right; the snapshot is very slightly off. Find the missing/extra stake (per-pool comparison at epochs 44–54) before making σ strict.
 4. Conway on preprod (epoch 163): governance ratification, reference-script fee, V3 cost models — the run has to get there.
 5. Mainnet: reach Shelley, then run the same comparisons (the scripts take `--network mainnet`).
-6. Flip σ, opcert counter, withdrawals (`WITHDRAWALS_STRICT`) and the reference-script fee to strict once 2–5 are clean. (2026-10-01: the reference-script fee is strict since bug 170; σ, the over-incremented counter, withdrawal amounts, the treasury value and the zero-balance deregistration are strict on a snapshot-imported LMDB store — bugs 272–276 — and stay reports on SQLite-derived state until a from-genesis run is proven exact.)
+6. Flip σ, opcert counter, withdrawals (`WITHDRAWALS_STRICT`) and the reference-script fee to strict once 2–5 are clean. (2026-10-01: the reference-script fee is strict since bug 170; σ, the over-incremented counter, withdrawal amounts, the treasury value and the zero-balance deregistration are strict on a snapshot-imported LMDB store — bugs 272–276 — and stay reports on SQLite-derived state until a from-genesis run is proven exact. 2026-10-02: an LMDB store synced from genesis (bug 304) is likewise report-only until `GEROLAMO_GENESIS_EXACT=1`, set after docs/RUNBOOK_GENESIS_NODE.md §5.)
 6a. Two preprod snapshots (boundaries 30 and 32) each lack one pool that registered and retired within the same epoch (2bdbd083…, 92cd3fdd…; 1.02·10¹² lovelace each), although the pool row, the delegations and the outputs were all present and a unit test of the same sequence passes; the boundary now logs any registered pool with delegations but no snapshot stake so the next occurrence carries details. Those two snapshots make the rewards of performance epochs 31 and 33 0.29 % low for every pool (apparent performance uses the active total).
 6b. MIR certificates (pre-Conway, type 6) are now queued when applied and take effect at the next boundary after the reward update (accounts credited from the pot if registered and the pot can pay; pot-to-pot transfers); untested against a real chain until mainnet reaches its first MIR (none on preprod/preview so far).
 6c. Memory: the 24 GB OOM of 2026-09-05 was bug 49 (unbounded header batch queue), fixed. The node logs a `Memory:` breakdown every 5 minutes (rss, main heap, external, worker heaps, worker external, unaccounted native) and `scripts/run-supervised.sh` relaunches a node that exits and restarts it cleanly at 14 GB RSS. Remaining baseline is ~1.1 GB native (20 worker runtimes, SQLite page cache) and stable.
@@ -489,7 +489,7 @@ fee policy never changed. No Byron size limit is checked today; any such check m
 from the orchestrator, then have `blockRules.evaluateByronBlock` take the adopted fee policy
 (`currentByronProtocolParameters()?.txFeePolicy ?? byronFeePolicyFor(ctx.config)`).
 
-## Bugs 296–305 — the Byron chain-validation state in the node (2026-10-01, fixed; 304–305 open)
+## Bugs 296–305 — the Byron chain-validation state in the node (2026-10-01, fixed; 304–305 fixed 2026-10-02, see bugs 316–327)
 
 Reference: cardano-ledger-byron (cardano-ledger-conway-1.22.1.0) `Block.Validation`
 (`updateBody`, `headerIsValid`, `epochTransition`, `updateChainBoundary`), `Byron.API.Validation`
@@ -564,13 +564,15 @@ the same either way.
 (`shelleyStartEpoch` 2⁴⁰): their slot/epoch geometry now takes the Shelley start from the Byron
 state once it is known (workers receive it with their jobs).
 
-**304. An LMDB ledger store cannot start from an empty chain** (finding, open, outside this area).
+**304. An LMDB ledger store cannot start from an empty chain** (finding; fixed 2026-10-02 — the store is
+built from the genesis files and stands at the origin, see "Bugs 304–305, 316–327" below).
 `ledgerBeginBlock` marks the store broken when the first block's parent (the genesis hash) is neither
 the tip nor an anchor, and the chain never reaches an anchor, so a from-genesis sync in `lmdb` mode
 halts after the first range. `dual` rebuilds the LMDB store from SQLite after that range (the Byron
 record included) and works; a from-genesis preprod sync must start in `sqlite` or `dual` mode.
 
-**305. Byron witness roots hash with the pure-TS BigInt sha3** (finding, performance, open): about
+**305. Byron witness roots hash with the pure-TS BigInt sha3** (finding, performance; fixed 2026-10-02 with
+@noble/hashes' pure-TS sha3_256, ~140× faster, identical digests — see "Bugs 304–305, 316–327"): about
 0.5 ms per input on the applier's thread, so roughly half an hour of main-thread CPU over mainnet's
 2.4 M Byron transactions.
 
@@ -604,10 +606,188 @@ Verification:
   `byronTxRules.test.ts` / `byronAdoptedParams.test.ts` (fee and size on the ATxAux bytes, adopted
   `maxTxSize`), `hfc.test.ts` (TransitionKnown from the Byron state, Shelley start, rollback).
 
-Left for a from-genesis preprod sync: start in `sqlite` or `dual` ledger mode (bug 304); Byron
+Left for a from-genesis preprod sync: ~~start in `sqlite` or `dual` ledger mode (bug 304)~~ (an empty `lmdb` store
+now starts from the genesis state, 2026-10-02); Byron
 headers are still checked against the OBFT state at header time, ahead of application, with the
 lenient active-or-scheduled delegation test (the ledger's forecast of the delegation map is not
 used there); the mempool has no Byron-era rules (no public network is in Byron).
+
+## Bugs 304–305, 316–327 — an LMDB ledger store from genesis (2026-10-02, genesis worktree)
+
+Reference: cardano-ledger-conway-1.22.1.0 — Byron `UTxO.GenesisUTxO.genesisUtxo` / `UTxO.fromBalances`,
+Shelley `API.ByronTranslation.translateToShelleyLedgerStateFromUtxo`, `Shelley.Transition`
+(`injectIntoTestState` = `shelleyRegisterInitialFundsThenStaking`: `registerInitialFunds`,
+`registerInitialStakePools`, `shelleyRegisterInitialAccounts`, `resetStakeDistribution`; Alonzo
+`alonzoInjectCostModels`; Conway `conwayRegisterInitialFundsThenStaking` / `registerDRepsThenDelegs`),
+Allegra `translateEra` (`returnRedeemAddrsToReserves`); ouroboros-consensus-cardano
+`protocolInfoCardano` / `mkInitExtLedgerStateCardano` (`injectInitialExtLedgerState` extends the
+telescope to slot 0 by translation, then `perEraInjections`), `translateChainDepStateByronToShelley`
+(η0 = ηv = ηc = the TPraos initial nonce = the Shelley genesis hash).
+
+**304 (fixed). An LMDB ledger store starts empty and stands at the origin.** New
+`ledger/genesisState.ts` builds what cardano-node's initial ledger state holds and writes it into the
+empty store; `openNodeLedgerStore` does so in `lmdb` / `dual` mode when the environment and the chain
+are empty and the config says `syncFromGenesis` (`buildNodeGenesisState`: genesis files and hashes
+from the config, eras from the hard-fork history's triggers). The store has no anchor until its first
+promotion: the first block's diff extends the origin — `ledgerBeginBlock` records no parent for a
+block whose parent is the chain's genesis parent (the Byron genesis hash for preprod / mainnet, none
+for preview); restarts before the first promotion find the selected tip through the diffs from the
+origin (a lost tip there is refused with the remedy: within the first k blocks, wipe and resync).
+Meta `genesis` (start era, first parent, file hashes, totals) and `ledger_source = "genesis"`.
+- Byron-first (preprod, mainnet): every `nonAvvmBalances` / `avvmDistr` entry at
+  `TxIn (blake2b-256 address) 0`, zero balances included (bug 316), and the initial Byron
+  chain-validation record (update state, heavy delegation). The Byron → Shelley translation happens
+  at the first Shelley boundary inside its block (bugs 317, 318), the pots there (reserves = max supply
+  − Σ UTxO, as before).
+- Shelley-at-epoch-0 (preview, `Test*HardForkAtEpoch` 0 up to Alonzo): the translated state —
+  zero-value outputs dropped (preview's 7), AVVM outputs returned when Allegra is at 0 too, reserves
+  = 45·10¹⁵ − 30·10¹⁵ = 15·10¹⁵, treasury 0, the Shelley genesis delegations — plus the start era's
+  `injectIntoTestState`: initial funds at `TxIn (blake2b-256 address) 0` with the reserves reduced,
+  genesis staking pools and accounts (pointer `Ptr 0 (i div 2¹⁶) (i mod 2¹⁶)`, delegation; the first
+  boundary's snapshot taken on this state is `resetStakeDistribution`'s mark). Mainnet refuses
+  injections (`protectMainnet`); the Alonzo `extraConfig` cost-model override is refused (not
+  implemented); Conway `initialDReps` / `delegs` stay with `seedGovernance` (bug 157). None of the
+  three public networks carries any injection.
+- Unchanged and verified: η0 of the Shelley start = the configured `shelleyGenesisHash` (evolver),
+  parameters per era (`deriveLocalParams` + `applyEraGenesis`), `esNonMyopic` = empty at the Shelley
+  start then advanced at every boundary (bug 319), empty snapshots / pool distribution at genesis.
+
+**305 (fixed). Byron hashing on the hot path uses @noble/hashes' sha3_256** (pure TS, 32-bit lanes):
+`rules/witnesses.byronAddressRoot` (every Byron input and every bootstrap witness) and
+`byron/ByronCrypto` (key hashes), and the AVVM genesis addresses (`avvmGenesisAddress`, mainnet's
+14 505: was ~15 s through ledger-ts' BigInt Keccak). Micro-benchmark (70–100-byte inputs, this
+machine): 1 124 µs → 7.8 µs per hash (×144); per address root on real witnesses incl. CBOR 1 118 →
+60 µs. Identical digests: NIST vectors, every length 0…300 against the old implementation, all 331
+bootstrap witnesses of preview epochs 0–99 (old vs new root), the first spends of the preview and
+preprod genesis UTxOs (root = the genesis address's root), the mainnet AVVM test vectors
+(Blockfrost) and 30 mainnet redeem addresses × 3 magics against `fromRedeemPublicKey`. (Preprod's
+Byron era carries no transaction; mainnet Byron chunks were not available — those roots are
+covered by the vectors above.)
+
+**316. Byron genesis UTxO without its zero balances.** `genesisUtxo` keeps every entry
+(`fromBalances`, no filter); `byronGenesisUtxos` (the SQLite seed) drops zeros. The LMDB genesis
+state keeps them (preprod / preview: 7 each, never spent); the translation drops them (317). The
+SQLite seed is unchanged (legacy path).
+
+**317. The Byron → Shelley translation's zero-value filter was missing.** `translateUTxOByronToShelley`
+drops every zero-valued Byron output ("we do not allow zero values in TxOuts in Shelley onwards") —
+genesis ones and any a Byron transaction created (allowed in Byron). Now at the first Shelley
+boundary (`initRewardPots` → `ledgerTranslateByronToShelley`, inside the block's diff, before the
+reserves are computed). Preprod replay: 7 dropped at epoch 4.
+
+**318. AVVM outputs were never returned to the reserves.** The Shelley translation stashes the UTxO
+at redeem addresses; Allegra's `translateEra` removes the still-unspent ones and adds them to the
+reserves (mainnet epoch 236). Now: stashed at the Shelley start (`avvm_stash`), returned at the first
+boundary of protocol ≥ 3 (`ledgerReturnStashedAvvm`, a no-op once empty). Unit-tested; not yet
+exercised on a real chain (mainnet only). LMDB only (a `dual` run would differ from SQLite here).
+
+**319. The pool-ranking state broke for good on a chain synced from genesis.** `snapshotPoolIds`
+answered "not kept" for a snapshot that exists but holds no pool (preview's snapshot 0), so
+`advanceNonMyopic` skipped epoch 3 and every later boundary found no predecessor:
+GetNonMyopicMemberRewards / GetRewardInfoPools would have stayed unanswered. An existing empty
+snapshot is now the empty pool set (LMDB and SQLite).
+
+**320. A from-genesis node asked Blockfrost for parameters of epochs −24…0.** Epoch-0 headers are
+judged before the boundary stores the record; `getEpochBodyParams` walked back 24 epochs into
+negative numbers, each an external fetch. Now: negative epochs are null, and up to the Shelley
+start the Shelley genesis parameters (+ era-genesis merges) answer. `repairLocalEpochParams` (SQLite
+rows only) no longer runs without SQLite ledger writes.
+
+**321. Genesis delegations and genesis UTxOs lived in SQLite only.** `seedGenesisDelegs` and
+`seedGenesisUtxosIfMissing` never reached LMDB; in `lmdb` mode the overlay schedule of preview's
+d = 1 epochs read no genesis delegate. Both are part of the genesis state; with
+`GEROLAMO_LEDGER_SQL_WRITES=0` the SQLite seed is skipped.
+
+**322. A primary block store refused an empty start, and the ledger store was then never opened.**
+`resolveStartupTip` → null → "refusing to start" was caught as "block store unavailable", which also
+skipped `openNodeLedgerStore`. An empty store (no chunk, no volatile block) with `syncFromGenesis` now
+starts at the origin.
+
+**323. Tools beside a running node counted promoted diffs twice.** A read-only store loads the diff
+files once and read LMDB live; a promotion in between put the same deltas in both (the first Koios
+check showed epoch 9's blocks-made 85 too high per pool). `LedgerView.withTxn` + `storeCompare.pin`
+read one LMDB transaction whose anchor is the one the diffs were loaded against (retried when the
+node promoted in between). store-compare and ledger-koios-check use it; `attachReadOnlyLedgerStore`
+(forge dry run, probes) still reads live (short runs; left as is).
+
+**324. Finding: the repository's preprod and mainnet Shelley genesis files are not byte-identical to
+the official ones** (their blake2b-256 differs from the configured `ShelleyGenesisHash`; preview's
+matches). The configured hash is what the nonce uses; the genesis builder warns.
+
+**325. Finding: the producer's store has no `esNonMyopic`.** store-compare 3036 ↔ producer (below):
+identical except `nonmyopic` (3036 seeded by `scripts/nonmyopic-seed.ts` at 2026-10-01 23:12 UTC,
+after the producer's copy of 01:21) — the producer cannot answer GetNonMyopicMemberRewards /
+GetRewardInfoPools until it is seeded.
+
+**326. Finding (open, low): stake pointers are never removed.** Deregistration deletes the
+registration and delegation but not the pointer (`stake_pointers` / LMDB `pointer`), and Conway
+registrations still add one. Before Conway a pointer-address output created after a re-registration
+under an old pointer would count for the credential where the ledger resolves nothing; Conway resolves
+no pointer. Not observed on preview; store-compare shows the extra keys of a genesis store.
+
+**327. A restart could corrupt the evolving nonce (consensus).** `ensureEvolverBootstrapped` made the
+evolver active (`bootstrap()`) before replaying the stored headers; a bootstrap started by the header
+stage (`ensureEvolverAtTip`) let the applier's `feedNonceEvolver` process the next block in the middle
+of the replay, out of order. Found by the preview run below: restarted every ~30 s at a 3 GB RSS cap,
+one restart landed at the 92 → 93 boundary and persisted a wrong epoch-93 start ηv (b7d747fe… instead of
+100a0f6c…, replayed from the certified chain); η0 of 94 came out 82e41c9a… instead of ed55385c… and
+every epoch-94 header failed its VRF check, on every later restart too. Callers now wait for a
+bootstrap in progress (one promise). The scratch store's epoch-93 start record was repaired by hand;
+then 94 → 99 passed with the node restarted every 30–40 s (η0 of 94–99 = Koios). Affects any node that
+restarts while applying (3035 / 3036 restart rarely and at the tip); a 3037-style genesis sync with
+supervisor restarts needs it.
+
+**Exactness.** A genesis store is report-only for the balance-dependent rules (bugs 272–277) until a
+full run is proven identical to the network: `ledgerStateExact()` treats `ledger_source = "genesis"`
+as exact only with `GEROLAMO_GENESIS_EXACT=1` in the environment, which the operator sets after the
+acceptance checks of docs/RUNBOOK_GENESIS_NODE.md (n2c-compare 64/64 against the relay, store-compare
+against 3036, the Koios history check) — an explicit switch, not a meta flag, so it is visible in the
+node's environment and undone by unsetting it.
+
+**Tools.** `scripts/store-compare.ts <ledgerA> <ledgerB>`: both stores read-only and pinned to their
+newest common block (anchor or volatile block), every named database streamed and merged key by key
+(`LedgerView.scan`, no database held in memory), per database counts / same / differing / one-sided
+keys and the first differences decoded; epoch-prefixed history compared from the newest of the two
+oldest epochs; `--placeholders` for snapshot-vs-genesis (fields a NewEpochState does not carry).
+`scripts/ledger-koios-check.ts <ledger> --network … --from --to`: per epoch pots, nonce, parameters,
+active stake, per-pool stake / blocks / reward totals, per-account rewards against Koios (pinned,
+rate-limited). `scripts/serve-chain.ts --block-store <dir>` serves a chunk-format store read-only.
+`scripts/byron-node-replay.ts --ledger lmdb` now starts from an empty store with no SQLite ledger and
+`--shelley-epochs N` continues past the transition.
+
+Verification:
+- store-compare 3036 ↔ producer (live, both at slot 124 260 268, anchors equal): 41 databases in 70 s,
+  every one identical (3 208 558 UTxOs, 319 315 snapshot credentials, 593 942 payout reports, …)
+  except `nonmyopic` (bug 325).
+- Preprod, empty LMDB store, `GEROLAMO_LEDGER_SQL_WRITES=0` (scripts/byron-node-replay.ts, Mithril
+  chunks 0–104, certified): the whole Byron era (46 blocks) through `applyRange`, every Byron check of
+  bugs 296–303 passes (state = standalone replay, transition known, OBFT delegation, 10-block rollback
+  and re-apply); the first Shelley block crosses with the translation (7 zero outputs dropped, 1 UTxO
+  left, reserves 15·10¹⁵ at epoch 4, 7 genesis delegations); then 86 414 blocks through epochs 4–7
+  (Shelley → Allegra → Mary → Alonzo) at 287 blocks/s. Koios: pots 5–7, nonces 4–7, parameters 4–7
+  (protocol 2 → 5), active stake and per-pool stake 6–8 — all identical (Koios has no totals for 4).
+- Preview from genesis, empty LMDB store, `GEROLAMO_LEDGER_SQL_WRITES=0`, scratch node (4 validation
+  workers, nice 10) syncing from `scripts/serve-chain.ts --block-store` over a copy of 3036's first 2 000
+  chunks (epochs 0–99): genesis state built in 0.0 s (1 UTxO of 30·10¹⁵, reserves 15·10¹⁵, 7 genesis
+  delegations), then 99 epochs (≈ 404 000 blocks; Alonzo 0–2, Babbage 3–99, protocol 6 → 8) with ~20
+  restarts (RSS cap, resume from anchor + diffs each time). `scripts/ledger-koios-check.ts` over epochs
+  0–98, every boundary: pots 98/98, nonces 99/99, parameters 99/99, active stake 97/97, rewards earned
+  83/83 (epoch 9: Koios' total is one 500 ADA pool-deposit refund), per-pool active stake and blocks
+  made 915/915 (epochs 79–81 for all 91–93 pools), per-account rewards 820/820 (the 10 largest per
+  epoch, members and leaders, key and script credentials); per-pool reward totals agree except where
+  db-sync's aggregate differs (Δ ±1 lovelace rounding; a member deregistered before the payout,
+  epoch 18, every paid account identical). `esNonMyopic` present for every epoch (bug 319). Stalled
+  once at epoch 94 on bug 327, fixed. Throughput (blocks/s): epochs 0–2 67, 3–39 52–61, 40–48 33
+  (process aged, RSS ~5 GB, main thread ~85 % busy), 49–59 74 and 105–117 right after a restart,
+  82–99 ~63 with restarts every 30–60 s; ≈ 53 average. RSS 0.7 GB at start, growing ~0.3–0.6 GB per
+  5 min (main heap ≤ 0.35 GB; worker heaps and native memory grow) — hence the supervisor cap in
+  docs/RUNBOOK_GENESIS_NODE.md. The local server alone delivers 2 360 headers/s; the applier's main
+  thread is the limit (SQLite header rows `blk.insert` ≈ 4 ms/block is its largest attributed cost).
+- Unit tests: `ledger/genesisState.test.ts` (preview / preprod / mainnet genesis states; a custom
+  Shelley-at-0 network with initial funds and staking; mainnet refusal; writing into an empty store;
+  the Shelley translation and the Allegra AVVM return; a node store from genesis through
+  `openNodeLedgerStore` / `ledgerBeginBlock` / promotion / restart), `ledger/storeCompare.test.ts`,
+  `byron/ByronCrypto.test.ts` and `byron/genesisUtxo.test.ts` (bug 305).
 
 ## Bugs 150–165 — Conway governance: rules, ratification, typed credentials (2026-09-28, fixed)
 
@@ -1787,3 +1967,115 @@ ParameterChange dd4fbc61…:0 (ratified at 1366, enacted at 1367; Koios `proposa
 `epoch_params` 1367 agree): the future parameters are exactly what preview adopted at 1367; plus a
 ratified UpdateCommittee and TreasuryWithdrawals. Not observable live today (nothing ratified on
 preview); outside the window all five stay byte-identical with the relay.
+
+## Bug 340 — a same-slot battle halted the producer: the winner's rules were evaluated on top of the loser and the verdict outlived the fork rollback (2026-10-03 04:09:16 UTC, producer, fixed)
+
+The producer (ledgerStore lmdb, SQL writes on, chain selection legacy) halted with "Block body
+validation failed at slot 124 344 556 … tx[0]: spends 2 input(s) not in the UTxO set … tx[1]: spends
+1 input(s) …" on eb4dc3ba (the block the network kept). Sequence from its log: C = de0a6a0a @ 124 344 552
+applied; the primary sent L = 1a513f75 @ 124 344 556, then RollBackward to C (deferred, 0 blocks behind
+the tip: L's range was still queued) and W = eb4dc3ba (same slot, parent C). W's header triggered two
+depth-0 `rollbackOurChainTo(C)` calls, which return before touching anything, so L's queued range was
+kept and applied; W's range (fetched from the local relay) applied next and the bug-284 fork rollback
+moved SQLite (journal undo), the block store and the LMDB store back to C correctly ("ledger store:
+rolled back to slot 124344552 (1 diff(s) dropped … tip de0a6a0a…)"). The hypothesis that LMDB was not
+rolled back is refuted by that line.
+
+Root cause: the rules-ahead pipeline. While L (the last block of its range) applied, the lookahead
+window ran into the next downloaded range (`lookaheadBlocks` → `RangeScheduler.peekNextBlocks`) and
+evaluated W on a worker with L's overlay (`applyOverlays`), assuming W extends L. W carries the very
+transactions L had (f2129cfd, 4c1dabe6, decoded from `logs/failed-block-124344556.hex`), so their
+inputs were "spent". The fork rollback kept the pipeline (`afterRollback({ keepPipeline: true })`) and
+with it `rulesAheadMap` (and `spentRowsAheadMap`, the rows the applier spends from); W's apply took
+the stale verdict instead of evaluating on the rolled-back ledger. 3036 (shadow chain selection, same
+legacy path) has not met a battle where the loser was applied first with the winner already
+downloaded behind it.
+
+Fix (`src/consensus/ConsensusOrchestratooor.ts`): (1) `scheduleRulesAhead` stops the window at a
+block whose parent is not the previous window block (profile `rules.skip.fork`): overlays are only
+meaningful along one chain. (2) `dropRulesAhead()` replaces the verdict / input-row maps (and the
+lookahead cache) in `afterRollback` — on every path, `keepPipeline` included — and in
+`afterFailedRange`. Either one alone makes the reproduction pass. (3) Audit hardening:
+`rollbackOurChainTo` and the Praos-approved path of `handleRollBack` now roll SQLite, the block
+store's selected tip and the LMDB store back in ONE `dbMutations` turn; before, the block-store and
+LMDB rollbacks ran after the mutex was released, so a range applying in between saw SQLite rolled
+back but the old continuity anchor, and its block was later dropped from LMDB alone.
+
+Reproduction (`src/consensus/legacyFork.test.ts`, "bug 340"): real orchestrator, primary block
+store, LMDB store, one real rules worker, forged signed Babbage blocks with real transactions
+(P ─ C(T0) ─ {L(T1,T2), W(T1,T2)}, W lower VRF), the producer's header sequence, L's range held
+until W's range is downloaded. Before the fix: lmdb with SQL writes on and off both halt with
+"tx[0]: spends 2 input(s) not in the UTxO set … | tx[1]: spends 1 input(s) …"; after: tip W in
+the block store and LMDB, L in `recentlyRolledBack`, UTxO = W's (LMDB, and SQLite when written).
+chainSelection "praos" passes before and after: there W's range fails the continuity check
+(`rollbackForForkingRange` is legacy-only) and the switch resets the scheduler, so W is re-fetched
+as a new object without a cached verdict.
+
+Rollback paths audited for LMDB-vs-SQLite asymmetry: `rollbackOurChainTo` (outvote switch, chain-
+selection switch, deferred-rollback fork confirmation, header fork at/below the tip slot,
+`rollbackForForkingRange`) — all three stores roll back, now atomically; depth 0 returns without
+`afterRollback`, so a queued range of the abandoned branch still applies and is undone by the next
+fork rollback (kept: correct after this fix, one wasted apply). `handleRollBack` with a candidate —
+same, now atomic; without a candidate / from a verifier — no store change. Failed range — SQLite
+transaction rolled back, `ledgerAbortRange` drops the range's diffs, block-store tip reset; note the
+`catch` also covers `mirrorToBlockStore` / `ledgerAfterRange` after the SQLite COMMIT (both catch
+internally today; a throw there would drop committed blocks from LMDB only). Bug-245 startup
+recovery — LMDB and the block-store tip move back, SQLite does not: the SQLite shadow tables and
+journaled SQLite-only state (`opcert_counters`, blocks-made counts) keep the dropped blocks' effects
+(open). `ledgerBeginBlock`'s guard rolls LMDB alone back (safety net, logged).
+
+## Bugs 341–342 — two restart races left a wrong epoch nonce: 3037 stuck at the first block of epoch 1328 (2026-10-03 21:25 UTC, genesis node, fixed)
+
+Node 3037 (preview from genesis, LMDB ledger, supervisor restarts on an 8 GB RSS cap) applied the
+first block of epoch 1328 (slot 114 739 249) and then rejected every header of 1328 with
+`correctProof: false`, on every restart. ledger-koios-check: everything identical for 1320–1327, but
+the stored η0(1328) was 8ba64d09… — exactly η0(1327) — where Koios has b8f15e61…. The node's own log
+shows `TICKN η0_1328=b8f15e616542c3da…` at 21:24:56 and `Received SIGTERM` in the same second.
+`scripts/nonce-repair.ts` (below) replayed epoch 1327 from its stored start state over the stored
+blocks: TICKN gives b8f15e61… (= Koios); the stored start ηv / ηc of 1328 and the running ηv / ηc
+after the boundary block are all correct; only the η0 field is wrong.
+
+**341. A range ending on an epoch's first block stored the previous epoch's η0 as the new one
+(consensus).** `feedNonceEvolver` remembered, per range, the η0 of the last block fed WITHOUT a TICKN
+(`nonceSnapshotDue`), and `persistNonceSnapshot` wrote it at the end of the range under the evolver's
+epoch. In a range holding the last blocks of 1327 and the first block of 1328, the boundary block's
+TICKN stored η0(1328) correctly, then the range end overwrote it with η0(1327) (and the new epoch's
+running ηv / ηc). In memory the cache kept the right value and the next range rewrote the row, so
+it only stuck when the process stopped between the two: SIGTERM at 21:24:56 lets the in-flight range
+commit and starts no other. After the restart the header stage read the row and every 1328 header
+failed. Fix: `RangeNonceSnapshot` (utils/nonceEvolver.ts) keys the due record by epoch — after a TICKN
+it is the TICKN's η0 for the new epoch — and persists nothing when the evolver is not in that epoch.
+
+**342. A peek during a restart's header replay handed out a half-replayed nonce (consensus).**
+`ensureEvolverAtTip` returned as soon as the evolver was active, but `bootstrapEvolver` makes it
+active before it replays the stored headers (bug 327 made the applier wait, not this path), and
+`peekNextEpochNonceHex` judged "past the freeze" at the applied tip's slot, not at the evolver's.
+The header stage asking for η0(e + 1) right after a restart therefore got ηc ⋆ ηh from a partial
+replay. This is the earlier 3037 stall: 2026-10-03 04:51:10 restart (tip slot 12 688 620, end of
+epoch 146), 04:51:13 "Header validation failed at slot 12700810" (epoch 147) logged BEFORE
+"NonceEvolver restored from the epoch 146 start state and 2897 stored header(s)"; the peek is not
+cached or stored, so the next restart cleared it. Fix: `ensureEvolverAtTip` waits for a bootstrap in
+progress, and the evolver tracks the slot its state reflects (`lastSlot`: each processed block;
+`bootstrap(…, { atSlot })` = the imported snapshot's slot, default the epoch start) — the peek uses
+the lower of that and the tip.
+
+Not the cause (checked): the 4k/f window (protocol 11, 34 560 slots; 2 041 of 3 366 blocks before
+the freeze, as the node's TICKN logged), ηh (previous hash of the last 1326 block → c68c64d0…),
+header double counting (the replay over the stored chain reproduces the node's TICKN exactly).
+
+**Repair.** `scripts/nonce-repair.ts <nodeDir> --epoch E [--network preview] [--yes]`: ledger store
+read-only and pinned, block store read-only; replays E − 1 from its stored start state (ηh from the
+stored chain, or the imported snapshot's) through the node's NonceEvolver with the stored protocol
+versions, and prints stored vs recomputed vs Koios for η0(E − 1), η0(E), the start state of E and
+the running ηv / ηc at the tip. `--yes` refuses while any process references the node directory,
+refuses when the recomputed η0 differs from Koios, and rewrites only the nonce record of E. Dry run
+on 3037 (2026-10-04, node running): one DIFF, η0(1328) stored 8ba64d09… / recomputed b8f15e61… =
+Koios; every other field same. `--yes` exercised on a copy of 3037's ledger: written, read back, a
+second dry run reports "already matches".
+
+Verification: `utils/nonceEvolver.restart.test.ts` runs the orchestrator's nonce bookkeeping (TICKN
+persisted at once, ηv / ηc per range, η0 read back after a "restart") with ranges cut right after an
+epoch's first block, and a peek during a partial header replay. With the old rules restored in
+`RangeNonceSnapshot` / `peekNextEpochNonceHex` both fail (η0(e) read back as η0(e + 1); a non-null
+peek before the replay reached the freeze); with the fix they pass. `bun test src/consensus
+src/ledger src/utils/nonceEvolver*` 862 pass; tsc clean.

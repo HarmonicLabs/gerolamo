@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { avvmGenesisAddress, base58Decode, byronGenesisUtxoId, byronGenesisUtxos, countFundedGenesisEntries } from "./genesisUtxo";
+import { avvmGenesisAddress, base58Decode, base64urlDecode, byronGenesisUtxoId, byronGenesisUtxos, countFundedGenesisEntries } from "./genesisUtxo";
 import genesis from "../../config/preprod/byron-genesis.json";
 
 describe("Byron genesis UTxO", () => {
@@ -45,7 +45,19 @@ describe("Byron genesis UTxO", () => {
         expect(r.utxos[0]!.address).toBe(vectors[0]!.addr);
     });
 
-    // 14,505 redeem-address derivations (~1 ms each): a one-off cost at first start on mainnet.
+    test("bug 305: the fast-sha3 redeem address equals ledger-ts fromRedeemPublicKey (mainnet and a testnet magic)", () => {
+        const { ByronAddress } = require("@harmoniclabs/cardano-ledger-ts");
+        const mainnet = require("../../config/mainnet/byron-genesis.json");
+        const keys = Object.keys(mainnet.avvmDistr as Record<string, string>).filter((_, i) => i % 1450 === 0);
+        for (const magic of [764824073, 1097911063, 2]) {
+            for (const k of keys) {
+                const slow = ByronAddress.fromRedeemPublicKey(base64urlDecode(k), magic);
+                expect(avvmGenesisAddress(k, magic).address).toBe(slow.toBase58());
+            }
+        }
+    });
+
+    // 14,505 redeem-address derivations (fast sha3 since bug 305; ~1 ms each before): at first start on mainnet.
     test("mainnet genesis yields one UTxO per funded AVVM entry", () => {
         const mainnet = require("../../config/mainnet/byron-genesis.json");
         const t0 = performance.now();

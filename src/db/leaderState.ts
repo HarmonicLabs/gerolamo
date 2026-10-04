@@ -11,8 +11,9 @@
  */
 import { sql } from "../sql";
 import type { SqlClient } from "../db";
-import { ledgerStake, ledgerStakeReads, ledgerUtxoReads, sqlLedgerWrites } from "../ledger/nodeLedgerStore";
+import { ledgerStake, ledgerStakeReads, ledgerTranslateByronToShelley, ledgerUtxoReads, sqlLedgerWrites } from "../ledger/nodeLedgerStore";
 import { decodeNonMyopic, encodeNonMyopic, type NonMyopicState } from "../consensus/nonMyopic";
+import { logger } from "../utils/logger";
 
 export async function ensureLeaderStateTables(): Promise<void> {
     await sql`CREATE TABLE IF NOT EXISTS pool_params (
@@ -289,8 +290,9 @@ export async function recordGenesisDelegation(db: SqlClient, genesisKeyHash: str
         VALUES (${genesisKeyHash.toLowerCase()}, ${delegateHash.toLowerCase()}, ${vrfKeyHash.toLowerCase()}, ${effectiveSlot})`;
 }
 
-/** Seed the Shelley genesis delegations (effective from slot 0) once. */
+/** Seed the Shelley genesis delegations (effective from slot 0) once — SQLite; an LMDB store holds them from its seed / import / genesis state (bug 321). */
 export async function seedGenesisDelegs(genDelegs: Record<string, { delegate: string; vrf: string }>): Promise<void> {
+    if (!sqlLedgerWrites()) return;
     for (const [gk, d] of Object.entries(genDelegs ?? {})) {
         await sql`INSERT OR IGNORE INTO genesis_delegs (genesis_key_hash, delegate_hash, vrf_key_hash, effective_slot)
             VALUES (${gk.toLowerCase()}, ${String(d.delegate).toLowerCase()}, ${String(d.vrf).toLowerCase()}, 0)`;
@@ -554,6 +556,10 @@ export async function readRewardPots(): Promise<RewardPots | null> {
 export async function initRewardPots(db: SqlClient, epoch: number, maxSupply: bigint): Promise<RewardPots> {
     const existing = await readRewardPots();
     if (existing) return existing;
+    // A store synced from a Byron genesis crosses `translateToShelleyLedgerState` here: zero-value
+    // outputs leave the UTxO, AVVM outputs are stashed for Allegra (bugs 317, 318).
+    const tr = await ledgerTranslateByronToShelley();
+    if (tr) logger.info(`Epoch ${epoch}: Byron → Shelley translation — ${tr.zeroDropped} zero-value output(s) dropped, ${tr.avvmStashed} AVVM output(s) (${tr.avvmLovelace} lovelace) stashed for the Allegra boundary`);
     const ur = ledgerUtxoReads();
     const circulating = ur ? ur.totalLovelace() : BigInt(String(((await db`SELECT COALESCE(SUM(lovelace), 0) FROM utxo`.values()) as unknown[][])[0]?.[0] ?? 0));
     const reserves = maxSupply - circulating;
@@ -798,11 +804,15 @@ export async function poolParamsAt(takenAt: number): Promise<Map<string, { vrf: 
  * (the reward update's `go` pools) — or null when the snapshot's pool parameters were not kept.
  */
 export async function snapshotPoolIds(takenAt: number): Promise<string[] | null> {
+    // A snapshot that exists but holds no pool (the first epochs of a chain synced from genesis) is the
+    // empty set, not "not kept": null there broke the pool-ranking chain for good (bug 319).
     const lr = ledgerStakeReads();
-    if (lr) { const m = lr.snapshotPoolParams(takenAt); return m.size ? [...m.keys()] : null; }
+    if (lr) { const m = lr.snapshotPoolParams(takenAt); return m.size ? [...m.keys()] : lr.snapshotTotals(takenAt) ? [] : null; }
     try {
         const rows = (await sql`SELECT pool_id FROM epoch_pool_params WHERE taken_at = ${takenAt}`.values()) as unknown[][];
-        return rows.length ? rows.map((r) => String(r[0])) : null;
+        if (rows.length) return rows.map((r) => String(r[0]));
+        const t = (await sql`SELECT 1 FROM epoch_stake_totals WHERE taken_at = ${takenAt}`.values()) as unknown[][];
+        return t.length ? [] : null;
     } catch { return null; }
 }
 

@@ -1,5 +1,6 @@
 import { Cbor, CborArray, CborBytes, CborUInt, LazyCborArray } from "@harmoniclabs/cbor";
-import { blake2b_224, sha3 } from "@harmoniclabs/crypto";
+import { blake2b_224 } from "@harmoniclabs/crypto";
+import { sha3_256 as nobleSha3_256 } from "@noble/hashes/sha3";
 import { verifyEd25519Fast } from "../fastEd25519";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
@@ -45,9 +46,12 @@ export function concatBytes(...parts: Uint8Array[]): Uint8Array {
     return out;
 }
 
-/** SHA3-256 from our own crypto package (pure TS; verified against the NIST empty-string vector). */
-function sha3_256(bytes: Uint8Array): Uint8Array {
-    return new Uint8Array(sha3(bytes));
+/**
+ * SHA3-256, pure TS (@noble/hashes; bug 305: the BigInt Keccak of @harmoniclabs/crypto took ~0.5–1 ms
+ * per call, the same digest — checked against the NIST vectors and the old implementation in the tests).
+ */
+export function sha3_256(bytes: Uint8Array): Uint8Array {
+    return nobleSha3_256(bytes);
 }
 
 function cborUInt(n: bigint | number): Uint8Array {

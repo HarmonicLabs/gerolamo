@@ -1372,7 +1372,12 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
             persistSelectedTipTo(selectedTipPathFor(store.dir));
             if (blockStoreMode() === "primary") {
                 const start = await resolveStartupTip(store, store.dir);
-                if (!start) {
+                const emptyStore = !start && store.chunks.chunks().length === 0 && store.volatile.size === 0;
+                if (emptyStore && config.syncFromGenesis) {
+                    // A fresh from-genesis node: no block yet, the chain starts at the origin (bug 304; the
+                    // ledger store builds the genesis state below).
+                    logger.info("Block store is PRIMARY and empty: syncing from genesis");
+                } else if (!start) {
                     // Mirror mode only makes sense with a populated `blocks` table; on a fresh bootstrap it
                     // would sync from genesis onto the imported ledger (2026-09-14 18:08, halted at slot 320).
                     const legacyRows = (await sql`SELECT 1 FROM blocks LIMIT 1`.values().catch(() => [])) as unknown[][];

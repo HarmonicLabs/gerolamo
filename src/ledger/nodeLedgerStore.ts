@@ -77,14 +77,17 @@ export function ledgerGovReads(): GovReads | null { return mode === "lmdb" && go
  * "snapshot" — imported from a Mithril NewEpochState (importLmdb.ts), exact by construction and
  * answering GetFilteredDelegationsAndRewardAccounts / GetAccountState / GetPoolDistr2 byte-identically
  * with cardano-node; "sqlite" — seeded from the SQLite ledger, whose reward balances drift (bug 246,
- * the 2026-10-01 producer store). A store written before the marker counts as a snapshot import when
+ * the 2026-10-01 producer store); "genesis" — built from the genesis files and synced from the origin
+ * (ledger/genesisState.ts, bug 304): exact only once a full run has been proven identical to the
+ * network, which the operator states with `GEROLAMO_GENESIS_EXACT=1` (report-only until then).
+ * A store written before the marker counts as a snapshot import when
  * the pots' initialized epoch and the governance seed epoch are both the snapshot's epoch (what the
  * importer writes; a SQLite seed copies SQLite's: the Shelley and the Conway start on a node synced
  * from genesis). The balance-dependent rules (withdrawal amounts, `current_treasury_value`, the
  * zero-balance deregistration, the σ leader threshold) are strict only when this is exact (bugs 272–276).
  */
 const SOURCE_KEY = new TextEncoder().encode("ledger_source");
-export type LedgerSource = "snapshot" | "sqlite";
+export type LedgerSource = "snapshot" | "sqlite" | "genesis";
 export async function markLedgerSource(st: LedgerStore, source: LedgerSource): Promise<void> {
     await st.env.write((t) => t.put("meta", SOURCE_KEY, new TextEncoder().encode(source)));
     if (exactMemo?.store === st) exactMemo = null;
@@ -100,7 +103,8 @@ export function ledgerStateExact(): { exact: boolean; why: string } {
         const p = stake.reads.pots(), g = gov.reads.state();
         source = p && g && p.initializedEpoch > 0 && p.initializedEpoch === g.seededEpoch ? "snapshot" : "unknown";
     }
-    const v = source === "snapshot" ? { exact: true, why: "" } : { exact: false, why: source === "sqlite" ? "ledger store seeded from SQLite" : "ledger store not imported from a snapshot" };
+    const genesisExact = source === "genesis" && process.env.GEROLAMO_GENESIS_EXACT === "1";
+    const v = source === "snapshot" || genesisExact ? { exact: true, why: "" } : { exact: false, why: source === "sqlite" ? "ledger store seeded from SQLite" : source === "genesis" ? "ledger store synced from genesis, not yet proven identical to the network (GEROLAMO_GENESIS_EXACT=1 after the acceptance checks)" : "ledger store not imported from a snapshot" };
     exactMemo = { store, v };
     return v;
 }
@@ -125,9 +129,51 @@ export function resolveLedgerDir(config: { dbPath: string; ledgerDir?: string })
     return join(dirname(config.dbPath), "ledger");
 }
 
+/** Where a from-genesis store's state comes from: the node configuration's genesis files and hashes. */
+export interface GenesisSource {
+    syncFromGenesis?: boolean;
+    networkMagic?: number;
+    byronGenesisFile?: string;
+    shelleyGenesisFile?: string;
+    alonzoGenesisFile?: string;
+    conwayGenesisFile?: string;
+    byronGenesisHash?: string;
+    shelleyGenesisHash?: string;
+}
+/** A store built from genesis and not promoted yet stands at the origin: the first block's parent as it names it (Byron: the genesis hash). */
+let originPrevHex: string | null = null;
+
+/** Build the genesis ledger state of the configured network into the empty store and mark it (bug 304). */
+export async function buildNodeGenesisState(st: LedgerStore, config: GenesisSource): Promise<import("./genesisState").GenesisMeta> {
+    const { buildGenesisLedgerState, writeGenesisLedgerState } = await import("./genesisState");
+    const { getHardForkHistory } = await import("../consensus/hfc/hfcNode");
+    const { triggersFrom } = await import("../consensus/hfc/HardForkHistory");
+    const { getEpochNetwork } = await import("../utils/epochFromSlotCalculations");
+    const read = (f?: string) => (f && existsSync(f) ? readFileSync(f) : null);
+    const json = (f?: string) => { const b = read(f); return b ? JSON.parse(b.toString("utf8")) : null; };
+    const network = String(getEpochNetwork());
+    if (!config.shelleyGenesisFile || !existsSync(config.shelleyGenesisFile)) throw new Error("genesis state: no Shelley genesis file configured");
+    const g = await buildGenesisLedgerState({
+        network, networkMagic: Number(config.networkMagic ?? 0),
+        byron: json(config.byronGenesisFile), shelley: json(config.shelleyGenesisFile), alonzo: json(config.alonzoGenesisFile), conway: json(config.conwayGenesisFile),
+        triggers: getHardForkHistory()?.triggers ?? triggersFrom(config as Record<string, unknown>, network),
+        byronGenesisHash: config.byronGenesisHash ?? null, shelleyGenesisHash: config.shelleyGenesisHash ?? null, shelleyGenesisBytes: read(config.shelleyGenesisFile),
+    });
+    for (const w of g.warnings) log.warn(`genesis state: ${w}`);
+    const meta = await writeGenesisLedgerState(st, g);
+    await markSeeded(st);
+    await markLedgerSource(st, "genesis");
+    return meta;
+}
+
 /**
  * Open the store (creating it) and bring it to the selected tip:
+ *   - empty environment and an empty chain with `syncFromGenesis`: build the genesis ledger state
+ *     (ledger/genesisState.ts, bug 304) — the store stands at the origin (no anchor) and the first
+ *     block's diff extends it;
  *   - empty environment: seed the UTxO set from SQLite at the tip (one-time);
+ *   - built from genesis and not yet promoted (no anchor): the persisted diffs must connect the
+ *     selected tip to the origin;
  *   - anchor present and the persisted diffs connect it to the tip: ready (diffs above the tip on
  *     other branches are dropped);
  *   - anchor present but the tip is unreachable (crash between the block store's commit and the
@@ -137,7 +183,7 @@ export function resolveLedgerDir(config: { dbPath: string; ledgerDir?: string })
  *     store's tip follows; only when no block of that chain does is it fatal — repair with the
  *     export tool.
  */
-export async function openNodeLedgerStore(config: { dbPath: string; ledgerDir?: string; ledgerStore?: string }, selectedTip: { slot: number; hash: Uint8Array } | null, chainNewestFirst?: Array<{ slot: number; hash: Uint8Array }>): Promise<LedgerStore | null> {
+export async function openNodeLedgerStore(config: { dbPath: string; ledgerDir?: string; ledgerStore?: string } & GenesisSource, selectedTip: { slot: number; hash: Uint8Array } | null, chainNewestFirst?: Array<{ slot: number; hash: Uint8Array }>): Promise<LedgerStore | null> {
     configureLedgerStore(config.ledgerStore);
     // scripts/ledger-sqlite-drop.ts empties the SQLite ledger tables of an lmdb node: from then on
     // SQLite cannot be the reference again (dual) or the ledger (sqlite).
@@ -154,10 +200,14 @@ export async function openNodeLedgerStore(config: { dbPath: string; ledgerDir?: 
     openAll();
     if (store!.tornDiffs || store!.staleDiffs) log.warn(`ledger store ${dir}: unclean stop — ${store!.tornDiffs} incomplete diff file(s) and ${store!.staleDiffs} diff(s) of blocks at or below the anchor ignored and removed`);
     let anchor = store!.anchor();
+    const { readGenesisMeta } = await import("./genesisState");
+    let genesis = readGenesisMeta(store!);
+    originPrevHex = !anchor && genesis ? genesis.firstPrevHash : null;
     const seedVersion = store!.env.read((t) => { const v = t.get("meta", SEED_KEY); return v ? new DataView(v.buffer, v.byteOffset).getUint32(0, false) : 0; });
     let reason: string | null = null;
-    if (anchor && seedVersion !== SEED_VERSION) reason = `seeded by version ${seedVersion}, this build needs ${SEED_VERSION}`;
+    if ((anchor || genesis) && seedVersion !== SEED_VERSION) reason = `seeded by version ${seedVersion}, this build needs ${SEED_VERSION}`;
     else if (anchor && selectedTip && !store!.chainReachesAnchor(selectedTip.hash)) reason = `anchor slot ${anchor.slot} with ${store!.loadedDiffs} persisted diff(s) does not reach the selected tip (slot ${selectedTip.slot}): ${store!.chainGap(selectedTip.hash)}`;
+    else if (!anchor && genesis && selectedTip && !store!.chainReachesAnchor(selectedTip.hash)) reason = `genesis state (no block promoted yet) with ${store!.loadedDiffs} persisted diff(s) does not reach the selected tip (slot ${selectedTip.slot}): ${store!.chainGap(selectedTip.hash)}`;
     if (reason && mode !== "dual" && selectedTip && chainNewestFirst?.length && seedVersion === SEED_VERSION) {
         // lmdb mode after a crash: the block store may hold blocks whose diffs never reached disk, a
         // diff may be torn, or the persisted tip may be ahead of the diffs. Land on the newest block
@@ -171,22 +221,34 @@ export async function openNodeLedgerStore(config: { dbPath: string; ledgerDir?: 
             store!.selectTip(common.hash);
             startupTipOverride = common;
             log.warn(`ledger store ${dir}: ${reason}; recovered at the newest block both stores hold with a complete diff chain, ${Buffer.from(common.hash).toString("hex").slice(0, 16)}@${common.slot} (${selectedTip.slot - common.slot} slot(s) back, ${dropped} diff(s) dropped)`);
-            log.info(`ledger store ${dir} (${mode}): anchor slot ${anchor!.slot}, ${store!.volatileCount()} volatile diff(s) to the selected tip, ${reads!.count()} UTxOs (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
+            log.info(`ledger store ${dir} (${mode}): anchor ${anchor ? `slot ${anchor.slot}` : "origin (genesis state)"}, ${store!.volatileCount()} volatile diff(s) to the selected tip, ${reads!.count()} UTxOs (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
             return store;
         }
-        log.error(`ledger store ${dir}: none of the ${chainNewestFirst.length} block(s) of the block store's chain (slots ${chainNewestFirst[chainNewestFirst.length - 1]!.slot}..${chainNewestFirst[0]!.slot}) reaches the anchor (slot ${anchor!.slot}) through the ${store!.loadedDiffs} persisted diff(s)`);
+        log.error(`ledger store ${dir}: none of the ${chainNewestFirst.length} block(s) of the block store's chain (slots ${chainNewestFirst[chainNewestFirst.length - 1]!.slot}..${chainNewestFirst[0]!.slot}) reaches the anchor (${anchor ? `slot ${anchor.slot}` : "origin"}) through the ${store!.loadedDiffs} persisted diff(s)`);
     }
     if (reason) {
         const msg = `ledger store ${dir}: ${reason}`;
+        if (genesis && !anchor && mode !== "dual") throw new Error(`${msg}; the node is within its first k blocks from genesis: delete the data directory's ledger/ and db/ and sync again`);
         if (mode !== "dual") throw new Error(`${msg}; rebuild it from a snapshot or with scripts/ledger-export.ts`);
         log.warn(`${msg}; rebuilding from SQLite`);
         store!.close();
         rmSync(dir, { recursive: true, force: true });
         openAll();
         anchor = null;
+        genesis = null; originPrevHex = null;
     }
-    if (!anchor) {
-        if (!selectedTip) { log.warn("ledger store: no anchor and no selected tip to seed at; store stays empty"); return store; }
+    if (!anchor && genesis) {
+        // built from genesis, nothing promoted yet: the origin is the anchor
+        store!.rollbackTo(selectedTip?.hash ?? null); // keep only the selected chain's diffs (none before the first block)
+        log.info(`ledger store ${dir} (${mode}): ${genesis.network} genesis state (start era ${genesis.startEra}), ${store!.volatileCount()} volatile diff(s) to the selected tip, ${reads!.count()} UTxOs (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
+    } else if (!anchor) {
+        if (!selectedTip) {
+            if (!config.syncFromGenesis) { log.warn("ledger store: no anchor and no selected tip to seed at; store stays empty"); return store; }
+            const meta = await buildNodeGenesisState(store!, config);
+            originPrevHex = meta.firstPrevHash;
+            log.info(`ledger store ${dir} (${mode}): built the ${meta.network} genesis state — start era ${meta.startEra}, ${meta.utxos} UTxO(s) holding ${meta.utxoTotal} lovelace, reserves ${meta.reserves ?? "(at the Shelley start)"}, first block's parent ${meta.firstPrevHash?.slice(0, 16) ?? "none (Shelley-based genesis)"} (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
+            return store;
+        }
         await seedAllFromSqlite(selectedTip, t0);
         await ledgerBoundaryPrune(Number(epochForSlot(selectedTip.slot)));
     } else {
@@ -337,6 +399,7 @@ async function rebuildFromSqlite(reason: string): Promise<void> {
     store.close();
     rmSync(storeDir, { recursive: true, force: true });
     store = LedgerStore.open(storeDir); writes = new UtxoWrites(store); reads = new UtxoReads(store); stake = new StakeWrites(store); gov = new GovWrites(store);
+    originPrevHex = null;
     const at = { slot: Number(tip.slot), hash: Uint8Array.from(Buffer.from(tip.hashHex, "hex")) };
     await seedAllFromSqlite(at, t0);
     await ledgerBoundaryPrune(Number(epochForSlot(at.slot)));
@@ -436,8 +499,12 @@ export async function seedGovFromSqlite(st: LedgerStore, w: GovWrites): Promise<
 
 // ------------------------------------------------------------------ block hooks (orchestrator)
 
-export function ledgerBeginBlock(hash: Uint8Array, prevHash: Uint8Array | null, slot: number): void {
+export function ledgerBeginBlock(hash: Uint8Array, rawPrevHash: Uint8Array | null, slot: number): void {
     if (!store || mode === "sqlite") return;
+    // A store built from genesis stands at the origin until its first promotion: the chain's first
+    // block (parent = the Byron genesis hash, or none) extends it and records no parent (bug 304).
+    let prevHash = rawPrevHash;
+    if (prevHash && originPrevHex && !store.selectedTip() && !store.anchor() && Buffer.from(prevHash).toString("hex") === originPrevHex) prevHash = null;
     // The block must extend the store's own chain: its parent is the selected tip (or the anchor).
     // Anything else means the block store and the ledger store disagree about the chain (bug 128:
     // a range built on a block the ledger store had rolled back left dangling diffs behind).
@@ -459,6 +526,24 @@ export function ledgerBeginBlock(hash: Uint8Array, prevHash: Uint8Array | null, 
     }
     store.beginBlock(hash, prevHash, slot);
     inBlock = true;
+}
+
+/**
+ * Byron → Shelley translation of a store built from a Byron genesis, at the first Shelley boundary
+ * inside its block (zero-value outputs dropped, AVVM outputs stashed; genesisState.ts). Null when
+ * not applicable (no store, not in a block, a store not built from a Byron genesis).
+ */
+export async function ledgerTranslateByronToShelley(): Promise<{ zeroDropped: number; avvmStashed: number; avvmLovelace: bigint } | null> {
+    if (!store || mode === "sqlite" || !inBlock) return null;
+    const { readGenesisMeta, translateByronUtxoAtShelleyStart } = await import("./genesisState");
+    if (readGenesisMeta(store)?.startEra !== 0) return null;
+    return translateByronUtxoAtShelleyStart(store);
+}
+/** Shelley → Allegra translation: the stashed AVVM outputs still unspent go back to the reserves (inside the boundary block; a no-op once the stash is empty). */
+export async function ledgerReturnStashedAvvm(): Promise<{ returned: number; lovelace: bigint } | null> {
+    if (!store || mode === "sqlite" || !inBlock) return null;
+    const { returnStashedAvvm } = await import("./genesisState");
+    return returnStashedAvvm(store);
 }
 
 /** Why the store stopped being usable (a refused rollback, a lost chain), or null. */

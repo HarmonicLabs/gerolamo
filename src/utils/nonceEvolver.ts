@@ -61,6 +61,8 @@ export class NonceEvolver {
     private nBlocksInEpoch = 0;
     private nBeforeFreeze = 0;
     private lastPrevHash: Uint8Array | null = null;
+    /** Slot the state reflects: every block up to it is in ηv / ηc (bug 342: a peek must not read a state mid-replay). */
+    private lastSlot = -1;
     private readonly stabilityWindow: number;
     private readonly securityParam: number;
     private readonly activeSlotsCoeff: number;
@@ -131,6 +133,8 @@ export class NonceEvolver {
             etaCHex?: string | null;
             etaHHex?: string | null;
             nBlocksInEpoch?: number;
+            /** Slot the given state reflects (an imported snapshot's); default: the epoch start (last slot of epoch − 1). */
+            atSlot?: number | null;
         },
     ): void {
         const eta0 = fromHex(eta0Hex);
@@ -148,6 +152,7 @@ export class NonceEvolver {
         this.nBlocksInEpoch = opts?.nBlocksInEpoch ?? 0;
         this.nBeforeFreeze = 0;
         this.lastPrevHash = null;
+        this.lastSlot = opts?.atSlot ?? Number(getFirstSlotOfEpoch(epoch, this.genesis)) - 1;
         this.active = true;
         logger.debug(
             `NonceEvolver bootstrap epoch=${epoch} η0=${eta0Hex.slice(0, 16)}…` +
@@ -215,6 +220,7 @@ export class NonceEvolver {
             this.nBeforeFreeze++;
         }
         this.lastPrevHash = prevHash ? new Uint8Array(prevHash) : null;
+        this.lastSlot = Number(s);
         this.nBlocksInEpoch++;
         return tickns;
     }
@@ -258,11 +264,17 @@ export class NonceEvolver {
      * next epoch arrive before its first block is applied, and this lets them be
      * validated without an external nonce source. Null while not bootstrapped
      * or before the freeze.
+     *
+     * Bug 342: "past the freeze" is judged at the slot the evolver's own state has reached, not
+     * only at `currentSlot` (the applied tip): while a restart replays the stored headers the
+     * evolver is active but behind the tip, and its half-replayed ηc gave a wrong η0 (preview
+     * epoch 147, 2026-10-03 04:51 UTC: every header of the epoch failed its VRF check).
      */
     peekNextEpochNonceHex(currentSlot: bigint | number): string | null {
         if (!this.active) return null;
         const firstNext = BigInt(getFirstSlotOfEpoch(this.epoch + 1, this.genesis));
-        if (isBeforeNonceFreeze(BigInt(currentSlot), firstNext, this.freezeWindowFor(this.epoch))) return null;
+        const reached = BigInt(Math.min(Number(currentSlot), this.lastSlot));
+        if (isBeforeNonceFreeze(reached, firstNext, this.freezeWindowFor(this.epoch))) return null;
         const etaH = this.etaH ?? new Uint8Array(0);
         return toHex(ticknNewEpochNonce(this.etaC, etaH));
     }
@@ -273,8 +285,40 @@ export class NonceEvolver {
         this.nBlocksInEpoch = 0;
         this.nBeforeFreeze = 0;
         this.lastPrevHash = null;
+        this.lastSlot = -1;
         this.etaH = null;
         logger.debug("NonceEvolver reset (inactive)");
+    }
+}
+
+/**
+ * Bug 341: the evolver state a range persists for mid-chain resume, with the η0 of the epoch that
+ * state belongs to. The orchestrator used to keep the η0 of the last block fed WITHOUT a TICKN and
+ * write it under the evolver's epoch at the end of the range; a range ending on the first block of
+ * an epoch therefore stored η0 of the previous epoch as the new epoch's nonce (the TICKN's correct
+ * value, written a moment earlier, overwritten). The next range rewrote it, so only a restart in
+ * between kept it: preview 3037, epoch 1328, 2026-10-03 21:24:56 UTC — every header of 1328 failed
+ * its VRF check on every later start.
+ */
+export class RangeNonceSnapshot {
+    private due: { epoch: number; eta0Hex: string } | null = null;
+
+    /** After one block went through UPDN: `eta0Hex` is the η0 of the block's epoch; `tickns` the boundaries it crossed. */
+    note(blockEpoch: number, eta0Hex: string, tickns: TicknResult[]): void {
+        const t = tickns[tickns.length - 1];
+        this.due = t ? { epoch: t.epoch, eta0Hex: t.eta0Hex } : { epoch: blockEpoch, eta0Hex };
+    }
+
+    clear(): void { this.due = null; }
+
+    /** The record to persist at the end of the range (consumes it): null when nothing is due or the evolver is not in the noted epoch. */
+    take(evolver: NonceEvolver | null): { epoch: number; eta0Hex: string; etaVHex: string; etaCHex: string } | null {
+        const due = this.due;
+        this.due = null;
+        if (!due || !evolver?.isActive()) return null;
+        const snap = evolver.snapshot();
+        if (snap.epoch !== due.epoch) return null;
+        return { epoch: due.epoch, eta0Hex: due.eta0Hex, etaVHex: snap.etaVHex, etaCHex: snap.etaCHex };
     }
 }
 

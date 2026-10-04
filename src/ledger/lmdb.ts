@@ -243,6 +243,22 @@ export class LmdbTxn {
         check(lib.symbols.mdb_drop(P(this.ptr), dbi, 0), "mdb_drop");
     }
 
+    /** Names of the environment's named databases: the keys of the unnamed main database (store-compare). */
+    databaseNames(): string[] {
+        const out = new Uint32Array(1);
+        check(lib.symbols.mdb_dbi_open(P(this.ptr), null, 0, ptr(out)), "mdb_dbi_open (main)");
+        const cur = new BigUint64Array(1);
+        check(lib.symbols.mdb_cursor_open(P(this.ptr), out[0]!, ptr(cur)), "mdb_cursor_open");
+        const names: string[] = [];
+        try {
+            const k = new Val(), v = new Val();
+            let rc = lib.symbols.mdb_cursor_get(P(Number(cur[0])), P(k.ptr), P(v.ptr), MDB_FIRST);
+            while (rc === 0) { names.push(new TextDecoder().decode(k.read()).replace(/\0+$/, "")); rc = lib.symbols.mdb_cursor_get(P(Number(cur[0])), P(k.ptr), P(v.ptr), MDB_NEXT); }
+            if (rc !== MDB_NOTFOUND) check(rc, "mdb_cursor_get");
+        } finally { lib.symbols.mdb_cursor_close(P(Number(cur[0]))); }
+        return names;
+    }
+
     /** Number of entries in a database. */
     count(name: string): number {
         const dbi = this.db(name);

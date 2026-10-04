@@ -10,7 +10,10 @@
  */
 import type { ByronAddress } from "@harmoniclabs/cardano-ledger-ts";
 import { CborArray, CborBytes, CborUInt, Cbor, CborMap, CborTag } from "@harmoniclabs/cbor";
-import { blake2b_224, sha3 } from "@harmoniclabs/crypto";
+import { blake2b_224 } from "@harmoniclabs/crypto";
+// Bug 305: @noble/hashes (pure TS, 32-bit lanes) instead of @harmoniclabs/crypto's BigInt Keccak — ~8 µs
+// instead of ~0.5–1 ms per address root, identical output (ByronCrypto.test.ts, real preprod Byron witnesses).
+import { sha3_256 } from "@noble/hashes/sha3";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import type { WitnessItem } from "../workers/witnessJob";
 
@@ -42,7 +45,7 @@ export function byronAddressRoot(addrType: 0 | 1 | 2, spendingTag: number, key: 
     all.set(head, 0);
     all.set(spending, head.length);
     all.set(attributesCbor, head.length + spending.length);
-    return toHex(blake2b_224(new Uint8Array(sha3(all))));
+    return toHex(blake2b_224(sha3_256(all)));
 }
 
 /** The attributes map of a parsed Byron address, re-encoded as CBOR bytes. */

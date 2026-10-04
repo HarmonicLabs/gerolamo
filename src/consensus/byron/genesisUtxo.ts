@@ -1,6 +1,7 @@
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { ByronAddress } from "@harmoniclabs/cardano-ledger-ts";
+import { byronAddressAttributesCbor, byronAddressRoot } from "../rules/witnesses";
 
 /**
  * Byron genesis UTxO set.
@@ -73,12 +74,20 @@ export function base64urlDecode(s: string): Uint8Array {
     return new Uint8Array(Buffer.from(b64, "base64"));
 }
 
-/** Redeem (AVVM) genesis entry → its Byron address (base58) and UTxO id. */
+/**
+ * Redeem (AVVM) genesis entry → its Byron address (base58) and UTxO id. The address root is hashed
+ * with the fast sha3 of `byronAddressRoot` (bug 305: `ByronAddress.fromRedeemPublicKey` hashes with
+ * the BigInt Keccak, ~15 s for mainnet's 14 505 entries); same address (genesisUtxo.test.ts).
+ */
 export function avvmGenesisAddress(redeemPkBase64url: string, protocolMagic?: number): { address: string; txId: string } {
     const pk = base64urlDecode(redeemPkBase64url);
-    const addr = ByronAddress.fromRedeemPublicKey(pk, protocolMagic);
+    if (pk.length !== 32) throw new Error("Byron redeem address needs a 32-byte public key");
+    const attributes = protocolMagic !== undefined && protocolMagic !== BYRON_MAINNET_MAGIC ? { networkMagic: protocolMagic } : {};
+    const attrs = byronAddressAttributesCbor(new ByronAddress({ rootHash: new Uint8Array(28), attributes, type: 2 }));
+    const addr = new ByronAddress({ rootHash: Uint8Array.from(Buffer.from(byronAddressRoot(2, 2, pk, attrs), "hex")), attributes, type: 2 });
     return { address: addr.toBase58(), txId: toHex(blake2b_256(addr.toBytes())) };
 }
+const BYRON_MAINNET_MAGIC = 764824073;
 
 export function byronGenesisUtxos(genesis: ByronGenesisBalances): { utxos: GenesisUtxo[]; nonAvvm: number; avvm: number } {
     const utxos: GenesisUtxo[] = [];

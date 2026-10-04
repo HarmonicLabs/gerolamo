@@ -60,7 +60,7 @@ function nodePid(): number | null {
 function supervisorPid(): number | null {
     for (const d of readdirSync("/proc")) {
         if (!/^\d+$/.test(d)) continue;
-        try { const cmd = readFileSync(`/proc/${d}/cmdline`, "utf8").split("\0").join(" "); if (cmd.startsWith("bash ") && cmd.includes("run-supervised.sh") && cmd.includes(` ${port} `) && cmd.includes(dir)) return Number(d); } catch { /* gone */ }
+        try { const cmd = readFileSync(`/proc/${d}/cmdline`, "utf8").split("\0").join(" "); if (/^(\S*\/)?bash /.test(cmd) && cmd.includes("run-supervised.sh") && cmd.includes(` ${port} `) && cmd.includes(dir)) return Number(d); } catch { /* gone */ }
     }
     return null;
 }

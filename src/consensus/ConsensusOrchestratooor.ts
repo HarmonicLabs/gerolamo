@@ -9,7 +9,7 @@ import { prevHashOf } from "../storage/volatileStore";
 import { locateHeader } from "../storage/chunkFormat";
 import * as blockReads from "../storage/blockReads";
 import { comparePraos, preferByTieBreak, tieBreakInfoOf, vrfFlavorForEra } from "./tieBreak";
-import { getLedgerStore, ledgerAbortRange, ledgerAfterRange, ledgerBeginBlock, ledgerBoundaryPrune, ledgerGovReads, ledgerStoreBroken, ledgerCommitBlock, ledgerDualVerify, ledgerRollbackTo, ledgerStoreMode } from "../ledger/nodeLedgerStore";
+import { getLedgerStore, ledgerAbortRange, ledgerAfterRange, ledgerBeginBlock, ledgerBoundaryPrune, ledgerGovReads, ledgerReturnStashedAvvm, ledgerStoreBroken, ledgerCommitBlock, ledgerDualVerify, ledgerRollbackTo, ledgerStoreMode } from "../ledger/nodeLedgerStore";
 import { sql } from "../sql";
 import { SerializedMutationQueue } from "./SerializedMutationQueue";
 import {
@@ -78,7 +78,7 @@ import {
     getHeaderPrevHashHex,
 } from "../utils/eraAccessors";
 import { getShelleyGenesisConfig } from "../utils/paths";
-import { NonceEvolver } from "../utils/nonceEvolver";
+import { NonceEvolver, RangeNonceSnapshot } from "../utils/nonceEvolver";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { emitChainChanged, emitTip } from "../network/liveEvents";
 import { LeaderChecker, type LeaderVerdict } from "./rules/leaderCheck";
@@ -356,13 +356,24 @@ export class ConsensusOrchestrator {
     /**
      * Bootstrap continuous ηv/ηc when inactive.
      * Prefer DB evolving/candidate; else ηv=ηc=η0 (correct at epoch start).
+     *
+     * Bug 327: `bootstrap()` makes the evolver active before the stored headers are replayed; a
+     * bootstrap started by the header stage (`ensureEvolverAtTip`) let the applier's feed of the next
+     * block run in the middle of the replay — out of order, so ηv went wrong and the next epoch's η0
+     * with it (preview epoch 94 after a restart at the 92→93 boundary: every header failed its VRF).
+     * Callers now wait for a bootstrap in progress.
      */
-    private async ensureEvolverBootstrapped(
-        epoch: number,
-        eta0Hex: string,
-    ): Promise<void> {
+    private evolverBootstrap: Promise<void> | null = null;
+    private async ensureEvolverBootstrapped(epoch: number, eta0Hex: string): Promise<void> {
+        if (this.evolverBootstrap) { await this.evolverBootstrap; return; }
         const evolver = await this.ensureNonceEvolver();
         if (!evolver || evolver.isActive()) return;
+        if (this.evolverBootstrap) { await this.evolverBootstrap; return; }
+        this.evolverBootstrap = this.bootstrapEvolver(evolver, epoch, eta0Hex).finally(() => { this.evolverBootstrap = null; });
+        await this.evolverBootstrap;
+    }
+
+    private async bootstrapEvolver(evolver: NonceEvolver, epoch: number, eta0Hex: string): Promise<void> {
         try {
             const tipRow = await getLastBlockBefore(Number.MAX_SAFE_INTEGER);
             const tipSlot = tipRow?.slot ?? -1;
@@ -379,7 +390,7 @@ export class ConsensusOrchestrator {
                     const last = await getLastBlockBefore(firstSlot);
                     etaHHex = last?.prevHash ? toHex(prevHashToNonce(fromHex(last.prevHash))) : null;
                 }
-                evolver.bootstrap(epoch, eta0Hex, { etaVHex: start.etaVHex, etaCHex: start.etaCHex, etaHHex });
+                evolver.bootstrap(epoch, eta0Hex, { etaVHex: start.etaVHex, etaCHex: start.etaCHex, etaHHex, atSlot: fromSlot - 1 });
                 const n = await this.replayStoredHeaders(evolver, fromSlot, tipSlot);
                 logger.info(`NonceEvolver restored from the epoch ${epoch} start state and ${n} stored header(s)${etaHHex ? " (ηh from the previous epoch's last block)" : ""}`);
             } else {
@@ -496,18 +507,15 @@ export class ConsensusOrchestrator {
         }
     }
 
-    private nonceSnapshotDue: { eta0Hex: string } | null = null;
+    /** Bug 341: the snapshot carries the η0 of the epoch the evolver is in (a range ending on a boundary block stored the previous epoch's). */
+    private readonly nonceSnapshot = new RangeNonceSnapshot();
 
     /** Persist the evolver's ηv/ηc once per applied range (inside its transaction). */
     private async persistNonceSnapshot(): Promise<void> {
-        const due = this.nonceSnapshotDue;
-        if (!due) return;
-        this.nonceSnapshotDue = null;
-        const evolver = this.nonceEvolver;
-        if (!evolver?.isActive()) return;
-        const snap = evolver.snapshot();
+        const rec = this.nonceSnapshot.take(this.nonceEvolver);
+        if (!rec) return;
         try {
-            await storeEpochNonce(snap.epoch, due.eta0Hex, "local", snap.etaVHex, snap.etaCHex);
+            await storeEpochNonce(rec.epoch, rec.eta0Hex, "local", rec.etaVHex, rec.etaCHex);
         } catch {
             // non-fatal; the next TICKN persists η0 regardless
         }
@@ -535,7 +543,7 @@ export class ConsensusOrchestrator {
 
             // ηv/ηc for mid-chain resume are persisted once per range (persistNonceSnapshot),
             // not per block: a range commits atomically, so the two are equivalent.
-            if (tickns.length === 0) this.nonceSnapshotDue = { eta0Hex };
+            if (evolver.isActive()) this.nonceSnapshot.note(epoch, eta0Hex, tickns); // recordTickn may have reset it
         } catch (err: unknown) {
             logger.warn("NonceEvolver feed failed:", err);
         }
@@ -600,6 +608,9 @@ export class ConsensusOrchestrator {
      * η0 before any block is applied again).
      */
     private async ensureEvolverAtTip(): Promise<void> {
+        // Bug 342: a bootstrap in progress has made the evolver active but is still replaying the
+        // stored headers; a caller that sees "active" must wait for it, not read its state.
+        if (this.evolverBootstrap) { await this.evolverBootstrap; return; }
         const evolver = await this.ensureNonceEvolver();
         if (!evolver || evolver.isActive()) return;
         const tipSlot = await getMaxSlot();
@@ -965,6 +976,7 @@ export class ConsensusOrchestrator {
         // ηv/ηc are only valid for the chain they were computed on: rebuild from stored headers.
         this.nonceEvolver?.reset();
         this.lastBlockNo = null; // heights past the rollback point are gone
+        this.dropRulesAhead(); // gathered on the chain we just left, kept ranges included (bug 340)
         if (opts.keepPipeline) { emitChainChanged(); return; }
         this.lastAccepted = null;
         this.pendingHeaders.clear();
@@ -1293,6 +1305,13 @@ export class ConsensusOrchestrator {
         const t0 = performance.now();
         const enacted = await this.governanceBoundary(epoch);
         await this.deriveLocalParams(epoch, enacted?.paramChanges ?? {});
+        // Shelley → Allegra (`translateEra`, before the new era's first tick): the AVVM outputs a Byron
+        // genesis store stashed at the Shelley start go back to the reserves (mainnet epoch 236; bug 318).
+        // A no-op once the stash is empty, so it is simply tried at every Allegra-or-later boundary.
+        if (Number(await this.protocolMajorForEpoch(epoch) ?? 0) >= 3) {
+            try { const r = await ledgerReturnStashedAvvm(); if (r?.returned) logger.info(`Epoch ${epoch}: Allegra translation — ${r.returned} unredeemed AVVM output(s), ${r.lovelace} lovelace, returned to the reserves`); }
+            catch (err) { logger.warn(`Epoch ${epoch}: AVVM return failed:`, err); }
+        }
         // Ledger order at the boundary: the reward update lands (applyRUpd), then the
         // snapshot is taken (SNAP) with the pool parameters in force during the ending
         // epoch, then pending re-registrations apply and retirements happen (POOLREAP).
@@ -2595,14 +2614,26 @@ export class ConsensusOrchestrator {
     private readonly parsedAheadMap = new WeakMap<BlockFetchBlock, MultiEraBlock>();
     /** Ledger effects of parsed blocks (for the overlay of blocks not yet applied). */
     private readonly overlayCache = new WeakMap<BlockFetchBlock, BlockOverlay>();
-    /** Rule outcomes running on workers, by block. */
-    private readonly rulesAheadMap = new WeakMap<BlockFetchBlock, Promise<BlockRulesResult>>();
+    /** Rule outcomes running on workers, by block. Replaced on every rollback (dropRulesAhead). */
+    private rulesAheadMap = new WeakMap<BlockFetchBlock, Promise<BlockRulesResult>>();
     /** Stored UTxO rows the rules stage read for a block; the applier spends from them (blk.apply reads fewer rows). */
-    private readonly spentRowsAheadMap = new WeakMap<BlockFetchBlock, Map<string, UtxoRow>>();
+    private spentRowsAheadMap = new WeakMap<BlockFetchBlock, Map<string, UtxoRow>>();
     /** Blocks that will never be evaluated ahead (epoch boundary): evaluated inline. */
     private readonly rulesAheadNever = new WeakSet<BlockFetchBlock>();
     private rulesAheadFailureLogged = false;
     private shelleyGenesisCache: unknown | null = null;
+
+    /**
+     * Verdicts and input rows gathered ahead were read from the ledger as it stood then, plus the overlays
+     * of the blocks before them: after a rollback (or a failed range) that state is gone. A queued range
+     * kept through a fork rollback (bug 284) must be evaluated on the rolled-back ledger, not with the
+     * dropped branch's verdict (bug 340). Overlays and parses are of the block alone and stay.
+     */
+    private dropRulesAhead(): void {
+        this.rulesAheadMap = new WeakMap();
+        this.spentRowsAheadMap = new WeakMap();
+        this.lookaheadCache = null;
+    }
 
     private overlayOf(message: BlockFetchBlock, block: MultiEraBlock): BlockOverlay {
         let o = this.overlayCache.get(message);
@@ -2648,6 +2679,14 @@ export class ConsensusOrchestrator {
                 }
                 const nextSlot = BigInt(getHeaderSlot(next.block.header));
                 if (Number(calculatePreProdCardanoEpoch(Number(nextSlot))) !== currentEpoch) { this.profile.add("rules.skip.epoch", 1); this.rulesAheadNever.add(msg); break; }
+                // The overlays assume block j extends block j−1. Past the range's end the window runs into
+                // the next downloaded range, which may continue another branch (bug 340, the producer
+                // 2026-10-03: the winner of a same-slot battle was evaluated on top of the loser, whose
+                // transactions it repeats — "not in the UTxO set" — and the verdict outlived the rollback).
+                const prevMsg = blocks[j - 1]!;
+                const prevId = this.verifiedIdentities.get(prevMsg) ?? headerIdentityOfBlock(prevMsg.blockData);
+                const parent = prevHashOf(msg.blockData);
+                if (!parent || toHex(parent).toLowerCase() !== toHex(prevId.hash).toLowerCase()) { this.profile.add("rules.skip.fork", 1); break; }
                 // effects of blocks i … j−1, in order
                 const overlays: BlockOverlay[] = [this.overlayOf(blocks[i]!, current)];
                 let complete = true;
@@ -2838,12 +2877,13 @@ export class ConsensusOrchestrator {
     /** Drop in-memory state derived from applied blocks after a range's transaction rolled back. */
     private afterFailedRange(): void {
         discardPendingUtxoWrites(); // queued rows belonged to the rolled-back transaction
+        this.dropRulesAhead(); // the next range's verdicts carried this range's overlays
         // The range's headers were accepted but their bodies never applied; the primary's ChainSync is
         // restarted from the DB tip and re-streams them. Left in place they masqueraded as "our chain"
         // in the deferred-rollback check (bug 124).
         this.pendingHeaders.clear();
         this.lastBlockNo = null; // re-read from the DB
-        this.nonceSnapshotDue = null;
+        this.nonceSnapshot.clear();
         this.nonceEvolver?.reset();
         this.epochNonceCache.clear();
         this.lastByronTipHash = null;
@@ -2875,11 +2915,17 @@ export class ConsensusOrchestrator {
         const crossesEpoch = tipBefore > slot && epochForSlot(tipBefore) !== epochForSlot(slot);
         const lmdbAnchor = ledgerStoreMode() === "lmdb" ? getLedgerStore()?.anchor() ?? null : null;
         const allowEpochCross = crossesEpoch && ledgerStoreMode() === "lmdb" && !ledgerStoreBroken() && (lmdbAnchor == null || BigInt(lmdbAnchor.slot) <= slot);
-        const counts = await this.dbMutations.run(() => rollbackChainTo(slot, { allowEpochCross })); // sqlite/dual: still throws across a boundary
+        // SQLite, the block store's tip and the LMDB store move back under one dbMutations turn: a range
+        // applying between them saw SQLite rolled back but the block store (its continuity anchor) and
+        // the LMDB store not yet, and its block was then dropped from LMDB alone (bug 340 audit).
+        const counts = await this.dbMutations.run(async () => {
+            const c = await rollbackChainTo(slot, { allowEpochCross }); // sqlite/dual: still throws across a boundary
+            getHardForkHistory()?.rollbackToSlot(slot); // an era transition inside the rolled-back blocks is undone too
+            if (blockStoreMode() === "primary" && this.blockStore) await rollbackSelectedTip(this.blockStore, slot);
+            if (ledgerStoreMode() !== "sqlite") { const row = await getBlockBySlot(slot); ledgerRollbackTo(Number(slot), row ? fromHex(String(Array.isArray(row) ? row[3] : row.block_hash)) : null); }
+            return c;
+        });
         if (crossesEpoch) this.afterEpochCrossingRollback(Number(epochForSlot(slot)));
-        getHardForkHistory()?.rollbackToSlot(slot); // an era transition inside the rolled-back blocks is undone too
-        if (blockStoreMode() === "primary" && this.blockStore) await rollbackSelectedTip(this.blockStore, slot);
-        if (ledgerStoreMode() !== "sqlite") { const row = await getBlockBySlot(slot); ledgerRollbackTo(Number(slot), row ? fromHex(String(Array.isArray(row) ? row[3] : row.block_hash)) : null); }
         logger.rollback(`Rollback to slot ${slot} (${why}): ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`);
         this.nonceEvolver?.reset();
         this.epochNonceCache.clear();
@@ -3380,9 +3426,12 @@ export class ConsensusOrchestrator {
 
                 if (comparison.preferred === "candidate") {
                     const rollbackSlot = point.blockHeader!.slotNumber;
-                    const counts = await this.dbMutations.run(() => rollbackChainTo(rollbackSlot));
-                    if (blockStoreMode() === "primary" && this.blockStore) await rollbackSelectedTip(this.blockStore, rollbackSlot, (() => { const h = (point.blockHeader as { hash?: unknown } | undefined)?.hash; return h instanceof Uint8Array ? toHex(h) : null; })());
-                    if (ledgerStoreMode() !== "sqlite") { const row = await getBlockBySlot(rollbackSlot); ledgerRollbackTo(Number(rollbackSlot), row ? fromHex(String(Array.isArray(row) ? row[3] : row.block_hash)) : null); }
+                    const counts = await this.dbMutations.run(async () => { // the three stores move together (see rollbackOurChainTo)
+                        const c = await rollbackChainTo(rollbackSlot);
+                        if (blockStoreMode() === "primary" && this.blockStore) await rollbackSelectedTip(this.blockStore, rollbackSlot, (() => { const h = (point.blockHeader as { hash?: unknown } | undefined)?.hash; return h instanceof Uint8Array ? toHex(h) : null; })());
+                        if (ledgerStoreMode() !== "sqlite") { const row = await getBlockBySlot(rollbackSlot); ledgerRollbackTo(Number(rollbackSlot), row ? fromHex(String(Array.isArray(row) ? row[3] : row.block_hash)) : null); }
+                        return c;
+                    });
                     logger.rollback(
                         `Praos-approved rollback to slot ${rollbackSlot}: ${counts.blocksDeleted} blocks, ${counts.headersDeleted} headers, ${counts.deltasDeleted} deltas deleted`,
                     );

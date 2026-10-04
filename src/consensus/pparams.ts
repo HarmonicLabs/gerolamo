@@ -315,6 +315,7 @@ export function diffRawParams(a: Record<string, unknown>, b: Record<string, unkn
  * Re-merge them in place once at startup; values already present are kept.
  */
 export async function repairLocalEpochParams(files: EraGenesisFiles, shelleyGenesis?: any): Promise<number> {
+    if (!sqlLedgerWrites()) return 0; // SQLite rows only; the LMDB store's records are written complete
     const rows = (await sql`SELECT epoch, params FROM epoch_params WHERE source IN ('local', 'genesis') ORDER BY epoch`.values()) as unknown[][];
     const spp = shelleyGenesis?.protocolParams ?? {};
     const shelleyKeys: Array<[string, string]> = [["e_max", "eMax"], ["n_opt", "nOpt"], ["a0", "a0"], ["rho", "rho"], ["tau", "tau"], ["min_pool_cost", "minPoolCost"]];

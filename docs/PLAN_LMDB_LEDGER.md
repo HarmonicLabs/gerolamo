@@ -503,3 +503,19 @@ restarting returns to the previous path (the block store is shared and unaffecte
   rounding) — fixed with CAST AS TEXT; the LMDB record was exact. Bug 130 (tracker kept a
   replaced block "confirmed") fixed; both nodes at the tip, producer's remaining 1428 slots all
   forged and on chain.
+
+### 2026-10-02 — an LMDB store from genesis (bug 304)
+
+- §10's "genesis replays stay a SQLite-mode tool" is closed: an empty environment on an empty chain
+  with `syncFromGenesis` is filled with the network's genesis ledger state (`ledger/genesisState.ts`:
+  Byron genesis UTxO incl. zero balances and the Byron chain-validation record for preprod / mainnet;
+  the translated Alonzo state with pots and genesis delegations for preview; initial funds / genesis
+  staking injection for custom Shelley-at-0 networks) and stands at the origin until its first
+  promotion; the Byron → Shelley translation (zero outputs dropped, AVVM stashed) runs at the first
+  Shelley boundary and the AVVM return at Allegra. Meta `ledger_source = "genesis"`; the balance rules
+  stay report-only until `GEROLAMO_GENESIS_EXACT=1` (after docs/RUNBOOK_GENESIS_NODE.md §5).
+- Tools: `scripts/store-compare.ts` (two stores pinned to a common block, every database key by key,
+  streaming), `scripts/ledger-koios-check.ts` (per-epoch history against Koios), `LedgerView.scan` /
+  `withTxn` (streamed, transaction-pinned reads for tools beside a running node).
+- Proven: preprod Byron + 4 Shelley epochs and preview's first epochs from an empty store with no
+  SQLite ledger, every boundary against Koios (docs/VALIDATION_STATUS.md, bugs 304–305 / 316–327).

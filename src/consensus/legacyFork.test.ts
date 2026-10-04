@@ -3,14 +3,17 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BlockFetchBlock, type ChainPoint } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { initSql } from "../sql";
-import { ensureInitialized, setStrictUtxoApply } from "../db";
+import { initSql, sql } from "../sql";
+import { ensureInitialized, setStrictUtxoApply, txOutColumns } from "../db";
+import { _resetEpochParamsCache, storeEpochParams } from "./epochParams";
+import { addressBech32, baseAddressBytes, encodeSignedTx, encodeTxBody, generateKeyPair, keyHash, signTxBody, txId } from "../pool/operator";
+import { assembleBody, splitTx } from "../pool/bodyAssembly";
 import { BlockStore } from "../storage/blockStore";
 import { configureBlockStoreMode, setNodeBlockStore } from "../storage/nodeBlockStore";
 import { getSelectedTipHash, setSelectedTipHash } from "../storage/blockReads";
-import { configureLedgerStore, getLedgerStore, ledgerBeginBlock, ledgerCommitBlock, ledgerStoreBroken, openNodeLedgerStore } from "../ledger/nodeLedgerStore";
+import { configureLedgerStore, getLedgerStore, ledgerBeginBlock, ledgerCommitBlock, ledgerStoreBroken, ledgerUtxoReads, openNodeLedgerStore } from "../ledger/nodeLedgerStore";
 import { setEpochNetwork } from "../utils/epochFromSlotCalculations";
-import { forgeBlock, type ForgedBlock } from "../pool/forge";
+import { forgeBlock, type BodySegments, type ForgedBlock } from "../pool/forge";
 import { compareBytes } from "./tieBreak";
 import { issueOperationalCert, loadColdSigningKey, loadKesSigningKey, loadVrfSigningKey } from "../pool/keystore";
 import { ConsensusOrchestrator } from "./ConsensusOrchestratooor";
@@ -48,11 +51,11 @@ const keys = (() => {
 })();
 
 interface Blk { slot: bigint; hash: string; prev: string; no: bigint; forged: ForgedBlock }
-function forge(parent: { hash: string; no: bigint }, slot: bigint, nonceByte = 0x11): Blk {
+function forge(parent: { hash: string; no: bigint }, slot: bigint, nonceByte = 0x11, body?: BodySegments): Blk {
     const f = forgeBlock({
         era: 6, blockNumber: parent.no + 1n, slot, prevHash: Uint8Array.from(Buffer.from(parent.hash, "hex")),
         nonce: new Uint8Array(32).fill(nonceByte), coldVkey: keys.cold.vkey, vrf: keys.vrf, kes: keys.kes, opcert: keys.opcert,
-        protocolVersion: { major: 9, minor: 0 }, slotsPerKESPeriod: SLOTS_PER_KES,
+        protocolVersion: { major: 9, minor: 0 }, slotsPerKESPeriod: SLOTS_PER_KES, body,
     });
     return { slot, hash: hex(f.headerHash), prev: parent.hash, no: parent.no + 1n, forged: f };
 }
@@ -234,6 +237,161 @@ describe("legacy chain following: a primary switch onto a branch that loses a sl
             expect(hex(getLedgerStore()!.selectedTip()!)).toBe(want.hash);
             expect(o.recentlyRolledBack.has(L.hash)).toBe(expectTip !== "L");
             if (expectTip === "L") expect(relay.isTerminated).toBe(true); // N's range failed the continuity check: the pipeline restarts
+        }, 60_000);
+    }
+});
+
+/**
+ * Bug 340 (producer, 2026-10-03 04:09:16 UTC, "spends 2 input(s) not in the UTxO set"): a same-slot
+ * battle at the tip, both blocks carrying the same transactions.
+ *
+ *   P ─ C ─┬─ L   (the primary's block, applied first)
+ *          └─ W   (the network's block: same slot, lower VRF; same transactions as L)
+ *
+ * The primary sends L, rolls back to C and sends W. L's range is still queued, so it applies; W's range
+ * (downloaded by then) is the next one, and the rules-ahead window of L's last block ran into it: W's
+ * rules were evaluated on a worker with L's overlay (L spent W's inputs) — "not in the UTxO set". The
+ * fork rollback for W's range (bug 284) then rolled both stores back to C correctly, but kept the
+ * pipeline, and with it W's verdict from the dropped branch: SYNC HALTED.
+ */
+const FEE = 200_000n;
+const payKey = generateKeyPair(new Uint8Array(32).fill(9));
+const payAddrBytes = baseAddressBytes(0, keyHash(payKey.vkey), keyHash(payKey.vkey));
+const payAddr = addressBech32(payAddrBytes);
+const PARAMS_RAW = {
+    min_fee_a: "44", min_fee_b: "155381", max_tx_size: "16384", max_block_size: "90112", max_block_header_size: "1100", key_deposit: "2000000", pool_deposit: "500000000",
+    coins_per_utxo_size: "4310", collateral_percent: "150", max_collateral_inputs: "3", max_val_size: "5000", protocol_major_ver: "9", protocol_minor_ver: "0",
+    price_mem: 0.0577, price_step: 0.0000721, max_tx_ex_mem: "14000000", max_tx_ex_steps: "10000000000", max_block_ex_mem: "62000000", max_block_ex_steps: "20000000000",
+    min_fee_ref_script_cost_per_byte: 15,
+};
+interface Tx { id: string; bytes: Uint8Array }
+function payTx(inputs: Array<{ id: string; ix: number }>, outputs: bigint[]): Tx {
+    const body = encodeTxBody({ inputs: inputs.map((i) => ({ txHash: Uint8Array.from(Buffer.from(i.id, "hex")), index: i.ix })), outputs: outputs.map((l) => ({ address: payAddrBytes, lovelace: l })), fee: FEE, certificates: [] });
+    return { id: hex(txId(body)), bytes: encodeSignedTx(body, signTxBody(body, [payKey])) };
+}
+const bodyOf = (txs: Tx[]): BodySegments => assembleBody(txs.map((t) => splitTx(Uint8Array.from(Buffer.from(t.id, "hex")), t.bytes)), 90_112).segments;
+
+let C: Blk, Lt: Blk, Wt: Blk, T0: Tx, T1: Tx, T2: Tx;
+const G = "11".repeat(32); // the funding outputs, in the ledger at P
+
+async function txScenario(name: string, opts: { sqlWrites: boolean; praos: boolean }): Promise<void> {
+    await orch?.stop().catch(() => undefined);
+    getLedgerStore()?.close();
+    configureLedgerStore("sqlite"); // params and funding rows go to SQLite first; the LMDB store is seeded from them
+    if (opts.sqlWrites) delete process.env.GEROLAMO_LEDGER_SQL_WRITES; else process.env.GEROLAMO_LEDGER_SQL_WRITES = "0";
+    const sub = join(dir, name);
+    const dbPath = join(sub, "preview.db");
+    initSql(dbPath);
+    await ensureInitialized();
+    _resetEpochParamsCache();
+    await storeEpochParams(1435, { ...PARAMS_RAW, epoch: 1435 }, "test");
+    for (const [ix, lovelace] of [[0, 100_000_000n], [1, 50_000_000n]] as const) {
+        const json = JSON.stringify({ address: payAddr, amount: String(lovelace), assets: {} });
+        const c = txOutColumns(json);
+        await sql`INSERT INTO utxo (utxo_ref, tx_out, tx_hash, address, lovelace, reference_script_hash, stake_key) VALUES (${`${G}:${ix}`}, ${json}, ${G}, ${c.address}, ${c.lovelace}, ${c.referenceScriptHash}, ${c.stakeKey})`;
+    }
+    configureBlockStoreMode("primary");
+    const bs = await BlockStore.open(join(sub, "db"), { k: 432 });
+    setNodeBlockStore(bs);
+
+    // C creates the outputs L and W both spend (the incident: 0a48251e…:1 and 50d7a11f…:0 came from de0a6a0a)
+    T0 = payTx([{ id: G, ix: 0 }], [60_000_000n, 40_000_000n - FEE]);
+    T1 = payTx([{ id: T0.id, ix: 0 }, { id: T0.id, ix: 1 }], [100_000_000n - 2n * FEE]);
+    T2 = payTx([{ id: G, ix: 1 }], [50_000_000n - FEE]); // an older output (bbfa4485…:9)
+    blocks = new Map();
+    P = forge({ hash: "ab".repeat(32), no: 4_707_853n }, S0);
+    C = forge(P, S0 + 9n, 0x11, bodyOf([T0]));
+    Lt = forge(C, C.slot + 4n, 0x22, bodyOf([T1, T2]));
+    for (let nonce = 0x23; ; nonce++) { // W wins the battle (lower VRF), as eb4dc3ba did
+        Wt = forge(C, C.slot + 4n, nonce, bodyOf([T1, T2]));
+        if (compareBytes(Wt.forged.vrf.output, Lt.forged.vrf.output) < 0) break;
+    }
+    for (const b of [P, C, Lt, Wt]) blocks.set(b.hash, b);
+
+    await bs.put(P.forged.blockFetchBytes, P.forged.headerHash);
+    setSelectedTipHash(P.forged.headerHash);
+    configureLedgerStore("lmdb");
+    await openNodeLedgerStore({ dbPath, ledgerStore: "lmdb" }, { slot: Number(P.slot), hash: P.forged.headerHash });
+    expect(getLedgerStore()!.anchor()).not.toBeNull();
+
+    peers = new Map(KEYS.map((k) => [k, new FakePeer(k, blocks)]));
+    orch = new ConsensusOrchestrator({
+        networkMagic: 2, shelleyGenesisFile: "src/config/preview/shelley-genesis.json", syncFromGenesis: true,
+        network: "testnet", dbPath, sync: { quorum: 2 }, validation: { workers: 1 }, blockFetchBatch: { maxRangeBlocks: 16 },
+        ...(opts.praos ? { consensus: { chainSelection: "praos" } } : {}),
+    } as never, {
+        getPeer: (id: string) => peers.get(id) ?? [...peers.values()].find((p) => p.peerId === id) ?? null,
+        pickHotPeer: () => null,
+    } as never);
+    orch.attachBlockStore(bs);
+    const o = orch as any;
+    o.kCached = 432;
+    o.getEpochNonce = async () => null;
+}
+
+/** The producer's sequence: C applied; header L; RollBackward to C; header W; L's range applies with W's range downloaded behind it. */
+async function replaySlotBattle(): Promise<void> {
+    const o = orch as any;
+    const prim = peers.get(KEYS[0]!)!;
+    for (const k of KEYS) orch.registerHotPeer(k);
+    expect(orch.primaryPeerKey()).toBe(prim.peerKey);
+    await o.acceptPrimaryHeaders(prim, [item(C, C.slot)], [summary(C)], [""]);
+    await until(() => o.halted != null || (!!getSelectedTipHash() && hex(getSelectedTipHash()!) === C.hash));
+    expect(o.halted).toBeNull();
+
+    // L's range is held until W's range has been downloaded (the incident: both arrived within a second)
+    const applyRange = o.applyRange.bind(o);
+    o.applyRange = async (points: Array<{ hash: string }>, bl: unknown, from: string, still?: () => boolean) => {
+        if (points[0]!.hash.toLowerCase() === Lt.hash) await until(() => (o.scheduler?.peekNextBlocks()?.length ?? 0) > 0);
+        return applyRange(points, bl, from, still);
+    };
+    await o.acceptPrimaryHeaders(prim, [item(Lt, Lt.slot)], [summary(Lt)], [""]);
+    await until(() => o.rangeBuffer.length === 0); // L's range submitted
+    await orch.handleRollBack({ blockHeader: { slotNumber: C.slot, hash: C.forged.headerHash } } as never, undefined, prim.peerId);
+    await o.acceptPrimaryHeaders(prim, [item(Wt, Wt.slot)], [summary(Wt)], [""]);
+}
+
+describe("same-slot battle at the tip, the loser applied first, both blocks carrying the same transactions (bug 340)", () => {
+    for (const [name, opts] of [
+        ["lmdb, SQL ledger writes on", { sqlWrites: true, praos: false }],
+        ["lmdb, SQL ledger writes off", { sqlWrites: false, praos: false }],
+        ["lmdb, chainSelection praos", { sqlWrites: true, praos: true }],
+    ] as const) {
+        test(`${name}: the winning block validates on the rolled-back ledger (no halt)`, async () => {
+            const sqlWritesBefore = process.env.GEROLAMO_LEDGER_SQL_WRITES, failedDirBefore = process.env.GEROLAMO_FAILED_BLOCK_DIR;
+            process.env.GEROLAMO_FAILED_BLOCK_DIR = join(dir, "failed-blocks"); // a halt dumps the block: not into the checkout
+            try {
+                await txScenario(`battle-${opts.sqlWrites}-${opts.praos}`, opts);
+                const o = orch as any;
+                await replaySlotBattle();
+                if (opts.praos) {
+                    // chain selection decides in praos mode: W's range does not extend L and fails; the switch follows
+                    await until(() => o.halted != null || o.recentlyRolledBack.size > 0 || hex(getSelectedTipHash()!) === Lt.hash);
+                    await until(() => o.halted != null || o.scheduler?.stats().queued === 0);
+                    if (!o.halted && hex(getSelectedTipHash()!) === Lt.hash) {
+                        const prim = peers.get(KEYS[0]!)!;
+                        await o.switchToCandidate({ peer: prim.peerKey, intersection: { slot: C.slot, hash: C.hash }, suffix: [{ slot: Wt.slot, hash: Wt.hash }], tip: { slot: Wt.slot, hash: Wt.hash, blockNo: Wt.no }, rollback: 1, reason: { kind: "equal", detail: { kind: "vrf" } } });
+                    }
+                }
+                await until(() => o.halted != null || (!!getSelectedTipHash() && hex(getSelectedTipHash()!) === Wt.hash));
+                expect(o.halted?.reason ?? null).toBeNull();
+                expect(ledgerStoreBroken()).toBeNull();
+                expect(hex(getSelectedTipHash()!)).toBe(Wt.hash);
+                expect(hex(getLedgerStore()!.selectedTip()!)).toBe(Wt.hash);
+                expect(o.recentlyRolledBack.has(Lt.hash)).toBe(true); // L was applied, then rolled back
+                // the ledger is W's: T1/T2 outputs present, their inputs spent
+                const has = (ref: string) => ledgerUtxoReads()!.get(ref) != null;
+                expect(has(`${T1.id}:0`)).toBe(true);
+                expect(has(`${T2.id}:0`)).toBe(true);
+                expect(has(`${T0.id}:0`) || has(`${T0.id}:1`) || has(`${G}:1`)).toBe(false);
+                if (opts.sqlWrites) { // the SQLite shadow tables followed the same chain (journal undo of L, then W)
+                    const refs = ((await sql`SELECT utxo_ref FROM utxo ORDER BY utxo_ref`.values()) as unknown[][]).map((r) => String(r[0]));
+                    expect(refs.sort()).toEqual([`${T1.id}:0`, `${T2.id}:0`].sort());
+                }
+            } finally {
+                if (sqlWritesBefore == null) delete process.env.GEROLAMO_LEDGER_SQL_WRITES; else process.env.GEROLAMO_LEDGER_SQL_WRITES = sqlWritesBefore;
+                if (failedDirBefore == null) delete process.env.GEROLAMO_FAILED_BLOCK_DIR; else process.env.GEROLAMO_FAILED_BLOCK_DIR = failedDirBefore;
+            }
         }, 60_000);
     }
 });

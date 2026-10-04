@@ -11,6 +11,7 @@ import {
 import { calculatePreProdCardanoEpoch, setEpochNetwork } from "../utils/epochFromSlotCalculations";
 import { setupKeyboard } from "../tui";
 import { backfillBlockHeights, countGenesisUtxoRegistry, ensureInitialized, getMaxSlot, seedGenesisUtxosIfMissing } from "../db";
+import { configureLedgerStore, sqlLedgerWrites } from "../ledger/nodeLedgerStore";
 import { getByronGenesisConfig } from "../utils/paths";
 import { byronGenesisUtxos, countFundedGenesisEntries } from "../consensus/byron/genesisUtxo";
 import { populateEpochState } from "../state/blockfrost";
@@ -283,10 +284,15 @@ export async function start() {
     // From-genesis ledger: the Byron genesis balances are the initial UTxO set.
     // Retroactive and idempotent — a DB that synced before seeding existed gets
     // the still-unspent genesis outputs added; spent ones are left absent.
-    if (config.syncFromGenesis) {
+    // With the LMDB ledger and no SQLite ledger writes the genesis UTxOs live in the store's genesis
+    // state (ledger/genesisState.ts, bug 304); the SQLite seed below is for the SQLite ledger only.
+    configureLedgerStore((config as { ledgerStore?: string }).ledgerStore);
+    if (config.syncFromGenesis && !sqlLedgerWrites()) {
+        logger.info("Genesis UTxOs: not seeded into SQLite (SQLite ledger writes are off; the LMDB store's genesis state or import holds the ledger)");
+    } else if (config.syncFromGenesis) {
         const byronGenesis = await getByronGenesisConfig(config);
         if (byronGenesis) {
-            // Deriving 14.5k mainnet redeem addresses costs ~15 s of CPU: do it once.
+            // Deriving 14.5k mainnet redeem addresses (~15 s with the BigInt sha3, ~1 s since bug 305): do it once.
             // The registry table remembers every genesis output ever seeded.
             const expected = countFundedGenesisEntries(byronGenesis);
             const registered = await countGenesisUtxoRegistry();

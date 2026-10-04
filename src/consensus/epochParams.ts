@@ -154,6 +154,7 @@ export async function getEpochBodyParams(
     epoch: number,
     depth = 0,
 ): Promise<EpochBodyParams | null> {
+    if (epoch < 0) return null; // before genesis (a from-genesis node's epoch-0 headers walked back 24 epochs to Blockfrost)
     const hit = cache.get(epoch);
     if (hit) return hit;
 
@@ -198,6 +199,21 @@ export async function getEpochBodyParams(
     } catch {
         /* fall through */
     }
+    // Up to the Shelley start nothing precedes the genesis parameters: a from-genesis node's first
+    // headers are judged before the boundary stores the epoch's record (bug 320; it asked Blockfrost).
+    try {
+        const { shelleyStartEpoch } = await import("../utils/epochFromSlotCalculations");
+        if (epoch <= Number(shelleyStartEpoch())) {
+            const genesis = await getShelleyGenesisConfig(config as any);
+            const raw: Record<string, unknown> = { ...epochParamsFromGenesis(epoch, genesis).raw, epoch };
+            const { applyEraGenesis, eraGenesisFilesFor } = await import("./pparams");
+            await applyEraGenesis(raw, 0, eraGenesisFilesFor(config));
+            raw.source = "genesis-carry";
+            const p = epochParamsFromRecord(epoch, raw);
+            cache.set(epoch, p);
+            return p;
+        }
+    } catch { /* fall through */ }
     try {
         const raw = await blockFrostFetchEpochParams(config, epoch);
         const p = epochParamsFromRecord(epoch, raw);

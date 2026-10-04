@@ -42,6 +42,8 @@ interface NodeSpec {
     producer?: boolean;        // watch leader-slot outcomes
     relaunch?: boolean;        // relaunch the supervisor when it is missing (default true)
     restartOnHaltMin?: number; // SIGTERM the node after this long halted (default 5; 0 = never)
+    catchingUp?: boolean;      // a node syncing history (e.g. from genesis): no "behind" alert; alert when its tip stops advancing instead
+    stallMin?: number;         // catchingUp: tip unchanged this long → "stalled" alert (default 15)
     parity?: boolean;          // continuous verification against the relay (default true when it has an N2C socket)
     n2cSocketPath?: string;    // default: the node's <dir>/config.json n2cSocketPath
     vrfSkeyFile?: string;      // producer: default <dir>/config.json producer.vrfSkeyFile (a path for cardano-cli only)
@@ -67,7 +69,7 @@ interface Config {
     processes?: ProcessSpec[];
     parity?: ParityConfig;     // see lib/parityProbe.ts and watchdog/README.md; on by default
 }
-interface State { haltRestarts?: Record<string, number>; problems: Record<string, { since: number; lastAlert: number; text: string }>; slotsSeen: Record<string, string>; strikes: Record<string, number>; launchedAt?: Record<string, number> }
+interface State { haltRestarts?: Record<string, number>; progress?: Record<string, { slot: number; at: number }>; problems: Record<string, { since: number; lastAlert: number; text: string }>; slotsSeen: Record<string, string>; strikes: Record<string, number>; launchedAt?: Record<string, number> }
 
 const cfgPath = process.argv[2];
 if (!cfgPath) { console.error("usage: bun scripts/watchdog.ts <config.json> [--test]"); process.exit(2); }
@@ -114,7 +116,7 @@ function findProcs(n: NodeSpec): { supervisor: number | null; node: number | nul
         if (!/^\d+$/.test(d)) continue;
         let cmd = "";
         try { cmd = readFileSync(`/proc/${d}/cmdline`, "utf8").split("\0").join(" "); } catch { continue; }
-        if (cmd.startsWith("bash ") && cmd.includes("run-supervised.sh") && cmd.includes(` ${n.port} `) && cmd.includes(n.dir)) supervisor = Number(d);
+        if (/^(\S*\/)?bash /.test(cmd) && cmd.includes("run-supervised.sh") && cmd.includes(` ${n.port} `) && cmd.includes(n.dir)) supervisor = Number(d);
         else if (cmd.startsWith("bun ") && cmd.includes("start-gerolamo")) {
             try { if (readFileSync(`/proc/${d}/environ`, "utf8").split("\0").includes(`GEROLAMO_PORT=${n.port}`)) node = Number(d); } catch { /* not ours */ }
         }
@@ -186,7 +188,13 @@ for (const n of cfg.nodes) {
     const ls = m.ledgerStore;
     const behind = wallSlot(n.network) - Number(m.tipSlot ?? 0);
     const sk = `${tag}:behind`;
-    if (behind > behindAlert && !halted) {
+    if (n.catchingUp) {
+        // 2026-10-04: node 3037 (preview from genesis) sat stalled for 20 h on a bad stored nonce and nothing said so.
+        const tip = Number(m.tipSlot ?? 0), pg = (state.progress ??= {});
+        const last = pg[tag];
+        if (!last || tip > last.slot) pg[tag] = { slot: tip, at: now };
+        else if (!halted && now - last.at >= (n.stallMin ?? 15) * 60_000) problem(`${tag}:stalled`, `${tag}: sync stalled`, `Tip slot ${tip} unchanged for ${Math.round((now - last.at) / 60_000)} min (${behind} s behind the wall clock).`, true);
+    } else if (behind > behindAlert && !halted) {
         state.strikes[sk] = (state.strikes[sk] ?? 0) + 1;
         if (state.strikes[sk]! >= 2) problem(sk, `${tag}: ${Math.round(behind / 60)} min behind`, `Tip slot ${m.tipSlot}, ${behind} s behind the wall clock; ${m.sync?.blocksPerSec ?? 0} blocks/s, ${m.peers?.hot ?? 0} hot peers${ls ? `, ledger ${ls.mode} ${ls.volatileBlocks} diffs` : ""}.`, behind > 1800);
     } else state.strikes[sk] = 0;

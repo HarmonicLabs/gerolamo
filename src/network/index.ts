@@ -301,7 +301,8 @@ export async function start() {
             } else {
                 const { utxos, nonAvvm, avvm } = byronGenesisUtxos(byronGenesis);
                 const r = await seedGenesisUtxosIfMissing(utxos);
-                logger.info(
+                if (r.skipped) logger.info(`Genesis UTxOs: not seeded (${r.skipped})`);
+                else logger.info(
                     `Genesis UTxOs: ${utxos.length} (${nonAvvm} funded address(es), ${avvm} AVVM) — ${r.inserted} added, ${r.present} present, ${r.spent} already spent on chain (tip slot ${await getMaxSlot()})`,
                 );
             }

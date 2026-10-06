@@ -314,6 +314,8 @@ export class StakeWrites {
     putSnapshotPool(takenAt: number, poolId: string, stake: bigint): void { this.s.put(SDB.snapPool, cat(u32(takenAt), hexKey(poolId)), u64(stake)); }
     putSnapshotTotals(takenAt: number, total: bigint, pools: number): void { this.s.put(SDB.snapTotals, u32(takenAt), cat(u64(total), u32(pools))); }
     putSnapshotPoolParams(takenAt: number, poolId: string, vrf: string, params: PoolRewardParams | null): void { this.s.put(SDB.snapPParams, cat(u32(takenAt), hexKey(poolId)), json({ vrf, params })); }
+    /** A pool the snapshot lists although its delegators' stake summed to zero (bug 188's key form: what `takeStakeSnapshot` writes). */
+    putSnapshotPoolZero(takenAt: number, poolId: string): void { this.s.put(SDB.snapPoolZero, cat(u32(takenAt), hexKey(poolId)), EMPTY); }
     putSnapshotPoolMeta(takenAt: number, poolId: string, delegators: number, owners: string[]): void { this.s.put(SDB.snapPoolMeta, cat(u32(takenAt), hexKey(poolId)), json({ delegators, owners })); }
     putBlocksMade(epoch: number, poolId: string, n: number): void { this.s.addU64(SDB.blocksMade, cat(u32(epoch), hexKey(poolId)), BigInt(n)); }
     putOpcert(poolId: string, counter: number, slot: number): void { this.s.put(SDB.opcert, hexKey(poolId), cat(u32(counter), u64(BigInt(slot)))); }
@@ -346,7 +348,7 @@ export class StakeWrites {
             total += stake;
         }
         for (const [pool, stake] of perPool) this.s.put(SDB.snapPool, cat(u32(takenAt), hexKey(pool)), u64(stake));
-        for (const pool of delegatedTo) if (!perPool.has(pool)) this.s.put(SDB.snapPoolZero, cat(u32(takenAt), hexKey(pool)), EMPTY);
+        for (const pool of delegatedTo) if (!perPool.has(pool)) this.putSnapshotPoolZero(takenAt, pool);
         // `spssNumDelegators` / `spssSelfDelegatedOwners` (DebugNewEpochState): every delegator, and the owners among them
         for (const [id, p] of pools) {
             const n = delegators.get(id) ?? 0;

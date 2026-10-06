@@ -57,3 +57,6 @@ desktop/dist/
 
 # Electrobun dev artifact written to the repo root by desktop/scripts/dev-wait.sh
 /Resources/
+
+# Docker host data directory (docker-compose.yml default)
+/data/

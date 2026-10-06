@@ -29,6 +29,7 @@ import {
     ShelleyTxBody,
 } from "@harmoniclabs/cardano-ledger-ts";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
+import { reduced } from "./network/n2c/lsq/cborWriter";
 import { certStakeEffect } from "./consensus/certificateRules";
 import {
     ensureMinibfSchema,
@@ -2558,7 +2559,7 @@ export async function applyCertificates(
                 if (certStakeEffect(t).deregisters && c.stakeCredential) await recordStakeDeregistration(db, c.stakeCredential, Number(ctx.epoch));
                 if (t === 3 && c.poolParams?.operator && c.poolParams?.vrfKeyHash) {
                     const pp = c.poolParams;
-                    const margin = pp.margin ?? {};
+                    const [mNum, mDen] = poolMarginOf(pp.margin);
                     // the pool's relays feed the peer governor's ledger-peer source (not ledger state: not journaled)
                     try {
                         const relays = ((pp.relays ?? []) as any[]).map(relayFromLedgerTs).filter((r): r is { host: string; port: number } => !!r);
@@ -2567,8 +2568,8 @@ export async function applyCertificates(
                     await recordPoolRegistration(db, String(pp.operator.toString()), String(pp.vrfKeyHash.toString()), ctx.slot, {
                         pledge: String(pp.pledge ?? 0),
                         cost: String(pp.cost ?? 0),
-                        marginNum: String(margin.num ?? margin.numerator ?? 0),
-                        marginDen: String(margin.den ?? margin.denominator ?? 1),
+                        marginNum: String(mNum),
+                        marginDen: String(mDen),
                         // A ledger-ts StakeAddress carries the credential type on itself (`type: "script"`),
                         // its `credentials` is the bare hash: a script reward account was stored untyped, never
                         // matched the typed registered set, and its operator rewards were dropped (preview
@@ -2735,28 +2736,29 @@ export async function applyInvalidTransaction(
     const ret: any = body.collateralReturn;
     let returned = 0n;
     if (ret) {
-        const idx = (body.outputs ?? []).length;
-        const utxoRef = `${txId}:${idx}`;
-        const address = addressToString(ret.address);
-        const assetsObj: Record<string, Record<string, string>> = {};
-        for (const ma of (Array.isArray(ret.value?.map) ? ret.value.map : []) as any[]) {
-            const policyStr = String(ma.policy?.toString?.() ?? "");
-            if (!policyStr) continue;
-            const a: Record<string, string> = {};
-            for (const asset of (ma.assets ?? []) as any[]) a[toHex(asset.name)] = String(asset.quantity);
-            assetsObj[policyStr] = a;
-        }
-        const lovelace = ret.value?.lovelaces ?? 0n;
-        returned = BigInt(lovelace);
-        const json = JSON.stringify({ address, amount: String(lovelace), assets: assetsObj, collateral_return: true });
-        await upsertUtxoRow(db, utxoRef, json, txId, txOutColumns({ address, amount: String(lovelace) }));
-        await insertUtxoDelta(db, blockHash, "create", packUtxoDelta({ utxo_ref: utxoRef, tx_out: json, tx_hash: txId }));
+        // The collateral return is an ordinary TxOut at index |outputs| (Babbage UTXOS): the same row as
+        // any output — lovelace inside the value map, datum and reference script kept — so a store
+        // synced from genesis and one imported from a snapshot hold it byte-identically (bug 353;
+        // the former flagged form dropped the lovelace entry, the datum and the reference script).
+        const row = buildUtxoRowForOutput(txId, (body.outputs ?? []).length, ret);
+        returned = BigInt(row.lovelace);
+        await upsertUtxoRow(db, row.utxoRef, row.txOutJson, txId, row.cols);
+        await insertUtxoDelta(db, blockHash, "create", packUtxoDelta({ utxo_ref: row.utxoRef, tx_out: row.txOutJson, tx_hash: txId }));
     }
     const toPot = body.totCollateral != null ? BigInt(body.totCollateral) : consumed - returned;
     try {
         if (toPot > 0n) await addFeeToPot(db, toPot);
     } catch { /* pots not initialised */ }
     void indexCtx;
+}
+
+/**
+ * A pool certificate's margin as the ledger keeps it: a Haskell Ratio, reduced on decoding — the
+ * certificate's 0/1000000 is 0 % 1 in its state and in a snapshot import (bug 354).
+ */
+export function poolMarginOf(margin: any): [bigint, bigint] {
+    const m = margin ?? {};
+    return reduced(BigInt(m.num ?? m.numerator ?? 0), BigInt(m.den ?? m.denominator ?? 1));
 }
 
 /** `[credential hash bytes, amount]` for every withdrawal of a body (any withdrawals shape: array, `{ map }`, or entries with `rewardAccount` / `stakeCred`). */
@@ -2934,6 +2936,12 @@ export async function rollbackChainTo(
                 counts.skippedLegacyDeltas++;
                 continue;
             }
+            // Bug 351: an output created and spent inside the gone blocks has its spend reverted first
+            // (newest first) — a QUEUED restore — and its creation next: the immediate DELETE found no
+            // row, the flush below wrote the restore, and the output survived the rollback (preview
+            // 2026-09-17 slot battles at 122 979 547 / 122 997 654: DEX outputs d6dcaa35…#3/#5 and
+            // dc1d31e2…#4 of transactions never on the chain). Drop the queued restore with the row.
+            for (let i = pendingUtxoRows.length - 1; i >= 0; i--) if (pendingUtxoRows[i]![0] === parsed.utxo_ref) pendingUtxoRows.splice(i, 1);
             await sql`DELETE FROM utxo WHERE utxo_ref = ${parsed.utxo_ref}`;
             counts.utxoRemoved++;
         } else if (action === "spend") {
@@ -3021,7 +3029,12 @@ export interface GenesisSeedResult {
     present: number;
     /** Not in utxo and already consumed by an applied transaction (mb_tx_in), so correctly absent. */
     spent: number;
+    /** Why nothing was seeded, when the ledger did not start at genesis (bug 350). */
+    skipped?: string;
 }
+
+/** Marker the snapshot importers record (`schema_migrations`): the UTxO set is a snapshot's, not genesis + history. */
+export const SNAPSHOT_UTXO_MARKER = "utxo_from_snapshot";
 
 /**
  * Retroactive, idempotent genesis seeding: insert every genesis UTxO that is
@@ -3033,6 +3046,13 @@ export async function seedGenesisUtxosIfMissing(
     rows: Array<{ utxoRef: string; txId: string; address: string; lovelace: bigint; kind?: "nonavvm" | "avvm" }>,
 ): Promise<GenesisSeedResult> {
     const res: GenesisSeedResult = { inserted: 0, present: 0, spent: 0 };
+    // Bug 350: on a snapshot-imported ledger the "already spent" test has no history to look in
+    // (`mb_tx_in` starts at the import), so every genesis output spent before the snapshot looked
+    // unspent and was inserted: preview 3036 held the Byron genesis output 4843cf2e…#0 (3·10^16
+    // lovelace, spent on the chain) from 2026-09-09 on, and the LMDB store seeded from that SQLite
+    // carried it (and so did the producer's copy). The snapshot's UTxO set is complete: seed nothing.
+    const imported = (await sql`SELECT 1 FROM schema_migrations WHERE name = ${SNAPSHOT_UTXO_MARKER}`.values()) as unknown[][];
+    if (imported.length) { res.skipped = "the UTxO set was imported from a snapshot"; return res; }
     const CHUNK = 400;
     for (let i = 0; i < rows.length; i += CHUNK) {
         const chunk = rows.slice(i, i + CHUNK);

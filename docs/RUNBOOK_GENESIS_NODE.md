@@ -156,16 +156,40 @@ supervisor. The node resumes from its anchor (diffs reach it) and follows the ne
    bun scripts/store-compare.ts /media/bakon/data/cardano/gerolamo-preview-mithril2/ledger $D/ledger \
      --names 3036,3037 --placeholders --json $D/logs/store-compare-3036.json
    ```
-   Expected and explained (not ledger differences): `meta` (ledger_source, genesis record);
-   epoch-prefixed history before the newest of the two stores' oldest epochs (not compared);
-   `pool_relays` (3036 only holds relays of pools registered after its import); `pointer` (the
-   genesis store holds every registration pointer since epoch 0; neither store deletes pointers on
-   deregistration, and Conway resolves none); `nonmyopic` epochs before 3036's seed. Anything in
-   `utxo*`, `stake*`, `deleg`, `reward`, `pool`, `pool_cbor`, `snap_*` (in window), `pots`,
-   `pot_snap`, `pending_rew`, `gov_*`, `drep_stake`, `epoch_params`, `nonces`, `opcert` (counter)
-   must be `ok`.
-3. Koios over the whole history: `bun scripts/ledger-koios-check.ts $D/ledger --network preview --from 1 --to <tip epoch − 1> --pools 10 --accounts 10`
-   (in ranges); every `DIFF` line is a finding.
+   store-compare compares row forms canonically (the UTxO value-map / collateral-return forms,
+   reduced pool margins, JSON key order, committee credentials typed vs bare, a zero DRep stake vs
+   none: bugs 353–355). With `--placeholders` it also ignores the build metadata (pots `init_epoch`,
+   governance `seededEpoch`, the pulser snapshot's `source`, past epochs' nonce resume checkpoints)
+   and counts as "history only one store can hold" — not as differences — what only the store whose
+   history starts earlier holds: decided governance actions with their votes and anchors
+   (`gov_proposals`, `gov_votes`, `gov_constitution_anchor`), `pointer` (every registration pointer
+   since epoch 0; neither store deletes pointers on deregistration, Conway resolves none),
+   `pool_relays` (3036 only holds relays of pools registered after its import), and epoch-keyed rows
+   before the later history start (`gov_enacted`, `pparam_props`). `meta` is informational
+   (`ledger_source`, the genesis record). Everything else must be `ok`.
+
+   Expected on 3036 and the producer until repaired (3036 / producer wrong, 3037 right — the relay and
+   Koios decide; VALIDATION_STATUS bugs 350–356, 2026-10-04 at slot 124 493 197):
+   - `utxo` / `utxo_addr` / `utxo_stats`: 4 phantoms only in 3036 — the Byron genesis output
+     4843cf2e…#0 (bug 350) and d6dcaa35…#3, #5, dc1d31e2…#4 (bug 351) — and 54ca4d49…#0 with the
+     lovelace column 1 below its `amount` (bug 352). Repair, node stopped:
+     `bun scripts/store-repair-phantoms.ts <ledger> --socket <relay socket> --magic 2 --yes`
+     (the dry run without `--yes` is read-only and lists exactly these five).
+   - `drep_stake` epochs 1424 and 1435: DRep b25d7204… 1 000 ADA low in 3036's rows (computed before
+     bug 155's fix; Koios `drep_voting_power_history` = 3037). History rows; not repaired.
+   Anything else in `utxo*`, `stake*`, `deleg`, `reward`, `pool`, `pool_cbor`, `snap_*` (in window),
+   `pots`, `pot_snap`, `pending_rew`, `gov_*`, `drep_stake`, `epoch_params`, `nonces`, `opcert`
+   (counter) is a finding. To check a store against the relay alone (no second store):
+   `bun scripts/store-repair-phantoms.ts $D/ledger --socket <relay socket> --magic 2` (≈ 4 min on
+   preview; 3037 at 2026-10-04: 0 phantoms, 0 lovelace differences).
+   The producer's store (a copy of 3036's from 2026-10-01) compares exactly like 3036.
+3. Koios over the whole history: `bun scripts/ledger-koios-check.ts $D/ledger --network preview --from 1 --to <tip epoch − 1> --pools 10 --accounts 10 --bulk`;
+   every `DIFF` line is a finding (`note pool-rew` lines are db-sync's paid-vs-computed split,
+   informational; `skip` = Koios has no row yet, e.g. the last epoch's pool history). Without
+   `--bulk` it makes 14 requests per epoch and the public tier's daily quota (≈ 5 000 requests,
+   then HTTP 429 for the rest of the day) stops it after ≈ 350 epochs; `--bulk` fetches each history
+   once (≈ a few hundred requests for the whole of preview) and waits out a 429 "Exceeded Tier
+   Limit" (a rolling 24 h window). 3037, 2026-10-05: epochs 1–1439, 0 differences.
 
 ## 6. Exactness
 

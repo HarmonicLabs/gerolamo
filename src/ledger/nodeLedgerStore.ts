@@ -407,13 +407,17 @@ async function rebuildFromSqlite(reason: string): Promise<void> {
     broken = null; touched = []; rangeDiffs = []; inBlock = false;
 }
 
-/** Copy the SQLite `utxo` table into LMDB as the immutable state at `tip` (one-time seed). */
+/**
+ * Copy the SQLite `utxo` table into LMDB as the immutable state at `tip` (one-time seed). The
+ * lovelace column is read as TEXT: an INTEGER comes back as a JS number, which rounds above 2^53
+ * (bug 352: preview 54ca4d49…#0, 22 767 614 730 929 897 lovelace, seeded as …896 on 2026-09-18).
+ */
 export async function seedUtxoFromSqlite(st: LedgerStore, tip: { slot: number; hash: Uint8Array }): Promise<number> {
     let n = 0;
     let after = "";
     const w = new UtxoWrites(st);
     for (;;) {
-        const rows = (await sql`SELECT utxo_ref, tx_out, tx_hash, address, lovelace, reference_script_hash, stake_key FROM utxo WHERE utxo_ref > ${after} ORDER BY utxo_ref LIMIT 20000`.values()) as unknown[][];
+        const rows = (await sql`SELECT utxo_ref, tx_out, tx_hash, address, CAST(lovelace AS TEXT), reference_script_hash, stake_key FROM utxo WHERE utxo_ref > ${after} ORDER BY utxo_ref LIMIT 20000`.values()) as unknown[][];
         if (!rows.length) break;
         await st.applyDirect(() => {
             for (const r of rows) {
@@ -556,6 +560,19 @@ export function ledgerCommitBlock(): void {
 }
 
 /**
+ * Make the range's block diffs durable (bug 380: one batched fsync pass instead of one fsync per
+ * block). The orchestrator calls it at the end of a range INSIDE the range's SQLite transaction, so
+ * the range's diffs reach the disk before anything else the range persists (SQLite rows and nonces,
+ * the block store's promotion, the selected-tip file): after a crash the node's own records are never
+ * ahead of the diffs except for the block store's volatile blocks and tip file, which the startup
+ * recovery (`recoveryTip`) already steps back from.
+ */
+export async function ledgerFlushDiffs(): Promise<void> {
+    if (!store || mode === "sqlite") return;
+    await store.flushDiffs();
+}
+
+/**
  * The range failed: forget exactly the diffs this range committed and put the tip back on the chain
  * the node keeps (`tipAfter` = the block store's selected tip once the orchestrator reset it; falls
  * back to the block before the range). A tip the store does not hold marks it broken.
@@ -665,7 +682,7 @@ export async function ledgerDualVerify(): Promise<DualVerifyResult> {
     }
     for (let i = 0; i < refs.length; i += 500) {
         const chunk = refs.slice(i, i + 500);
-        const rows = (await sql`SELECT utxo_ref, tx_out, lovelace, stake_key FROM utxo WHERE utxo_ref IN ${sql(chunk)}`.values()) as unknown[][];
+        const rows = (await sql`SELECT utxo_ref, tx_out, CAST(lovelace AS TEXT), stake_key FROM utxo WHERE utxo_ref IN ${sql(chunk)}`.values()) as unknown[][]; // TEXT: exact above 2^53 (bug 352)
         const inSqlite = new Map(rows.map((r) => [String(r[0]), { tx_out: String(r[1]), lovelace: r[2] == null ? null : String(r[2]), stake_key: r[3] == null ? null : String(r[3]) }]));
         for (const ref of chunk) {
             out.checked++;

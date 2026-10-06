@@ -24,6 +24,8 @@ export class HashIndex {
     private capacity = 0;
     /** Highest slot recorded (for catching up with the store). */
     maxSlot = -1;
+    /** The record file's directory exists (created once: a mkdir per appended block was 1–3 % of a sync's main thread, bug 382). */
+    private dirReady = false;
 
     private constructor(path: string) {
         this.path = path;
@@ -110,7 +112,7 @@ export class HashIndex {
         const rec = new Uint8Array(HASH_INDEX_RECORD);
         rec.set(hash, 0);
         new DataView(rec.buffer).setBigUint64(32, BigInt(slot), false);
-        await mkdir(dirname(this.path), { recursive: true });
+        await this.ensureDir();
         const fh = await openFile(this.path, "a");
         try {
             await fh.write(rec);
@@ -123,7 +125,7 @@ export class HashIndex {
 
     /** Append many records with one file handle (rebuild / catch-up). */
     async addMany(items: Iterable<{ hash: Uint8Array; slot: number }>): Promise<number> {
-        await mkdir(dirname(this.path), { recursive: true });
+        await this.ensureDir();
         const fh = await openFile(this.path, "a");
         let n = 0;
         try {
@@ -146,6 +148,12 @@ export class HashIndex {
             await fh.close();
         }
         return n;
+    }
+
+    private async ensureDir(): Promise<void> {
+        if (this.dirReady) return;
+        await mkdir(dirname(this.path), { recursive: true });
+        this.dirReady = true;
     }
 
     private async load(): Promise<void> {

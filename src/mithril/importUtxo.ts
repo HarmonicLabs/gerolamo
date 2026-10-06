@@ -171,6 +171,12 @@ export async function importUtxoFromTables(opts: ImportUtxoOptions): Promise<Imp
     const batchSize = opts.batchSize ?? 5000;
     let batch: unknown[][] = [];
     const flush = db.transaction((rows: unknown[][]) => { for (const r of rows) insert.run(...(r as any[])); });
+    // The snapshot's UTxO set is the whole set at its slot: rows already in the table (a Byron genesis
+    // output seeded by an earlier start with syncFromGenesis, bug 350) are not part of it. Mark the
+    // database so the genesis seeding never adds them back (db.ts SNAPSHOT_UTXO_MARKER).
+    const before = Number((db.query("SELECT COUNT(*) AS c FROM utxo").get() as { c: number }).c);
+    if (before && !opts.limit) { db.run("DELETE FROM utxo"); log(`import-utxo: ${before} row(s) already in the utxo table removed (not part of the snapshot)`); }
+    if (!opts.limit) db.run("INSERT OR IGNORE INTO schema_migrations (name) VALUES ('utxo_from_snapshot')");
     const errorsShown: string[] = [];
     const { entries } = streamTablesFile(opts.tablesPath, (key, val, index) => {
         result.entries++;

@@ -41,6 +41,24 @@ describe("rollbackChainTo restores spent outputs to the utxo table", () => {
         expect(Number(((await sql`SELECT MAX(slot) FROM blocks`.values()) as unknown[][])[0]![0])).toBe(200);
     });
 
+    test("an output created and spent inside the rolled-back block does not survive (bug 351)", async () => {
+        for (const [i, slot] of [[31, 3100], [32, 3200]] as const) {
+            await insertBlockVolatile({ slot: BigInt(slot), blockHash: h(i), prevHash: h(i - 1), blockNo: i, headerData: new Uint8Array([1]), blockData: new Uint8Array([2]) } as any);
+        }
+        // block 32: tx1 spends `input` and creates `pool` (a DEX pool output), tx2 spends `pool` and creates `next`
+        const input = `${"e1".repeat(32)}:0`, pool = `${"e2".repeat(32)}:3`, next = `${"e3".repeat(32)}:0`;
+        const out = (n: string) => JSON.stringify({ address: "addr_test1wtest", amount: n, assets: { "": { "": n } } });
+        const delta = async (action: string, ref: string, n: string) => sql`INSERT INTO utxo_deltas (block_hash, action, utxo) VALUES (${Buffer.from(h(32), "hex")}, ${action}, ${JSON.stringify({ utxo_ref: ref, tx_out: out(n), tx_hash: ref.slice(0, 64) })})`;
+        await delta("spend", input, "10"); await delta("create", pool, "4464825706"); // tx1
+        await delta("spend", pool, "4464825706"); await delta("create", next, "7");    // tx2
+        await sql`INSERT OR REPLACE INTO utxo (utxo_ref, tx_out, tx_hash, address, lovelace) VALUES (${next}, ${out("7")}, ${"e3".repeat(32)}, ${"addr_test1wtest"}, ${"7"})`; // the block's net effect
+        const r = await rollbackChainTo(3100n);
+        expect([r.utxoRestored, r.utxoRemoved]).toEqual([2, 2]);
+        const refs = ((await sql`SELECT utxo_ref FROM utxo WHERE utxo_ref IN (${input}, ${pool}, ${next})`.values()) as unknown[][]).map((x) => String(x[0]));
+        expect(refs).toEqual([input]); // the input is back; neither the pool output nor tx2's output remain
+        expect(pendingUtxoWriteCount()).toBe(0);
+    });
+
     test("certificate and governance state written by a rolled-back block is undone (bug 63)", async () => {
         for (const [i, slot] of [[11, 1100], [12, 1200], [13, 1300]] as const) {
             await insertBlockVolatile({ slot: BigInt(slot), blockHash: h(i), prevHash: h(i - 1), blockNo: i, headerData: new Uint8Array([1]), blockData: new Uint8Array([2]) } as any);

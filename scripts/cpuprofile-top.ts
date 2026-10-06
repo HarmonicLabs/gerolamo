@@ -4,6 +4,12 @@
  * per file, plus inclusive time for the functions you name.
  *   bun scripts/cpuprofile-top.ts <file.cpuprofile> [--top 40] [--incl applyBlock,validateBlock] [--file-top 15] [--callers join,BigInt]
  *   --callers: for native/builtin frames, the nearest non-native caller frames (who is paying for `join`?)
+ *   --weight next|prev|count (default next): what one sample is worth. `next` = the time until the following
+ *     sample (DevTools: the sampled stack holds until the next sample); `prev` = the gap before it (this
+ *     script's old rule — it charged the main thread's idle waits to the first function that ran after
+ *     them: `chain` showed 4–5 % on the 2026-10-06 sync profiles for 34–49 samples, bug 381); `count` =
+ *     one per sample. Idle time (awaiting I/O) is still charged to a neighbour under `next`; compare with
+ *     `count` before trusting a small entry.
  */
 import { readFileSync } from "node:fs";
 
@@ -14,10 +20,12 @@ const prof = JSON.parse(readFileSync(file, "utf8")) as { nodes: Array<{ id: numb
 const byId = new Map(prof.nodes.map((n) => [n.id, n]));
 const parent = new Map<number, number>();
 for (const n of prof.nodes) for (const c of n.children ?? []) parent.set(c, n.id);
+const weight = String(args.weight ?? "next");
+const dtOf = (i: number): number => weight === "count" ? 1000 : weight === "prev" ? (prof.timeDeltas[i] ?? 0) : (prof.timeDeltas[i + 1] ?? 0);
 const self = new Map<number, number>();
 let total = 0;
 for (let i = 0; i < prof.samples.length; i++) {
-    const dt = prof.timeDeltas[i] ?? 0;
+    const dt = dtOf(i);
     total += dt;
     self.set(prof.samples[i]!, (self.get(prof.samples[i]!) ?? 0) + dt);
 }
@@ -32,7 +40,7 @@ for (const [id, t] of self) {
 }
 const pct = (t: number) => `${(100 * t / total).toFixed(1)}%`;
 const ms = (t: number) => `${(t / 1000).toFixed(0)} ms`;
-console.log(`profile ${file}: ${(total / 1e6).toFixed(1)} s sampled, ${prof.samples.length} samples\n`);
+console.log(`profile ${file}: ${(total / 1e6).toFixed(1)} s sampled, ${prof.samples.length} samples (weight: ${weight}${weight === "count" ? ", 1 ms per sample" : ""})\n`);
 const top = Number(args.top ?? 40);
 console.log(`== self time, top ${top} functions`);
 for (const [k, t] of [...selfByFrame].sort((a, b) => b[1] - a[1]).slice(0, top)) console.log(`${pct(t).padStart(6)} ${ms(t).padStart(9)}  ${k}`);
@@ -63,7 +71,7 @@ if (args.incl) {
     const names = String(args.incl).split(",").map((s) => s.trim()).filter(Boolean);
     const incl = new Map<string, number>(names.map((n) => [n, 0]));
     for (let i = 0; i < prof.samples.length; i++) {
-        const dt = prof.timeDeltas[i] ?? 0;
+        const dt = dtOf(i);
         const seen = new Set<string>();
         for (let id: number | undefined = prof.samples[i]; id != null; id = parent.get(id)) {
             const fn = byId.get(id)!.callFrame.functionName;

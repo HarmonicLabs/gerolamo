@@ -145,6 +145,8 @@ export async function importStateToLmdb(opts: ImportLmdbStateOptions): Promise<I
                 w.putSnapshotTotals(takenAt, total, perPool.size);
                 for (const [id, p] of snap.pools) { const full = withAllOwners(p, s.pools.get(id)); w.putSnapshotPoolParams(takenAt, id, p.vrf, JSON.parse(poolParamsJson(full))); }
                 for (const [id, p] of snap.pools) if (p.delegators || p.owners.length) w.putSnapshotPoolMeta(takenAt, id, p.delegators, [...p.owners].sort()); // the node's own counts
+                // pools with delegators whose stake sums to zero: GetPoolDistr and the pulser's SPO distribution list them at 0 (bugs 188, 247, 370)
+                for (const [id, p] of snap.pools) if (p.delegators > 0 && !((perPool.get(id) ?? 0n) > 0n)) { w.putSnapshotPoolZero(takenAt, id); count("epoch_pool_zero", 1); }
             });
             count("epoch_stake_cred", snap.stake.size); count("epoch_pool_stake", perPool.size); count("epoch_pool_params", snap.pools.size);
             for (const [pool, p] of snap.pools) { const stk = perPool.get(pool) ?? 0n; if (stk !== p.stake) warnings.push(`snapshot ${takenAt}: pool ${pool.slice(0, 12)} stake ${p.stake} vs summed ${stk}`); }

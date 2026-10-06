@@ -355,6 +355,8 @@ async function runTsBootstrapInner(
                 );
             } catch (e) {
                 const msg = e instanceof Error ? e.message : String(e);
+                // --ledger-state needs it: fail with the real reason instead of a later "no ancillary ledger directory".
+                if (opts.ledgerState) throw new Error(`Ancillary ledger snapshot unavailable: ${msg}`);
                 logWarn(
                     logger,
                     `Ancillary download failed (UTxO still A2 blocked): ${msg}`,

@@ -178,6 +178,7 @@ describe("LedgerStore crash recovery (bug 245)", () => {
         await st.env.write((t) => { t.put("utxo", b("in0"), b("out0")); t.put("stake_bal", b("c"), u64(100n)); });
         await st.setAnchor({ slot: 0, hash: h(0) });
         for (let i = 1; i <= n; i++) { st.beginBlock(h(i), h(i - 1), i * 10); st.put("utxo", b(`in${i}`), b(`out${i}`)); st.addU64("stake_bal", b("c"), BigInt(i)); st.commitBlock(); }
+        await st.flushDiffs(); // every block durable, as the node leaves them after a range (bug 380)
         return { dir, st };
     }
     const file = (dir: string, i: number) => join(dir, "diffs", Buffer.from(h(i)).toString("hex") + ".diff");
@@ -270,5 +271,200 @@ describe("LedgerStore crash recovery (bug 245)", () => {
         expect(re.anchor()!.slot).toBe(40);
         expect(re.getU64("stake_bal", b("c"))).toBe(110n);
         re.close();
+    });
+});
+
+/**
+ * Bug 380: the diffs are made durable once per applied range (`flushDiffs`) instead of once per block.
+ * Until its flush a block's diff exists only as `<hash>.diff.tmp`; a crash inside a batch must leave
+ * the store recoverable at the newest block whose diffs reach the anchor, exactly as bug 245 requires.
+ */
+describe("LedgerStore batched diff durability (bug 380)", () => {
+    const open = (dir: string) => LedgerStore.open(dir, { mapSize: 64 * 1024 * 1024 });
+    const hx = (i: number) => Buffer.from(h(i)).toString("hex");
+    const file = (dir: string, i: number) => join(dir, "diffs", hx(i) + ".diff");
+    const blocks = (...is: number[]) => is.map((i) => ({ slot: i * 10, hash: h(i) }));
+    const commit = (st: LedgerStore, i: number) => { st.beginBlock(h(i), h(i - 1), i * 10); st.put("utxo", b(`in${i}`), b(`out${i}`)); st.addU64("stake_bal", b("c"), BigInt(i)); st.commitBlock(); };
+    /** Anchor at block 0 (c = 100); blocks 1..flushed committed and flushed, then flushed+1..n committed (one open batch). */
+    async function batchOf(flushed: number, n: number) {
+        const dir = await mkdtemp(join(tmpdir(), "ledger-b-")); tmp.push(dir);
+        const st = open(dir);
+        await st.env.write((t) => { t.put("utxo", b("in0"), b("out0")); t.put("stake_bal", b("c"), u64(100n)); });
+        await st.setAnchor({ slot: 0, hash: h(0) });
+        for (let i = 1; i <= flushed; i++) commit(st, i);
+        expect(await st.flushDiffs()).toBe(flushed);
+        for (let i = flushed + 1; i <= n; i++) commit(st, i);
+        return { dir, st };
+    }
+    const files = (dir: string) => readdirSync(join(dir, "diffs")).sort();
+    const sumTo = (i: number) => 100n + BigInt((i * (i + 1)) / 2);
+
+    test("a batch is temp files until its flush; the flush renames them (each decodes) and leaves no temp file", async () => {
+        const { dir, st } = await batchOf(2, 5);
+        expect(st.pendingDiffs()).toBe(3);
+        expect(files(dir)).toEqual([hx(1) + ".diff", hx(2) + ".diff", hx(3) + ".diff.tmp", hx(4) + ".diff.tmp", hx(5) + ".diff.tmp"].sort());
+        expect(st.getU64("stake_bal", b("c"))).toBe(sumTo(5)); // reads never depend on the disk
+        expect(await st.flushDiffs()).toBe(3);
+        expect(await st.flushDiffs()).toBe(0);
+        expect(st.pendingDiffs()).toBe(0);
+        expect(files(dir)).toEqual([1, 2, 3, 4, 5].map((i) => hx(i) + ".diff").sort());
+        for (let i = 1; i <= 5; i++) expect(decodeDiff(new Uint8Array(readFileSync(file(dir, i)))).slot).toBe(i * 10);
+        st.close();
+    });
+
+    test("a kill inside a batch (nothing of it flushed): temp files swept, recovery lands on the last flushed block", async () => {
+        const { dir, st } = await batchOf(3, 7);
+        st.close({ flush: false });
+        const re = open(dir);
+        expect(re.loadedDiffs).toBe(3); expect(re.tornDiffs).toBe(0);
+        expect(files(dir).filter((f) => f.endsWith(".tmp"))).toEqual([]);
+        expect(re.chainGap(h(7))).toMatch(/no diff for the tip/);
+        expect(re.recoveryTip(blocks(7, 6, 5, 4, 3, 2, 1, 0))).toEqual({ slot: 30, hash: h(3) }); // the block store holds the whole batch
+        re.rollbackTo(h(3)); re.selectTip(h(3));
+        expect(re.getU64("stake_bal", b("c"))).toBe(sumTo(3));
+        expect(re.get("utxo", b("in4"))).toBeUndefined();
+        // the network re-sends the batch: it applies again on top of the recovered block
+        for (let i = 4; i <= 7; i++) commit(re, i);
+        await re.flushDiffs();
+        expect(re.getU64("stake_bal", b("c"))).toBe(sumTo(7));
+        await re.promoteDeep(2);
+        expect(re.anchor()!.slot).toBe(50);
+        expect(re.getU64("stake_bal", b("c"))).toBe(sumTo(7));
+        re.close();
+    });
+
+    test("a kill during the flush: renames that reached the disk without their data (zeroed / truncated / empty) count as absent", async () => {
+        const { dir, st } = await batchOf(2, 6);
+        const enc = [3, 4, 5, 6].map((i) => readFileSync(join(dir, "diffs", hx(i) + ".diff.tmp")));
+        st.close({ flush: false });
+        // the directory updates (renames) of 3..6 reached the disk, the data only partly: 3 complete,
+        // 4 zero-filled at its full length, 5 complete, 6 truncated; a stray temp of 6 as well
+        for (const i of [3, 4, 5, 6]) rmSync(join(dir, "diffs", hx(i) + ".diff.tmp"));
+        writeFileSync(file(dir, 3), enc[0]!);
+        writeFileSync(file(dir, 4), new Uint8Array(enc[1]!.length));
+        writeFileSync(file(dir, 5), enc[2]!);
+        writeFileSync(file(dir, 6), enc[3]!.subarray(0, enc[3]!.length >> 1));
+        writeFileSync(join(dir, "diffs", hx(6) + ".diff.tmp"), enc[3]!);
+        let re = open(dir);
+        expect(re.tornDiffs).toBe(2); expect(re.loadedDiffs).toBe(4); // 1, 2, 3, 5
+        expect(re.hasDiff(h(5))).toBe(true);
+        expect(re.chainReachesAnchor(h(5))).toBe(false); // 5's chain is broken at 4
+        expect(re.recoveryTip(blocks(6, 5, 4, 3, 2, 1, 0))).toEqual({ slot: 30, hash: h(3) });
+        re.rollbackTo(h(3)); re.selectTip(h(3));
+        expect(re.getU64("stake_bal", b("c"))).toBe(sumTo(3));
+        expect(files(dir)).toEqual([1, 2, 3].map((i) => hx(i) + ".diff").sort()); // 5 (a dead branch now) dropped
+        re.close();
+        // an empty file under the final name (rename durable, no data block allocated) — the same
+        writeFileSync(file(dir, 3), new Uint8Array(0));
+        re = open(dir);
+        expect(re.tornDiffs).toBe(1);
+        expect(re.recoveryTip(blocks(3, 2, 1, 0))).toEqual({ slot: 20, hash: h(2) });
+        re.close();
+    });
+
+    test("a rename lost out of order (a later block's file on disk, an earlier one's not): recovery stops below the gap", async () => {
+        const { dir, st } = await batchOf(1, 4);
+        await st.flushDiffs();
+        st.close();
+        rmSync(file(dir, 2)); // its directory entry never reached the disk; 3 and 4 did
+        const re = open(dir);
+        expect(re.recoveryTip(blocks(4, 3, 2, 1, 0))).toEqual({ slot: 10, hash: h(1) });
+        re.close();
+    });
+
+    test("diffs dropped before or during a flush are not resurrected; a block rewritten meanwhile stays pending", async () => {
+        const { dir, st } = await batchOf(1, 6);
+        const flushing = st.flushDiffs(); // in flight: its fsyncs are awaited
+        expect(st.rollbackTo(h(4))).toBe(2); // 5, 6 dropped while the flush runs
+        expect(st.dropDiffs([h(4)])).toBe(1); // an aborted range's block
+        st.selectTip(h(3));
+        await flushing;
+        expect(files(dir)).toEqual([1, 2, 3].map((i) => hx(i) + ".diff").sort());
+        // dropped while pending, then re-applied (a retried range): the new diff is pending again and flushes
+        commit(st, 4);
+        expect(st.pendingDiffs()).toBe(1);
+        const f2 = st.flushDiffs();
+        st.rollbackTo(h(3)); st.selectTip(h(3)); commit(st, 4); // dropped and rewritten while the flush runs
+        await f2;
+        expect(st.pendingDiffs()).toBe(1);
+        expect(files(dir)).toContain(hx(4) + ".diff.tmp");
+        await st.flushDiffs();
+        expect(files(dir)).toEqual([1, 2, 3, 4].map((i) => hx(i) + ".diff").sort());
+        st.close();
+        const re = open(dir);
+        expect(re.loadedDiffs).toBe(4);
+        expect(re.recoveryTip(blocks(4, 3, 2, 1, 0))).toEqual({ slot: 40, hash: h(4) });
+        re.selectTip(h(4));
+        expect(re.getU64("stake_bal", b("c"))).toBe(sumTo(4));
+        re.close();
+    });
+
+    test("promotion, a direct LMDB write and close flush first; promoted pending diffs leave no file", async () => {
+        const { dir, st } = await batchOf(0, 4);
+        expect(st.pendingDiffs()).toBe(4);
+        await st.promoteDeep(2); // 1, 2 promoted; 3, 4 made durable before LMDB moved
+        expect(st.pendingDiffs()).toBe(0);
+        expect(files(dir)).toEqual([3, 4].map((i) => hx(i) + ".diff").sort());
+        commit(st, 5);
+        await st.applyDirect(() => { st.put("meta2", b("k"), b("v")); });
+        expect(st.pendingDiffs()).toBe(0);
+        commit(st, 6);
+        st.applyDirectSync(() => { st.put("meta2", b("k2"), b("v2")); });
+        expect(st.pendingDiffs()).toBe(0);
+        commit(st, 7);
+        st.close(); // a clean stop leaves nothing pending
+        const re = open(dir);
+        expect(re.loadedDiffs).toBe(5);
+        expect(re.recoveryTip(blocks(7, 6, 5, 4, 3, 2))).toEqual({ slot: 70, hash: h(7) });
+        re.selectTip(h(7));
+        expect(re.getU64("stake_bal", b("c"))).toBe(sumTo(7));
+        re.close();
+    });
+
+    test("GEROLAMO_LEDGER_DIFF_FSYNC: 0 and block write final files at once (nothing pending)", async () => {
+        const prev = process.env.GEROLAMO_LEDGER_DIFF_FSYNC;
+        try {
+            for (const v of ["0", "block"]) {
+                process.env.GEROLAMO_LEDGER_DIFF_FSYNC = v;
+                const { dir, st } = await batchOf(0, 3);
+                expect(st.pendingDiffs()).toBe(0);
+                expect(files(dir)).toEqual([1, 2, 3].map((i) => hx(i) + ".diff").sort());
+                st.close({ flush: false });
+                expect(open(dir).recoveryTip(blocks(3, 2, 1, 0))).toEqual({ slot: 30, hash: h(3) });
+            }
+        } finally { if (prev === undefined) delete process.env.GEROLAMO_LEDGER_DIFF_FSYNC; else process.env.GEROLAMO_LEDGER_DIFF_FSYNC = prev; }
+    });
+});
+
+describe("LedgerStore chain cache (bug 381)", () => {
+    test("chainReachesAnchor / viewAt / promoteDeep through the overlay's chain agree with a fresh walk across commits, forks, rollbacks and promotions", async () => {
+        const dir = await mkdtemp(join(tmpdir(), "ledger-cc-")); tmp.push(dir);
+        let st = LedgerStore.open(dir, { mapSize: 64 * 1024 * 1024 });
+        await st.setAnchor({ slot: 0, hash: h(0) });
+        const fresh = () => LedgerStore.open(dir, { mapSize: 64 * 1024 * 1024, readOnly: true });
+        const c = (i: number, p: number) => { st.beginBlock(h(i), h(p), i * 10); st.addU64("stake_bal", b("c"), BigInt(i)); st.commitBlock(); };
+        c(1, 0); c(2, 1); c(3, 2);
+        expect(st.getU64("stake_bal", b("c"))).toBe(6n); // overlay on 3
+        expect(st.chainReachesAnchor(h(3))).toBe(true);
+        c(9, 2); // a fork: the overlay follows 9
+        expect(st.chainReachesAnchor(h(3))).toBe(true);
+        expect(st.viewAt(h(9))!.getU64("stake_bal", b("c"))).toBe(12n);
+        expect(st.viewAt(h(3))!.getU64("stake_bal", b("c"))).toBe(6n);
+        st.rollbackTo(h(2)); st.selectTip(h(2));
+        expect(st.chainReachesAnchor(h(9))).toBe(false); // the cached chain must not keep a dropped diff
+        expect(st.chainReachesAnchor(h(2))).toBe(true);
+        c(4, 2); c(5, 4);
+        expect(st.getU64("stake_bal", b("c"))).toBe(12n);
+        await st.promoteDeep(1); // anchor → 4
+        expect(st.anchor()!.slot).toBe(40);
+        expect(st.chainReachesAnchor(h(5))).toBe(true);
+        expect(st.chainReachesAnchor(h(2))).toBe(false); // promoted: below the anchor
+        expect(st.viewAt(h(5))!.depth).toBe(1);
+        expect(st.getU64("stake_bal", b("c"))).toBe(12n);
+        await st.setAnchor({ slot: 50, hash: h(5) }); // an importer moving the anchor: the overlay must not survive it
+        expect(st.chainReachesAnchor(h(5))).toBe(true);
+        expect(st.viewAt(h(5))!.depth).toBe(0);
+        st.close();
+        st = fresh(); expect(st.anchor()!.slot).toBe(50); st.close();
     });
 });

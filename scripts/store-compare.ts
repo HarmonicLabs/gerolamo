@@ -12,9 +12,17 @@
  *   bun scripts/store-compare.ts <ledgerDirA> <ledgerDirB> [--at <blockHash>] [--db utxo,stake,…]
  *       [--skip utxo_addr,…] [--samples 5] [--names A,B] [--placeholders] [--json out.json]
  *
+ * Row forms that differ between writers but not in content are compared canonically (storeCompare
+ * .canonicalValue: the UTxO value-map / collateral-return forms, reduced pool margins, JSON key order;
+ * committee credentials typed vs bare; zero DRep stake vs absent).
+ *
  * `--placeholders`: a snapshot-imported store against one synced from genesis — ignore the fields
  * the importer cannot know (pool / DRep registration slots, DRep activity epochs, vote slots,
- * proposal order, op-cert slots; storeCompare.PLACEHOLDER_FIELDS).
+ * proposal order, op-cert slots; storeCompare.PLACEHOLDER_FIELDS), the build metadata (pots
+ * `init_epoch`, governance `seededEpoch`, the pulser snapshot's `source`, past epochs' nonce resume
+ * checkpoints), and count as history (not differences) what only the store with the earlier history
+ * start can hold: decided governance actions with their votes and anchors, registration pointers,
+ * relays of pools registered before the import, epoch-keyed rows before the later history start.
  *
  * Exit 0 when every ledger database matches, 1 when any differs, 2 on a usage/pinning error.
  */
@@ -64,7 +72,9 @@ for (const db of dbs) {
     reports.push(r);
     const bad = r.differ + r.onlyA + r.onlyB > 0;
     if (bad && !INFORMATIONAL.has(db)) differing++;
-    const hist = r.fromEpoch !== undefined ? `  (from epoch ${r.fromEpoch}; below it ${r.skippedA} / ${r.skippedB} not compared)` : "";
+    const hist = (r.fromEpoch !== undefined ? `  (from epoch ${r.fromEpoch}; below it ${r.skippedA} / ${r.skippedB} not compared)` : "")
+        + (r.historyA || r.historyB ? `  (history only one store can hold: ${r.historyA ?? 0} / ${r.historyB ?? 0})` : "")
+        + (r.zeros ? `  (${r.zeros} zero counter(s) one side omits)` : "");
     console.log(`${bad ? (INFORMATIONAL.has(db) ? "info" : "DIFF") : "ok  "} ${db.padEnd(22)} ${nameA} ${pad(r.countA, 9)}  ${nameB} ${pad(r.countB, 9)}  same ${pad(r.same, 9)}  differ ${pad(r.differ, 7)}  only ${nameA} ${pad(r.onlyA, 7)}  only ${nameB} ${pad(r.onlyB, 7)}  ${r.seconds.toFixed(1)} s${hist}`);
     for (const s of r.samples) console.log(`       ${s}`);
 }

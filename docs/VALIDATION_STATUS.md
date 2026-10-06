@@ -2079,3 +2079,271 @@ epoch's first block, and a peek during a partial header replay. With the old rul
 `RangeNonceSnapshot` / `peekNextEpochNonceHex` both fail (η0(e) read back as η0(e + 1); a non-null
 peek before the replay reached the freeze); with the fix they pass. `bun test src/consensus
 src/ledger src/utils/nonceEvolver*` 862 pass; tsc clean.
+
+## Bugs 350–356 — acceptance of the first full from-genesis store (3037) against 3036 / the producer (2026-10-04)
+
+`store-compare` 3036 (Mithril import, 2026-09-09; LMDB seeded from its SQLite ledger 2026-09-18) vs
+3037 (built block by block from genesis) at slot 124 491 812 reported 20 differing databases. Every
+entry was decided against the cardano-node 11.0.1 relay (GetUTxOByTxIn acquired at the compared
+block, `cardano-cli conway query …`) or Koios where the relay cannot answer (history). Verdict: no
+difference where 3037 is wrong; five UTxO entries and two history rows where 3036 (and the producer,
+whose store is a copy of 3036's from 2026-10-01) are wrong; everything else is representation, build
+metadata or history only one store can hold.
+
+**350. The Byron genesis output re-seeded into a snapshot-imported ledger (3036 / producer wrong).**
+4843cf2e…#0 (30 000 000 000 000 000 lovelace, the preview Byron genesis output at FHnt4NL7…; spent on
+the chain, absent from the relay's UTxO) — in 3036 with the seeding path's row form
+(`assets: {}`). 3036's log: `Genesis UTxOs: 1 … 1 added … (tip slot 0)` on 2026-09-09 02:14 (a
+fresh database started with `syncFromGenesis`), then the snapshot's UTxO set was imported on top with
+`INSERT OR REPLACE`, which never removed it; the 2026-09-14 SQLite backup holds it, and the
+2026-09-18 LMDB seed from SQLite carried it. The same path also re-adds it on a later start whenever
+the genesis registry is empty: "already spent" is looked up in `mb_tx_in`, which on an imported
+database starts at the import. Fix: `import-utxo` replaces the table (the snapshot's set is the whole
+set) and records `utxo_from_snapshot`; `seedGenesisUtxosIfMissing` seeds nothing on a database with
+that marker (test `db.genesisSeed.test.ts`). The LMDB importer wipes its directory and an lmdb node
+never seeds SQLite: not affected.
+
+**351. The SQLite rollback resurrected outputs created and spent inside the rolled-back block (3036 /
+producer wrong).** d6dcaa35…#3, #5 and dc1d31e2…#4 (DEX pool outputs at addr_test1wr6h05…; the two
+transactions were never on the chain — Koios `tx_status` unknown). The canonical chain has, in the
+same slots, 3ee3a507… (slot 122 997 654; outputs #3 / #5 with exactly the phantoms' values) and
+6afa957e… (slot 122 979 547; #4 = 1 761 041 039): competing batches of the same pool. 3036 lost two
+same-slot battles on 2026-09-17 (08:59:09 "Rollback to slot 122979439 … 176 deltas", 14:00:55
+"Rollback to slot 122997590 … 88 deltas, utxoRestored=23 utxoRemoved=48") in dual mode. The reversal
+walks the gone blocks' deltas newest first: an output a later transaction of the same block spent
+gets its spend reverted first — a QUEUED restore (`upsertUtxoRow`, batched since 2026-09-05) — and
+its creation next — an immediate `DELETE` that finds no row; the flush then writes the restore. The
+SQLite ledger kept the outputs, the 2026-09-18 LMDB seed copied them. The LMDB ledger's own rollback
+(dropping diffs) is exact and never had this. Fix: the creation's reversal drops the queued restore
+of that output with the row (test `db.rollbackRestore.test.ts`, fails without the fix).
+
+**352. The SQLite → LMDB seed read the lovelace column through a JS number (3036 / producer wrong).**
+54ca4d49…#0: `amount` 22 767 614 730 929 897 (= relay) but the row's lovelace column
+22 767 614 730 929 896 — above 2^53 the INTEGER rounds. The rules read `amount` (value conservation
+unaffected); the column feeds `utxo` totals, the collateral fee pot and stake balances (this address
+has no stake part). Fix: `seedUtxoFromSqlite` and the dual-run verification read `CAST(lovelace AS
+TEXT)` (test `ledger/seedUtxoFromSqlite.test.ts`, fails without the fix).
+
+**353. Collateral returns had their own row form (representation; content loss possible).** The 28
+collateral-return outputs created before 3036's import: 3036 holds them in the applier's ordinary
+form (lovelace inside `assets` under the empty policy), 3037 (applied by `applyInvalidTransaction`) as
+`assets` without the lovelace entry plus `collateral_return: true` — that writer also dropped a
+return's datum and reference script and its stake / reference-script columns. Canonical form: the
+ordinary one — a collateral return is an ordinary TxOut (Babbage UTXOS) and the snapshot import
+cannot know the flag; nothing read it. `applyInvalidTransaction` now builds the row with
+`buildUtxoRowForOutput` (test `db.collateralReturn.test.ts`); rows already written keep their form and
+store-compare compares both canonically. None of 3037's 29 flagged rows (the 28, and one written
+after the import in both stores) has a datum or reference script on the relay (GetUTxOByTxIn).
+
+**354. Pool margins were stored as written in the certificate (representation).** Pool 6954ec11…:
+3037 `0/1000000` (its registration certificate), 3036 `0/1` (the NewEpochState: the ledger's Ratio is
+reduced on decoding); `pool` and four `snap_pparams` rows. Rewards are identical for any
+representation (the denominator cancels exactly); the LocalStateQuery answers use `pool_cbor`. New
+registrations are stored reduced (`poolMarginOf`, test in `db.collateralReturn.test.ts`).
+
+**355. store-compare reported representation, build metadata and history as differences (tooling).**
+Canonical comparison always: the two UTxO row forms (bug 353), reduced margins, JSON key order
+(`epoch_params`: 22 rows, same fields in another order), committee credentials typed vs bare
+(`gov_committee` / `gov_cc_auth`: 3036's three script cold keys are bare rows from before bug 153,
+which the readers accept as both types; the relay's committee-state confirms scriptHash), a zero
+DRep stake vs none (`drep_stake` epoch 1420: 120 zero-stake DReps the importer writes). With
+`--placeholders` also: pots `init_epoch`, gov_state `seededEpoch` (1420 vs 646), the pulser
+snapshot's `source` ("backfill-exact" vs "boundary"), past epochs' nonce resume checkpoints (η0
+equal in every epoch; the evolving / candidate nonces of a past epoch are the last per-range
+snapshot written in it, 21 epochs differ by timing; the newest epoch's are compared and equal), and
+one-sided history the store with the later history start cannot hold — decided proposals (1 533:
+1 471 expired, 48 dropped, 14 enacted) with their 3 058 votes and 203 anchors, 118 205 pointers, 1 261
+pool relays, `gov_enacted` (14 enactments 736–1370) and `pparam_props` (55 pre-Conway proposals,
+epochs 1–645) below epoch 1420. Test in `ledger/storeCompare.test.ts` (each normalisation, and a real
+amount / margin difference still reported).
+
+**356. 3036's DRep stake rows of epochs 1424 and 1435 (3036 / producer wrong, history).** DRep
+b25d7204… 936 038 121 472 / 939 611 081 113 in 3036, 937 038 121 472 / 940 611 081 113 in 3037 = Koios
+`drep_voting_power_history`: the 1 000 ADA refunds of the expired 8f60f9da…:0 (decided 1424) and
+e6ed8d65…:0 (decided 1435) to 104b7df2…, which delegates its vote to b25d7204… — bug 155 (bug 185's
+finding), computed by 3036 before that fix; 3037 computed both boundaries with it. Past-epoch rows
+only (the current distribution comes from the pulser snapshot); not repaired.
+
+**Repair tool.** `scripts/store-repair-phantoms.ts <ledgerDir> --socket <relay> --magic 2` looks every
+UTxO key of the store up on the relay (GetUTxOByTxIn, 2 000 per query, the relay acquired at the
+store's pinned block) and lists the phantoms and the lovelace mismatches (column or `amount` vs the
+relay's coin); read-only, ≈ 4 min on preview. `--yes` (refuses while any process holds `data.mdb`)
+deletes the phantoms through `UtxoWrites.del` (utxo, utxo_addr, utxo_rs, stake_bal, utxo_stats) and
+rewrites the lovelace rows from the relay, only for keys no volatile diff touches. Dry runs
+2026-10-04, nodes running: 3036 (3 145 631 outputs) and the producer (3 145 632): exactly the four
+phantoms of bugs 350–351 and 54ca4d49…#0 of bug 352; 3037 (3 145 625): none. `--yes` exercised on a
+small store anchored at a real preview block (one phantom, one wrong column): deleted / rewritten,
+count, address index and stake balance exact, a second dry run clean. Not run on 3036 or the
+producer (they keep running): stop the node, run it with `--yes`, restart.
+
+**357. ledger-koios-check spent the public tier's daily quota on a fraction of the history (tooling).**
+14 requests per epoch; Koios answers HTTP 429 "Exceeded Tier Limit, count was 5178" (per IP, preview
+and preprod together) after ≈ 5 000 for the rest of the day. `--bulk` fetches /totals, /epoch_params,
+/epoch_info once (paginated), /pool_history once per pool that is among the --pools largest of any
+epoch of the range and /account_rewards once per 50 accounts, then runs the same per-epoch comparisons
+from memory (query forms checked on the mainnet instance); `KOIOS_API_KEY` from the environment is
+sent as a bearer token.
+
+**Koios history of 3037 (2026-10-04, `--pools 10 --accounts 10`, epoch by epoch).** Epochs 1–267,
+1301–1351 and 1401–1439 (357 epochs): 0 DIFF — pots 357, η0 357, parameters 357, active stake 356,
+reward totals 348 (34 of them with pool-deposit refunds inside Koios' total, accepted as before),
+pools 3 496 (active stake and blocks), accounts 3 470 (the 10 largest reward accounts per epoch).
+`skip` (no Koios row): stake epoch 1, rewards epochs 1–8 and 1439, the pool history of 1439 (10).
+`note pool-rew` is informational (db-sync's paid split vs our computed leader / member rewards: ±1
+lovelace rounding in 72 pool-epochs, and the forfeits of members deregistered before the payout, e.g.
+pool 3867a097… at 1434 and 1436) — the accounts check is the exact one. Epochs 268–1300 and
+1352–1400 (1 082) were cut off by the quota (bug 357).
+
+**Completed 2026-10-05 with `--bulk`.** Epochs 268–1400 (1 133; 44 pools, 147 accounts prefetched in
+226 s): pots, η0, parameters, active stake, reward totals 1 133 each, pools 11 330, accounts 11 323 —
+and 7 account DIFFs, each exactly Koios' `proposal_refund` entries of that epoch (100 000 ADA ×1–3 at
+802–804, 811, 828, 843; 1 000 ADA at 1398): governance deposit refunds, which the account comparison
+excluded only as "refund". The filter now excludes `proposal_refund` too; those seven epochs rerun: 0
+DIFF. Bulk vs epoch by epoch on 1401–1439: identical (the bulk run, a day later, also has 1439's pool
+history). **Whole history 1–1439: 0 ledger differences.**
+
+## Bugs 370–372 — a fresh Mithril import answered 60 of 64 LocalStateQuery queries (2026-10-05, fixed)
+
+A node created from scratch by `mithril-bootstrap … --ledger-state --include-ancillary` (the LMDB
+importer, `importStateToLmdb`; Docker container on donherm, epoch-1441 snapshot) differed from the
+relay in GetPoolDistr [21], GetPoolDistr2 [36], GetNonMyopicMemberRewards [2] and GetRewardInfoPools
+[18]. 3036 / the producer / 3037 were 64/64: 3036 was imported before bug 262 and got these rows from
+later paths (`nonmyopic-seed.ts`, which reads the state's raw bytes; boundary-written zero-stake
+pools), so the importer's own versions were never exercised. `store-compare` 3036 vs the fresh store
+(same block, `--placeholders`): `nonmyopic` differs at both epochs, `snap_pool_zero` missing for the
+three imported snapshots (hidden by the tool, bug 372), the epoch-1441 pulser SPO distribution
+missing 36 pools; everything else equal or history / build metadata (the current epoch's `nonces`
+evolving/candidate fields are a direct-written resume checkpoint and change between two reads of 3036
+itself).
+
+**370. No zero-stake pools for the imported snapshots.** `takeStakeSnapshot` records the pools whose
+delegators' stake sums to zero (`snap_pool_zero`, bugs 188 / 247); the importer built the per-pool
+stake from the credential stake map only and wrote none, so the `set` snapshot's pool distribution
+(GetPoolDistr / GetPoolDistr2: ours 57 315 / 62 931 B vs 57 385 / 63 002 B) and the pulser's SPO
+distribution of the snapshot epoch lacked them (the query's fallback for unrecorded snapshots is an
+approximation). Now the importer writes them for mark, set and go: the snapshot's pools with
+`spssNumDelegators` > 0 and no stake (`StakeWrites.putSnapshotPoolZero`, also used by
+`takeStakeSnapshot`). Verified: the relay's epoch-1441 ledger state imported to a scratch store gives
+36 / 36 / 36 zero-stake pools at 1439–1441, the same sets as 3036.
+
+**371. The pool-ranking likelihoods byte-swapped.** `decodeLedgerSnapshot` read `esNonMyopic`'s float32
+likelihoods through @harmoniclabs/cbor, whose `readFloat32BE` / `readFloat64BE` (uint8array-utils)
+fill a typed array in the platform's byte order — little-endian on x86, so every float came back
+byte-swapped (0x3c81834e = 0.0158 decoded as 1.1 × 10⁹). The imported epoch's likelihoods were
+garbage and every boundary after it carried them on (performance estimates 1.0 instead of e.g. 0.885
+in [18]; [2] off from byte 43). Not repairable after the fact (a swapped pattern that is a NaN loses
+its payload), so the decoder now takes the likelihoods from the raw bytes with the seed script's
+reader (`nonMyopicOfLedgerState`) and keeps the object tree only to check the shape, the pool set, the
+epoch and the reward pot. Verified: decoding the relay's epoch-1441 state gives 3036's `nonmyopic`
+row of 1441 byte for byte (728 pools). No other code decodes CBOR floats with the library. A store
+imported with the bug is repaired with `scripts/nonmyopic-seed.ts --state <the snapshot's or a
+relay's ledger state> --yes` (node stopped).
+
+**372. store-compare hid the missing rows (tooling).** Epoch-prefixed databases are compared from the
+newer of the two stores' oldest epochs; a store with no zero-stake pools before the first boundary
+after the import therefore started `snap_pool_zero`'s window later and reported "ok". The window of
+`snap_pool_zero` is now the stake snapshot's (`snap_cred`, `storeCompare.WINDOW_OF`): the old fresh
+store now shows 108 rows only in 3036.
+
+Tests: `src/mithril/importLmdb.test.ts` (zero-stake pools per snapshot; likelihoods stored bit for
+bit; the raw reader on big-endian floats including one whose swapped bits are a NaN),
+`storeCompare.test.ts` (the window).
+
+**End to end (2026-10-06 00:12–00:50 UTC).** The fixed image rebuilt on donherm, its data directory
+wiped, a fresh `mithril-bootstrap` (epoch-1441 snapshot; the import logged `epoch_pool_zero 108`,
+`nonmyopic 728`), synced across the 1441 → 1442 boundary to the tip: `scripts/n2c-compare.ts` against
+the relay at block 124592041 — **64 of 64 byte-identical** (GetPoolDistr 57 385 B, GetPoolDistr2
+63 002 B, GetNonMyopicMemberRewards 165 811 B, GetRewardInfoPools 52 185 B).
+
+## Bugs 380–383 — sync throughput: one fsync per block diff held the main thread (2026-10-06, CPU profile of a from-genesis preview sync, fixed)
+
+The donherm profiling run (from-genesis preview sync, `bun --cpu-prof`, three 120-s windows at
+10 min / 2 h / 6 h; `/media/bakon/data/cardano/profiling-2026-10-06/pulled/prof/`) spent 21–34 % of
+the main thread in `fsyncSync`, every sample of it in `LedgerStore.saveDiff` ← `commitBlock`: the
+bug-245 protocol (temp → fsync → rename) once per applied block. A synchronous fsync blocks the event
+loop, so ChainSync, BlockFetch and the validation workers' results waited with it.
+
+**380. The block diffs are made durable once per applied range (perf; crash safety unchanged).**
+`saveDiff` now writes `<hash>.diff.tmp` only (one page-cache write); `LedgerStore.flushDiffs` makes
+the batch durable — fdatasync of the temp files, 32 at a time on the thread pool (concurrent fsyncs
+share ext4 journal commits), rename of each to `<hash>.diff`, one fsync of the directory. Per file the
+order is the bug-245 one (data durable before its final name exists), only batched.
+
+Where it flushes: the orchestrator calls `ledgerFlushDiffs()` at the end of `applyRange`, **inside**
+the range's SQLite transaction, right after the last block applied; `LedgerStore` flushes on its own
+before `promote`, `applyDirect` / `applyDirectSync` / `applyDirectBeside` / `fillAbsentSync` /
+`setAnchor` (LMDB is never ahead of the diffs below it) and in `close` (`close({ flush: false })` is what
+a kill leaves; tests only). A diff dropped (rollback, aborted range, promotion) or rewritten while a
+flush runs is left alone (per-entry token), and a flush snapshots what was written up to its call.
+`GEROLAMO_LEDGER_DIFF_FSYNC`: unset / `1` batched, `block` the old per-block protocol (for A/B runs),
+`0` never fsync (unchanged meaning: temp + rename at once).
+
+Why it is safe. What a crash may now lose is the current range's diffs (before: at most the block
+being written). Recovery is bug 245's: `.tmp` files are swept at open, a final-named file that came
+back short / zero-filled / empty fails the length + crc32 trailer and is absent, and `recoveryTip`
+lands on the newest block of the block store's chain whose diffs reach the anchor. That needs one
+invariant: some block on the block store's durable chain at or above its immutable tip has a durable
+complete ledger state. It holds because everything the node persists after a range comes after the
+flush: the SQLite commit (rows, nonce snapshot), `mirrorToBlockStore`'s chunk promotion, the ledger
+promotion. The only records that can be ahead of the diffs are the block store's volatile blocks and
+the debounced selected-tip file (written per block inside the range in primary mode) — by at most one
+range, a case the recovery already handles (the bug-245 "persisted tip ahead of the diffs" test).
+Alternatives measured on this machine (Samsung 990 EVO Plus, ext4; 200 × 20 KB files):
+per-file fsync 1.33 ms/file, fdatasync 1.27 (no gain: a new file's size is metadata), a sequential
+fsync pass at the batch end 1.28 (same: one journal commit per fsync), the parallel pass 0.18, one
+append-only log + one fdatasync 0.02. The log is the cheapest but needs a new on-disk format,
+compaction and handling of dropped diffs reappearing from it; the parallel pass keeps the format, the
+tools and every bug-245 argument, and its remaining cost runs off the main thread — chosen.
+fdatasync instead of fsync for the files (the directory fsync covers the names).
+
+Tests (`LedgerStore.test.ts`, "batched diff durability (bug 380)"): a batch is temp files until its
+flush, which renames them and leaves none; a kill inside a batch (nothing flushed) → temp files swept,
+recovery on the last flushed block, the batch re-applied and promoted cleanly; a kill during the flush
+with the renames on disk but the data not (zero-filled, truncated, empty files; a stray temp) → torn,
+recovery below the first broken block; a rename lost out of order (a later block's file present, an
+earlier one's not) → recovery below the gap; drops and rewrites during a flush not resurrected; the
+flush before promotion / direct writes / close; the `0` and `block` policies. The bug-245 tests'
+helper flushes after its blocks (the state a range leaves). `bun test src/ledger src/storage
+src/consensus`: 883 pass.
+
+Measured (this machine; the server rerun is the real end-to-end number):
+- micro-benchmark — the 432 real diffs of 3036's store (2.6 KiB average) replayed through
+  `beginBlock … commitBlock` into a scratch store on the data disk, flushed every 128 blocks: old code
+  1.45 ms/block (all on the main thread), `block` 1.45, batched **0.33** (of which 0.19 the awaited
+  parallel flush, off the main thread), `0` 0.14. Ranges of 20 / 50 / 432: 0.37 / 0.34 / 0.33. A
+  one-block range (at the tip, a forged block) costs 2.8 ms (file + directory fsync) instead of 1.45.
+- replay through `ConsensusOrchestrator.applyRange` (lmdb, preview from genesis, ranges of 128,
+  20 000 blocks to slot ~400 000, no block store attached): `block` 567 / 576 blk/s,
+  batched **1 505 / 1 542 blk/s** (2.7×), `0` 1 971 blk/s; same anchor (slot 390 333) and no broken
+  store in every run. Early preview blocks are almost empty, so the per-block fsync is most of the work
+  there; the gain on transaction-heavy ranges will be smaller (the profile: 21–34 % of the main thread).
+
+**381. `scripts/cpuprofile-top.ts` charged idle gaps to the next function (tooling).** It weighted
+sample *i* with `timeDeltas[i]`, the gap *before* it, so the main thread's waits (awaiting I/O) were
+charged to whatever ran first afterwards. `chain()` showed 4–5 % on the three profiles from 34–49
+samples (0.2–0.3 %); `mkdir` 1.2–2.8 % from 37–59 samples. `--weight next|prev|count` (default
+`next`, DevTools' rule: a stack holds until the next sample; `count` one per sample). Re-read with it,
+the profile's real costs besides the fsync are: `postMessage` to the validation workers 4.6–5.8 %,
+LMDB `commit` 2.5–5.4 % (a promotion per range), `applyToOverlay` 2.4 % by count (the read overlay is
+rebuilt from all ~k volatile diffs after every promotion), ChainSync sends (382). `LedgerStore` still
+avoids the repeated walk: `chainGap` / `promoteDeep` / `viewAt` take the read overlay's chain when it
+stands on the same tip (`chainOf`; the overlay is dropped whenever a diff leaves, and now also when
+`setAnchor` moves the anchor); test "chain cache (bug 381)" (commits, a fork, rollback, promotion,
+`setAnchor`).
+
+**382. Findings: the `writeBuffered` samples are ChainSync, not logs; the node's log is not on the
+per-block path.** All 194–252 `writeBuffered` samples per window are `Multiplexer.send` ←
+`ChainSyncClient.requestNext` ← `PeerClient.chainSyncTopUp`: one socket write per MsgRequestNext
+(the pipeline tops up one request per reply). Coalescing them is a network-layer change, not done
+here. The genesis node 3037's log over its whole from-genesis sync (2026-10-03 00:57–20:00) is
+~900 lines / 0.6 KB/s, dominated by the per-boundary governance tallies (logged on purpose, PLAN_FULL_VALIDATION
+bug 82 note) and the `Sync profile:` line every 256 blocks (the watchdog and runbooks rely on neither,
+but the docs do): no log line was changed.
+Also seen, not changed: the block store fsyncs per block — `VolatileStore.put` once, and
+`ChunkStore.append` three times (chunk, secondary, primary) in `BlockStore.promote`, awaited one after
+another: ~5 ms of awaited I/O per block on this disk (off the main thread, but serial in the apply
+mutex). Batching them per promotion, and promoting the ledger every few ranges instead of every range
+(fewer LMDB commits and overlay rebuilds), are the next candidates.
+
+**383. `HashIndex.add` created its directory on every appended block (perf).** `mkdir -p` per chunk
+append (37–59 samples per window); now once per index (`ensureDir`).

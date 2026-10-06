@@ -1,0 +1,25 @@
+# Profiling run: a fresh preview sync from genesis, alone on the host, with hard resource limits so it can never
+# take memory or CPU from other work. Usage: docker compose -f docker-compose.profile.yml up -d --build
+services:
+  gerolamo-profile:
+    build: .
+    image: gerolamo:latest
+    container_name: gerolamo-profile
+    restart: unless-stopped
+    stop_grace_period: 60s
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      NETWORK: preview
+      GEROLAMO_PORT: "3030"
+      GEROLAMO_BOOTSTRAP: genesis
+      GEROLAMO_ROLE: data
+      GEROLAMO_MAX_RSS_GB: "8"
+      GEROLAMO_LEDGER_SQL_WRITES: "0"
+    volumes:
+      - ${GEROLAMO_PROFILE_DIR:-./data/profile}:/data
+    ports:
+      - "127.0.0.1:3031:3030"
+    mem_limit: 9g          # hard cap: the kernel kills this container, never the host's other work
+    cpus: 8
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }

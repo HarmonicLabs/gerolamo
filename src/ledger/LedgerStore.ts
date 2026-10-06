@@ -7,7 +7,8 @@
  * Databases are named strings; keys and values are bytes. The UTxO layout and the other groups'
  * encodings live in `encodings.ts` / the group modules; this class is the storage mechanism.
  */
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { closeSync, existsSync, fdatasyncSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
+import { open as openAsync } from "node:fs/promises";
 import { join } from "node:path";
 import { LedgerDiff, decodeDiff, encodeDiff, hex, readU64, u64, unhex } from "./LedgerDiff";
 import { LmdbEnv, type LmdbTxn } from "./lmdb";
@@ -23,8 +24,18 @@ export interface Anchor { slot: number; hash: Uint8Array }
 
 const META = "meta";
 const ANCHOR_KEY = new TextEncoder().encode("anchor");
-/** fsync each diff file before its rename (`GEROLAMO_LEDGER_DIFF_FSYNC=0` skips it: a crash then loses more recent diffs, which the recovery rolls past). */
-const DIFF_FSYNC = process.env.GEROLAMO_LEDGER_DIFF_FSYNC !== "0";
+/**
+ * How a diff file becomes durable (`GEROLAMO_LEDGER_DIFF_FSYNC`, read at open):
+ *   - unset / "1" — batched (bug 380): a block's diff goes to `<hash>.diff.tmp` with no fsync; `flushDiffs`
+ *     (the end of every applied range, and before a promotion, a direct LMDB write or close) fdatasyncs the
+ *     batch's temp files in parallel, renames them and fsyncs the directory once;
+ *   - "block" — the bug-245 protocol per block (temp, fsync, rename), for comparisons;
+ *   - "0" — never fsync (temp + rename at once): a crash then loses more recent diffs, which the recovery rolls past.
+ */
+type DiffSyncPolicy = "batch" | "block" | "never";
+function diffSyncPolicy(): DiffSyncPolicy { const v = process.env.GEROLAMO_LEDGER_DIFF_FSYNC; return v === "0" ? "never" : v === "block" ? "block" : "batch"; }
+/** fsyncs in flight at once in a batched flush: concurrent fsyncs share journal commits (ext4: ~7× fewer per file than one after another). */
+const FLUSH_PARALLEL = 32;
 
 export class LedgerStore {
     readonly env: LmdbEnv;
@@ -46,6 +57,16 @@ export class LedgerStore {
     /** Directory of persisted diffs (always read at open; written and pruned only when `persist`). */
     private readonly diffDir: string;
     private readonly persist: boolean;
+    private readonly syncPolicy: DiffSyncPolicy = diffSyncPolicy();
+    /**
+     * Diffs written as `<hash>.diff.tmp` and not yet durable (batched policy), by block hash (hex); the
+     * value is a token, so a flush renames a file only if it was neither dropped nor rewritten meanwhile.
+     * Until its flush a block has no `.diff` on disk: a crash leaves only temp files, swept at open, and
+     * the recovery lands below the batch (bug 380).
+     */
+    private readonly pending = new Map<string, object>();
+    /** Flushes run one after another (a flush awaits its fsyncs; a later one waits for it). */
+    private flushChain: Promise<unknown> = Promise.resolve();
     /** Diffs found on disk at open (before any chain check). */
     readonly loadedDiffs: number;
     /** Files at open that were not a complete diff (a write cut short by a crash): ignored, removed when writable. */
@@ -89,29 +110,86 @@ export class LedgerStore {
         return new LedgerStore(env, join(dir, "diffs"), persist);
     }
 
-    close(): void { this.env.close(); }
+    /** Close; pending diffs are made durable first (`flush: false` is what a kill leaves behind — tests). */
+    close(opts: { flush?: boolean } = {}): void {
+        if (opts.flush !== false) this.flushDiffsSync();
+        this.env.close();
+    }
 
     private diffPath(hashHex: string): string { return join(this.diffDir, `${hashHex}.diff`); }
     /**
      * Temp file, fsync, rename: after a crash the final name holds either the complete diff or
      * nothing (a leftover `.tmp` is swept at open), and the trailer catches a file that came back
-     * short anyway (bug 245).
+     * short anyway (bug 245). Batched (bug 380): the fsync and the rename wait for `flushDiffs`, so the
+     * per-block cost is one page-cache write; the order temp → fsync → rename per file is unchanged.
      */
     private saveDiff(d: LedgerDiff): void {
         if (!this.persist) return;
-        const p = this.diffPath(hex(d.hash));
+        const h = hex(d.hash), p = this.diffPath(h);
         const buf = encodeDiff(d);
         const fd = openSync(p + ".tmp", "w");
         try {
             let off = 0;
             while (off < buf.length) off += writeSync(fd, buf, off, buf.length - off);
-            if (DIFF_FSYNC) fsyncSync(fd);
+            if (this.syncPolicy === "block") fsyncSync(fd);
         } finally { closeSync(fd); }
+        if (this.syncPolicy === "batch") { this.pending.set(h, {}); return; }
         renameSync(p + ".tmp", p);
+    }
+
+    /** Diff files written but not yet durable (batched policy). */
+    pendingDiffs(): number { return this.pending.size; }
+
+    /**
+     * Make every diff written so far durable: fdatasync the temp files (in parallel — the fsyncs share
+     * journal commits and run off the main thread), rename each to its final name, fsync the directory.
+     * Called at the end of every applied range BEFORE the range's SQLite commit, so nothing the node
+     * persists after a range (SQLite, the block store's promotion, the selected-tip file) is ever ahead
+     * of the diffs it depends on; and before a promotion, a direct LMDB write and close. A diff dropped
+     * (rollback, aborted range, promotion) or rewritten while the flush runs is left alone.
+     */
+    flushDiffs(): Promise<number> {
+        if (!this.pending.size) return this.flushChain.then(() => 0); // nothing new: still wait for one in flight
+        const batch = [...this.pending]; // what was written up to this call
+        const run = this.flushChain.then(() => this.flushBatch(batch));
+        this.flushChain = run.catch(() => undefined);
+        return run;
+    }
+    private async flushBatch(batch: Array<[string, object]>): Promise<number> {
+        for (let i = 0; i < batch.length; i += FLUSH_PARALLEL) {
+            await Promise.all(batch.slice(i, i + FLUSH_PARALLEL).map(async ([h, tok]) => {
+                if (this.pending.get(h) !== tok) return;
+                let fh;
+                try { fh = await openAsync(this.diffPath(h) + ".tmp", "r+"); }
+                catch (err) { if (this.pending.get(h) !== tok) return; throw err; } // dropped meanwhile: its temp file is gone
+                try { await fh.datasync(); } finally { await fh.close(); }
+            }));
+        }
+        return this.finishFlush(batch);
+    }
+    /** Synchronous `flushDiffs` (sequential fdatasyncs) for the synchronous paths. */
+    flushDiffsSync(): number {
+        if (!this.pending.size) return 0;
+        const batch = [...this.pending];
+        for (const [h] of batch) { const fd = openSync(this.diffPath(h) + ".tmp", "r+"); try { fdatasyncSync(fd); } finally { closeSync(fd); } }
+        return this.finishFlush(batch);
+    }
+    private finishFlush(batch: Array<[string, object]>): number {
+        let n = 0;
+        for (const [h, tok] of batch) {
+            if (this.pending.get(h) !== tok) continue; // dropped or rewritten (then it is in the next flush)
+            const p = this.diffPath(h);
+            renameSync(p + ".tmp", p);
+            this.pending.delete(h);
+            n++;
+        }
+        if (n) { const fd = openSync(this.diffDir, "r"); try { fsyncSync(fd); } finally { closeSync(fd); } } // the renames (and earlier unlinks)
+        return n;
     }
     private dropDiffFile(hashHex: string): void {
         if (!this.persist) return;
         const p = this.diffPath(hashHex);
+        if (this.pending.delete(hashHex)) rmSync(p + ".tmp", { force: true }); // not flushed yet: only the temp file
         if (existsSync(p)) rmSync(p, { force: true });
     }
 
@@ -131,7 +209,7 @@ export class LedgerStore {
         const a = this.anchor();
         if (!tip) return a === null ? null : "no tip";
         if (a && hex(tip) === hex(a.hash)) return null;
-        const chain = this.chain(hex(tip));
+        const chain = this.chainOf(hex(tip));
         if (!chain.length || hex(chain[0]!.hash) !== hex(tip)) return `no diff for the tip ${hex(tip).slice(0, 16)}`;
         const oldest = chain[chain.length - 1]!;
         if (!a) return oldest.prevHash === null ? null : `no diff for ${hex(oldest.prevHash).slice(0, 16)} (parent of ${hex(oldest.hash).slice(0, 16)}@${oldest.slot})`;
@@ -161,6 +239,8 @@ export class LedgerStore {
 
     /** Set the anchor directly (importer: the snapshot's block). */
     async setAnchor(a: Anchor): Promise<void> {
+        await this.flushDiffs();
+        this.ov = null; // the chain walk stops at the anchor: an overlay built under the old one is stale
         await this.env.write((t) => t.put(META, ANCHOR_KEY, concat(u64(BigInt(a.slot)), a.hash)));
         this.anchorCache = a;
     }
@@ -186,6 +266,14 @@ export class LedgerStore {
             cur = p && p !== anchorHex ? this.diffs.get(p) : undefined;
         }
         return out;
+    }
+    /**
+     * `chain(tipHex)` without the walk when the read overlay already stands on `tipHex`: its chain is the
+     * same list (built by `chain`, extended only by commits on its tip, dropped whenever a diff leaves or
+     * the anchor moves — bugs 133 / 245). Read-only for the caller; the array is never mutated in place.
+     */
+    private chainOf(tipHex: string | null): LedgerDiff[] {
+        return this.ov && this.ov.tip === tipHex ? this.ov.chain : this.chain(tipHex);
     }
 
     volatileCount(): number { return this.diffs.size; }
@@ -224,6 +312,7 @@ export class LedgerStore {
      */
     fillAbsentSync(db: string, entries: Array<[Uint8Array, Uint8Array]>): number {
         const todo = entries.filter(([k]) => this.get(db, k) === undefined);
+        if (todo.length) this.flushDiffsSync(); // LMDB is never ahead of the diffs below it on disk
         if (todo.length) this.env.writeSync((t) => { for (const [k, v] of todo) t.put(db, k, v); });
         return todo.length;
     }
@@ -280,6 +369,7 @@ export class LedgerStore {
         this.open = d;
         try { await fn(); } catch (err) { this.open = null; throw err; }
         this.open = null;
+        await this.flushDiffs(); // LMDB is never ahead of the diffs below it on disk (bug 380)
         await this.env.write((t) => applyDiff(t, d));
         this.tip = tip;
         return d.size;
@@ -411,6 +501,7 @@ export class LedgerStore {
         this.open = d;
         try { fn(); } catch (err) { this.open = null; throw err; }
         this.open = null;
+        this.flushDiffsSync();
         this.env.writeSync((t) => applyDiff(t, d));
         this.tip = tip;
         return d.size;
@@ -433,6 +524,7 @@ export class LedgerStore {
      */
     async promote(hashes: Uint8Array[]): Promise<{ promoted: number; anchor: Anchor | null }> {
         if (!hashes.length) return { promoted: 0, anchor: this.anchor() };
+        await this.flushDiffs(); // normally a no-op (the range already flushed); the backstop for other callers
         const diffs = hashes.map((h) => { const d = this.diffs.get(hex(h)); if (!d) throw new Error(`promote: no diff for ${hex(h).slice(0, 16)}`); return d; });
         let anchor = this.anchor();
         for (const d of diffs) {
@@ -452,7 +544,7 @@ export class LedgerStore {
 
     /** Promote everything on the selected chain deeper than `k` blocks. */
     async promoteDeep(k: number): Promise<{ promoted: number; anchor: Anchor | null }> {
-        const chain = this.chain(); // newest first
+        const chain = this.chainOf(this.tip); // newest first
         const toPromote = chain.slice(k).reverse(); // oldest first
         return this.promote(toPromote.map((d) => d.hash));
     }
@@ -464,7 +556,7 @@ export class LedgerStore {
      */
     viewAt(hash: Uint8Array): LedgerView | null {
         if (!this.knows(hash)) return null;
-        const chain = this.chain(hex(hash)), a = this.anchor();
+        const chain = this.chainOf(hex(hash)), a = this.anchor();
         const oldest = chain[chain.length - 1];
         if (oldest && (a ? !oldest.prevHash || hex(oldest.prevHash) !== hex(a.hash) : oldest.prevHash !== null)) return null; // a gap: not a complete state
         return new LedgerView(this.env, chain);

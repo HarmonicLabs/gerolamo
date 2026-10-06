@@ -23,6 +23,7 @@
  *               drepPulsing (always the completed form: [PulsingSnapshot, RatifyState])]
  *   header = [[[eraIx, [slot, hash, blockNo]]], telescope; [6] = [bound, [0, PraosState]]]
  */
+import { nonMyopicOfLedgerState } from "../consensus/nonMyopicSeed";
 import { Cbor, CborArray, CborBytes, CborMap, CborNegInt, CborObj, CborSimple, CborTag, CborText, CborUInt } from "@harmoniclabs/cbor";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 
@@ -453,11 +454,20 @@ export function decodeLedgerSnapshot(stateBytes: Uint8Array): LedgerSnapshot {
     const pdPools = new Map<string, { stake: bigint; vrf: string }>();
     for (const { k, v } of map(pd[0], "poolDistr.pools")) { const a = arr(v, "poolDistr.value", 3); pdPools.set(bytes(k, "poolDistr.key", 28), { stake: big(a[1], "poolDistr.stake"), vrf: bytes(a[2], "poolDistr.vrf", 32) }); }
     const nonMyopic = arr(es[3], "epochState.nonMyopic", 2);
-    const nonMyopicLikelihoods = new Map<string, Float32Array>();
+    // The likelihoods are CBOR float32s, which @harmoniclabs/cbor decodes in the platform's byte order
+    // (uint8array-utils readFloat32BE fills a Float32Array: little-endian on x86), i.e. byte-swapped, and
+    // not recoverable where the swapped bits form a NaN. Read them from the raw bytes (bug 371); the
+    // object tree only checks the shape.
+    const nmRaw = nonMyopicOfLedgerState(stateBytes);
+    const nonMyopicLikelihoods = nmRaw.likelihoods;
+    let nmPools = 0;
     for (const { k, v } of map(nonMyopic[0], "nonMyopic.likelihoods")) {
-        const ws = arr(v, "nonMyopic.likelihood");
-        nonMyopicLikelihoods.set(bytes(k, "nonMyopic.pool", 28), Float32Array.from(ws, (x) => { if (!(x instanceof CborSimple) || typeof x.simple !== "number") fail("nonMyopic.likelihood", "float", x); return x.simple; }));
+        const id = bytes(k, "nonMyopic.pool", 28), ws = arr(v, "nonMyopic.likelihood");
+        for (const x of ws) if (!(x instanceof CborSimple) || typeof x.simple !== "number") fail("nonMyopic.likelihood", "float", x);
+        if (nonMyopicLikelihoods.get(id)?.length !== ws.length) throw new LedgerSnapshotFormatError(`ledger state: likelihood of pool ${id} not read from the raw bytes`);
+        nmPools++;
     }
+    if (nmPools !== nonMyopicLikelihoods.size || nmRaw.epoch !== epoch || nmRaw.rewardPot !== big(nonMyopic[1], "nonMyopic.rewardPot")) throw new LedgerSnapshotFormatError("ledger state: raw NonMyopic read disagrees with the decoded state");
 
     // Header state
     const header = arr(root[1], "header", 2);

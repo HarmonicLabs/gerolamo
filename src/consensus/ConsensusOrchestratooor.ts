@@ -9,7 +9,7 @@ import { prevHashOf } from "../storage/volatileStore";
 import { locateHeader } from "../storage/chunkFormat";
 import * as blockReads from "../storage/blockReads";
 import { comparePraos, preferByTieBreak, tieBreakInfoOf, vrfFlavorForEra } from "./tieBreak";
-import { getLedgerStore, ledgerAbortRange, ledgerAfterRange, ledgerBeginBlock, ledgerBoundaryPrune, ledgerGovReads, ledgerReturnStashedAvvm, ledgerStoreBroken, ledgerCommitBlock, ledgerDualVerify, ledgerRollbackTo, ledgerStoreMode } from "../ledger/nodeLedgerStore";
+import { getLedgerStore, ledgerAbortRange, ledgerAfterRange, ledgerBeginBlock, ledgerBoundaryPrune, ledgerGovReads, ledgerReturnStashedAvvm, ledgerStoreBroken, ledgerCommitBlock, ledgerDualVerify, ledgerFlushDiffs, ledgerRollbackTo, ledgerStoreMode } from "../ledger/nodeLedgerStore";
 import { sql } from "../sql";
 import { SerializedMutationQueue } from "./SerializedMutationQueue";
 import {
@@ -2824,6 +2824,9 @@ export class ConsensusOrchestrator {
                 let appliedTip: string | null = null;
                 await sql.begin(async () => {
                     appliedTip = await this.applyRangeBlocks(points, blocks, fetchedFrom);
+                    const tFl = performance.now();
+                    await ledgerFlushDiffs(); // the range's diffs are durable before its commit (bug 380)
+                    this.profile.add("blk.ldgflush", performance.now() - tFl);
                     await this.persistNonceSnapshot();
                     const tIns = performance.now();
                     await insertHeaderBatchVolatile(Array.from(this.batchHeaderRecords.values()));

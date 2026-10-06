@@ -1,0 +1,27 @@
+# Only package.json, bun.lock, tsconfig.json, vendor/, patches/, src/, scripts/ and docker/ go into the image.
+node_modules
+**/node_modules
+.git
+desktop
+dashboard
+browser
+docs
+dist
+ledger
+logs
+snapshots
+store
+testdata
+tools
+Resources
+assets
+cddl
+.live
+.devenv
+.hermes
+src/store
+**/*.db
+**/*.db-shm
+**/*.db-wal
+**/*.mdb
+**/*.cpuprofile

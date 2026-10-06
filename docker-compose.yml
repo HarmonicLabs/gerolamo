@@ -1,0 +1,32 @@
+# Gerolamo in Docker. `docker compose up -d` starts a preview relay that bootstraps from Mithril on its
+# first start; see docs/DOCKER.md for the genesis-sync and block-producer variants.
+#
+# Chain data (block store, LMDB ledger, sockets, logs) lives in a host directory, so it survives the
+# container being removed, rebuilt or upgraded. Set GEROLAMO_DATA_DIR in .env (or the shell) to choose it;
+# the container runs as your user (UID/GID), so the files are yours.
+#
+# The desktop control center (Electrobun) runs on the host: Control Center → attach → port 3030.
+
+services:
+  gerolamo:
+    build: .
+    image: gerolamo:latest
+    container_name: gerolamo-preview
+    restart: unless-stopped
+    stop_grace_period: 60s
+    user: "${UID:-1000}:${GID:-1000}"
+    environment:
+      NETWORK: preview                  # preview | preprod | mainnet
+      GEROLAMO_PORT: "3030"
+      GEROLAMO_BOOTSTRAP: mithril       # mithril (fast, from a verified snapshot) | genesis (build everything from block 0)
+      GEROLAMO_ROLE: relay              # relay | data | producer (producer: see docs/DOCKER.md)
+      GEROLAMO_MAX_RSS_GB: "8"
+      GEROLAMO_LEDGER_SQL_WRITES: "0"   # LMDB ledger only
+    volumes:
+      - ${GEROLAMO_DATA_DIR:-./data/preview}:/data
+      # - ./pool-keys:/keys:ro          # producer only: cold.vkey, kes.skey, vrf.skey, node.cert
+    ports:
+      - "127.0.0.1:3030:3030"           # HTTP: /health /metrics /stats /ws/stats, mini-Blockfrost — for the desktop app
+      - "${GEROLAMO_N2N_HOST_PORT:-3001}:3001"   # node-to-node: peers pull blocks here (relay / producer)
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }

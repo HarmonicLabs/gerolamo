@@ -524,5 +524,38 @@ export function Main() {
             },
         );
 
+    program
+        .command("mithril-produce")
+        .description(
+            "Produce cardano-database v2 artifacts (immutable archives, digests, snapshot record) from a chunk store and certify them: the local Merkle root must be the one a real Mithril certificate signed (chain verified to the genesis key). Read-only on the chunk store.",
+        )
+        .requiredOption("--immutable-dir <dir>", "Chunk store immutable directory (Gerolamo <nodeDir>/db/immutable or cardano-node db/immutable); opened read-only")
+        .requiredOption("--out <dir>", "Artifact store directory (served by the node when mithril.serveArtifacts is on)")
+        .option("--network <name>", "preprod | preview | mainnet", process.env.NETWORK || "preprod")
+        .option("--aggregator <url>", "Aggregator to certify against (default: the network's)")
+        .option("--genesis-vkey <key-path-or-url>", "Genesis verification key (default: the network's published key)")
+        .option("--immutable <n>", "Certified immutable file number to produce (default: the newest one the store has complete)", (v) => parseInt(v, 10))
+        .option("--archive-from <n>", "First immutable archive to build (default 0)", (v) => parseInt(v, 10))
+        .option("--archive-to <n>", "Last immutable archive to build (default: the beacon)", (v) => parseInt(v, 10))
+        .action(async (options: { immutableDir: string; out: string; network: string; aggregator?: string; genesisVkey?: string; immutable?: number; archiveFrom?: number; archiveTo?: number }) => {
+            const { produceCertifiedSnapshot } = await import("./mithril/cdb/certify");
+            const { ArtifactStore } = await import("./mithril/cdb/store");
+            const r = await produceCertifiedSnapshot({
+                immutableDir: resolve(options.immutableDir),
+                store: new ArtifactStore(resolve(options.out)),
+                network: options.network,
+                aggregator: options.aggregator,
+                genesisVkey: options.genesisVkey,
+                immutable: options.immutable,
+                archiveRange: options.archiveFrom != null || options.archiveTo != null ? { from: options.archiveFrom ?? 0, to: options.archiveTo ?? Number.MAX_SAFE_INTEGER } : undefined,
+                log: (m) => console.log(m),
+            });
+            console.log(
+                `mithril-produce: snapshot ${r.snapshot.hash} e${r.snapshot.beacon.epoch}/i${r.snapshot.beacon.immutable_file_number} ` +
+                    `merkle root ${r.merkleRoot} certified by ${r.target.certificate.hash} ` +
+                    `(${r.digests.length} files, ${r.archivesWritten} archives written, ${r.archivesReused} reused, ${r.seconds.toFixed(1)} s)`,
+            );
+        });
+
     program.parse(process.argv);
 }

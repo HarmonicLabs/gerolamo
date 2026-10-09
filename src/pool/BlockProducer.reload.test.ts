@@ -47,13 +47,13 @@ function setup(chain: bigint | null = 0n) {
 describe("KES / operational certificate hot reload (SIGHUP)", () => {
     test("a rotated key + certificate (counter + 1) replaces the running pair", async () => {
         const { dir, cold, bp } = setup(0n);
-        expect(bp.stats().opcert.counter).toBe("0");
+        expect(bp.stats().opcert!.counter).toBe("0");
         const kes = generateKesKey(new Uint8Array(32).fill(7));
         const vkey = Uint8Array.from(kes.vkey);
         writeCreds(dir, cold, kes, 1n);
         const r = await bp.reloadCredentials();
         expect(r).toEqual({ ok: true, counter: 1n, kesPeriod: PERIOD, evolution: 0 });
-        expect(bp.stats().opcert.counter).toBe("1");
+        expect(bp.stats().opcert!.counter).toBe("1");
         expect(Buffer.from((bp as any).kes.vkey).toString("hex")).toBe(Buffer.from(vkey).toString("hex"));
         // reloading the same files again is fine (counter equal to the chain's + 1 still allowed)
         expect((await bp.reloadCredentials()).ok).toBe(true);
@@ -73,7 +73,7 @@ describe("KES / operational certificate hot reload (SIGHUP)", () => {
             const r = await bp.reloadCredentials();
             expect(r.ok).toBe(false);
             expect((bp as any).kes).toBe(before);
-            expect(bp.stats().opcert.counter).toBe("0");
+            expect(bp.stats().opcert!.counter).toBe("0");
             void what;
         }
         // certificate for a KES key other than the one in kes.skey
@@ -97,9 +97,9 @@ describe("KES / operational certificate hot reload (SIGHUP)", () => {
         writeCreds(dir, cold, generateKesKey(new Uint8Array(32).fill(11)), 1n);
         const p = bp.reloadCredentials();
         await Bun.sleep(120);
-        expect(bp.stats().opcert.counter).toBe("0");
+        expect(bp.stats().opcert!.counter).toBe("0");
         (bp as any).forging = false;
         expect((await p).ok).toBe(true);
-        expect(bp.stats().opcert.counter).toBe("1");
+        expect(bp.stats().opcert!.counter).toBe("1");
     }, 30_000);
 });

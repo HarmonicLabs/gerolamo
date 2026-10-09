@@ -500,11 +500,13 @@ export async function recordProposals(db: SqlClient, txIdHex: string, proposals:
             if (sqlLedgerWrites()) await db`UPDATE gov_state SET dormant_epochs = 0 WHERE id = 1`;
         }
     }
+    // Dijkstra (protocol 12) adds PlutusV4 and update keys 34..56 (bug 430)
+    const dijkstraUpdates = proposals.length > 0 && ((await protocolMajorAt(epoch)) ?? 0) >= 12;
     for (let i = 0; i < proposals.length; i++) {
         const p = proposals[i];
         const kind = actionKind(p?.govAction);
         if (!kind) continue;
-        const rawChanges = kind === "ParameterChange" && bodyBytes ? paramChangesOfProposal(bodyBytes, i) : null;
+        const rawChanges = kind === "ParameterChange" && bodyBytes ? paramChangesOfProposal(bodyBytes, i, { dijkstra: dijkstraUpdates }) : null;
         const prev = p.govAction?.govActionId;
         const prevId = prev ? `${hex(prev.id)}:${Number(prev.index)}` : null;
         const actionId = `${txIdHex.toLowerCase()}:${i}`;

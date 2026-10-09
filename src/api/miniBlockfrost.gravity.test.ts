@@ -7,9 +7,11 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 import { initSql, sql } from "../sql";
 import { BACKFILL_UTXO_COLUMNS_SQL, ensureInitialized } from "../db";
 import { handleMiniBlockfrost } from "./miniBlockfrost";
+import { bech32Encode } from "../db/stakeCred";
 
 const tempDir = mkdtempSync(join(tmpdir(), "gerolamo-minibf-gravity-"));
-const address = "addr_test1qpzgravityreferenceaddress";
+// a well-formed testnet base address (payment key 0x11…, stake key 0x22…): Blockfrost validates the path
+const address = bech32Encode("addr_test", Uint8Array.from([0x00, ...new Array(28).fill(0x11), ...new Array(28).fill(0x22)]));
 const policy = "ab".repeat(28);
 const assetName = "746f6b656e";
 const assetUnit = `${policy}${assetName}`;

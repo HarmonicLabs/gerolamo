@@ -10,12 +10,14 @@
 import type { ResolvedUtxo } from "./resolvedUtxo";
 import { effectiveRedeemers } from "./alonzoRules";
 import { ledgerInputs, utxoRefOf } from "./resolvedUtxo";
+import { isDijkstraEra, dijkstraBatchValue, checkDijkstraTx, plutusLegacyMode, dijkstraRefScriptParams } from "./dijkstraRules";
 import { addAll, addUnit, alonzoMinUtxo, diffUnits, maryMinUtxo, unitsEqual, unitsOf, type UnitMap } from "./value";
 import { evalNativeScript, nativeScriptTreeOf } from "./nativeScript";
 import { parseStoredAddress, requiredWitnesses } from "./requiredSigners";
 import { ByronAddress, Script } from "@harmoniclabs/cardano-ledger-ts";
 import { evaluateAlonzoRules } from "./alonzoRules";
-import { bodyFieldBytes, bodyOutputBytes, scriptLanguageOfCbor, witnessScriptHashes, type PlutusLanguage } from "./scriptDataHash";
+import { bodyFieldBytes, bodyOutputBytes, maxPlutusLanguage, scriptLanguageOfCbor, witnessScriptHashes, type PlutusLanguage, type WitnessScript } from "./scriptDataHash";
+import { checkScriptsWellFormed } from "./scriptsWellFormed";
 import {
     certDepositsAndRefunds, checkAuxiliaryData, checkWithdrawalAccounts, checkBadCollateralAndRefInputs, checkBootAddrAttrs, checkDisjointRefInputs, checkOutputsTooBig, checkScriptWitnesses,
     checkTreasuryValue, checkTxRefScriptsSize, checkValidityInterval, checkWithdrawalNetwork, checkWithdrawalsDelegated, minFeeTx, rationalOf, tierRefScriptFeeExact, txRefScriptsSize,
@@ -186,7 +188,16 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
     const cd = certDepositsAndRefunds((body.certs ?? []) as any[], { keyDeposit: tx.params.keyDeposit, poolDeposit: tx.params.poolDeposit, drepDeposit: era >= 7 ? tx.params.drepDeposit ?? null : null }, tx.isPoolRegistered, tx.stakeDeposit);
     addUnit(produced, "lovelace", cd.deposits);
     addUnit(consumed, "lovelace", cd.refunds);
-    if (missing.length === 0 && !unitsEqual(consumed, produced)) failures.push(`value not conserved: ${diffUnits(consumed, produced)}`);
+    let batchMissing = 0;
+    if (isDijkstraEra(era)) {
+        // Dijkstra UTXO (bug 428): consumed / produced cover the sub-transactions and the direct deposits
+        const bv = dijkstraBatchValue(body, { resolved: tx.resolved, keyDeposit: tx.params.keyDeposit, poolDeposit: tx.params.poolDeposit, drepDeposit: tx.params.drepDeposit ?? null, isPoolRegistered: tx.isPoolRegistered, stakeDeposit: tx.stakeDeposit });
+        addAll(consumed, bv.consumed);
+        addAll(produced, bv.produced);
+        batchMissing = bv.missing.length;
+        if (bv.missing.length) failures.push(`sub-transactions spend ${bv.missing.length} input(s) not in the UTxO set before the batch: ${bv.missing.slice(0, 3).join(", ")}`);
+    }
+    if (missing.length === 0 && batchMissing === 0 && !unitsEqual(consumed, produced)) failures.push(`value not conserved: ${diffUnits(consumed, produced)}`);
     for (const o of (body.outputs ?? []) as any[]) {
         const v = unitsOf(o.value);
         for (const [u, q] of v) if (q < 0n) failures.push(`negative output quantity for ${u.slice(0, 16)}`);
@@ -195,7 +206,9 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
     // 3. fee: a·size + b + ⌈ExUnits · prices⌉ (Alonzo+) + tiered reference-script fee (Conway), all exact
     const fee = BigInt(body.fee ?? 0);
     const refScriptBytes = era >= 7 ? (tx.refScriptBytes ?? txRefScriptsSize(body, (r) => tx.resolved.get(r))) : 0;
-    checkTxRefScriptsSize(sink, era, refScriptBytes);
+    // Dijkstra: the limits and the tier price come from the protocol parameters (Conway: constants)
+    const dRef = isDijkstraEra(era) ? dijkstraRefScriptParams(tx.params.raw) : null;
+    checkTxRefScriptsSize(sink, era, refScriptBytes, dRef?.maxPerTx ?? undefined);
     if (tx.txSizeBytes != null) {
         let mem = 0n, steps = 0n;
         for (const r of effectiveRedeemers((tx.witnessSet?.redeemers ?? []) as any[], era)) {
@@ -208,6 +221,8 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
             priceMem: rationalOf(tx.params.priceMem),
             priceStep: rationalOf(tx.params.priceStep),
             refScriptCostPerByte: era >= 7 ? rationalOf(tx.params.minFeeRefScriptCostPerByte) : null,
+            refScriptStride: dRef?.stride ?? undefined,
+            refScriptMultiplier: dRef?.multiplier ?? undefined,
         }, era, tx.txSizeBytes, { mem, steps }, refScriptBytes);
         const baseMin = f.sizeFee + f.scriptFee;
         if (fee < baseMin) failures.push(`fee ${fee} below minimum ${baseMin} (size ${tx.txSizeBytes})`);
@@ -296,6 +311,8 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
 
     // 8. witnesses: required keys ⊆ proven, bootstrap roots ⊆ proven roots, scripts provided + native scripts hold
     const req = requiredWitnesses(body, tx.resolved);
+    // Dijkstra guards (key 14): key hashes are in `requiredSigners`; script guards need their script
+    if (isDijkstraEra(era)) for (const g of (body.scriptGuards ?? []) as any[]) req.scriptHashes.add(hex(g.hash));
     for (const p of req.problems) reports.push(p);
     const missingKeys = [...req.keyHashes].filter((k) => !tx.provenKeys.has(k));
     if (missingKeys.length) failures.push(`missing vkey witness for ${missingKeys.length} key(s): ${missingKeys.slice(0, 2).map((k) => k.slice(0, 12) + "…").join(", ")}`);
@@ -307,7 +324,10 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
     const plutusLanguages = new Map<string, PlutusLanguage>();
     const ws = tx.witnessSet ?? {};
     for (const s of (ws.nativeScripts ?? []) as any[]) provided.set(hex(s.hash), { kind: "native", script: s });
-    for (const [key, lang] of [["plutusV1Scripts", 1], ["plutusV2Scripts", 2], ["plutusV3Scripts", 3]] as const) {
+    const scriptLists: ReadonlyArray<readonly [string, PlutusLanguage]> = isDijkstraEra(era)
+        ? [["plutusV1Scripts", 1], ["plutusV2Scripts", 2], ["plutusV3Scripts", 3], ["plutusV4Scripts", 4]]
+        : [["plutusV1Scripts", 1], ["plutusV2Scripts", 2], ["plutusV3Scripts", 3]];
+    for (const [key, lang] of scriptLists) {
         for (const s of (ws[key] ?? []) as any[]) {
             provided.set(hex(s.hash), { kind: "plutus", script: s });
             plutusLanguages.set(hex(s.hash), lang);
@@ -318,8 +338,9 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
     const wsBytes = witnessSetBytesOf(ws);
     /** `scriptTxWitsL`: the witness set's scripts keyed by the hash of their original bytes. */
     const witnessHashes = new Set<string>();
+    const witnessScripts = wsBytes ? witnessScriptHashes(wsBytes, maxPlutusLanguage(era)) : new Map<string, WitnessScript>();
     if (wsBytes) {
-        for (const [h, w] of witnessScriptHashes(wsBytes)) {
+        for (const [h, w] of witnessScripts) {
             witnessHashes.add(h);
             if (!provided.has(h)) provided.set(h, { kind: w.kind, script: w.kind === "native" ? (ws.nativeScripts ?? []).find((n: any) => hex(n.hash) === h) ?? null : null });
             if (w.kind === "plutus" && w.language && !plutusLanguages.has(h)) plutusLanguages.set(h, w.language);
@@ -336,7 +357,7 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
             // A reference script may be native (`[0, script]`): it is then evaluated like a
             // witness native script and needs no redeemer.
             const refCbor = u.referenceScriptCbor ?? null;
-            const isNative = !!refCbor && scriptLanguageOfCbor(refCbor) === null && refCbor.startsWith("8200");
+            const isNative = !!refCbor && scriptLanguageOfCbor(refCbor, maxPlutusLanguage(era)) === null && refCbor.startsWith("8200");
             let native: any = null;
             if (isNative && refCbor) {
                 try {
@@ -348,7 +369,7 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
             // Babbage `getBabbageScriptsProvided`: reference scripts ∪ witness scripts (left-biased: the reference script)
             provided.set(u.referenceScriptHash, isNative ? { kind: "native", script: native } : { kind: "plutus", script: null });
             if (!isNative && refCbor) {
-                const lang = scriptLanguageOfCbor(refCbor);
+                const lang = scriptLanguageOfCbor(refCbor, maxPlutusLanguage(era));
                 if (lang && !plutusLanguages.has(u.referenceScriptHash)) plutusLanguages.set(u.referenceScriptHash, lang);
             }
         }
@@ -372,10 +393,13 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
         // Plutus scripts: phase-2 execution is Phase 3 of the plan; presence is enforced here.
     }
 
+    // 8a. Babbage UTXOW: Plutus witness scripts and output reference scripts deserialise (bug 400)
+    checkScriptsWellFormed(sink, era, pv, witnessScripts, outs.map(({ bytes }) => bytes));
+
     // 8b. withdrawals must take the whole reward balance, as of the state before the tx's certificates
     // (strict when the balances are exact; unregistered accounts are WithdrawalsMissingAccounts below)
     const balancesStrict = WITHDRAWALS_STRICT || tx.exactness?.exact === true;
-    if (tx.rewardBalances) {
+    if (tx.rewardBalances && !isDijkstraEra(era)) {
         const rule = era >= 7 && (pv ?? 0) >= 11 ? "ConwayIncompleteWithdrawals" : era >= 7 ? "WithdrawalsNotInRewardsCERTS" : "WithdrawalsNotInRewardsDELEGS";
         for (const w of (body.withdrawals?.map ?? []) as any[]) {
             const cred = rewardAccountKey(w.rewardAccount);
@@ -387,11 +411,25 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
     }
     // 8c. Conway LEDGER: DRep-delegated withdrawals (protocol ≥ 10), treasury value
     checkWithdrawalAccounts(sink, body, era, tx.stakeRegistered, WITHDRAWAL_ACCOUNTS_STRICT);
-    checkWithdrawalsDelegated(sink, body, era, pv, tx.drepDelegated);
+    if (!isDijkstraEra(era)) checkWithdrawalsDelegated(sink, body, era, pv, tx.drepDelegated); // removed in Dijkstra
     if (era >= 7) checkTreasuryValue(sink, body, tx.treasury, TREASURY_VALUE_STRICT || tx.exactness?.exact === true, tx.exactness?.why);
 
     // 8d. auxiliary data: hash binding and metadatum sizes
     checkAuxiliaryData(sink, body, tx.auxDataBytes, pv);
+
+    // 8e. Dijkstra: guards, direct deposits, account balance intervals, partial withdrawals (bug 428)
+    if (isDijkstraEra(era)) {
+        checkDijkstraTx(sink, {
+            body,
+            network: wantNet,
+            rewardBalances: tx.rewardBalances,
+            stakeRegistered: tx.stakeRegistered,
+            providedScripts: provided,
+            legacyMode: plutusLegacyMode(req.scriptHashes, plutusLanguages),
+            strict: balancesStrict,
+            why: tx.exactness?.why,
+        });
+    }
 
     // 9. Alonzo+ integrity: datums, collateral, ex units, redeemer ↔ purpose
     if (era >= 5) {

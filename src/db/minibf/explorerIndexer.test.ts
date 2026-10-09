@@ -6,6 +6,9 @@ import { initSql, sql } from "../../sql";
 import { ensureInitialized } from "../../db";
 import { applyMbTx, type MbTxDelta } from "./writer";
 import { explorerDbPathFor, explorerIndexer, mbSql } from "./explorerIndexer";
+import { readFileSync } from "node:fs";
+import { blockFacts } from "./blockFacts";
+import { deltasOfBlock } from "./blockDeltas";
 
 const dir = mkdtempSync(join(tmpdir(), "gerolamo-explorer-"));
 const mainDb = join(dir, "ledger.db");
@@ -52,5 +55,28 @@ describe("explorer indexer worker", () => {
         const o2 = (await mb`SELECT spent_by_tx FROM mb_tx_out WHERE tx_hash = ${H(2)}`.values()) as unknown[][];
         expect(o2[0]![0]).toBeNull();
         expect(explorerIndexer.tipSlot).toBe(25);
+    });
+
+    test("v2: a block message is decoded in the worker into block, metadata, redeemer and script rows", async () => {
+        const bytes = Uint8Array.from(Buffer.from(readFileSync(join(import.meta.dir, "../../consensus/__fixtures__/preview-block-10703285.hex"), "utf8").trim(), "hex"));
+        const facts = blockFacts(bytes);
+        const hash = new Uint8Array(32).fill(0x42);
+        const slot = facts.slot!;
+        for (const d of await deltasOfBlock(facts, { hash, slot, height: facts.blockNo }, () => null)) await explorerIndexer.enqueue(d);
+        await explorerIndexer.enqueueBlock({ kind: "block", hash, slot, height: facts.blockNo, epoch: 0, epochSlot: 0, bytes });
+        await explorerIndexer.flush();
+        const mb = mbSql();
+        const blk = (await mb`SELECT tx_count, height, fees FROM mb_block WHERE hash = ${hash}`.values()) as unknown[][];
+        expect(Number(blk[0]![0])).toBe(facts.txs.length);
+        expect(Number(blk[0]![1])).toBe(facts.blockNo!);
+        expect(String(blk[0]![2])).toBe(facts.txs.reduce((x, t) => x + t.fee, 0n).toString());
+        const meta = (await mb`SELECT COUNT(*) FROM mb_tx_meta WHERE slot = ${slot}`.values()) as unknown[][];
+        expect(Number(meta[0]![0])).toBe(facts.txs.reduce((x, t) => x + t.metadata.length, 0));
+        const red = (await mb`SELECT COUNT(*) FROM mb_redeemer WHERE slot = ${slot}`.values()) as unknown[][];
+        expect(Number(red[0]![0])).toBe(facts.txs.reduce((x, t) => x + t.redeemers.length, 0));
+        const idx = (await mb`SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_mb_tx_out_stake'`.values()) as unknown[][];
+        expect(idx.length).toBe(1); // built by the worker after it reported ready
+        const creds = (await mb`SELECT COUNT(*) FROM mb_tx_out WHERE stake_cred IS NOT NULL AND tx_hash IN (SELECT tx_hash FROM mb_tx WHERE slot = ${slot})`.values()) as unknown[][];
+        expect(Number(creds[0]![0])).toBeGreaterThan(0);
     });
 });

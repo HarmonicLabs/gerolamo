@@ -242,6 +242,14 @@ setInterval(() => {
   el("countdown").textContent = d > 0 ? "in " + hms(d) : "now";
 }, 1000);
 
+function kesSourceText(c) {
+  if (!c) return "file";
+  if (c.source !== "kes-agent") return "file" + (c.lastUpdate ? " · loaded " + esc(when(c.lastUpdate)) : "");
+  const a = c.agent;
+  const conn = a && a.connected ? badge("ok", "kes-agent connected · " + (a.version || "")) : badge("bad", "kes-agent not connected" + (a && a.lastError ? " · " + a.lastError : ""));
+  return conn + (c.installed ? "" : " " + badge("bad", "no key yet")) + (c.lastUpdate ? ' <span class="muted">last key ' + esc(when(c.lastUpdate)) + (a ? " · " + a.keysAccepted + " accepted, " + a.keysRejected + " rejected" : "") + "</span>" : "");
+}
+
 function renderProducer(m) {
   const p = m.producer;
   const sec = el("prodSection");
@@ -253,8 +261,10 @@ function renderProducer(m) {
   kv(el("coreKv"), [
     ["Pool", '<code title="' + esc(p.poolId) + '">' + short(p.poolId, 16) + "</code>", true],
     ["VRF key hash", short(p.vrfKeyHash, 16)],
-    ["KES current | remaining | exp", kes ? kes.period + " | " + kes.remaining + " of " + kes.maxEvolutions + " | " + when(kes.expiresAt) : "period " + oc.kesPeriod + " · evolution " + p.kesEvolution],
-    ["OP cert disk | chain", badge(chainBad || (kes && kes.counter === "ahead-of-chain") ? "bad" : "ok", oc.counter + " | " + (oc.chainCounter == null ? "none yet" : oc.chainCounter)), true],
+    ["KES source", kesSourceText(p.credentials), true],
+    ["KES current | remaining | exp", kes ? kes.period + " | " + kes.remaining + " of " + kes.maxEvolutions + " | " + when(kes.expiresAt) : p.opcert ? "period " + oc.kesPeriod + " · evolution " + p.kesEvolution : "no KES key installed"],
+    ["OP cert disk | chain", p.opcert ? badge(chainBad || (kes && kes.counter === "ahead-of-chain") ? "bad" : "ok", oc.counter + " | " + (oc.chainCounter == null ? "none yet" : oc.chainCounter)) : badge("bad", "none installed"), true],
+    ["Equivocations (own pool)", m.equivocations && m.equivocations.self ? badge("bad", m.equivocations.self + " · our key signed two headers for one slot") : badge("ok", "0"), true],
     ["KES health", kes && kes.health ? badge({ ok: "ok", "rotate-soon": "warn", "rotate-now": "bad", expired: "bad", "not-yet-valid": "bad" }[kes.health] || "muted", { ok: "ok", "rotate-soon": "rotate soon", "rotate-now": "ROTATE NOW", expired: "EXPIRED: no blocks", "not-yet-valid": "certificate not valid yet" }[kes.health] || kes.health) : "—", true],
     ["Missed slot leader checks", badge(Number(p.missedLeaderChecks) > 0 ? "warn" : "ok", String(p.missedLeaderChecks || 0)), true],
     ["Schedules", (p.scheduledEpochs && p.scheduledEpochs.length ? "epochs " + p.scheduledEpochs.join(", ") : "none yet") + " · " + p.leaderSlotsKnown + " leader slot(s)"],
@@ -294,6 +304,14 @@ function renderProducer(m) {
   el("slotRows").innerHTML = slots.length ? slots.map((s) =>
     "<tr><td>" + fmt(s.slot) + "</td><td>" + esc(when(s.time)) + '</td><td><span class="out ' + esc(s.outcome) + '">' + esc(s.outcome) + '</span></td><td class="wrap">' + (s.hash ? "<code>" + short(s.hash, 12) + "</code> " : "") + esc(s.note && s.outcome !== "upcoming" ? s.note : "") + "</td></tr>"
   ).join("") : '<tr><td colspan="4" class="empty">' + (p.scheduling ? "computing the leader schedule (a VRF pass over the epoch)…" : "no schedule yet") + "</td></tr>";
+}
+
+function equivocationText(e) {
+  if (!e) return "—";
+  if (!e.total) return badge("ok", "none seen") + ' <span class="muted">' + fmt(e.tracked) + " slot(s) tracked</span>";
+  const last = e.recent && e.recent.length ? e.recent[e.recent.length - 1] : null;
+  return badge(e.self ? "bad" : "warn", e.total + " pair(s)" + (e.self ? " · " + e.self + " OUR POOL" : ""))
+    + (last ? ' <span class="muted">last: pool ' + short(last.poolId, 12) + " slot " + fmt(last.slot) + " · " + short(last.hashes[0], 10) + " vs " + short(last.hashes[1], 10) + "</span>" : "");
 }
 
 function renderPeers(m, gov) {
@@ -399,6 +417,7 @@ function applyView(m, gov) {
     ["Blocks / s", sy.blocksPerSec != null ? Number(sy.blocksPerSec).toFixed(1) : "—"],
     ["Workers · pending headers", (sy.validationWorkers != null ? sy.validationWorkers : "—") + " · " + (sy.pendingHeaders != null ? sy.pendingHeaders : "—")],
     ["Mithril", m.mithril ? (m.mithril.replay ? m.mithril.replay.label : m.mithril.phase) : "not used"],
+    ["Equivocations", equivocationText(m.equivocations), true],
   ]);
   kv(el("mempoolKv"), [["Transactions", String(mp.count)], ["Bytes", fmtBytes(mp.bytes)]]);
   el("mempoolTxs").innerHTML = (mp.txs || []).map((x) => "<li><code>" + short(x.hash, 20) + "</code><span>" + fmtBytes(x.size) + "</span></li>").join("") + (mp.count > (mp.txs || []).length ? '<li class="muted">… ' + (mp.count - mp.txs.length) + " more</li>" : "");

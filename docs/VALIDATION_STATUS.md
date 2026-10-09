@@ -2347,3 +2347,128 @@ mutex). Batching them per promotion, and promoting the ledger every few ranges i
 
 **383. `HashIndex.add` created its directory on every appended block (perf).** `mkdir -p` per chunk
 append (37–59 samples per window); now once per index (`ensureDir`).
+
+## Bug 384 — the block store's per-block fsyncs: the server rerun synced at 5 blocks/s (2026-10-07, fixed)
+
+The server rerun of the profiling sync (run 3, with bugs 380–383) reached epoch 13 in 120 min against
+52 min for run 2. Stage timings ruled out bug 380: the batched diff flush cost 5–8 ms per range. The
+scheduler showed every range downloaded (`inFlight 0`, `awaitingApply 4`) with the CPU at 12–15 %, so
+the applier was stuck inside `applyRange`. New range-level timers (`rng.total`, `rng.gap`, `rng.fork`,
+`rng.qwait`, `rng.begin`, `rng.blocks.apply`, `rng.noncesnap`, `rng.commit`, `rng.dualv`, `rng.after`)
+put 60–71 % of the wall time in `blk.store`, the chunk promotion: up to 18 s per 128-block range.
+
+Cause: four serial fsyncs per block. `VolatileStore.put` synced each block it appended, and
+`ChunkStore.append` synced the chunk, secondary and primary files for every promoted block. The
+server's data disk is a DRAM-less QLC NVMe, 88 % full, shared with a container that reads tens of GB.
+Its fsync latency under that load turned 512 fsyncs per range into most of the sync. Run 2 met a
+quieter disk.
+
+Fix:
+- `VolatileStore.put` writes to the page cache only. `flush()` fdatasyncs every file touched since,
+  and the orchestrator calls it once per range beside `ledgerFlushDiffs`, before the SQLite commit.
+- `ChunkStore.appendMany` writes a whole batch with one write and one fsync per file per chunk. The
+  order chunk, secondary, primary holds for the batch, and every block of a chunk is checked before
+  anything of that chunk is written. `BlockStore.promote` flushes the volatile files, then uses it.
+- Volatile replay stops at a block that does not parse (a zero-filled tail after a power loss), not
+  only at a short CBOR item.
+- `GEROLAMO_BLOCK_FSYNC`: unset or `batch` batched, `block` the old per-block syncs, `0` never.
+
+Why it is safe: the ledger diffs and the volatile blocks of a range become durable together, before
+the range's commit. Chunk promotion still writes data before the indices that make it visible, so a
+crash leaves at worst trailing bytes that `open()` trims. The debounced selected-tip file could already
+run ahead of durable blocks by one range; startup falls back to the newest block both stores hold.
+
+Tests (`src/storage/batchedSync.test.ts`): `appendMany` in uneven batches across a chunk boundary
+writes byte-identical chunk, secondary, primary and hash-index files to per-block `append`; a batch
+with a block out of order writes nothing; batched volatile puts are pending until `flush()`, and replay
+stops at a zero-filled tail; `promote` through the batched path keeps every read intact. `bun test
+src`: 1 399 pass.
+
+Measured on the server run, same store before and after the restart:
+
+| Window | Blocks per second | `blk.store` per block |
+|---|---|---|
+| slow hour before | 4.9 | 145 ms |
+| quiet 4 min before | 48 | 12.4 ms |
+| 5 min after | 145 | 0.28 ms |
+
+## Bug 385 — a speed promotion handed over a range with a 1 565-block hole; seven honest peers convicted (2026-10-07, fixed)
+
+Server profiling run, 14:02 UTC, preview epoch 627: a verifier 1 565 validated headers ahead was promoted
+to primary for throughput. `anchorPromotedPrimary` kept its stream and handed the scheduler its fragment
+past our tip, cut by slot (`fragmentOf(key).filter(slot > tip)`) into 128-point ranges. One of them spanned
+1 693 blocks. Every peer asked for it served the whole span and was convicted ("returned 1693 blocks for
+128-point range"): seven honest relays held cold, then the range pipeline failed and reset.
+
+Cause: a candidate fragment is kept in arrival order. A verifier re-anchored on our tip replays older slots
+after newer ones, and evicted or never-received headers leave holes, so a slot filter over it is not a
+chain. The outvote refill (`switchPrimaryAfterOutvote`) cut ranges the same way.
+
+Fix:
+- `CandidatePoint.prevHash` is recorded for every observed header, and `CandidateSet.chainAfter(key,
+  anchor)` follows parent hashes from a block. Where two children of one block are present, the later
+  arrival wins.
+- Both handovers submit `chainAfter(peer, our tip)`. A promoted primary whose fragment does not chain onto
+  our tip has its ChainSync restarted instead.
+- `RangeScheduler` takes `pointsAreSubsequence`. When a peer returns more blocks than points and every point
+  is among them in order, the range has a hole of ours: `RangeHole`, no retry, no conviction. The
+  orchestrator resets the pipeline and re-anchors the primary's ChainSync instead of terminating it.
+
+Tests (`src/consensus/rangeHole.test.ts`): the chain walk through a replayed, holed fragment and across a
+branch switch; a holed range fails once with no peer convicted; extra blocks without our points still
+convict. `legacyFork.test.ts` now observes headers with their parent hash, as the node does. `bun test src`:
+1 403 pass.
+
+## Bug 386 — "is this block on our chain?" walked k volatile blocks per header (2026-10-07, perf, fixed)
+
+CPU profile of the server run at preview epoch ~960 (dense Conway epochs, 120 s): about a third of the main
+thread was `onSelectedChain`. Its callers include `getBlockByHash` / `hasOnSelectedChain`, which run for every
+header the node checks ("already applied?") from the primary and every verifier. Each call walked the volatile
+chain down from the tip (up to k blocks), building a hex key per block: `volatileChain` 4.0 % self,
+`VolatileStore.get` 5.3 %, and most of `Buffer` / `toString` (20 %).
+
+Fix: `blockReads` keeps, per block store, the hex hashes of the volatile chain under the current tip. A tip that
+extends the cached one adds one hash; anything else (a rollback, a switch, a set grown past 4·k) rebuilds it
+from `volatileChain`. Test: membership as the tip advances, after a rollback and after re-extending
+(`src/storage/batchedSync.test.ts`).
+
+Also fixed the same day, in the Docker entrypoint: a heap-summary request (SIGUSR2) that lands in the second the
+node restarts reaches it before its handler is installed, and Bun's default action kills it. The 18:24 UTC
+profile window was lost that way. The entrypoint now holds `heap.next` until the node has run for 60 s.
+
+## Wave 3, Dingo parity (2026-10-08): items 400–529, merged and live
+
+Plan: docs/PLAN_DINGO_PARITY.md. Each area's numbered items, decisions and measurements are in its own log:
+- Conformance suites, 400–406: `docs/parity/conformance.md`. Cardano Blueprint ledger vectors 2574/2574 on the block path and on the mempool path; ouroboros-mock consensus scenarios 5/7 strict, 2 classified (they expect a tip no peer served). Bugs: 400 script well-formedness rule, 401 chain selection from origin, 402 null `prev_hash` headers, 403/404 mempool `is_valid=false` and withdrawal checks.
+- Dijkstra era and Plutus V4, 420–436: `docs/parity/dijkstra.md`, ledger-ts diff `docs/parity/dijkstra-ledger-ts.patch` (vendored as 0.6.0-dijkstra.1; the sibling repo still needs it). Gated by `ExperimentalHardForksEnabled`; full preview replay through the new ledger-ts: 4 736 254 blocks, 0 differences. Plutus V4 conformance 997 pass, 9 failures all in the UPLC text parser of the harness.
+- KES agent and equivocation, 450–457: `docs/parity/kesagent.md`. cardano-node's kes-agent protocol (`producer.kesAgentSocket`); equivocation detection on every node; three double-signing paths closed (signed slot persisted before signing, atomic state file, tip check before a retry).
+- Mithril, 460–467: `docs/parity/mithril.md`. Full STM certificate verification; `mithril-bootstrap` now verifies every downloaded file against the certified digests (462, a security fix); `mithril-produce` and the `/mithril/*` routes; 3037's chunk store reproduces a certified Merkle root over 86 643 files.
+- UTxO RPC, 480–490: `docs/parity/utxorpc.md`. v1alpha Query/Submit/Sync/Watch over gRPC, gRPC-Web and Connect; `utxorpc` config key, off by default; LMDB `utxo_idx` search indexes (backfilled once at start, about 1 min, about 1 GB).
+- Blockfrost-compatible API, 500–520: `docs/parity/blockfrost.md`. 117 of 129 OpenAPI paths (the rest are IPFS, metrics, NutLink), schema-checked; explorer projection v2.
+
+Merge notes: phase2.ts `budget` (UTxO RPC and Blockfrost added the same option), flat.ts / txRules.ts (well-formedness and Plutus V4 both touched the version check and the witness-script scan) resolved by keeping both; `LANGUAGE_INTRODUCED_IN` gained V4 at protocol 12. Supervisors started before the RssAnon change still capped VmRSS (LMDB mapped pages): the UTxO index backfill pushed 3037 over its 8 GB cap in a loop; all three supervisors were relaunched on the current script.
+
+## Bug 388 — a promoted primary with nothing past our tip restarted its ChainSync and stalled 3036 for 10 minutes (2026-10-08, fixed)
+
+Regression from bug 385. The network produced no block from 07:33:51 to 07:38:08 UTC. Meanwhile 3036's primary left and four successive promotions followed. Each new primary's fragment held nothing past our tip, so `chainAfter` was empty, and the bug-385 fallback restarted its ChainSync. A restart at the tip waits for every pipelined reply (21–32 of them), and each is answered only by a new block: 3036 applied nothing for about 10 minutes while 3035 and 3037 followed the network. Before bug 385 the stream was kept in this case.
+
+Fix: when nothing chains onto our tip, the stream is kept unless the fragment holds headers past our tip that do not chain onto it (then a restart is the right answer). Test: `legacyFork.test.ts` "a promoted primary with nothing past our tip keeps its stream (bug 388)" covers both branches.
+
+## Bug 389 — GetGovState showed a DRep anchor updated after the epoch boundary (2026-10-09, fixed)
+
+The watchdog's parity probe reported 63/64 on all three nodes from 18:59 UTC: `[24] GetGovState` 2 bytes shorter than
+cardano-node's. The difference was one entry of the DRep pulser snapshot's DRep-state map (`psDRepState`): DRep
+`1cf23799…` had updated its anchor during epoch 1445 (UpdateDRep: Maci → Jeff, expiry 1475 → 1476). cardano-node's
+snapshot keeps the epoch-start state (Maci, 1475); ours showed the new anchor with the old expiry.
+
+Cause: our snapshot stores expiry, deposit and delegators, and reads anchors from the governance index "as of the
+boundary block". `GovIndex.at()` answered any point at or below its base (the immutable tip) with the base's facts.
+About k blocks into an epoch the boundary block becomes immutable, so from then on an anchor update made after the
+boundary leaked in. It showed at 18:59 because the update became immutable then.
+
+Fix: while folding blocks, the index keeps a copy of its facts at each epoch boundary (the last three), persisted in
+its cache (version 2; a version-1 cache is rebuilt once: 2 397 370 blocks in 67 s on preview). `at()` answers the
+boundary block from that copy; any other point below the base now logs a warning. Tests:
+`src/network/n2c/lsq/govIndex.test.ts` (blocks built with @harmoniclabs/cbor): the boundary keeps the old anchor
+while the tip has the new one, and the boundary facts come back from the cache after a restart. Both fail on the
+old code. Live: GetGovState byte-identical again on 3035, 3036 and 3037.

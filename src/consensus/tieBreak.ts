@@ -56,7 +56,9 @@ export function tieBreakInfoOf(rawHeader: Uint8Array): TieBreakInfo | null {
         if (!(issuer instanceof CborBytes)) return null;
         const blockNo = a[0] instanceof CborUInt ? a[0].num : undefined;
         const slot = a[1] instanceof CborUInt ? a[1].num : undefined;
-        if (a.length === 10) { // Praos (Babbage, Conway): [..., vrf_result [output, proof], size, body_hash, opcert [hot, seq, period, sig], pv]
+        // Praos (Babbage, Conway; Dijkstra appends the Leios flag and announcement, bug 425):
+        // [..., vrf_result [output, proof], size, body_hash, opcert [hot, seq, period, sig], pv (, leios, eb)]
+        if (a.length === 10 || a.length === 12) {
             const vrf = a[5], oc = a[8];
             if (!(vrf instanceof CborArray) || !(vrf.array[0] instanceof CborBytes) || !(oc instanceof CborArray) || !(oc.array[1] instanceof CborUInt)) return null;
             return { issuer: toHex(issuer.bytes), opcertCounter: oc.array[1].num, vrfOutput: vrf.array[0].bytes, slot, blockNo };

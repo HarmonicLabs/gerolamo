@@ -12,15 +12,24 @@ import { Cbor, CborBytes, CborMap, CborUInt, CborArray, CborNegInt, CborTag } fr
 import { blake2b_224, blake2b_256 } from "@harmoniclabs/crypto";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { costModelsToLanguageViewCbor, toCostModelArrV2, toCostModelArrV3 } from "@harmoniclabs/cardano-costmodels-ts";
+import { plutusV4CostModelArray } from "../plutus/v4";
 
-export type PlutusLanguage = 1 | 2 | 3;
+export type PlutusLanguage = 1 | 2 | 3 | 4;
+
+/**
+ * Highest Plutus language a ledger era knows: V3 through Conway, V4 from Dijkstra (era 8,
+ * bug 433). Script tag 4, witness key 8 and the V4 language view only exist from there.
+ */
+export function maxPlutusLanguage(era: number | bigint): PlutusLanguage {
+    return Number(era) >= 8 ? 4 : 3;
+}
 
 /** Cost model arrays per language from a stored parameter record (Blockfrost `cost_models_raw`, `cost_models` objects, genesis objects). */
 export function costModelArrays(raw: Record<string, any> | null | undefined): Partial<Record<PlutusLanguage, (number | bigint)[]>> {
     const out: Partial<Record<PlutusLanguage, (number | bigint)[]>> = {};
     const rawArrays = raw?.cost_models_raw;
     const models = raw?.cost_models ?? raw?.costModels;
-    for (const lang of [1, 2, 3] as PlutusLanguage[]) {
+    for (const lang of [1, 2, 3, 4] as PlutusLanguage[]) {
         const names = [`PlutusV${lang}`, `PlutusScriptV${lang}`, `plutusV${lang}`, `plutus:v${lang}`];
         let v: any = undefined;
         for (const n of names) if (rawArrays?.[n] != null) { v = rawArrays[n]; break; }
@@ -34,7 +43,8 @@ export function costModelArrays(raw: Record<string, any> | null | undefined): Pa
                     // (the Alonzo names and their later renamings sort identically).
                     out[1] = Object.keys(v).sort().map((k) => Number(v[k]));
                 } else if (lang === 2) out[2] = toCostModelArrV2(v).map((x: any) => (typeof x === "bigint" ? x : Number(x)));
-                else out[3] = toCostModelArrV3(v).map((x: any) => (typeof x === "bigint" ? x : Number(x)));
+                else if (lang === 3) out[3] = toCostModelArrV3(v).map((x: any) => (typeof x === "bigint" ? x : Number(x)));
+                else out[4] = plutusV4CostModelArray(v); // V4: in PlutusLedgerApi.V4.ParamName order
             } catch {
                 /* unknown naming: language unavailable */
             }
@@ -52,7 +62,7 @@ export function languageViews(models: Partial<Record<PlutusLanguage, (number | b
     // so a transaction with both V1 and V2 scripts hashes V2 first (preview slot
     // 11663879); the library emits V1 first.
     const entries: Array<{ k: any; v: any; keyBytes: Uint8Array }> = [];
-    for (const l of [1, 2, 3] as PlutusLanguage[]) {
+    for (const l of [1, 2, 3, 4] as PlutusLanguage[]) {
         if (!langs.has(l)) continue;
         if (l === 1) {
             // V1 keeps the legacy view (key = bytes of the encoded language, value = the list
@@ -136,12 +146,12 @@ export function expectedScriptDataHash(input: ScriptDataHashInput): { hash: stri
 }
 
 /** Plutus language of a script wrapper `[tag, bytes]` (CBOR hex), or null for native scripts / unknown. */
-export function scriptLanguageOfCbor(hexOrBytes: string | Uint8Array): PlutusLanguage | null {
+export function scriptLanguageOfCbor(hexOrBytes: string | Uint8Array, maxLanguage: PlutusLanguage = 3): PlutusLanguage | null {
     try {
         const bytes = typeof hexOrBytes === "string" ? Buffer.from(hexOrBytes, "hex") : hexOrBytes;
         const obj: any = Cbor.parse(bytes);
         const tag = Number(obj?.array?.[0]?.num ?? NaN);
-        return tag === 1 || tag === 2 || tag === 3 ? (tag as PlutusLanguage) : null;
+        return tag >= 1 && tag <= maxLanguage ? (tag as PlutusLanguage) : null;
     } catch {
         return null;
     }
@@ -269,7 +279,7 @@ export interface WitnessScript {
  * by its author hashes over both wraps — decoders that normalise the wrapping
  * (ledger-ts) then compute a hash the address does not have.
  */
-export function witnessScriptHashes(witnessSetBytes: Uint8Array): Map<string, WitnessScript> {
+export function witnessScriptHashes(witnessSetBytes: Uint8Array, maxLanguage: PlutusLanguage = 3): Map<string, WitnessScript> {
     const out = new Map<string, WitnessScript>();
     let root: any;
     try {
@@ -284,6 +294,8 @@ export function witnessScriptHashes(witnessSetBytes: Uint8Array): Map<string, Wi
         6: { kind: "plutus", language: 2, tag: 2 },
         7: { kind: "plutus", language: 3, tag: 3 },
     };
+    // Dijkstra witness key 8: Plutus V4, hashed with tag 4
+    if (maxLanguage >= 4) keyLang[8] = { kind: "plutus", language: 4, tag: 4 };
     for (const { k, v } of root.map) {
         if (!(k instanceof CborUInt)) continue;
         const spec = keyLang[Number(k.num)];

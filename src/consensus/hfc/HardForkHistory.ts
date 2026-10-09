@@ -16,7 +16,8 @@
  */
 import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { logger } from "../../utils/logger";
-import { ERA_TRIGGER_MAJOR, HFC_ERAS, LAST_REACHABLE_ERA, eraShape, reconstructSummary, type EraParams, type EraSummary, type GenesisGeometry, type Transition } from "./hfc";
+import { applyExperimentalFromConfig, configEnablesExperimentalHardForks, DIJKSTRA_HFC_ERA, lastReachableEra } from "./experimental";
+import { ERA_TRIGGER_MAJOR, HFC_ERAS, eraShape, reconstructSummary, type EraParams, type EraSummary, type GenesisGeometry, type Transition } from "./hfc";
 
 const log = logger.child("hfc");
 
@@ -42,11 +43,14 @@ export const KNOWN_ERA_STARTS: Record<number, number[]> = {
 /** Resolve the trigger of every era from a config object carrying cardano-node `Test*HardForkAtEpoch` keys. */
 export function triggersFrom(cfg: Record<string, unknown>, network?: string): EraTrigger[] {
     const base = network ? NETWORK_TEST_TRIGGERS[network] ?? {} : {};
+    // cardano-node 11: Conway's successor is NotDuringThisExecution unless ExperimentalHardForksEnabled (bug 421)
+    applyExperimentalFromConfig(cfg);
+    const reachable = configEnablesExperimentalHardForks(cfg) ? Math.max(lastReachableEra(), DIJKSTRA_HFC_ERA) : lastReachableEra();
     const out: EraTrigger[] = [{ kind: "never" }];
     for (let i = 1; i < HFC_ERAS.length; i++) {
         const key = TEST_TRIGGER_KEYS[i]!;
         const v = cfg[key] ?? (base as Record<string, unknown>)[key];
-        if (i > LAST_REACHABLE_ERA) { out.push({ kind: "never" }); continue; } // cardano-node 11: Conway's successor is NotDuringThisExecution
+        if (i > reachable) { out.push({ kind: "never" }); continue; }
         if (v != null && Number.isFinite(Number(v))) out.push({ kind: "epoch", epoch: BigInt(Number(v)) });
         else out.push({ kind: "version", major: ERA_TRIGGER_MAJOR[i]! });
     }
@@ -95,6 +99,13 @@ export class HardForkHistory {
 
     constructor(readonly geometry: GenesisGeometry, readonly triggers: EraTrigger[], readonly magic: number, private readonly statePath: string | null = null) {
         this.shape = eraShape(geometry);
+    }
+
+    /** HFC index of the last era these triggers can reach (Conway, or Dijkstra with ExperimentalHardForksEnabled). */
+    get lastReachableEra(): number {
+        let last = 0;
+        for (let i = 1; i < this.triggers.length; i++) if (this.triggers[i]!.kind !== "never") last = i; else break;
+        return last;
     }
 
     /** Start epochs of every era up to the current one (the era of the ledger tip). */
@@ -307,7 +318,7 @@ export async function eraStartsFromBlocks(
     else out[1] = shelleyStart;
     const s0 = (shelleyStart ?? 0n) * geo.byronEpochSize;
     const epochOf = (slot: bigint): bigint => (slot < s0 ? slot / geo.byronEpochSize : (shelleyStart ?? 0n) + (slot - s0) / geo.shelleyEpochSize);
-    for (let era = 2; era <= LAST_REACHABLE_ERA; era++) {
+    for (let era = 2; era <= lastReachableEra(); era++) {
         const b = await firstOfEra(era);
         if (!b) break;
         if (b.slot === firstBlock.slot && !fromGenesis) { out[era] = null; continue; } // already in progress at the store's first block

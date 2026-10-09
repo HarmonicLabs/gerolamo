@@ -23,6 +23,7 @@ import { Cbor, CborArray, CborBytes, CborTag } from "@harmoniclabs/cbor";
 import { base58Decode, base64urlDecode } from "../../../consensus/byron/genesisUtxo";
 import { PARAM_NAMES_V1 } from "../../../consensus/plutus/paramNames";
 import { cborItemLength } from "../../../storage/chunkFormat";
+import { experimentalHardForksEnabled } from "../../../consensus/hfc/experimental";
 import { encodeUtcTime, type EraHistoryNetwork } from "../eraHistory";
 import { toFraction } from "../pparamsCbor";
 import { CborWriter, reduced } from "./cborWriter";
@@ -38,7 +39,8 @@ type Trigger = { atVersion: number } | { atEpoch: number } | "never";
 function triggers(network: EraHistoryNetwork): Trigger[] {
     const v = [2, 3, 4, 5, 7, 9].map((atVersion) => ({ atVersion }) as Trigger);
     if (network === "preview") for (let i = 0; i < 4; i++) v[i] = { atEpoch: 0 };
-    return [...v, "never", "never"]; // Conway → Dijkstra only with ExperimentalHardForksEnabled
+    // Conway → Dijkstra only with ExperimentalHardForksEnabled (protocol 12; bug 421)
+    return [...v, experimentalHardForksEnabled() ? { atVersion: 12 } : "never", "never"];
 }
 const wTrigger = (w: CborWriter, t: Trigger) => { if (t === "never") w.array(1).uint(2); else if ("atVersion" in t) w.array(2).uint(0).uint(t.atVersion); else w.array(2).uint(1).uint(t.atEpoch); };
 const wRat = (w: CborWriter, v: unknown) => { const [n, d] = toFraction(v); const [rn, rd] = reduced(n, d); w.rational(rn, rd); };

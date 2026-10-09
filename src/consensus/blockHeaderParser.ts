@@ -20,6 +20,7 @@ import {
     ByronEbbHead,
     ConwayHeader,
     ConwayHeaderBody,
+    DijkstraHeader,
     MaryHeader,
     MultiEraBlock,
     MultiEraHeader,
@@ -27,6 +28,7 @@ import {
 } from "@harmoniclabs/cardano-ledger-ts";
 import { ChainSyncRollForward } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { logger } from "../utils/logger";
+import { experimentalHardForksEnabled } from "./hfc/experimental";
 import {
     calculateCardanoEpoch,
     calculatePreProdCardanoEpoch,
@@ -37,7 +39,8 @@ import { toHex } from "@harmoniclabs/uint8array-utils";
 /**
  * Era numbering (matches cardano-ledger-ts `MultiEraHeader` / `MultiEraBlock`):
  *   0 = Byron epoch-boundary block (EBB), 1 = Byron main block,
- *   2 = Shelley, 3 = Allegra, 4 = Mary, 5 = Alonzo, 6 = Babbage, 7 = Conway.
+ *   2 = Shelley, 3 = Allegra, 4 = Mary, 5 = Alonzo, 6 = Babbage, 7 = Conway,
+ *   8 = Dijkstra (only with ExperimentalHardForksEnabled).
  *
  * N2N ChainSync headers carry the hard-fork-combinator era index instead
  * (0 = Byron, 1 = Shelley, … 6 = Conway); Shelley+ is `[hfcEra, #6.24(header)]`
@@ -254,6 +257,44 @@ export function localRollForwardMessage(blockFetchBytes: Uint8Array): { bytes: U
     return { bytes, slot, blockNo, hashHex: Buffer.from(id.hash).toString("hex"), era: id.era };
 }
 
+/**
+ * Offset of a Praos header body's `prev_hash` inside the raw header `[header_body, kes_signature]`
+ * when it is CBOR null (the CDDL's `nil`: the first block of a chain that starts after Byron), else -1.
+ */
+export function nullPrevHashOffset(rawHeader: Uint8Array): number {
+    // `82` (header: 2 items) then a one-byte body array head (`8a`: 10 items)
+    if (rawHeader[0] !== 0x82 || (rawHeader[1]! & 0xe0) !== 0x80 || (rawHeader[1]! & 0x1f) > 23) return -1;
+    try {
+        const body = Cbor.parseLazy(rawHeader.subarray(1));
+        if (!(body instanceof LazyCborArray) || body.array.length < 3) return -1;
+        const off = 2 + body.array[0]!.length + body.array[1]!.length;
+        return rawHeader[off] === 0xf6 ? off : -1;
+    } catch {
+        return -1;
+    }
+}
+
+/**
+ * ledger-ts 0.5.13 decodes a Babbage / Conway / Dijkstra header body only with a hash in
+ * `prev_hash`, although its encoder writes null for none (Shelley–Alonzo accept both). The first
+ * block of a chain that starts in a Praos era (a devnet forging Conway blocks from genesis, the
+ * ouroboros-mock consensus captures) then did not parse (bug 402). Parse with 32 zero bytes in
+ * place of the null, then clear the field and the cached slices: `header.body.toCborBytes()` (the
+ * KES-signed bytes) re-encodes the body, and the null re-encodes as `f6`, the original bytes.
+ */
+function parsePraosHeader<T>(cls: { fromCbor(b: Uint8Array): T }, raw: Uint8Array): T {
+    const off = nullPrevHashOffset(raw);
+    if (off < 0) return cls.fromCbor(raw);
+    const patched = new Uint8Array(raw.length + 33);
+    patched.set(raw.subarray(0, off), 0);
+    patched[off] = 0x58; patched[off + 1] = 0x20; // bytes(32), zeros
+    patched.set(raw.subarray(off + 1), off + 34);
+    const h: any = cls.fromCbor(patched);
+    h.cborRef = undefined;
+    if (h.body) { h.body.prevHash = undefined; h.body.cborRef = undefined; }
+    return h as T;
+}
+
 export async function headerParser(
     rollForward: Uint8Array,
 ): Promise<ParsedHeader | null> {
@@ -321,10 +362,15 @@ export async function headerParser(
             parsedHeader = AlonzoHeader.fromCbor(rawHeaderBytes);
             break;
         case 6:
-            parsedHeader = BabbageHeader.fromCbor(rawHeaderBytes);
+            parsedHeader = parsePraosHeader(BabbageHeader, rawHeaderBytes);
             break;
         case 7:
-            parsedHeader = ConwayHeader.fromCbor(rawHeaderBytes);
+            parsedHeader = parsePraosHeader(ConwayHeader, rawHeaderBytes);
+            break;
+        case 8:
+            // Dijkstra (HFC index 7): only with ExperimentalHardForksEnabled, like cardano-node (bug 421).
+            if (!experimentalHardForksEnabled()) return null;
+            parsedHeader = DijkstraHeader.fromCbor(rawHeaderBytes);
             break;
         default:
             return null;

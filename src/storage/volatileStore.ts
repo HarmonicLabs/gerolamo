@@ -28,8 +28,24 @@ export interface VolatileBlock {
     fileNo: number;
 }
 
+/**
+ * When block files are fsynced (GEROLAMO_BLOCK_FSYNC). `batch` (default): `put` writes to the page cache and
+ * `flush()` fdatasyncs every file touched since, once per applied range, before the range's commit (the way
+ * the ledger diffs are flushed, bug 380) — 4 serial fsyncs per block were most of a sync's wall time on a
+ * busy disk (bug 384). `block`: fsync inside every `put` (the old behaviour). `0`: never (tests, scratch).
+ */
+export type BlockSyncPolicy = "batch" | "block" | "none";
+export function blockSyncPolicy(): BlockSyncPolicy {
+    const v = (process.env.GEROLAMO_BLOCK_FSYNC ?? "").trim().toLowerCase();
+    if (v === "block") return "block";
+    if (v === "0" || v === "none" || v === "off") return "none";
+    return "batch";
+}
+
 export interface VolatileStoreOptions {
     blocksPerFile?: number;
+    /** Default: `blockSyncPolicy()` (GEROLAMO_BLOCK_FSYNC). */
+    syncPolicy?: BlockSyncPolicy;
     /** Never modify the directory (no torn-tail truncation, `put`/`gc` refused): for a running node's files. */
     readOnly?: boolean;
 }
@@ -44,10 +60,14 @@ export class VolatileStore {
     private readonly perFile = new Map<number, Set<string>>();
     private currentFile = 0;
     private currentCount = 0;
+    readonly syncPolicy: BlockSyncPolicy;
+    /** Files written since the last `flush()` (batched policy). */
+    private readonly unsynced = new Set<number>();
 
     private constructor(dir: string, opts: VolatileStoreOptions) {
         this.dir = dir;
         this.blocksPerFile = opts.blocksPerFile ?? 1000;
+        this.syncPolicy = opts.syncPolicy ?? blockSyncPolicy();
         this.readOnly = !!opts.readOnly;
     }
 
@@ -96,9 +116,14 @@ export class VolatileStore {
                 }
                 if (len <= 0 || p + len > bytes.length) break; // torn tail
                 const blk = bytes.slice(p, p + len);
-                const h = locateHeader(blk);
-                const slot = slotOf(blk, h);
-                this.remember({ hash: VolatileStore.hashOf(blk, h), prevHash: prevHashOf(blk, h), slot, bytes: blk, headerOffset: h.headerOffset, headerSize: h.headerSize, eraTag: h.eraTag, fileNo });
+                let rec: VolatileBlock;
+                try {
+                    const h = locateHeader(blk);
+                    rec = { hash: VolatileStore.hashOf(blk, h), prevHash: prevHashOf(blk, h), slot: slotOf(blk, h), bytes: blk, headerOffset: h.headerOffset, headerSize: h.headerSize, eraTag: h.eraTag, fileNo };
+                } catch {
+                    break; // not a block: a tail the OS zero-filled or cut after a power loss (writes are batched, bug 384)
+                }
+                this.remember(rec);
                 p += len;
                 good = p;
                 count++;
@@ -163,14 +188,39 @@ export class VolatileStore {
         const fh = await openFile(path, "a");
         try {
             await fh.write(bytes);
-            await fh.sync();
+            if (this.syncPolicy === "block") await fh.sync();
         } finally {
             await fh.close();
         }
+        if (this.syncPolicy === "batch") this.unsynced.add(this.currentFile);
         this.currentCount++;
         const b: VolatileBlock = { hash: hh, prevHash: prevHashOf(bytes, h), slot: slotOf(bytes, h), bytes, headerOffset: h.headerOffset, headerSize: h.headerSize, eraTag: h.eraTag, fileNo: this.currentFile };
         this.remember(b);
         return b;
+    }
+
+    /** Blocks written but not yet durable (batched policy): the count of files to sync. */
+    pendingFiles(): number {
+        return this.unsynced.size;
+    }
+
+    /**
+     * Make every block written so far durable: fdatasync each file touched since the last flush (in
+     * parallel). Called once per applied range before its commit, and before a promotion into the chunks.
+     */
+    async flush(): Promise<number> {
+        if (!this.unsynced.size) return 0;
+        const files = [...this.unsynced];
+        this.unsynced.clear();
+        await Promise.all(files.map(async (fileNo) => {
+            let fh;
+            try { fh = await openFile(join(this.dir, `blocks-${fileNo}.dat`), "r+"); }
+            catch (err) { if ((err as NodeJS.ErrnoException).code === "ENOENT") return; this.unsynced.add(fileNo); throw err; } // collected meanwhile
+            try { await fh.datasync(); }
+            catch (err) { this.unsynced.add(fileNo); throw err; }
+            finally { await fh.close(); }
+        }));
+        return files.length;
     }
 
     /**
@@ -193,6 +243,7 @@ export class VolatileStore {
                 this.currentCount = 0;
             }
             await rm(join(this.dir, `blocks-${fileNo}.dat`), { force: true });
+            this.unsynced.delete(fileNo);
             for (const k of keys) this.byHash.delete(k);
             removed += keys.size;
             this.perFile.delete(fileNo);

@@ -217,7 +217,7 @@ export class TxContext {
     readonly proposals: CNode[];
     readonly datums: Map<string, { hash: Uint8Array; data: Data }>;
     /** Witness-set Plutus scripts by hash (hex): language and the script bytes (CBOR-wrapped flat). */
-    readonly witnessScripts = new Map<string, { lang: 1 | 2 | 3; bytes: Uint8Array }>();
+    readonly witnessScripts = new Map<string, { lang: 1 | 2 | 3 | 4; bytes: Uint8Array }>();
     private readonly input: ContextInput;
     private infoCache = new Map<number, Data | ContextError>();
 
@@ -256,7 +256,9 @@ export class TxContext {
             const hash = blake2b_256(bytes);
             this.datums.set(toHex(hash), { hash, data: decodeData(bytes) });
         }
-        for (const [key, lang] of [[3, 1], [6, 2], [7, 3]] as const) {
+        // Dijkstra adds witness key 8 (Plutus V4, script hash prefix 4; bug 433)
+        const scriptKeys: ReadonlyArray<readonly [number, 1 | 2 | 3 | 4]> = this.era >= 8 ? [[3, 1], [6, 2], [7, 3], [8, 4]] : [[3, 1], [6, 2], [7, 3]];
+        for (const [key, lang] of scriptKeys) {
             for (const s of arr(field(this.wits, key))) { const b = bytesOf(s); this.witnessScripts.set(toHex(scriptHashOf(lang, b)), { lang, bytes: b }); }
         }
         // effective redeemers: list form keeps the last per purpose (Map.fromList), sorted by pointer

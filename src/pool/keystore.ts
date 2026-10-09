@@ -198,6 +198,38 @@ export function kesVerifyAt(signature: Uint8Array, evolution: number, vkey: Uint
     return kesVerify(signature, evolution, vkey, message);
 }
 
+/**
+ * A KES key as a kes-agent pushes it: the 608-byte Sum6 body followed by the u32 BE period, the
+ * same layout this module keeps in memory. The bytes are copied (the caller zeroes its buffer).
+ */
+export function kesKeyFromAgent(skeyWithPeriod: Uint8Array): KesKey {
+    if (skeyWithPeriod.length !== KES_SK_WITH_PERIOD_BYTES) throw new Error(`KES secret: ${skeyWithPeriod.length} bytes, expected ${KES_SK_WITH_PERIOD_BYTES}`);
+    const skey = Uint8Array.from(skeyWithPeriod);
+    try {
+        if (kes_get_period(skey) > KES_MAX_EVOLUTIONS) throw new Error(`KES key period ${kes_get_period(skey)} is past ${KES_MAX_EVOLUTIONS}`);
+        return { skey, vkey: kes_to_pk(skey) };
+    } catch (err) {
+        zeroise(skey);
+        throw err;
+    }
+}
+
+const KES_PROBE_MESSAGE = new TextEncoder().encode("gerolamo kes key probe");
+
+/**
+ * Sign a fixed message with the key at its current evolution and verify it against `vkey`
+ * (Dingo's self-sign probe): proves a key received from elsewhere really signs for the
+ * certificate's KES key before it is installed.
+ */
+export function kesProbe(key: KesKey, vkey: Uint8Array): boolean {
+    try {
+        const evolution = kesEvolution(key);
+        return kesVerify(kesSign(key.skey, KES_PROBE_MESSAGE), evolution, vkey, KES_PROBE_MESSAGE);
+    } catch {
+        return false;
+    }
+}
+
 // ─────────────────────────── VRF ───────────────────────────
 
 export interface VrfKey {

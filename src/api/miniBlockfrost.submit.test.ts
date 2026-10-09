@@ -33,22 +33,22 @@ describe("POST /api/v0/tx/submit", () => {
             seen.push(toHex(id));
             return { status: "success", nTxs: 1, availableSpace: 1000 };
         });
-        expect(res?.status).toBe(202);
-        const j = (await res!.json()) as any;
-        expect(j.hash).toBe(txId);
+        // Blockfrost: 200 with the transaction id as a JSON string; the mempool verdict in headers
+        expect(res?.status).toBe(200);
+        expect(await res!.json()).toBe(txId);
         expect(seen).toEqual([txId]);
-        expect(j.mempool.nTxs).toBe(1);
-        expect(j.status).toBe("accepted");
+        expect(res!.headers.get("X-Gerolamo-Mempool-Txs")).toBe("1");
+        expect(res!.headers.get("X-Gerolamo-Mempool-Status")).toBe("success");
     });
 
     test("hex text body is accepted too", async () => {
         const { cbor, txId } = fixtureTx();
         const res = await post(toHex(cbor), "text/plain", async () => ({ status: "success", nTxs: 1, availableSpace: 1 }));
-        expect(res?.status).toBe(202);
-        expect(((await res!.json()) as any).hash).toBe(txId);
+        expect(res?.status).toBe(200);
+        expect(await res!.json()).toBe(txId);
     });
 
-    test("undecodable CBOR is a 400, not a fire-and-forget 202", async () => {
+    test("undecodable CBOR is a 400, not a fire-and-forget success", async () => {
         let called = false;
         const res = await post(new Uint8Array([0x01, 0x02, 0x03]), "application/cbor", async () => {
             called = true;

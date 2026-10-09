@@ -27,7 +27,11 @@ export const EPOCH_PREFIXED = new Set([
  * later and hide them. They share the stake snapshot's credential window.
  */
 export const WINDOW_OF: Record<string, string> = { snap_pool_zero: "snap_cred" };
-export const INFORMATIONAL = new Set(["meta"]);
+/**
+ * `utxo_idx` (utxoIndex.ts) is derived from `utxo`: a backfilled store may hold keys of outputs spent
+ * meanwhile (they read as nothing), and a store from before it has none; `utxo` itself is compared.
+ */
+export const INFORMATIONAL = new Set(["meta", "utxo_idx"]);
 /** u64 counter databases (values printed as numbers). */
 const COUNTERS = new Set(["reward", "stake_bal", "utxo_stats", "pots", "blocks_made", "pending_rew", "counters", "drep_stake", "reward_payouts", "snap_pool"]);
 

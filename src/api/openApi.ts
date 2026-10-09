@@ -12,6 +12,9 @@
  * Local Blockfrost-subset explorer only. No external LLM. No ledger writes.
  */
 
+import { blockfrostRouter } from "./miniBlockfrost";
+import vendored from "./blockfrost/blockfrost-openapi.responses.json";
+
 export type OpenApiCtx = {
     network?: string;
     port?: number;
@@ -35,6 +38,28 @@ function json(data: unknown, status = 200): Response {
             ...CORS_HEADERS,
         },
     });
+}
+
+/** One OpenAPI operation per route of the Blockfrost router, with Blockfrost's own 200 schema where it has one. */
+function blockfrostPaths(okJson: (d: string, s?: Record<string, unknown>) => unknown): Record<string, Record<string, unknown>> {
+    const schemas = (vendored as { paths: Record<string, Record<string, unknown>> }).paths;
+    const err = (d: string) => okJson(d, { type: "object", properties: { status_code: { type: "integer" }, error: { type: "string" }, message: { type: "string" } }, required: ["status_code", "error", "message"] });
+    const out: Record<string, Record<string, unknown>> = {};
+    for (const r of blockfrostRouter.list()) {
+        const key = "/api/v0" + (r.path === "/" ? "/" : r.path);
+        const params = [...r.path.matchAll(/\{([^}]+)\}/g)].map((m) => ({ name: m[1], in: "path", required: true, schema: { type: "string" } }));
+        const paged = r.method === "GET" && /s$|\/(txs|utxos|history|addresses|delegators|blocks|updates|votes|redeemers|next|previous|stakes|registrations|delegations|withdrawals|mirs|rewards|transactions|labels|\{label\}|cbor)$/.test(r.path);
+        const query = paged ? ["count", "page", "order"].map((n) => ({ name: n, in: "query", required: false, schema: n === "order" ? { type: "string", enum: ["asc", "desc"] } : { type: "integer" } })) : [];
+        (out[key] ??= {})[r.method.toLowerCase()] = {
+            tags: [r.path.split("/")[1] || "root"],
+            summary: schemas[r.path] ? `Blockfrost ${r.path}` : `Gerolamo extension ${r.path}`,
+            operationId: `${r.method.toLowerCase()}${r.path.replace(/[{}]/g, "").replace(/\/(\w)/g, (_m, c: string) => c.toUpperCase()).replace(/[^A-Za-z0-9]/g, "")}` || "getRoot",
+            parameters: [...params, ...query],
+            ...(r.method === "POST" ? { requestBody: { content: { "application/cbor": { schema: { type: "string", format: "binary" } }, "application/json": { schema: { type: "object" } } } } } : {}),
+            responses: { "200": okJson("OK", (schemas[r.path] as Record<string, unknown>) ?? { type: "object" }), "400": err("Bad Request"), "404": err("Not Found") },
+        };
+    }
+    return out;
 }
 
 function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
@@ -63,14 +88,15 @@ function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
     return {
         openapi: "3.0.3",
         info: {
-            title: "Gerolamo MiniBF",
-            version: "0.5.0",
+            title: "Gerolamo mini-Blockfrost",
+            version: "0.1.92",
             description: [
-                "Blockfrost-compatible **subset** for dApps/wallets on this Gerolamo node.",
+                "Blockfrost-compatible API (paths and response schemas of Blockfrost OpenAPI 0.1.92) served by this Gerolamo node.",
                 "",
-                "- Forward index writes `mb_*` projections (+ legacy `tx_index` / `address_tx` / `block_tx`).",
-                "- History needs Phase-3 backfill on `.live` only (`scripts/backfill-minibf.mjs`).",
-                "- Consensus never reads `mb_*`. Empty history ≠ broken route when lag > 0.",
+                "- Current state (accounts, pools, DReps, proposals, UTxOs) comes from the node's ledger store.",
+                "- History (transactions, assets, metadata, certificates, scripts) comes from the explorer projection (`mb_*`).",
+                "- Errors are Blockfrost bodies `{status_code, error, message}`; `count` / `page` / `order` as Blockfrost.",
+                "- Coverage and known differences: docs/parity/blockfrost.md.",
                 `- Network: \`${network}\`.`,
             ].join("\n"),
             contact: { name: "Harmonic Labs / Gerolamo" },
@@ -90,464 +116,7 @@ function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
             { name: "mempool", description: "Local mempool" },
             { name: "submit", description: "Tx submission" },
         ],
-        paths: {
-            "/api/v0/": {
-                get: {
-                    tags: ["root"],
-                    summary: "API root",
-                    operationId: "getRoot",
-                    responses: {
-                        "200": okJson("version + endpoint list", {
-                            type: "object",
-                            properties: {
-                                url: { type: "string" },
-                                version: { type: "string", example: "0.5.0" },
-                                node: { type: "string" },
-                                network: { type: "string" },
-                                endpoints: {
-                                    type: "array",
-                                    items: { type: "string" },
-                                },
-                                note: { type: "string" },
-                            },
-                        }),
-                    },
-                },
-            },
-            "/api/v0/health": {
-                get: {
-                    tags: ["root"],
-                    summary: "Health",
-                    operationId: "getHealth",
-                    responses: {
-                        "200": okJson("is_healthy", {
-                            type: "object",
-                            properties: {
-                                is_healthy: { type: "boolean" },
-                            },
-                        }),
-                    },
-                },
-            },
-            "/api/v0/network": {
-                get: {
-                    tags: ["network"],
-                    summary: "Network snapshot",
-                    description:
-                        "Tip + UTxO count + mb_*/legacy index density and lag_slots.",
-                    operationId: "getNetwork",
-                    responses: {
-                        "200": okJson("tip + index", {
-                            type: "object",
-                            properties: {
-                                supply: { type: "object" },
-                                stake: { type: "object" },
-                                tip: {
-                                    type: "object",
-                                    properties: {
-                                        slot: { type: "string" },
-                                        hash: {
-                                            type: "string",
-                                            nullable: true,
-                                        },
-                                        epoch: {
-                                            type: "integer",
-                                            nullable: true,
-                                        },
-                                        epoch_nonce: {
-                                            type: "string",
-                                            nullable: true,
-                                        },
-                                    },
-                                },
-                                utxo_count: { type: "integer" },
-                                index: {
-                                    type: "object",
-                                    properties: {
-                                        tx_index: { type: "integer" },
-                                        address_tx: { type: "integer" },
-                                        mb_tx: { type: "integer" },
-                                        mb_cursor_slot: { type: "integer" },
-                                        lag_slots: { type: "integer" },
-                                    },
-                                },
-                                note: { type: "string" },
-                            },
-                        }),
-                    },
-                },
-            },
-            "/api/v0/epochs/latest": {
-                get: {
-                    tags: ["epochs"],
-                    summary: "Latest epoch",
-                    operationId: "getEpochsLatest",
-                    responses: {
-                        "200": okJson("epoch derived from tip slot"),
-                    },
-                },
-            },
-            "/api/v0/epochs/latest/parameters": {
-                get: {
-                    tags: ["epochs"],
-                    summary: "Latest epoch parameters",
-                    description:
-                        "From protocol_params table when populated; else sparse/null fields.",
-                    operationId: "getEpochsLatestParameters",
-                    responses: {
-                        "200": okJson("protocol parameters subset"),
-                    },
-                },
-            },
-            "/api/v0/blocks": {
-                get: {
-                    tags: ["blocks"],
-                    summary: "Blocks newest first (Gerolamo extension: Blockfrost has no list endpoint)",
-                    operationId: "listBlocks",
-                    parameters: [
-                        { name: "limit", in: "query", schema: { type: "integer", default: 20, maximum: 100 } },
-                        { name: "before", in: "query", schema: { type: "string" }, description: "exclusive cursor: a slot number or a 64-hex block hash" },
-                    ],
-                    responses: { "200": okJson("BlockContent[] with height, time, epoch, epoch_slot, slot_leader, size, tx_count, previous/next_block, confirmations") },
-                },
-            },
-            "/api/v0/blocks/slot/{slot}": {
-                get: {
-                    tags: ["blocks"],
-                    summary: "Block by absolute slot",
-                    operationId: "getBlockBySlot",
-                    parameters: [{ name: "slot", in: "path", required: true, schema: { type: "integer" } }],
-                    responses: { "200": okJson("BlockContent"), "404": okJson("no block in that slot") },
-                },
-            },
-            "/api/v0/blocks/height/{height}": {
-                get: {
-                    tags: ["blocks"],
-                    summary: "Block by chain height (alias: a bare number in {hash_or_number} is a height, as in Blockfrost)",
-                    operationId: "getBlockByHeight",
-                    parameters: [{ name: "height", in: "path", required: true, schema: { type: "integer" } }],
-                    responses: { "200": okJson("BlockContent"), "404": okJson("no block at that height") },
-                },
-            },
-            "/api/v0/blocks/{hash_or_number}/previous": {
-                get: {
-                    tags: ["blocks"],
-                    summary: "Blocks before a block, newest first",
-                    operationId: "getBlockPrevious",
-                    parameters: [
-                        { name: "hash_or_number", in: "path", required: true, schema: { type: "string" } },
-                        { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 100 } },
-                    ],
-                    responses: { "200": okJson("BlockContent[]") },
-                },
-            },
-            "/api/v0/blocks/{hash_or_number}/next": {
-                get: {
-                    tags: ["blocks"],
-                    summary: "Blocks after a block, oldest first",
-                    operationId: "getBlockNext",
-                    parameters: [
-                        { name: "hash_or_number", in: "path", required: true, schema: { type: "string" } },
-                        { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 100 } },
-                    ],
-                    responses: { "200": okJson("BlockContent[]") },
-                },
-            },
-            "/api/v0/epochs/{number}": {
-                get: {
-                    tags: ["epochs"],
-                    summary: "Epoch summary from slot geometry and stored blocks",
-                    operationId: "getEpoch",
-                    parameters: [{ name: "number", in: "path", required: true, schema: { type: "integer" } }],
-                    responses: { "200": okJson("EpochContent + first_block/last_block/first_slot/last_slot/synced") },
-                },
-            },
-            "/api/v0/epochs/{number}/blocks": {
-                get: {
-                    tags: ["epochs"],
-                    summary: "Block hashes of an epoch, oldest first",
-                    operationId: "getEpochBlocks",
-                    parameters: [
-                        { name: "number", in: "path", required: true, schema: { type: "integer" } },
-                        { name: "page", in: "query", schema: { type: "integer", default: 1 } },
-                        { name: "count", in: "query", schema: { type: "integer", default: 100, maximum: 100 } },
-                    ],
-                    responses: { "200": okJson("string[]") },
-                },
-            },
-            "/api/v0/epochs/{number}/parameters": {
-                get: {
-                    tags: ["epochs"],
-                    summary: "Stored protocol parameters of an epoch",
-                    operationId: "getEpochParameters",
-                    parameters: [{ name: "number", in: "path", required: true, schema: { type: "integer" } }],
-                    responses: { "200": okJson("EpochParamContent"), "404": okJson("not stored") },
-                },
-            },
-            "/api/v0/epochs/{number}/next": {
-                get: { tags: ["epochs"], summary: "Following epochs", operationId: "getEpochNext", parameters: [{ name: "number", in: "path", required: true, schema: { type: "integer" } }, { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 20 } }], responses: { "200": okJson("EpochContent[]") } },
-            },
-            "/api/v0/epochs/{number}/previous": {
-                get: { tags: ["epochs"], summary: "Preceding epochs", operationId: "getEpochPrevious", parameters: [{ name: "number", in: "path", required: true, schema: { type: "integer" } }, { name: "count", in: "query", schema: { type: "integer", default: 1, maximum: 20 } }], responses: { "200": okJson("EpochContent[]") } },
-            },
-            "/api/v0/search": {
-                get: {
-                    tags: ["explorer"],
-                    summary: "Resolve a search box query: tx hash, block hash, height/slot, address, stake key, pool",
-                    operationId: "search",
-                    parameters: [{ name: "q", in: "query", required: true, schema: { type: "string" } }],
-                    responses: { "200": okJson("{ kind: tx|block|address|stake|pool|unknown, id, height?, slot? }") },
-                },
-            },
-            "/api/v0/blocks/latest": {
-                get: {
-                    tags: ["blocks"],
-                    summary: "Latest block",
-                    operationId: "getBlocksLatest",
-                    responses: {
-                        "200": okJson("tip block summary"),
-                        "404": okJson("no tip"),
-                    },
-                },
-            },
-            "/api/v0/blocks/{hash_or_number}": {
-                get: {
-                    tags: ["blocks"],
-                    summary: "Block by slot or hash",
-                    operationId: "getBlock",
-                    parameters: [
-                        pathParam(
-                            "hash_or_number",
-                            "Decimal slot or 64-hex block hash",
-                        ),
-                    ],
-                    responses: {
-                        "200": okJson("block summary"),
-                        "404": okJson("not found"),
-                    },
-                },
-            },
-            "/api/v0/blocks/{hash_or_number}/txs": {
-                get: {
-                    tags: ["blocks"],
-                    summary: "Tx hashes in block",
-                    description: "Prefers mb_block_tx; falls back to legacy block_tx.",
-                    operationId: "getBlockTxs",
-                    parameters: [
-                        pathParam(
-                            "hash_or_number",
-                            "Decimal slot or 64-hex block hash",
-                        ),
-                    ],
-                    responses: {
-                        "200": okJson("array of tx hashes"),
-                        "404": okJson("block not found"),
-                    },
-                },
-            },
-            "/api/v0/addresses/{address}": {
-                get: {
-                    tags: ["addresses"],
-                    summary: "Address summary",
-                    operationId: "getAddress",
-                    parameters: [
-                        pathParam("address", "Bech32 address (addr… / stake…)"),
-                    ],
-                    responses: {
-                        "200": okJson(
-                            "amount + tx_count (tx_count from mb_address_tx when present)",
-                        ),
-                    },
-                },
-            },
-            "/api/v0/addresses/{address}/utxos": {
-                get: {
-                    tags: ["addresses"],
-                    summary: "Address UTxOs",
-                    description: "Live UTxO set for address (not historical).",
-                    operationId: "getAddressUtxos",
-                    parameters: [
-                        pathParam("address", "Bech32 address"),
-                    ],
-                    responses: {
-                        "200": okJson("array of UTxOs"),
-                    },
-                },
-            },
-            "/api/v0/addresses/{address}/utxos/{asset}": {
-                get: {
-                    tags: ["addresses"],
-                    summary: "Address UTxOs filtered by asset",
-                    description:
-                        "Live UTxO set for the address containing the 56-hex policy plus asset-name unit.",
-                    operationId: "getAddressAssetUtxos",
-                    parameters: [
-                        pathParam("address", "Bech32 address"),
-                        pathParam("asset", "Policy id + asset-name hex"),
-                    ],
-                    responses: {
-                        "200": okJson("array of matching UTxOs"),
-                    },
-                },
-            },
-            "/api/v0/addresses/{address}/transactions": {
-                get: {
-                    tags: ["addresses"],
-                    summary: "Address transactions",
-                    description:
-                        "Paginated via ?count=&page=. Needs mb_address_tx / backfill for history.",
-                    operationId: "getAddressTransactions",
-                    parameters: [
-                        pathParam("address", "Bech32 address"),
-                        {
-                            name: "count",
-                            in: "query",
-                            required: false,
-                            schema: {
-                                type: "integer",
-                                minimum: 1,
-                                maximum: 100,
-                                default: 20,
-                            },
-                        },
-                        {
-                            name: "page",
-                            in: "query",
-                            required: false,
-                            schema: {
-                                type: "integer",
-                                minimum: 1,
-                                default: 1,
-                            },
-                        },
-                    ],
-                    responses: {
-                        "200": okJson("array of {tx_hash,slot,direction}"),
-                    },
-                },
-            },
-            "/api/v0/scripts/{hash}/cbor": {
-                get: {
-                    tags: ["scripts"],
-                    summary: "Reference script CBOR",
-                    description:
-                        "Resolves a reference script currently present in the ledger UTxO set.",
-                    operationId: "getScriptCbor",
-                    parameters: [
-                        pathParam("hash", "56-hex script hash"),
-                    ],
-                    responses: {
-                        "200": okJson("{cbor}"),
-                        "404": okJson("reference script not found"),
-                    },
-                },
-            },
-            "/api/v0/txs/{hash}": {
-                get: {
-                    tags: ["txs"],
-                    summary: "Transaction by hash",
-                    description:
-                        "Prefers mb_tx; falls back to legacy tx_index. Many BF fields null.",
-                    operationId: "getTx",
-                    parameters: [
-                        pathParam("hash", "64-hex transaction hash"),
-                    ],
-                    responses: {
-                        "200": okJson("tx subset"),
-                        "404": okJson("not indexed"),
-                    },
-                },
-            },
-            "/api/v0/txs/{hash}/utxos": {
-                get: {
-                    tags: ["txs"],
-                    summary: "Transaction UTxOs (full IO when indexed)",
-                    description:
-                        "Prefers mb_tx_in/mb_tx_out full IO; falls back to unspent outs in live UTxO set.",
-                    operationId: "getTxUtxos",
-                    parameters: [
-                        pathParam("hash", "64-hex transaction hash"),
-                    ],
-                    responses: {
-                        "200": okJson("inputs + outputs"),
-                    },
-                },
-            },
-            "/api/v0/txs/{hash}/utxos/{index}": {
-                get: {
-                    tags: ["txs"],
-                    summary: "Single tx output if unspent",
-                    operationId: "getTxUtxoByIndex",
-                    parameters: [
-                        pathParam("hash", "64-hex transaction hash"),
-                        pathParam("index", "Output index (decimal)"),
-                    ],
-                    responses: {
-                        "200": okJson("single UTxO"),
-                        "404": okJson("spent or missing"),
-                    },
-                },
-            },
-            "/api/v0/mempool": {
-                get: {
-                    tags: ["mempool"],
-                    summary: "Local mempool",
-                    operationId: "getMempool",
-                    responses: {
-                        "200": okJson("SharedMempool snapshot"),
-                    },
-                },
-            },
-            "/api/v0/tx/submit": {
-                post: {
-                    tags: ["submit"],
-                    summary: "Submit raw transaction",
-                    description:
-                        "Body: raw CBOR bytes (application/cbor) or hex text. Relayed to hot peers when manager available.",
-                    operationId: "submitTx",
-                    requestBody: {
-                        required: true,
-                        content: {
-                            "application/cbor": {
-                                schema: {
-                                    type: "string",
-                                    format: "binary",
-                                },
-                            },
-                            "application/octet-stream": {
-                                schema: {
-                                    type: "string",
-                                    format: "binary",
-                                },
-                            },
-                            "text/plain": {
-                                schema: {
-                                    type: "string",
-                                    description: "hex-encoded CBOR",
-                                },
-                            },
-                        },
-                    },
-                    responses: {
-                        "202": okJson("accepted into the local mempool: { hash (tx id = body hash), status, mempool: { status, nTxs, availableSpace } }"),
-                        "400": okJson("undecodable CBOR or mempool rejection"),
-                        "503": okJson("no hot peer / submit path unavailable"),
-                    },
-                },
-            },
-            "/api/v0/mempool/{hash}": {
-                get: {
-                    tags: ["mempool"],
-                    summary: "Is a transaction still in the local mempool",
-                    operationId: "getMempoolTx",
-                    parameters: [{ name: "hash", in: "path", required: true, schema: { type: "string" } }],
-                    responses: {
-                        "200": okJson("{ tx_hash, in_mempool: true, size }"),
-                        "404": okJson("not in the local mempool"),
-                    },
-                },
-            },
-        },
+        paths: blockfrostPaths(okJson),
         externalDocs: {
             description: "Live stats dashboard",
             url: "/stats",

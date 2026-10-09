@@ -160,9 +160,9 @@ async function replayIncident(withN2 = true): Promise<FakePeer> {
     for (const p of [old!, relay!, v2!]) orch.registerHotPeer(p.peerKey);
     expect(orch.primaryPeerKey()).toBe(old!.peerKey);
     // fragments as they stood at 10:03:57: the old primary and the relay on …A, L; the third peer on …A, N
-    for (const b of [P, ...W, L]) orch.candidates.observe(old!.peerKey, { slot: b.slot, hash: b.hash });
-    for (const b of [...W, L]) orch.candidates.observe(relay!.peerKey, { slot: b.slot, hash: b.hash });
-    for (const b of [...W, N]) orch.candidates.observe(v2!.peerKey, { slot: b.slot, hash: b.hash });
+    for (const b of [P, ...W, L]) orch.candidates.observe(old!.peerKey, { slot: b.slot, hash: b.hash, prevHash: b.prev });
+    for (const b of [...W, L]) orch.candidates.observe(relay!.peerKey, { slot: b.slot, hash: b.hash, prevHash: b.prev });
+    for (const b of [...W, N]) orch.candidates.observe(v2!.peerKey, { slot: b.slot, hash: b.hash, prevHash: b.prev });
 
     relay!.gate = new Promise<void>((r) => { (relay as any).open = r; });
     v2!.gate = relay!.gate; old!.gate = relay!.gate;
@@ -189,6 +189,24 @@ afterAll(async () => {
     configureLedgerStore("sqlite");
     setNodeBlockStore(null);
     rmSync(dir, { recursive: true, force: true });
+});
+
+describe("a promoted primary with nothing past our tip keeps its stream (bug 388)", () => {
+    test("no ChainSync restart when the fragment holds no header beyond our tip; restart when it holds unchained ones", async () => {
+        await scenario("n-wins", true);
+        const o = orch as any;
+        const [, relay] = KEYS.map((k) => peers.get(k)!);
+        orch.registerHotPeer(relay!.peerKey);
+        relay!.chainSyncInFlight = 21; // pipelined requests outstanding at the tip
+        // our tip is P; the peer's fragment holds only P (nothing past the tip): keep the stream
+        orch.candidates.observe(relay!.peerKey, { slot: P.slot, hash: P.hash, prevHash: P.prev });
+        await o.anchorPromotedPrimary(relay, relay!.peerKey, true, "test");
+        expect(relay!.restarts).toEqual([]);
+        // headers past our tip that do not chain onto it (W2 without W1): a restart is right
+        orch.candidates.observe(relay!.peerKey, { slot: W[1]!.slot, hash: W[1]!.hash, prevHash: W[1]!.prev });
+        await o.anchorPromotedPrimary(relay, relay!.peerKey, true, "test");
+        expect(relay!.restarts.length).toBe(1);
+    }, 60_000);
 });
 
 describe("legacy chain following: a primary switch onto a branch that loses a slot battle 0.2 s later (bug 284)", () => {

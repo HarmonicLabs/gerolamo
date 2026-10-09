@@ -14,6 +14,9 @@ import { BYRON_EBB_ERA, BYRON_MAIN_ERA, isByronEra } from "./blockHeaderParser";
  *   Shelley…Mary : blake2b-256( h(tx_bodies) ‖ h(tx_witness_sets) ‖ h(auxiliary_data_set) )
  *   Alonzo+      : blake2b-256( h(tx_bodies) ‖ h(tx_witness_sets) ‖ h(auxiliary_data_set) ‖ h(invalid_transactions) )
  *   where each h(x) is blake2b-256 over x's raw CBOR bytes exactly as they appear in the block.
+ *   Dijkstra     : block = [header, block_body]; blake2b-256( block_body ) over its raw bytes
+ *                  (cardano-ledger BlockBody/Internal.hs `hashBlockBody` = hash of the memoised bytes),
+ *                  and the header's block_body_size must equal the length of those bytes (bug 426).
  *
  * Byron main block (`blockproof = [txProof, sscProof, dlgProof, updProof]`, cardano-ledger-byron):
  *   txProof  = [n, merkleRoot(txs), blake2b-256(0x9f ‖ witnesses… ‖ 0xff)]
@@ -90,8 +93,27 @@ export function shelleyHeaderBodyHash(era: number, rawHeader: Uint8Array): Uint8
     return item.bytes;
 }
 
+/** Ledger era tag of Dijkstra blocks. */
+export const DIJKSTRA_ERA = 8;
+
+/** The raw `block_body` of a Dijkstra block `[header, block_body]`. */
+export function dijkstraBlockBodyBytes(rawBlock: Uint8Array): Uint8Array {
+    const block = lazyArray(rawBlock, "dijkstra block");
+    if (block.array.length !== 2) throw new Error(`bodyHash: dijkstra block has ${block.array.length} elements, expected [header, block_body]`);
+    return block.array[1]!;
+}
+
+/** The header's `block_body_size` (Praos header body index 6, Babbage+). */
+export function praosHeaderBodySize(rawHeader: Uint8Array): number {
+    const header = lazyArray(rawHeader, "praos header");
+    const body = Cbor.parse(header.array[0]!);
+    if (!(body instanceof CborArray) || !(body.array[6] instanceof CborUInt)) throw new Error("bodyHash: block_body_size field missing");
+    return Number(body.array[6].num);
+}
+
 /** Recompute `block_body_hash` from the raw block `[header, tx_bodies, tx_witness_sets, aux, (invalid)]`. */
 export function computeShelleyBodyHash(era: number, rawBlock: Uint8Array): Uint8Array {
+    if (era >= DIJKSTRA_ERA) return blake2b_256(dijkstraBlockBodyBytes(rawBlock));
     const block = lazyArray(rawBlock, "shelley block");
     const parts = block.array;
     if (parts.length < 4) throw new Error("bodyHash: shelley block has fewer than 4 elements");
@@ -248,6 +270,19 @@ export function verifyBlockBodyHash(blockData: Uint8Array): BodyHashResult {
 
     const expected = shelleyHeaderBodyHash(era, rawHeader);
     const actual = computeShelleyBodyHash(era, rawBlock);
+    if (era >= DIJKSTRA_ERA) {
+        // BBODY WrongBlockBodySizeBBODY: the size commitment is checked with the hash
+        const declared = praosHeaderBodySize(rawHeader);
+        const size = dijkstraBlockBodyBytes(rawBlock).length;
+        const hashOk = uint8ArrayEq(expected, actual);
+        return {
+            ok: hashOk && declared === size,
+            era,
+            expected: toHex(expected),
+            actual: toHex(actual),
+            ...(declared !== size ? { detail: `block_body_size ${declared} in the header, body is ${size} bytes` } : {}),
+        };
+    }
     return {
         ok: uint8ArrayEq(expected, actual),
         era,

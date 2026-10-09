@@ -8,7 +8,7 @@ import { SQL } from "bun";
 import { existsSync } from "node:fs";
 import { logger } from "../../utils/logger";
 import { sql } from "../../sql";
-import type { MbTxDelta } from "./writer";
+import type { MbBlockMsg, MbTxDelta } from "./writer";
 
 const BATCH_ITEMS = 64;
 const BATCH_MS = 40;
@@ -19,7 +19,7 @@ const BUSY_TX_PER_SEC = 20;
 class ExplorerIndexer {
     private worker: Worker | null = null;
     private ready: Promise<void> | null = null;
-    private buffer: MbTxDelta[] = [];
+    private buffer: Array<MbTxDelta | MbBlockMsg> = [];
     private timer: ReturnType<typeof setTimeout> | null = null;
     private seq = 0;
     private outstanding = 0;
@@ -84,6 +84,14 @@ class ExplorerIndexer {
     async enqueue(d: MbTxDelta): Promise<void> {
         this.enqueued++;
         this.buffer.push(d);
+        if (this.buffer.length >= BATCH_ITEMS) this.post();
+        else if (!this.timer) this.timer = setTimeout(() => this.post(), BATCH_MS);
+        if (this.outstanding >= MAX_OUTSTANDING) await new Promise<void>((r) => this.drainWaiters.push(r));
+    }
+
+    /** Queue a block for the v2 indexes, ordered after its transactions' deltas. */
+    async enqueueBlock(m: MbBlockMsg): Promise<void> {
+        this.buffer.push(m);
         if (this.buffer.length >= BATCH_ITEMS) this.post();
         else if (!this.timer) this.timer = setTimeout(() => this.post(), BATCH_MS);
         if (this.outstanding >= MAX_OUTSTANDING) await new Promise<void>((r) => this.drainWaiters.push(r));

@@ -1,4 +1,7 @@
 /**
+ * Legacy staged Mithril checks (kept for the browser node and diagnostics).
+ * The production verifier is src/mithril/verify (full STM + chain, port of mithril-common).
+ *
  * Pure-TS Mithril crypto path.
  *
  * Stage 1: cert shape parse (AVK + multi_signature hex→JSON).

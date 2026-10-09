@@ -27,12 +27,19 @@ export function persistSelectedTipTo(path: string | null): void {
 
 export function setSelectedTipHash(hash: Uint8Array | null): void {
     selectedTipHash = hash;
-    if (persistPath && hash) {
-        if (persistTimer) clearTimeout(persistTimer);
-        const p = persistPath, h = hex(hash);
-        // Temp file + rename: an in-place rewrite cut short by a crash leaves an empty file, which silently
-        // drops the "persisted tip" startup candidate (bug 245: the producer restarted at the SQLite journal's tip).
-        persistTimer = setTimeout(() => { persistTimer = null; try { writeFileSync(p + ".tmp", h); renameSync(p + ".tmp", p); } catch { /* best effort: the ledger journal / volatile chain top are the fallbacks */ } }, 200);
+    // Throttled, not debounced: at most 200 ms after a change the newest tip is on disk. A debounce restarted by
+    // every block never fired during catch-up (blocks every few ms), the file fell behind the immutable tip and
+    // the next start refused primary mode (bug 387, server run 2026-10-07 18:37 UTC).
+    if (persistPath && hash && !persistTimer) {
+        const p = persistPath;
+        persistTimer = setTimeout(() => {
+            persistTimer = null;
+            const cur = selectedTipHash;
+            if (!cur || persistPath !== p) return;
+            // Temp file + rename: an in-place rewrite cut short by a crash leaves an empty file, which silently
+            // drops the "persisted tip" startup candidate (bug 245: the producer restarted at the SQLite journal's tip).
+            try { writeFileSync(p + ".tmp", hex(cur)); renameSync(p + ".tmp", p); } catch { /* best effort: the ledger journal / volatile chain top are the fallbacks */ }
+        }, 200);
     }
 }
 
@@ -73,13 +80,32 @@ export function chainConnects(store: BlockStore, hash: Uint8Array, imm: BlockRec
     return false;
 }
 
+/**
+ * Hashes (hex) of the volatile chain down from a tip, per store. Rebuilt only when the tip does not extend the
+ * cached one: `onSelectedChain` runs for every header the node checks ("already applied?"), and walking k
+ * volatile blocks with a hex key each per call was a third of the main thread in dense epochs (bug 386).
+ */
+const selectedSets = new WeakMap<BlockStore, { tip: string; set: Set<string> }>();
+function selectedVolatileSet(store: BlockStore, tipHash: Uint8Array): Set<string> {
+    const t = hex(tipHash);
+    const c = selectedSets.get(store);
+    if (c && c.tip === t) return c.set;
+    if (c && c.set.size < 4 * Math.max(store.k, 64)) {
+        const prev = store.volatile.get(tipHash)?.prevHash;
+        if (prev && hex(prev) === c.tip) { c.set.add(t); c.tip = t; return c.set; } // the tip moved one block forward
+    }
+    const set = new Set(store.volatileChain(tipHash).map((v) => hex(v.hash)));
+    selectedSets.set(store, { tip: t, set });
+    return set;
+}
+
 /** True when `b` is on the selected chain (immutable, or on the volatile path down from the tip). */
 export async function onSelectedChain(store: BlockStore, b: BlockRecord): Promise<boolean> {
     if (b.immutable) return true;
     const tip = await selectedTip(store);
     if (!tip) return false;
     if (eq(tip.hash, b.hash)) return true;
-    return store.volatileChain(tip.hash).some((v) => eq(v.hash, b.hash));
+    return selectedVolatileSet(store, tip.hash).has(hex(b.hash));
 }
 
 /** The selected chain's blocks with slot in [fromSlot, toSlot], ascending. */

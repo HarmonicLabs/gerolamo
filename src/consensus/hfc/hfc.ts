@@ -22,7 +22,11 @@
 import { CborArray, CborBytes, CborSimple, CborUInt, type CborObj } from "@harmoniclabs/cbor";
 
 export const HFC_ERAS = ["Byron", "Shelley", "Allegra", "Mary", "Alonzo", "Babbage", "Conway", "Dijkstra"] as const;
-/** Index of the last era cardano-node 11 can reach in this execution (Conway: its successor is `TriggerHardForkNotDuringThisExecution`). */
+/**
+ * Index of the last era cardano-node 11 can reach in this execution without
+ * `ExperimentalHardForksEnabled` (Conway: its successor is `TriggerHardForkNotDuringThisExecution`).
+ * With the switch on Dijkstra (7) is reachable: see `experimental.ts` `lastReachableEra()`.
+ */
 export const LAST_REACHABLE_ERA = 6;
 /** `eraProtVerLow` of each era: the major version that triggers the hard fork INTO it (index 0 unused). */
 export const ERA_TRIGGER_MAJOR = [0, 2, 3, 4, 5, 7, 9, 12] as const;

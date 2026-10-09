@@ -226,3 +226,33 @@ describe("ChainSel simulator: randomized forks settle on the best eligible chain
         }
     });
 });
+
+describe("ChainSel: the origin (bug 401)", () => {
+    // A Shelley-based chain's first block has no parent hash; ChainSync rolls a fresh client back to
+    // the origin point (no hash). Both used to leave the peer's fragment detached, so nothing could
+    // be selected from an empty chain.
+    const origin = { hash: "00".repeat(32), slot: 0n, blockNo: 0n };
+    const hdr = (n: number, prev: string | null) => ({ hash: n.toString(16).padStart(64, "0"), prevHash: prev, slot: BigInt(n * 3), hfcEra: 6 });
+
+    test("headers from genesis (prev hash null) form a candidate anchored at the origin", () => {
+        const cs = new ChainSel({ k: 5, anchor: origin });
+        cs.addPeer("a");
+        cs.rollBackward("a", { hash: null, slot: 0n });
+        cs.rollForward("a", hdr(1, null));
+        cs.rollForward("a", hdr(2, hdr(1, null).hash));
+        const r = cs.select();
+        expect(r.status.get("a")?.kind).toBe("preferable");
+        expect(r.best?.intersection.hash).toBe(origin.hash);
+        expect(r.best?.suffix.map((h) => h.hash)).toEqual([hdr(1, null).hash, hdr(2, null).hash]);
+    });
+
+    test("a RollBackward to the origin re-anchors a peer that had headers; a hashless rollback elsewhere still detaches", () => {
+        const cs = new ChainSel({ k: 5, anchor: origin });
+        cs.rollForward("a", hdr(1, null));
+        cs.rollBackward("a", { hash: null, slot: 0n });
+        expect(cs.fragmentOf("a")).toEqual({ anchor: origin, headers: [], latestSlot: 3n });
+        cs.rollForward("a", hdr(1, null));
+        cs.rollBackward("a", { hash: null, slot: 3n });
+        expect(cs.fragmentOf("a")!.anchor).toBeNull();
+    });
+});

@@ -83,15 +83,17 @@ while [ "$stopping" = 0 ]; do
   # and every restart signal would orphan the running node: several nodes on one store).
   cd /app
   bun $flags src/index.ts start-gerolamo &
-  child=$!
+  child=$!; started=$(date +%s)
   while kill -0 "$child" 2>/dev/null; do
-    if [ -f "$D/heap.next" ]; then rm -f "$D/heap.next"; kill -USR2 "$child" 2>/dev/null && log "heap summary requested"; fi
+    # SIGUSR2 before the node installs its handler kills it (Bun's default action): hold the request for a minute.
+    if [ -f "$D/heap.next" ] && [ $(( $(date +%s) - started )) -ge 60 ]; then rm -f "$D/heap.next"; kill -USR2 "$child" 2>/dev/null && log "heap summary requested"; fi
     if [ "$prof_until" -gt 0 ] && [ "$(date +%s)" -ge "$prof_until" ]; then
       log "CPU profile window over: stopping the node so Bun writes the profile"; prof_until=0; kill -TERM "$child" 2>/dev/null
     elif [ "$prof_until" -eq 0 ] && [ -f "$D/cpu-prof.next" ]; then
       log "CPU profile requested: restarting the node under --cpu-prof"; kill -TERM "$child" 2>/dev/null
     fi
-    rss_kb=$(awk '/VmRSS/{print $2}' /proc/$child/status 2>/dev/null); rss_kb=${rss_kb:-0}
+    # anonymous memory only: LMDB's mapped file pages count in VmRSS but are page cache (reclaimable)
+    rss_kb=$(awk '/RssAnon/{print $2}' /proc/$child/status 2>/dev/null); rss_kb=${rss_kb:-0}
     if [ "$rss_kb" -ge $((MAX_GB * 1024 * 1024)) ]; then
       log "rss $((rss_kb / 1024)) MB >= ${MAX_GB} GB: restarting"; kill -TERM "$child" 2>/dev/null
     fi

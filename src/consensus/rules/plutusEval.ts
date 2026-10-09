@@ -15,6 +15,7 @@ import {
     dataFromCbor as bDataFromCbor, dataToCbor as bDataToCbor,
 } from "@harmoniclabs/buildooor";
 import { Machine, ExBudget } from "@harmoniclabs/plutus-machine";
+import { DijkstraTxBody, DijkstraTxWitnessSet } from "@harmoniclabs/cardano-ledger-ts";
 import { toCostModelV1, toCostModelV2 } from "@harmoniclabs/cardano-costmodels-ts";
 import { Cbor, CborBytes } from "@harmoniclabs/cbor";
 import { blake2b_256 } from "@harmoniclabs/crypto";
@@ -231,11 +232,13 @@ function toResolvedUtxo(input: any, u: ResolvedUtxo): UTxO | null {
 }
 
 function rebuildBody(era: number, bytes: Uint8Array): any {
+    if (era >= 8) return DijkstraTxBody.fromCbor(bytes);
     if (era >= 7) return ConwayTxBody.fromCbor(bytes);
     if (era === 6) return BabbageTxBody.fromCbor(bytes);
     return AlonzoTxBody.fromCbor(bytes);
 }
 function rebuildWitnessSet(era: number, bytes: Uint8Array): any {
+    if (era >= 8) return DijkstraTxWitnessSet.fromCbor(bytes);
     if (era >= 7) return ConwayTxWitnessSet.fromCbor(bytes);
     if (era === 6) return BabbageTxWitnessSet.fromCbor(bytes);
     return AlonzoTxWitnessSet.fromCbor(bytes);

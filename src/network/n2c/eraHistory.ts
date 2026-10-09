@@ -11,13 +11,13 @@
  */
 import { CborBytes, CborArray, CborSimple, CborUInt, type CborObj } from "@harmoniclabs/cbor";
 import { getHardForkHistory } from "../../consensus/hfc/hfcNode";
-import { encodeInterpreter, eraShape, reconstructSummary } from "../../consensus/hfc/hfc";
+import { encodeInterpreter, eraShape, reconstructSummary, type EraSummary } from "../../consensus/hfc/hfc";
 
 export type EraHistoryNetwork = "preview" | "preprod" | "mainnet";
 
 export const HFC_ERA_NAMES = ["Byron", "Shelley", "Allegra", "Mary", "Alonzo", "Babbage", "Conway", "Dijkstra"] as const;
 
-interface NetworkEras {
+export interface NetworkEras {
     systemStart: string;
     /** First epoch of each era, Byron first; the Byron epoch/slot geometry follows. */
     eraStartEpochs: number[];
@@ -31,6 +31,9 @@ const NETWORKS: Record<EraHistoryNetwork, NetworkEras> = {
     preprod: { systemStart: "2022-06-01T00:00:00Z", eraStartEpochs: [0, 4, 5, 6, 7, 12, 163], byron: { epochSlots: 21600, slotMs: 20000, safeZone: 4320 }, shelley: { epochSlots: 432000, slotMs: 1000, safeZone: 129600 } },
     mainnet: { systemStart: "2017-09-23T21:44:51Z", eraStartEpochs: [0, 208, 236, 251, 290, 365, 507], byron: { epochSlots: 21600, slotMs: 20000, safeZone: 4320 }, shelley: { epochSlots: 432000, slotMs: 1000, safeZone: 129600 } },
 };
+
+/** Era start epochs and geometry of a public network (the Blockfrost `/network/eras` table). */
+export function eraTable(network: EraHistoryNetwork): Readonly<NetworkEras> { return NETWORKS[network]; }
 
 export function networkFromMagic(magic: number): EraHistoryNetwork | null {
     return magic === 2 ? "preview" : magic === 1 ? "preprod" : magic === 764824073 ? "mainnet" : null;
@@ -99,8 +102,14 @@ export function eraSummaries(network: EraHistoryNetwork, currentEraIndex: number
  * the consensus safe-zone horizon. null when neither knows the network.
  */
 export function interpreterFor(network: EraHistoryNetwork | null, eraIndex: number, tipSlot: bigint | null): CborObj | null {
+    const summary = eraSummaryFor(network, eraIndex, tipSlot);
+    return summary ? encodeInterpreter(summary) : null;
+}
+
+/** The era summaries behind `interpreterFor` (UTxO RPC ReadEraSummary reads them too). */
+export function eraSummaryFor(network: EraHistoryNetwork | null, eraIndex: number, tipSlot: bigint | null): EraSummary[] | null {
     const h = getHardForkHistory();
-    if (h && h.currentEra() === eraIndex) return encodeInterpreter(h.summary(tipSlot));
+    if (h && h.currentEra() === eraIndex) return h.summary(tipSlot);
     if (!network) return null;
     const n = NETWORKS[network];
     const shape = eraShape({
@@ -108,7 +117,7 @@ export function interpreterFor(network: EraHistoryNetwork | null, eraIndex: numb
         shelley: { epochLength: n.shelley.epochSlots, slotLengthSec: n.shelley.slotMs / 1000, securityParam: n.byron.safeZone / 2, activeSlotsCoeff: 0.05, systemStart: n.systemStart },
     });
     const starts = n.eraStartEpochs.slice(0, Math.min(eraIndex, n.eraStartEpochs.length - 1) + 1).map((e) => BigInt(e));
-    return encodeInterpreter(reconstructSummary(shape, starts, { kind: "unknown", ledgerTipSlot: tipSlot }));
+    return reconstructSummary(shape, starts, { kind: "unknown", ledgerTipSlot: tipSlot });
 }
 
 /** GetSystemStart: the Shelley genesis `systemStart` of the running network (table fallback). */

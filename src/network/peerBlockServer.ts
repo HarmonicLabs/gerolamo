@@ -1,9 +1,13 @@
 import { plutusPhase2Totals } from "../consensus/BlockBodyValidator";
+import { equivocationStats } from "../consensus/equivocation";
 import { statsHtmlPage } from "./statsPage";
 import { govRuleSummary } from "../consensus/governance/govValidate";
 import { mempoolMetrics } from "../mempool";
 import { ledgerStoreSummary } from "../ledger/nodeLedgerStore";
 import { getBlockProducer } from "../pool/startBlockProducer";
+import { resolveMithrilServeConfig } from "../mithril/cdb/serveConfig";
+import { createMithrilArtifactHandler } from "../mithril/cdb/server";
+import { ArtifactStore } from "../mithril/cdb/store";
 import { mithrilReplayStatus, readMithrilProgressCached } from "../mithril/progress";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { getBasePath } from "../utils/paths";
@@ -209,6 +213,8 @@ async function buildMetricsPayload(
         /** "data" (outbound only) or "relay" (accepts inbound N2N). */
         role: resolveNodeRole(config),
         producer: getBlockProducer()?.stats() ?? null,
+        /** Two different valid headers from one pool for one slot (consensus/equivocation.ts): totals and the newest pairs. */
+        equivocations: equivocationStats(),
         recentBlocks: await recentBlocksCached(),
         blockStore: await blockStoreSummary(),
         ledgerStore: ledgerStoreSummary(),
@@ -261,8 +267,19 @@ export async function startPeerBlockServer(
         block_data?: Uint8Array;
     }
 
+    // Mithril artifact routes (/mithril/*), only when configured (off by default).
+    const mithrilServe = resolveMithrilServeConfig(config.mithril);
+    const mithrilHandler = mithrilServe
+        ? createMithrilArtifactHandler({ store: new ArtifactStore(mithrilServe.artifactsDir), publicBaseUrl: mithrilServe.publicBaseUrl, listUncertified: mithrilServe.listUncertified })
+        : null;
+
     const handleHttp = async (req: Request, srv: import("bun").Server<WsClientData>): Promise<Response | undefined> => {
         const url = new URL(req.url);
+
+        if (mithrilHandler) {
+            const r = await mithrilHandler(req, url);
+            if (r) return r;
+        }
 
         // Bun WebSocket upgrade — ops stream (tip/peers/metrics)
         if (url.pathname === "/ws/stats" || url.pathname === "/ws") {

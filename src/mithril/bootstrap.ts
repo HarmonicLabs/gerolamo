@@ -14,7 +14,7 @@ import { processChunk } from "../state";
 import { writeMithrilProgress, type MithrilProgress } from "./progress";
 import { epochForSlot, setEpochNetwork } from "../utils/epochFromSlotCalculations";
 import { probeAncillaryLedger } from "../state/mithril";
-import { ANCILLARY_VKEYS, verifyAncillary } from "./ancillaryManifest";
+import { ANCILLARY_VKEYS, parseAncillaryManifest, verifyAncillary } from "./ancillaryManifest";
 import type { Logger } from "../utils/logger";
 import {
     fetchGenesisVkey,
@@ -36,6 +36,12 @@ import type {
     MithrilBootstrapResult,
     MithrilEngine,
 } from "./types";
+
+/** Ancillary verification key: the given key, path or URL, else the network's published key. */
+async function resolveAncillaryVkey(vkey: string | undefined, network: string): Promise<string | undefined> {
+    if (vkey) return vkey.startsWith("http") || vkey.includes("/") ? await fetchGenesisVkey(vkey) : vkey;
+    return ANCILLARY_VKEYS[network];
+}
 
 function logInfo(logger: Logger | undefined, msg: string): void {
     if (logger?.info) logger.info(msg);
@@ -70,7 +76,7 @@ async function applyChunkRange(
  */
 async function importLedgerStateFromAncillary(a: { ledger?: string; downloadDir: string; ancillaryDir: string; network: string; vkey?: string; logger: Logger; prog: (p: Partial<MithrilProgress>) => void; trimSqliteBlocks?: boolean }): Promise<{ slot: number; blockHash: string; blockNo: number; epoch: number }> {
     const { logger } = a;
-    const vkeyRaw = a.vkey ? (a.vkey.startsWith("http") || a.vkey.includes("/") ? await fetchGenesisVkey(a.vkey) : a.vkey) : ANCILLARY_VKEYS[a.network];
+    const vkeyRaw = await resolveAncillaryVkey(a.vkey, a.network);
     if (!vkeyRaw) throw new Error(`--ledger-state: no ancillary verification key known for network ${a.network} (pass --ancillary-vkey)`);
     a.prog({ phase: "apply", message: "verifying the ancillary manifest" });
     const v = await verifyAncillary(a.downloadDir, vkeyRaw, (m) => logInfo(logger, m));
@@ -250,17 +256,17 @@ async function runTsBootstrapInner(
     );
     prog({ phase: "certificate", snapshotHash: selected.hash, snapshotEpoch: selected.beacon.epoch, beacon: selected.beacon.immutable_file_number, message: "verifying certificate chain" });
 
+    logInfo(logger, `Verifying certificate chain (pure-TS STM + genesis) cert=${selected.certificate_hash}…`);
+    let hops = 0;
+    const { cert, certificate, chain } = await client.verifyCertificateChain(selected.certificate_hash, {
+        onHop: () => {
+            if (++hops % 50 === 0) prog({ phase: "certificate", message: `certificate chain: ${hops} certificates verified` });
+        },
+    });
     logInfo(
         logger,
-        `Verifying certificate chain (pure-TS) cert=${selected.certificate_hash}…`,
-    );
-    const { cert, pureTs } = await client.verifyCertificateChain(
-        selected.certificate_hash,
-    );
-    logInfo(
-        logger,
-        `Certificate chain OK (pure-TS) cert.hash=${cert.hash} ` +
-            `epoch=${cert.epoch ?? "?"} reason=${pureTs.reason}`,
+        `Certificate chain OK: ${chain.hops.length} certificate(s) verified back to genesis ${chain.genesisHash?.slice(0, 16) ?? "?"}… ` +
+            `(cert ${cert.hash.slice(0, 16)}… epoch ${cert.epoch ?? "?"}, ${(chain.ms / 1000).toFixed(1)} s)`,
     );
     prog({ certificateVerified: true, message: "certificate chain verified" });
 
@@ -363,6 +369,39 @@ async function runTsBootstrapInner(
                 );
             }
         }
+    }
+
+    if (immutableDir) {
+        // The certificate signs the Merkle root of the digests; the downloaded files must match them.
+        if (!detail) detail = await client.getCardanoDatabaseV2(selected.hash);
+        prog({ phase: "download", message: "verifying the immutable files against the certified digests" });
+        const { fetchVerifiedDigests, verifyImmutableFiles, describeVerification } = await import("./cdb/verifyDownload");
+        const verified = await fetchVerifiedDigests(detail, certificate, { log: (m) => logInfo(logger, m) });
+        // The ancillary archive adds the snapshot's last (unsigned) immutable trio; its signed manifest covers it.
+        const ancillaryDigests = new Map<string, string>();
+        if (ancillaryDir) {
+            const vkeyRaw = await resolveAncillaryVkey(opts.ancillaryVkey, opts.network);
+            if (vkeyRaw) {
+                const v = await verifyAncillary(downloadDir, vkeyRaw, (m) => logInfo(logger, m));
+                if (!v.ok) throw new Error(`ancillary verification failed: ${v.errors.join("; ")}`);
+                const manifest = parseAncillaryManifest(await Bun.file(join(downloadDir, "ancillary_manifest.json")).text());
+                for (const [rel, h] of Object.entries(manifest.data)) if (/^immutable\/\d+\.(chunk|primary|secondary)$/.test(rel)) ancillaryDigests.set(rel.slice("immutable/".length), h);
+            }
+        }
+        const range = opts.skipDownload ? { from: 0, to: -1 } : { from, to };
+        let check = await verifyImmutableFiles(immutableDir, range, verified, ancillaryDigests);
+        // A resumed download dir can hold trios from an older snapshot (e.g. the ancillary archive's
+        // then-unfinished last chunk): fetch the requested ones again, once.
+        const stale = [...new Set(check.tampered.map((n) => parseInt(n, 10)).filter((n) => n >= range.from && n <= range.to))];
+        if (stale.length && detail) {
+            logWarn(logger, `${stale.length} downloaded trio(s) differ from the certified digests (${stale.slice(0, 5).join(", ")}); fetching them again`);
+            const { downloadImmutableChunk, immutableTemplateFromSnapshot } = await import("./download");
+            for (const n of stale) await downloadImmutableChunk({ template: immutableTemplateFromSnapshot(detail), chunkNo: n, downloadDir, skipIfPresent: false });
+            check = await verifyImmutableFiles(immutableDir, range, verified, ancillaryDigests);
+        }
+        const problem = describeVerification(check);
+        if (problem) throw new Error(`immutable files do not match the certified snapshot: ${problem}${check.nonVerifiable.length ? " (files left from another snapshot: use a fresh --download-dir)" : ""}`);
+        logInfo(logger, `Immutable files verified: ${check.checked} file(s) match the certified digests (merkle root ${verified.merkleRoot.slice(0, 16)}…)`);
     }
 
     if (ancillaryDir) {

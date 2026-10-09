@@ -17,7 +17,7 @@ import { TK, type Term } from "./flat";
 import { Env, T_LIST_DATA, UNIT, VBuiltin, VCon, VConstr, VDelay, VLam, VPair, listHead, listIsEmpty, listTail, mkListFromArray, type Value } from "./values";
 import { DK } from "./data";
 import { EvalFailure, EvalUnsupported, SIGNATURE, callBuiltin, newBnCek, type BuiltinCtx } from "./builtins";
-import { clampNum, type CostTable } from "./costs";
+import { clampNum, variantBoundsBytes, variantBoundsIntegers, variantTextByBytes, type CostTable } from "./costs";
 import { costModelV3ToBuiltinCosts, legacyIntegerCosts } from "@harmoniclabs/plutus-machine/dist/Machine/BuiltinCosts/BuiltinCosts.js";
 import { defaultV3Costs } from "@harmoniclabs/cardano-costmodels-ts";
 
@@ -44,7 +44,7 @@ function bigLookup(costs: CostTable): (tag: number) => any {
     const v3: Record<string, number> = { ...(defaultV3Costs as any) };
     for (const [k, v] of costs.named) if (k in v3) v3[k] = clampNum(v);
     let lookup: (tag: number) => any = costModelV3ToBuiltinCosts(v3 as any);
-    if (costs.lang !== 3) { const legacy: Record<string, number> = {}; for (const [k, v] of costs.named) legacy[k] = clampNum(v); lookup = legacyIntegerCosts(legacy, lookup); }
+    if (costs.lang < 3) { const legacy: Record<string, number> = {}; for (const [k, v] of costs.named) legacy[k] = clampNum(v); lookup = legacyIntegerCosts(legacy, lookup); }
     Object.defineProperty(anyCosts, "_big", { value: lookup, enumerable: false });
     return lookup;
 }
@@ -64,7 +64,7 @@ export function evaluate(term: Term, costs: CostTable, budget: { cpu: number; me
     const logs: string[] = [];
     const ctx: BuiltinCtx = {
         spend(c: number, m: number) { cpu += c; mem += m; if (cpu > maxCpu || mem > maxMem) throw new BudgetExceeded(cpu, mem); },
-        costs, legacy: costs.lang !== 3, textByBytes: costs.variant === "D" || costs.variant === "E", bounded: costs.variant === "D" || costs.variant === "E",
+        costs, legacy: costs.lang < 3, textByBytes: variantTextByBytes(costs.variant), bounded: variantBoundsBytes(costs.variant), boundedInt: variantBoundsIntegers(costs.variant),
         logs: opts.logs ? logs : null, bnCek: null,
     };
     let bn: any = null;

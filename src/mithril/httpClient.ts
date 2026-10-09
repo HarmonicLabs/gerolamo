@@ -1,5 +1,7 @@
 /**
- * Production Mithril client — HTTP aggregator + pure-TS cert-chain verify.
+ * Production Mithril client: HTTP aggregator + pure-TS certificate chain verification
+ * (src/mithril/verify, a port of mithril-common's MithrilCertificateVerifier with full STM
+ * multi-signature checks).
  *
  * This is the only in-process engine; `--engine bin` shells out to mithril-client.
  */
@@ -10,12 +12,15 @@ import type {
     MithrilNetwork,
 } from "./types";
 import { fetchGenesisVkey, networkConfig, selectSnapshot } from "./client";
+import { parseJsonLossless } from "./verify/json";
+import type { Certificate } from "./verify/certificate";
 import {
-    pureTsFullChainStagesOk,
-    pureTsVerifyCertificateChain,
-    type PureTsVerifyResult,
-} from "./dualRun";
-import { createAggregatorCertificateFetcher } from "./pureTs/chain";
+    aggregatorCertificateRetriever,
+    decodeGenesisVerificationKey,
+    verifyCertificateChain,
+    type ChainHop,
+    type ChainVerifyResult,
+} from "./verify/verifier";
 
 export type TsMithrilClient = {
     aggregator: string;
@@ -25,12 +30,13 @@ export type TsMithrilClient = {
     getCardanoDatabaseV2(hash: string): Promise<MithrilCdbSnapshot>;
     fetchCertificate(hash: string): Promise<MithrilCertificate>;
     /**
-     * Walk tip→genesis with the pure-TS verifier.
-     * Throws if Stages 1–5d are not all green.
+     * Verify the certificate and its chain back to the genesis certificate (signed with the
+     * network's genesis key). Throws a CertificateError on the first failed check.
      */
-    verifyCertificateChain(certificateHash: string): Promise<{
+    verifyCertificateChain(certificateHash: string, opts?: { onHop?: (hop: ChainHop) => void }): Promise<{
         cert: MithrilCertificate;
-        pureTs: PureTsVerifyResult;
+        certificate: Certificate;
+        chain: ChainVerifyResult;
     }>;
 };
 
@@ -39,7 +45,7 @@ async function httpJson<T>(url: string): Promise<T> {
     if (!res.ok) {
         throw new Error(`GET ${url} → HTTP ${res.status}`);
     }
-    return (await res.json()) as T;
+    return parseJsonLossless(await res.text()) as T;
 }
 
 export async function createTsMithrilClient(opts: {
@@ -52,6 +58,10 @@ export async function createTsMithrilClient(opts: {
     const aggregator = (opts.aggregator || cfg.aggregator).replace(/\/$/, "");
 
     let genesisKey = opts.genesisVkey?.trim() || "";
+    // --genesis-vkey takes a key, a file path or a URL.
+    if (genesisKey && (genesisKey.startsWith("http") || genesisKey.includes("/") || genesisKey.includes("."))) {
+        genesisKey = await fetchGenesisVkey(genesisKey);
+    }
     if (!genesisKey) {
         const envKey = process.env.GENESIS_VERIFICATION_KEY?.trim();
         if (envKey && envKey.length > 64 && !envKey.includes("/") && !envKey.startsWith("http")) {
@@ -67,12 +77,8 @@ export async function createTsMithrilClient(opts: {
         }
     }
 
-    const fetchRaw = createAggregatorCertificateFetcher(aggregator);
-    const fetchCert = async (hash: string): Promise<MithrilCertificate | null> => {
-        const c = await fetchRaw(hash);
-        if (!c || typeof (c as MithrilCertificate).hash !== "string") return null;
-        return c as MithrilCertificate;
-    };
+    const retrieve = aggregatorCertificateRetriever(aggregator);
+    const genesisVkeyBytes = decodeGenesisVerificationKey(genesisKey);
 
     return {
         aggregator,
@@ -97,30 +103,19 @@ export async function createTsMithrilClient(opts: {
             return detail;
         },
         async fetchCertificate(hash: string) {
-            const cert = await fetchCert(hash);
-            if (!cert) throw new Error(`certificate ${hash} not found`);
-            return cert;
+            return (await retrieve(hash)).raw as MithrilCertificate;
         },
-        async verifyCertificateChain(certificateHash: string) {
-            const cert = await fetchCert(certificateHash);
-            if (!cert) {
-                throw new Error(`certificate ${certificateHash} not found`);
+        async verifyCertificateChain(certificateHash: string, opts?: { onHop?: (hop: ChainHop) => void }) {
+            const certificate = await retrieve(certificateHash);
+            if (certificate.hash !== certificateHash) {
+                throw new Error(`certificate ${certificateHash}: aggregator returned ${certificate.hash}`);
             }
-            const pureTs = await pureTsVerifyCertificateChain(
-                certificateHash,
-                cert,
-                {
-                    fetcher: fetchCert,
-                    genesisVkey: genesisKey,
-                    runChainWalk: true,
-                },
-            );
-            if (!pureTsFullChainStagesOk(pureTs)) {
-                throw new Error(
-                    `pure-TS cert-chain reject cert=${certificateHash}: ${pureTs.reason}`,
-                );
-            }
-            return { cert, pureTs };
+            const chain = await verifyCertificateChain(certificate, {
+                genesisVkey: genesisVkeyBytes,
+                retrieve,
+                onHop: opts?.onHop,
+            });
+            return { cert: certificate.raw as MithrilCertificate, certificate, chain };
         },
     };
 }

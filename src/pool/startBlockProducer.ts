@@ -1,4 +1,5 @@
 /** Wire the BlockProducer to the running node (orchestrator, DB, shared mempool). */
+import { getEquivocationDetector } from "../consensus/equivocation";
 import { getHardForkHistory } from "../consensus/hfc/hfcNode";
 import { eraIndexAt } from "../consensus/hfc/eraOfTip";
 import { getConsensus } from "../network/peerManager";
@@ -61,6 +62,7 @@ export async function startBlockProducer(config: GerolamoConfig): Promise<BlockP
         return { inbound, duplex: inb.duplexPullers ?? [], publicReachable: inb.publicReachable ? inb.publicReachable.ok : null };
     };
     producer = new BlockProducer(pc, node);
+    getEquivocationDetector().setSelfPoolId(producer.poolId); // equivocations with our own key are flagged
     await producer.start();
     logger.info(`Block producer started for pool ${producer.poolId}`);
     return producer;

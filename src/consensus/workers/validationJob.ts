@@ -1,3 +1,4 @@
+import { applyExperimentalFromConfig } from "../hfc/experimental";
 import { evaluateShelleyBlockWithInputs, type BlockRuleOutcome } from "../rules/blockRulesPure";
 import type { ResolvedUtxo } from "../rules/resolvedUtxo";
 import type { EpochBodyParams } from "../epochParams";
@@ -147,6 +148,7 @@ export async function runHeaderValidationJob(job: HeaderValidationJob): Promise<
     // Worker threads have their own module state: pin slot→epoch math to the job's network.
     if (job.config.epochGeometry) setCustomEpochGeometry(job.config.epochGeometry); // a custom network's geometry (bigints survive structured clone)
     if (job.config.network) pinJobNetwork(job.config.network);
+    applyExperimentalFromConfig(job.config as unknown as Record<string, unknown>); // Dijkstra headers parse only with ExperimentalHardForksEnabled (bug 421)
     const parsed = await headerParser(job.rollForward);
     if (!parsed) {
         return {

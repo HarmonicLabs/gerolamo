@@ -35,6 +35,17 @@ export {
     type TsMithrilClient,
 } from "./httpClient";
 
+// Certificate chain verification (port of mithril-common / mithril-stm).
+export { parseCertificate, computeCertificateHash, protocolMessageHash, type Certificate } from "./verify/certificate";
+export { verifyCertificateChain, verifyStandardCertificate, verifyGenesisCertificate as verifyGenesisCertificateStrict, aggregatorCertificateRetriever, decodeGenesisVerificationKey, type ChainVerifyResult } from "./verify/verifier";
+export { verifyConcatenationProof } from "./verify/stm";
+
+// cardano-database v2 artifacts: produce, certify, serve.
+export { produceCardanoDatabaseSnapshot } from "./cdb/produce";
+export { produceCertifiedSnapshot } from "./cdb/certify";
+export { createMithrilArtifactHandler } from "./cdb/server";
+export { ArtifactStore } from "./cdb/store";
+
 export {
     ancillaryUrlFromSnapshot,
     downloadAncillary,

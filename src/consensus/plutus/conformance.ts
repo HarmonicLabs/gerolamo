@@ -12,8 +12,15 @@ import { FreeVariableError, UplcParseError, discharge, parseBudget, parseProgram
 
 export interface ConformanceResult { resultOk: boolean; budgetOk: boolean; detail?: string; got?: { cpu: number; mem: number }; skipped?: string }
 
-export function runConformanceCase(program: string, expected: string, budget: string, v3Costs: ReadonlyArray<number>): ConformanceResult {
-    const exp = expected.trim(), wantBudget = parseBudget(budget);
+/**
+ * `lang` / `pv` select the ledger language and protocol version (default Plutus V3 at protocol 11,
+ * variant E). Plutus V4 at protocol 12 is variant G, the `def` (maxBound) variant the suite at
+ * plutus master evaluates with (bug 434).
+ */
+export function runConformanceCase(program: string, expected: string, budget: string, v3Costs: ReadonlyArray<number>, opts: { lang?: 3 | 4; pv?: number } = {}): ConformanceResult {
+    const lang = opts.lang ?? 3, pv = opts.pv ?? 11;
+    // plutus master writes "parse/decode error" where 1.63 wrote "parse error"
+    const exp0 = expected.trim(), exp = exp0 === "parse/decode error" ? "parse error" : exp0, wantBudget = parseBudget(budget);
     let parsed;
     try { parsed = parseProgram(program); }
     catch (e) {
@@ -27,7 +34,7 @@ export function runConformanceCase(program: string, expected: string, budget: st
         try { want = parseProgram(exp).term; }
         catch (e) { return { resultOk: false, budgetOk: false, skipped: `expected output not parseable: ${(e as Error).message}` }; }
     }
-    const r = evaluate(parsed.term, costTable(3, v3Costs, 11), { cpu: Number.MAX_SAFE_INTEGER, mem: Number.MAX_SAFE_INTEGER }, { pv: 11 });
+    const r = evaluate(parsed.term, costTable(lang, v3Costs, pv), { cpu: Number.MAX_SAFE_INTEGER, mem: Number.MAX_SAFE_INTEGER }, { pv });
     const got = { cpu: r.cpu, mem: r.mem };
     if (!r.ok) {
         if (r.error?.startsWith("evaluator limit")) return { resultOk: false, budgetOk: false, detail: r.error, got };

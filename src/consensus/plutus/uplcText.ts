@@ -198,7 +198,8 @@ export function parseProgram(src: string): { version: [number, number, number]; 
     if (parts.length !== 3 || parts.some((n) => !Number.isInteger(n))) err("bad version");
     const version = parts as [number, number, number];
     v110 = version[0] === 1 && version[1] >= 1;
-    if (version[0] !== 1 || version[1] > 1 || version[2] !== 0) err("unsupported version");
+    // 1.2.0 (plutus master, Dijkstra) adds no term form; whether a ledger language may use it is the flat decoder's call
+    if (version[0] !== 1 || version[1] > 2 || version[2] !== 0) err("unsupported version");
     const t = term([]);
     sym(")"); ws();
     if (p !== src.length) err("trailing input");

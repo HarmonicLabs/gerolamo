@@ -159,64 +159,64 @@ function fail(path: string, what: string, o?: CborObj): never {
     const got = o == null ? "nothing" : o.constructor?.name ?? typeof o;
     throw new LedgerSnapshotFormatError(`ledger state: ${path}: expected ${what}, got ${got}`);
 }
-function arr(o: CborObj | undefined, path: string, len?: number): CborObj[] {
+export function arr(o: CborObj | undefined, path: string, len?: number): CborObj[] {
     if (!(o instanceof CborArray)) fail(path, "array", o);
     if (len != null && o.array.length !== len) throw new LedgerSnapshotFormatError(`ledger state: ${path}: expected ${len} items, got ${o.array.length}`);
     return o.array;
 }
-function map(o: CborObj | undefined, path: string): Array<{ k: CborObj; v: CborObj }> {
+export function map(o: CborObj | undefined, path: string): Array<{ k: CborObj; v: CborObj }> {
     if (!(o instanceof CborMap)) fail(path, "map", o);
     return o.map;
 }
-function bytes(o: CborObj | undefined, path: string, len?: number): string {
+export function bytes(o: CborObj | undefined, path: string, len?: number): string {
     if (!(o instanceof CborBytes)) fail(path, "bytes", o);
     if (len != null && o.bytes.length !== len) throw new LedgerSnapshotFormatError(`ledger state: ${path}: expected ${len} bytes, got ${o.bytes.length}`);
     return toHex(o.bytes);
 }
-function big(o: CborObj | undefined, path: string): bigint {
+export function big(o: CborObj | undefined, path: string): bigint {
     if (o instanceof CborUInt) return o.num;
     if (o instanceof CborNegInt) return o.num;
     return fail(path, "integer", o);
 }
-function int(o: CborObj | undefined, path: string): number { return Number(big(o, path)); }
+export function int(o: CborObj | undefined, path: string): number { return Number(big(o, path)); }
 function text(o: CborObj | undefined, path: string): string {
     if (!(o instanceof CborText)) fail(path, "text", o);
     return o.text;
 }
-function isNull(o: CborObj | undefined): boolean { return o instanceof CborSimple && o.simple === null; }
+export function isNull(o: CborObj | undefined): boolean { return o instanceof CborSimple && o.simple === null; }
 function bool(o: CborObj | undefined, path: string): boolean {
     if (o instanceof CborSimple && typeof o.simple === "boolean") return o.simple;
     return fail(path, "boolean", o);
 }
 /** A set: tag 258 around an array, or a bare array (older encoders). */
-function set(o: CborObj | undefined, path: string): CborObj[] {
+export function set(o: CborObj | undefined, path: string): CborObj[] {
     if (o instanceof CborTag && Number(o.tag) === 258) return arr(o.data, path);
     return arr(o, path);
 }
-function rational(o: CborObj | undefined, path: string): { num: bigint; den: bigint } {
+export function rational(o: CborObj | undefined, path: string): { num: bigint; den: bigint } {
     if (!(o instanceof CborTag) || Number(o.tag) !== 30) fail(path, "tag 30 rational", o);
     const a = arr(o.data, path, 2);
     return { num: big(a[0], path), den: big(a[1], path) };
 }
-function cred(o: CborObj | undefined, path: string): Cred {
+export function cred(o: CborObj | undefined, path: string): Cred {
     const a = arr(o, path, 2);
     const t = int(a[0], path);
     if (t !== 0 && t !== 1) throw new LedgerSnapshotFormatError(`ledger state: ${path}: credential type ${t}`);
     return { type: t, hash: bytes(a[1], path, 28) };
 }
-function drep(o: CborObj | undefined, path: string): DRep {
+export function drep(o: CborObj | undefined, path: string): DRep {
     const a = arr(o, path);
     const k = int(a[0], path);
     if (k === 0 || k === 1) return { kind: k, hash: bytes(a[1], path, 28) };
     if (k === 2 || k === 3) return { kind: k };
     throw new LedgerSnapshotFormatError(`ledger state: ${path}: DRep kind ${k}`);
 }
-function anchor(o: CborObj | undefined, path: string): Anchor {
+export function anchor(o: CborObj | undefined, path: string): Anchor {
     const a = arr(o, path, 2);
     return { url: text(a[0], path), hash: bytes(a[1], path, 32) };
 }
 /** StrictMaybe as a list: [] = nothing, [x] = just. */
-function maybe<T>(o: CborObj | undefined, path: string, f: (x: CborObj) => T): T | null {
+export function maybe<T>(o: CborObj | undefined, path: string, f: (x: CborObj) => T): T | null {
     const a = arr(o, path);
     if (a.length === 0) return null;
     if (a.length === 1) return f(a[0]!);
@@ -227,11 +227,11 @@ function nonce(o: CborObj | undefined, path: string): string | null {
     if (int(a[0], path) === 0) return null;
     return bytes(a[1], path, 32);
 }
-function govActionId(o: CborObj | undefined, path: string): string {
+export function govActionId(o: CborObj | undefined, path: string): string {
     const a = arr(o, path, 2);
     return `${bytes(a[0], path, 32)}:${int(a[1], path)}`;
 }
-function rewardAccount(o: CborObj | undefined, path: string): Cred {
+export function rewardAccount(o: CborObj | undefined, path: string): Cred {
     const h = bytes(o, path, 29);
     const header = parseInt(h.slice(0, 2), 16);
     const kind = header >> 4;
@@ -311,7 +311,7 @@ function actionOf(o: CborObj | undefined, path: string): GovAction {
         default: throw new LedgerSnapshotFormatError(`ledger state: ${path}: governance action tag ${tag}`);
     }
 }
-function proposalOf(o: CborObj | undefined, path: string): Proposal {
+export function proposalOf(o: CborObj | undefined, path: string): Proposal {
     const a = arr(o, path, 7);
     const id = govActionId(a[0], `${path}.id`);
     const p = `${path}.${id.slice(0, 8)}`;
@@ -329,12 +329,12 @@ function proposalOf(o: CborObj | undefined, path: string): Proposal {
         expiresAfter: int(a[6], `${p}.expiresAfter`),
     };
 }
-function rootsOf(o: CborObj | undefined, path: string): Roots {
+export function rootsOf(o: CborObj | undefined, path: string): Roots {
     const a = arr(o, path, 4);
     const r = (i: number) => maybe(a[i], `${path}[${i}]`, (x) => govActionId(x, `${path}[${i}]`));
     return { pparams: r(0), hardFork: r(1), committee: r(2), constitution: r(3) };
 }
-function constitutionOf(o: CborObj | undefined, path: string): { anchor: Anchor; script: string | null } {
+export function constitutionOf(o: CborObj | undefined, path: string): { anchor: Anchor; script: string | null } {
     const a = arr(o, path, 2);
     return { anchor: anchor(a[0], `${path}.anchor`), script: isNull(a[1]) ? null : bytes(a[1], `${path}.script`, 28) };
 }

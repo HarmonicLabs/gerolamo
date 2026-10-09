@@ -174,10 +174,12 @@ function certOf(c: Cbor, index: number): GovCertModel {
         case 0: case 1: m.cred = credential(f[1]!); break;
         case 2: m.cred = credential(f[1]!); m.pool = hexOf(bytes(f[2]!)); break;
         case 3: {
-            // pool_params inline: operator, vrf, pledge, cost, margin, reward_account, owners, relays, metadata
+            // pool_params inline: operator, vrf, pledge, cost, margin, reward_account, owners, relays, metadata;
+            // Dijkstra may put `bls_key / nil` after vrf (11 elements; bug 424): skip it
+            const o = f.length === 11 ? 1 : 0;
             m.pool = hexOf(bytes(f[1]!));
-            const md = f[9];
-            m.poolReg = { vrf: hexOf(bytes(f[2]!)), cost: uint(f[4]!), rewardAccount: rewardAccountOf(bytes(f[6]!)), metadataHashLen: isNull(md) ? null : bytes(arr(md!)[1]!).length };
+            const md = f[9 + o];
+            m.poolReg = { vrf: hexOf(bytes(f[2]!)), cost: uint(f[4 + o]!), rewardAccount: rewardAccountOf(bytes(f[6 + o]!)), metadataHashLen: isNull(md) ? null : bytes(arr(md!)[1]!).length };
             break;
         }
         case 4: m.pool = hexOf(bytes(f[1]!)); m.epoch = num(f[2]!); break;

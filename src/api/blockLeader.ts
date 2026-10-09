@@ -4,7 +4,7 @@ import {
     AllegraHeader,
     AlonzoHeader,
     BabbageHeader,
-    ConwayHeader,
+    ConwayHeader, DijkstraHeader,
     MaryHeader,
     ShelleyHeader,
 } from "@harmoniclabs/cardano-ledger-ts";
@@ -38,6 +38,7 @@ export function slotLeaderOfHeader(era: number, rawHeader: Uint8Array): string |
             case 5: header = AlonzoHeader.fromCbor(rawHeader) as any; break;
             case 6: header = BabbageHeader.fromCbor(rawHeader) as any; break;
             case 7: header = ConwayHeader.fromCbor(rawHeader) as any; break;
+            case 8: header = DijkstraHeader.fromCbor(rawHeader) as any; break;
             default: return null;
         }
         const vk = header.body.issuerPubKey;

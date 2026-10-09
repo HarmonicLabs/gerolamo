@@ -466,14 +466,15 @@ export async function submitTx(id: string, txHex: string): Promise<SubmitTxResul
   }
 }
 
-/** Local mempool snapshot from the node (GET /api/v0/mempool). */
+/** Local mempool snapshot from the node (GET /api/v0/mempool/txs). */
 export async function mempool(id: string): Promise<MempoolSnapshot> {
   const row = getInstance(getAppDb(), id);
   if (!row) return { ok: false, count: 0, txs: [], error: "unknown instance" };
   const cached = feedMempool(id, 30_000);
   if (cached) return cached;
   try {
-    const res = await fetch(gerolamoHttpBase(row.port) + "/api/v0/mempool", { signal: AbortSignal.timeout(4000) });
+    // `/mempool` is Blockfrost's hash list; `/mempool/txs` keeps the count + sizes snapshot
+    const res = await fetch(gerolamoHttpBase(row.port) + "/api/v0/mempool/txs", { signal: AbortSignal.timeout(4000) });
     if (!res.ok) return { ok: false, count: 0, txs: [], error: `HTTP ${res.status}` };
     const j = (await res.json()) as { count?: number; txs?: Array<{ tx_hash: string; size: number }> };
     return { ok: true, count: j.count ?? 0, txs: j.txs ?? [] };

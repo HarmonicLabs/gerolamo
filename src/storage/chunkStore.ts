@@ -16,6 +16,7 @@ import { existsSync } from "node:fs";
 import { mkdir, open as openFile, readdir, stat, truncate } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { HashIndex } from "./hashIndex";
+import { type BlockSyncPolicy, blockSyncPolicy } from "./volatileStore";
 import {
     SECONDARY_ENTRY_SIZE,
     cborItemLength,
@@ -68,6 +69,8 @@ export interface ChunkStoreOptions {
      * the immutable directory, never inside it). `false` disables hash lookups.
      */
     hashIndexPath?: string | false;
+    /** `none` skips the fsyncs (tests, scratch stores); default `blockSyncPolicy()`. `appendMany` syncs once per file per batch either way. */
+    syncPolicy?: BlockSyncPolicy;
 }
 
 export class ChunkStore {
@@ -81,12 +84,14 @@ export class ChunkStore {
     private chunkNos: number[] = [];
     /** The open chunk (last one) as an in-memory mirror of its files, for appends. */
     private tail: { chunkNo: number; offsets: number[]; entries: SecondaryEntry[]; chunkBytes: number } | null = null;
+    private readonly sync: boolean;
 
     private constructor(dir: string, opts: ChunkStoreOptions) {
         this.dir = dir;
         this.chunkSlots = opts.chunkSlots;
         this.cacheMax = opts.cacheChunks ?? 64;
         this.readOnly = !!opts.readOnly;
+        this.sync = (opts.syncPolicy ?? blockSyncPolicy()) !== "none";
         this.hashIndexPath = opts.hashIndexPath === undefined ? join(dirname(dir), "gerolamo", "hash-index.bin") : opts.hashIndexPath;
     }
 
@@ -365,19 +370,80 @@ export class ChunkStore {
         const entry = { blockOffset: t.chunkBytes, headerOffset: h.headerOffset, headerSize: h.headerSize, crc: crc32(block.bytes), headerHash: block.hash, slotOrEbb: isEbb ? (block.epoch ?? 0) : block.slot };
         const secEnd = t.entries.length * SECONDARY_ENTRY_SIZE;
         // 1. chunk bytes
-        await appendSync(this.path(chunkNo, "chunk"), block.bytes);
+        await appendSync(this.path(chunkNo, "chunk"), block.bytes, this.sync);
         // 2. secondary entry
-        await appendSync(this.path(chunkNo, "secondary"), encodeSecondaryEntry(entry));
+        await appendSync(this.path(chunkNo, "secondary"), encodeSecondaryEntry(entry), this.sync);
         // 3. primary: repeat the current end offset for the gap, then the new end
         const add: number[] = [];
         while (t.offsets.length + add.length < rel + 1) add.push(secEnd);
         add.push(secEnd + SECONDARY_ENTRY_SIZE);
-        await appendSync(this.path(chunkNo, "primary"), encodePrimary(add).subarray(1));
+        await appendSync(this.path(chunkNo, "primary"), encodePrimary(add).subarray(1), this.sync);
         t.offsets.push(...add);
         t.entries.push({ ...entry, isEbb });
         t.chunkBytes += block.bytes.length;
         this.cache.delete(chunkNo);
         if (!isEbb && this.hashIndex) await this.hashIndex.add(block.hash, block.slot);
+    }
+
+    /**
+     * Append several blocks (ascending, as for `append`) with one write and one fsync per file per chunk
+     * instead of three per block (bug 384). The order chunk → secondary → primary is kept for the whole
+     * batch, so a crash still leaves at worst trailing blocks the primary does not cover, which `open()`
+     * trims. Every block of a chunk is checked before anything of that chunk is written.
+     */
+    async appendMany(blocks: ReadonlyArray<{ slot: number; hash: Uint8Array; bytes: Uint8Array; isEbb?: boolean; epoch?: number }>): Promise<void> {
+        if (this.readOnly) throw new Error("append: store opened read-only");
+        let i = 0;
+        while (i < blocks.length) {
+            const chunkNo = chunkNoOf(blocks[i]!.slot, this.chunkSlots);
+            let j = i + 1;
+            while (j < blocks.length && chunkNoOf(blocks[j]!.slot, this.chunkSlots) === chunkNo) j++;
+            await this.appendGroup(chunkNo, blocks.slice(i, j));
+            i = j;
+        }
+    }
+
+    private async appendGroup(chunkNo: number, group: ReadonlyArray<{ slot: number; hash: Uint8Array; bytes: Uint8Array; isEbb?: boolean; epoch?: number }>): Promise<void> {
+        if (this.tail && chunkNo < this.tail.chunkNo) throw new Error(`append: slot ${group[0]!.slot} is in chunk ${chunkNo}, store is at chunk ${this.tail.chunkNo}`);
+        if (this.tail && chunkNo > this.tail.chunkNo) await this.finaliseTail();
+        if (!this.tail || this.tail.chunkNo !== chunkNo) await this.startChunk(chunkNo);
+        const t = this.tail!;
+        // Plan the whole group first: nothing is written when a block is out of order.
+        let offsetsLen = t.offsets.length, secEnd = t.entries.length * SECONDARY_ENTRY_SIZE, chunkBytes = t.chunkBytes;
+        const add: number[] = [];
+        const entries: Array<SecondaryEntry & { isEbb: boolean }> = [];
+        const secParts: Uint8Array[] = [];
+        let total = 0;
+        for (const block of group) {
+            const isEbb = !!block.isEbb;
+            const rel = isEbb ? 0 : relativeSlot(block.slot, chunkNo, this.chunkSlots);
+            if (rel < offsetsLen - 1) throw new Error(`append: slot ${block.slot} (relative ${rel}) is not after the last written relative slot ${offsetsLen - 2}`);
+            const h = locateHeader(block.bytes);
+            const entry = { blockOffset: chunkBytes, headerOffset: h.headerOffset, headerSize: h.headerSize, crc: crc32(block.bytes), headerHash: block.hash, slotOrEbb: isEbb ? (block.epoch ?? 0) : block.slot };
+            while (offsetsLen < rel + 1) { add.push(secEnd); offsetsLen++; }
+            secEnd += SECONDARY_ENTRY_SIZE;
+            add.push(secEnd); offsetsLen++;
+            secParts.push(encodeSecondaryEntry(entry));
+            entries.push({ ...entry, isEbb });
+            chunkBytes += block.bytes.length;
+            total += block.bytes.length;
+        }
+        const chunkBuf = new Uint8Array(total);
+        let off = 0;
+        for (const block of group) { chunkBuf.set(block.bytes, off); off += block.bytes.length; }
+        const secBuf = new Uint8Array(secParts.length * SECONDARY_ENTRY_SIZE);
+        secParts.forEach((e, k) => secBuf.set(e, k * SECONDARY_ENTRY_SIZE));
+        await appendSync(this.path(chunkNo, "chunk"), chunkBuf, this.sync);
+        await appendSync(this.path(chunkNo, "secondary"), secBuf, this.sync);
+        await appendSync(this.path(chunkNo, "primary"), encodePrimary(add).subarray(1), this.sync);
+        t.offsets.push(...add);
+        t.entries.push(...entries);
+        t.chunkBytes = chunkBytes;
+        this.cache.delete(chunkNo);
+        if (this.hashIndex) {
+            const keys = group.filter((b) => !b.isEbb).map((b) => ({ hash: b.hash, slot: b.slot }));
+            if (keys.length) await this.hashIndex.addMany(keys);
+        }
     }
 
     private async startChunk(chunkNo: number): Promise<void> {
@@ -396,7 +462,7 @@ export class ChunkStore {
         if (t.offsets.length < want) {
             const last = t.offsets[t.offsets.length - 1]!;
             const add = new Array<number>(want - t.offsets.length).fill(last);
-            await appendSync(this.path(t.chunkNo, "primary"), encodePrimary(add).subarray(1));
+            await appendSync(this.path(t.chunkNo, "primary"), encodePrimary(add).subarray(1), this.sync);
             t.offsets.push(...add);
         }
         this.cache.set(t.chunkNo, { chunkNo: t.chunkNo, offsets: t.offsets, entries: t.entries, chunkBytes: t.chunkBytes });
@@ -450,11 +516,12 @@ export class ChunkStore {
     }
 }
 
-async function appendSync(path: string, bytes: Uint8Array): Promise<void> {
+async function appendSync(path: string, bytes: Uint8Array, sync = true): Promise<void> {
     const fh = await openFile(path, "a");
     try {
-        await fh.write(bytes);
-        await fh.sync();
+        let off = 0;
+        while (off < bytes.length) off += (await fh.write(bytes, off, bytes.length - off)).bytesWritten;
+        if (sync) await fh.sync();
     } finally {
         await fh.close();
     }

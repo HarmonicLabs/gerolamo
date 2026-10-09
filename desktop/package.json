@@ -10,15 +10,15 @@
   },
   "dependencies": {
     "electrobun": "^1.18.1",
-    "marked": "^17.0.3",
-    "solid-js": "^1.9.11"
+    "marked": "^17.0.6",
+    "solid-js": "^1.9.17"
   },
   "devDependencies": {
-    "@tailwindcss/vite": "^4.3.1",
+    "@tailwindcss/vite": "^4.3.3",
     "@types/bun": "latest",
-    "tailwindcss": "^4.3.0",
-    "typescript": "^5.7.2",
-    "vite": "^6.0.3",
-    "vite-plugin-solid": "^2.11.10"
+    "tailwindcss": "^4.3.3",
+    "typescript": "^5.9.3",
+    "vite": "^6.4.4",
+    "vite-plugin-solid": "^2.11.14"
   }
 }

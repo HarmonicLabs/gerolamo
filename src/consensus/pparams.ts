@@ -166,6 +166,8 @@ export async function deriveNextEpochParams(prev: Record<string, unknown>, epoch
 export interface EraGenesisFiles {
     alonzo?: string | null;
     conway?: string | null;
+    /** Dijkstra genesis (`DijkstraGenesisFile`), read only when the ledger crosses into protocol 12. */
+    dijkstra?: string | null;
 }
 
 /** Genesis file paths: explicit config keys, else siblings of the Shelley genesis file. */
@@ -175,6 +177,7 @@ export function eraGenesisFilesFor(config: any): EraGenesisFiles {
     return {
         alonzo: config?.alonzoGenesisFile ?? (dir ? `${dir}alonzo-genesis.json` : null),
         conway: config?.conwayGenesisFile ?? (dir ? `${dir}conway-genesis.json` : null),
+        dijkstra: config?.dijkstraGenesisFile ?? config?.DijkstraGenesisFile ?? (dir ? `${dir}dijkstra-genesis.json` : null),
     };
 }
 
@@ -243,6 +246,46 @@ export function conwayGenesisRaw(g: any, prevCostModels: any): Record<string, un
 }
 
 /**
+ * Keys introduced by the Dijkstra genesis (`UpgradeDijkstraPParams`, cardano-ledger eras/dijkstra
+ * PParams.hs; bug 430). Rationals are kept as exact "n/d" strings when the file gives a fraction,
+ * as decimals otherwise. Missing keys (an older genesis such as cardano-node 11's built-in one,
+ * which only has the four reference-script fields) are simply absent.
+ */
+export function dijkstraGenesisRaw(g: any, prevCostModels: any): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    const exact = (v: any): unknown => v == null ? null : typeof v === "object" && (v.numerator ?? v.num) != null ? `${v.numerator ?? v.num}/${v.denominator ?? v.den}` : v;
+    const set = (k: string, v: any) => { if (v !== undefined) out[k] = exact(v); };
+    set("max_ref_script_size_per_block", g.maxRefScriptSizePerBlock);
+    set("max_ref_script_size_per_tx", g.maxRefScriptSizePerTx);
+    set("ref_script_cost_stride", g.refScriptCostStride);
+    set("ref_script_cost_multiplier", g.refScriptCostMultiplier);
+    set("max_pledge_leverage", g.maxPledgeLeverage);
+    set("min_pool_margin", g.minPoolMargin);
+    set("leios_announcement_period_ms", g.leiosAnnouncementPeriodLength);
+    set("leios_vote_period_ms", g.leiosVotePeriodLength);
+    set("leios_diffusion_period_ms", g.leiosDiffusionPeriodLength);
+    set("leios_committee_size", g.leiosCommitteeSize);
+    set("leios_quorum_stake_threshold", g.leiosQuorumStakeThreshold);
+    set("max_eb_references_size", g.maxEndorserBlockReferencesSize);
+    set("max_eb_txs_size", g.maxEndorserBlockTxsSize);
+    if (g.maxEndorserBlockExecutionUnits) {
+        out.max_eb_ex_mem = String(g.maxEndorserBlockExecutionUnits.memory ?? g.maxEndorserBlockExecutionUnits.exUnitsMem);
+        out.max_eb_ex_steps = String(g.maxEndorserBlockExecutionUnits.steps ?? g.maxEndorserBlockExecutionUnits.exUnitsSteps);
+    }
+    set("max_ref_script_size_per_eb", g.maxRefScriptSizePerEndorserBlock);
+    set("peras_min_candidate_block_age", g.perasMinCandidateBlockAge);
+    set("peras_healing_factor", g.perasHealingFactor);
+    set("peras_cert_boost", g.perasCertBoost);
+    set("peras_target_committee_size", g.perasTargetCommitteeSize);
+    set("peras_bootstrap_round", g.perasBootstrapRound);
+    set("peras_quorum_threshold_safety_margin", g.perasQuorumThresholdSafetyMargin);
+    set("ref_inputs_cost_per_multi_asset_policy", g.refInputsCostPerMultiAssetPolicy);
+    set("ref_inputs_cost_per_datum_byte", g.refInputsCostPerDatumByte);
+    if (g.plutusV4CostModel) out.cost_models = { ...(prevCostModels ?? {}), PlutusV4: g.plutusV4CostModel };
+    return out;
+}
+
+/**
  * Hard-fork parameter introductions: when the protocol major version crosses
  * into Alonzo (5), Babbage (7) or Conway (9) the new era's genesis supplies
  * the parameters that no update proposal carries. Explicit values already in
@@ -288,6 +331,10 @@ export async function applyEraGenesis(raw: Record<string, unknown>, prevMajor: n
     if (prevMajor < 9 && major >= 9 && files.conway) {
         const g = await Bun.file(files.conway).json().catch(() => null);
         if (g) merge(conwayGenesisRaw(g, raw.cost_models), "Conway");
+    }
+    if (prevMajor < 12 && major >= 12 && files.dijkstra) {
+        const g = await Bun.file(files.dijkstra).json().catch(() => null);
+        if (g) merge(dijkstraGenesisRaw(g, raw.cost_models), "Dijkstra");
     }
     return merged;
 }

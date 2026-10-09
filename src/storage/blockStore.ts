@@ -61,6 +61,11 @@ export class BlockStore {
         return { slot: b.slot, hash: b.hash, bytes: b.bytes, headerOffset: b.headerOffset, headerSize: b.headerSize, immutable: false };
     }
 
+    /** Make every block `put` so far durable (batched fsync policy, bug 384). */
+    async flush(): Promise<number> {
+        return this.volatile.flush();
+    }
+
     /** Store a freshly adopted (or fetched) block in the volatile set. */
     async put(bytes: Uint8Array, hash?: Uint8Array): Promise<BlockRecord> {
         return BlockStore.fromVolatile(await this.volatile.put(bytes, hash));
@@ -126,17 +131,20 @@ export class BlockStore {
         const oldestFirst = chain.slice().reverse();
         const toPromote = oldestFirst.slice(0, Math.max(0, oldestFirst.length - k));
         const imm = await this.chunks.tip();
-        let promoted = 0;
+        const batch: Array<{ slot: number; hash: Uint8Array; bytes: Uint8Array; isEbb: boolean }> = [];
         for (const b of toPromote) {
-            if (imm && b.slot <= imm.slot && promoted === 0) continue; // already immutable (re-run after a crash)
-            if (promoted === 0 && imm && b.prevHash && !Buffer.from(b.prevHash).equals(Buffer.from(imm.hash))) {
+            if (imm && b.slot <= imm.slot && batch.length === 0) continue; // already immutable (re-run after a crash)
+            if (batch.length === 0 && imm && b.prevHash && !Buffer.from(b.prevHash).equals(Buffer.from(imm.hash))) {
                 // The first block to promote must extend the immutable tip: anything else means the
                 // volatile chain does not connect and promotion would corrupt the chunk store.
                 if (b.slot > imm.slot) throw new Error(`promote: block ${Buffer.from(b.hash).toString("hex").slice(0, 16)} at slot ${b.slot} does not extend the immutable tip ${Buffer.from(imm.hash).toString("hex").slice(0, 16)} (slot ${imm.slot})`);
             }
-            await this.chunks.append({ slot: b.slot, hash: b.hash, bytes: b.bytes, isEbb: b.eraTag === 0 });
-            promoted++;
+            batch.push({ slot: b.slot, hash: b.hash, bytes: b.bytes, isEbb: b.eraTag === 0 });
         }
+        // The volatile copies are durable before anything moves, then one write + fsync per chunk file (bug 384).
+        await this.volatile.flush();
+        if (batch.length) await this.chunks.appendMany(batch);
+        const promoted = batch.length;
         const tip = await this.chunks.tip();
         const immutableSlot = tip ? tip.slot : -1;
         if (promoted) await this.volatile.gc(immutableSlot);

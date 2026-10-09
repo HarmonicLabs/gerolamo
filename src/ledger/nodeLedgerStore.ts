@@ -22,7 +22,8 @@ import { GovReads, GovWrites } from "./govStore";
 import { StakeReads, StakeWrites } from "./stakeStore";
 import { verifyStakeDiff } from "./stakeVerify";
 import { verifyGovDiff } from "./govVerify";
-import { UtxoReads, UtxoWrites, type UtxoRecord } from "./utxoStore";
+import { UtxoReads, UtxoWrites, decodeRow, keyRef, type UtxoRecord } from "./utxoStore";
+import { backfillUtxoIndex } from "./utxoIndex";
 
 const log = logger.child("ledger");
 
@@ -184,6 +185,15 @@ export async function buildNodeGenesisState(st: LedgerStore, config: GenesisSour
  *     export tool.
  */
 export async function openNodeLedgerStore(config: { dbPath: string; ledgerDir?: string; ledgerStore?: string } & GenesisSource, selectedTip: { slot: number; hash: Uint8Array } | null, chainNewestFirst?: Array<{ slot: number; hash: Uint8Array }>): Promise<LedgerStore | null> {
+    const st = await openNodeLedgerStoreInner(config, selectedTip, chainNewestFirst);
+    // The UTxO RPC search indexes (utxoIndex.ts) of a store written before they existed: built once, before any block applies.
+    if (st) {
+        backfillUtxoIndex(st, (k, v) => decodeRow(keyRef(k), v), { log: (m) => log.info(m) });
+    }
+    return st;
+}
+
+async function openNodeLedgerStoreInner(config: { dbPath: string; ledgerDir?: string; ledgerStore?: string } & GenesisSource, selectedTip: { slot: number; hash: Uint8Array } | null, chainNewestFirst?: Array<{ slot: number; hash: Uint8Array }>): Promise<LedgerStore | null> {
     configureLedgerStore(config.ledgerStore);
     // scripts/ledger-sqlite-drop.ts empties the SQLite ledger tables of an lmdb node: from then on
     // SQLite cannot be the reference again (dual) or the ledger (sqlite).

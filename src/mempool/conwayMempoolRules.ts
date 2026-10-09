@@ -66,6 +66,8 @@ export interface MempoolLookups {
     rewardBalances?: Map<string, bigint>;
     /** Stake credentials registered / delegated (keys: `credKey`), for the certificate sequence; null skips it. */
     stake?: { registered: Set<string>; delegated: Map<string, string> } | null;
+    /** Are `rewardBalances` exact? The block rules' withdrawal-amount check is strict only then (bug 404). */
+    exactness?: { exact: boolean; why: string };
 }
 
 /** Signature verdicts (computed once per transaction; a revalidation reuses them). */
@@ -612,6 +614,7 @@ export function evaluateMempoolPhase1(tx: MempoolTx, state: MempoolLedgerState, 
         era: 7, body, witnessSet: tx.witnessSet, slot, resolved,
         provenKeys: wits.provenKeys, provenRoots: wits.provenRoots,
         isPoolRegistered: (h) => look.pools.has(h.toLowerCase()), params: p, txSizeBytes: tx.size, rewardBalances: look.rewardBalances,
+        exactness: look.exactness,
     });
     out.reports.push(...rules.reports);
     if (rules.failures.length && !mempool.failing) {
@@ -622,7 +625,9 @@ export function evaluateMempoolPhase1(tx: MempoolTx, state: MempoolLedgerState, 
         out.structuredOnly = 1;
     }
     out.failures = [...mempool.failures];
-    out.runsPlutus = !mempool.failing && redeemers.length > 0; // is_valid = false too: the ledger then requires the scripts to fail
+    // is_valid = false too: the ledger then requires the scripts to fail, and with no script at all
+    // the (vacuous) evaluation passes, `ValidationTagMismatch PassedUnexpectedly` (bug 403)
+    out.runsPlutus = !mempool.failing && (redeemers.length > 0 || !tx.isValid);
     return out;
 }
 

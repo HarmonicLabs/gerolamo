@@ -1,4 +1,5 @@
 import { installHardForkHistory, type HfcNodeConfig } from "../consensus/hfc/hfcNode";
+import { kesSourceOf } from "../pool/kesSource";
 import { startExplorerIndexer, stopExplorerIndexer } from "../db/minibf/explorerIndexer";
 import * as path from "node:path/posix";
 
@@ -30,6 +31,8 @@ import { resolveN2NConfig } from "./n2n/config";
 import { listShareablePeers, reloadTopology, setInboundN2NStatusProvider } from "./peerManager";
 import { resolvePrometheusConfig, startPrometheusServer, type PrometheusHandle } from "./prometheus";
 import { collectNodeMetrics } from "./nodePrometheus";
+import { resolveUtxorpcConfig, startUtxorpcServer, type UtxorpcHandle } from "../api/utxorpc/server";
+import { nodeProvider } from "../api/utxorpc/provider";
 import { getBlockProducer } from "../pool/startBlockProducer";
 import { resolveNodeRole } from "./nodeRole";
 import { ignoredValidationKeys, resolveValidationPolicy } from "../consensus/validationPolicy";
@@ -165,6 +168,9 @@ async function loadConfig(network: string): Promise<GerolamoConfig> {
     if (["relay", "producer"].includes(String((configData as any).role ?? "").toLowerCase())) n2nInput.enabled = true;
     const n2n = resolveN2NConfig(n2nInput, process.env);
 
+    // Block producer credentials: key file + opcert file, or a kes-agent socket (never both).
+    if ((configData as any).producer) kesSourceOf((configData as any).producer);
+
     return {
         ...configData,
         dbPath,
@@ -229,7 +235,8 @@ function installSighup(): void {
             try { logger.info(`SIGHUP: ${await reloadTopology()}`); }
             catch (err) { logger.error("SIGHUP: topology reload failed (previous topology stays):", err); }
             const bp = getBlockProducer();
-            if (bp) {
+            if (bp?.kesSource === "kes-agent") logger.info("SIGHUP: block producer credentials come from the kes-agent; nothing to reload");
+            else if (bp) {
                 const r = await bp.reloadCredentials();
                 if (r.ok) logger.info(`SIGHUP: block producer now uses opcert counter ${r.counter}, KES period ${r.kesPeriod}`);
                 else logger.error(`SIGHUP: block producer kept its credentials: ${r.reason}`);
@@ -361,6 +368,18 @@ export async function start() {
         }
     }
 
+    // UTxO RPC (gRPC / gRPC-Web / Connect; off unless `utxorpc.enabled` or GEROLAMO_UTXORPC).
+    let utxorpcHandle: UtxorpcHandle | undefined;
+    const utxorpcCfg = resolveUtxorpcConfig(config);
+    if (utxorpcCfg) {
+        try {
+            const manager = createHttpPeerManager();
+            utxorpcHandle = await startUtxorpcServer(utxorpcCfg, nodeProvider(config as never, (tx) => manager.submitTx({ txCbor: tx })));
+        } catch (err) {
+            logger.error(`UTxO RPC ${utxorpcCfg.host}:${utxorpcCfg.port} failed to start:`, err);
+        }
+    }
+
     let n2nHandle: N2NServerHandle | undefined;
     if (config.n2n) {
         n2nHandle = await startN2NServer({
@@ -468,6 +487,9 @@ export async function start() {
         }, 30_000);
         try {
             promHandle?.stop();
+        } catch { /* ignore */ }
+        try {
+            await utxorpcHandle?.stop();
         } catch { /* ignore */ }
         try {
             await n2nHandle?.stop();

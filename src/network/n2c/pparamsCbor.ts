@@ -1,4 +1,4 @@
-import { CborArray, CborMap, CborNegInt, CborTag, CborUInt, type CborObj } from "@harmoniclabs/cbor";
+import { CborArray, CborMap, CborNegInt, CborSimple, CborTag, CborUInt, type CborObj } from "@harmoniclabs/cbor";
 
 /**
  * Conway `PParams` as ouroboros-consensus returns it for `GetCurrentPParams` (LocalStateQuery):
@@ -50,6 +50,53 @@ export function conwayPParamsCbor(raw: Record<string, unknown>): CborArray {
         u("drep_activity"),
         r("min_fee_ref_script_cost_per_byte"),
     ]);
+}
+
+/**
+ * Dijkstra `PParams` (protocol 12; bug 430): the 31 Conway fields, then the 23 Dijkstra ones in
+ * `eraPParams` order (cardano-ledger eras/dijkstra PParams.hs), 54 in all. A field the record does
+ * not carry takes the value of `emptyDijkstraPParams`, except the reference-script stride and
+ * multiplier and their limits, which default to Conway's constants (the values every Dijkstra
+ * genesis so far gives), and the positive intervals, which default to 1.
+ * `perasBootstrapRound` is a StrictMaybe: `[]` or `[round]`.
+ */
+export function dijkstraPParamsCbor(raw: Record<string, unknown>): CborArray {
+    const conway = conwayPParamsCbor(raw).array;
+    const u = (k: string, dflt = 0n) => new CborUInt(big(raw[k], dflt));
+    const r = (k: string, dflt = "0") => rational(raw[k] ?? dflt);
+    const maybeRational = (k: string) => raw[k] == null ? new CborSimple(null) : rational(raw[k]);
+    const bootstrap = raw.peras_bootstrap_round == null ? new CborArray([]) : new CborArray([u("peras_bootstrap_round")]);
+    return new CborArray([
+        ...conway,
+        u("max_ref_script_size_per_block", 1_048_576n),
+        u("max_ref_script_size_per_tx", 204_800n),
+        u("ref_script_cost_stride", 25_600n),
+        r("ref_script_cost_multiplier", "6/5"),
+        maybeRational("max_pledge_leverage"),
+        r("min_pool_margin"),
+        u("leios_announcement_period_ms"),
+        u("leios_vote_period_ms"),
+        u("leios_diffusion_period_ms"),
+        u("leios_committee_size"),
+        r("leios_quorum_stake_threshold"),
+        u("max_eb_references_size"),
+        u("max_eb_txs_size"),
+        new CborArray([u("max_eb_ex_mem"), u("max_eb_ex_steps")]),
+        u("max_ref_script_size_per_eb"),
+        u("peras_min_candidate_block_age"),
+        r("peras_healing_factor", "1"),
+        u("peras_cert_boost"),
+        u("peras_target_committee_size"),
+        bootstrap,
+        r("peras_quorum_threshold_safety_margin"),
+        u("ref_inputs_cost_per_multi_asset_policy"),
+        u("ref_inputs_cost_per_datum_byte"),
+    ]);
+}
+
+/** The era's `PParams` encoding for a stored record: Dijkstra from protocol 12, Conway before. */
+export function pparamsCborFor(raw: Record<string, unknown>): CborArray {
+    return Number(raw.protocol_major_ver ?? 0) >= 12 ? dijkstraPParamsCbor(raw) : conwayPParamsCbor(raw);
 }
 
 /** `{ PlutusV1: [...], PlutusV2: [...], PlutusV3: [...] }` → `{ 0: [...], 1: [...], 2: [...] }`. */

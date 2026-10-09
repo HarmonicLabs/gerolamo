@@ -11,23 +11,23 @@
     "test": "bun test"
   },
   "devDependencies": {
-    "@types/node": "^25.5.0",
+    "@types/node": "^25.9.9",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@kobalte/core": "^0.13.11",
+    "@kobalte/core": "^0.13.14",
     "@motionone/solid": "^10.16.4",
-    "@tailwindcss/vite": "^4.2.2",
-    "@tanstack/solid-query": "^5.95.2",
+    "@tailwindcss/vite": "^4.3.3",
+    "@tanstack/solid-query": "^5.104.1",
     "@tanstack/solid-table": "^8.21.3",
-    "@tanstack/solid-virtual": "^3.13.23",
+    "@tanstack/solid-virtual": "^3.13.41",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "solid-js": "^1.9.12",
+    "solid-js": "^1.9.17",
     "solid-transition-group": "^0.3.0",
-    "tailwind-merge": "^3.5.0",
-    "tailwindcss": "^4.2.2",
-    "vite": "^8.0.3",
-    "vite-plugin-solid": "^2.11.11"
+    "tailwind-merge": "^3.7.0",
+    "tailwindcss": "^4.3.3",
+    "vite": "^8.3.4",
+    "vite-plugin-solid": "^2.11.14"
   }
 }

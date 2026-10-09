@@ -26,7 +26,9 @@ import { unitsOf } from "./value";
 import { collectShelleyWitnesses } from "./witnesses";
 import { checkBlockTxPhase2, phase2Mode } from "./phase2";
 import { getEpochNetwork } from "../../utils/epochFromSlotCalculations";
-import { BlockRefScriptSize, checkHeaderProtVer, rewardAccountKey, txRefScriptsSize } from "./ledgerChecks";
+import { BlockRefScriptSize, checkHeaderProtVer, checkValidityInterval, rewardAccountKey, txRefScriptsSize } from "./ledgerChecks";
+import { checkDijkstraBlock, dijkstraBlockAuxDataBytes, dijkstraRefScriptParams, isDijkstraEra, rewardMapEntries, subBodiesOf, subTransactionReads, subTransactionsOf } from "./dijkstraRules";
+import { requiredWitnesses } from "./requiredSigners";
 import { blockAuxDataBytes } from "./scriptDataHash";
 
 export interface BlockRuleContext {
@@ -218,6 +220,14 @@ export function shelleyBlockReads(block: MultiEraBlock): { refs: Set<string>; po
         const c = rewardAccountKey(w.rewardAccount);
         if (c) wdCreds.push(c);
     }
+    // Dijkstra (bug 428): sub-transactions read the UTxO and accounts too; direct deposits and
+    // account balance intervals read accounts
+    if (isDijkstraEra(block.era)) for (const body of bodies) {
+        const r = subTransactionReads(body);
+        for (const x of r.refs) refs.add(x);
+        poolIds.push(...r.poolIds);
+        wdCreds.push(...r.creds);
+    }
     return { refs, poolIds, wdCreds };
 }
 
@@ -278,6 +288,20 @@ export function shelleyBlockOverlay(block: MultiEraBlock): BlockOverlay {
             const ret = body.collateralReturn;
             if (ret) advanceResolved(created, txHashHex, [], [], (body.outputs ?? []).length, [outputLike(ret)]);
             return;
+        }
+        // Dijkstra: a valid transaction's sub-transactions take effect first (bug 429)
+        for (const sb of subBodiesOf(body)) {
+            const subHex = String(sb.hash?.toString?.() ?? "").toLowerCase();
+            for (const inp of sb.inputs ?? []) { const r = utxoRefOf(inp); if (r) spent.add(r); }
+            if (subHex) advanceResolved(created, subHex, [], ((sb.outputs ?? []) as any[]).map(outputLike));
+            for (const c of (sb.certs ?? []) as any[]) {
+                if (Number(c.certType) === 3) poolsRegistered.add(String(c.poolParams?.operator?.toString?.() ?? "").toLowerCase());
+                const d = drepDelegationEffect(c);
+                if (d) drepDelegation.set(d.key, d.delegated);
+                const r = stakeRegistrationEffect(c);
+                if (r) stakeRegistration.set(r.key, r.registered);
+            }
+            for (const e of rewardMapEntries(sb.withdrawals)) withdrawnCreds.add(e.key);
         }
         for (const inp of body.inputs ?? []) { const r = utxoRefOf(inp); if (r) spent.add(r); }
         advanceResolved(created, txHashHex, [], ((body.outputs ?? []) as any[]).map(outputLike));
@@ -369,7 +393,14 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
     const aux: Record<number, any> = b.auxiliaryDataSet ?? {};
     const invalid = new Set<number>((b.invalidTransactions ?? []).map((i: number | bigint) => Number(i)));
     const out: BlockRuleOutcome = { failures: [], reports: [], txs: bodies.length, witnessesVerified: 0, plutus: { evaluated: 0, skipped: 0, mismatches: 0, skipReasons: {} } };
-    if (bodies.length === 0) return out;
+    if (bodies.length === 0) {
+        // an empty Dijkstra block still has its BBODY header / Peras / Leios rules (bug 427)
+        if (isDijkstraEra(block.era) && (ctx.phase ?? "both") !== "shadow") {
+            const p0 = ruleParams(ctx.params, ctx.genesis, block.era, String(ctx.config?.network ?? "mainnet"));
+            checkDijkstraBlock(out, { block: b, protocolMajor: p0.protocolMajor ?? null });
+        }
+        return out;
+    }
     // the block's own transactions spend from / add to this map as they are evaluated in order
     const resolved = new Map(inputs.resolved);
     const pools = inputs.pools;
@@ -386,6 +417,18 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
         const c = collectShelleyWitnesses(bodyHash, wits[i]);
         perTx.push({ start: items.length, proves: c.proves, problems: c.problems });
         items.push(...c.items);
+    }
+    // Dijkstra sub-transactions sign their own body hash with their own witness set (bug 428)
+    const perSub: Array<Array<{ start: number; proves: Array<{ kind: "key" | "root"; hash: string }>; problems: string[] }>> = [];
+    if (isDijkstraEra(block.era)) for (let i = 0; i < bodies.length; i++) {
+        perSub.push(subTransactionsOf(bodies[i]).map((st: any) => {
+            const sb = st?.body ?? st;
+            const hx = String(sb?.hash?.toString?.() ?? "");
+            const c = collectShelleyWitnesses(hx ? fromHex(hx) : blake2b_256(sb.toCborBytes()), st?.witnessSet);
+            const entry = { start: items.length, proves: c.proves, problems: c.problems };
+            items.push(...c.items);
+            return entry;
+        }));
     }
     const phase = ctx.phase ?? "both";
     const ok = phase === "shadow" ? items.map(() => true)
@@ -433,6 +476,12 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
     // Auxiliary data bytes: the decoder's slice, else sliced from the block (bug 184)
     let auxSlices: Map<number, Uint8Array> | null | undefined;
     const auxBytesOf = (i: number): Uint8Array | undefined => {
+        if (isDijkstraEra(block.era)) {
+            // Dijkstra: the bytes as carried inside the block transaction (bug 428)
+            if (auxSlices === undefined) { let bb: Uint8Array | null = null; try { bb = b.cborRef?.toBuffer?.() ?? null; } catch { bb = null; } auxSlices = bb ? dijkstraBlockAuxDataBytes(bb) : null; }
+            const s = auxSlices?.get(i);
+            if (s) return s;
+        }
         try { const own = aux[i]?.cborRef?.toBuffer?.(); if (own) return own; } catch { /* */ }
         if (auxSlices === undefined) { let bb: Uint8Array | null = null; try { bb = b.cborRef?.toBuffer?.() ?? null; } catch { bb = null; } auxSlices = bb ? blockAuxDataBytes(bb) : null; }
         return auxSlices?.get(i);
@@ -462,6 +511,29 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
             blockRefScripts.add(body, true, txHashHex, ret ? [ret] : []);
             if (txHashHex) advanceResolved(resolved, txHashHex, [...(body.collateralInputs ?? [])], [], (body.outputs ?? []).length, ret ? [ret] : []);
             continue;
+        }
+        if (isDijkstraEra(block.era)) {
+            // SUBUTXO / SUBUTXOW essentials: inputs in the UTxO before the batch, vkey witnesses
+            // for the sub-transaction's own needs, validity interval, output network
+            subTransactionsOf(body).forEach((st: any, j: number) => {
+                const sb = st?.body ?? st;
+                const sw = perSub[i]?.[j];
+                const proven = new Set<string>();
+                if (sw) for (let k = 0; k < sw.proves.length; k++) {
+                    if (!ok[sw.start + k]) { out.failures.push(`tx[${i}].sub[${j}]: vkey witness ${sw.proves[k]!.hash.slice(0, 12)}… has an invalid signature`); continue; }
+                    if (sw.proves[k]!.kind === "key") proven.add(sw.proves[k]!.hash);
+                }
+                for (const p of sw?.problems ?? []) out.failures.push(`tx[${i}].sub[${j}]: ${p}`);
+                const missingIns = ((sb.inputs ?? []) as any[]).map(utxoRefOf).filter((r): r is string => !!r && !resolved.has(r));
+                if (missingIns.length) out.failures.push(`tx[${i}].sub[${j}]: spends ${missingIns.length} input(s) not in the UTxO set: ${missingIns.slice(0, 2).join(", ")}`);
+                const subSink = { failures: [] as string[], reports: [] as string[] };
+                checkValidityInterval(subSink, block.era, sb, ctx.slot);
+                const req = requiredWitnesses(sb, resolved);
+                const missingKeys = [...req.keyHashes].filter((k) => !proven.has(k));
+                if (missingKeys.length) subSink.failures.push(`missing vkey witness for ${missingKeys.length} key(s)`);
+                for (const f of subSink.failures) out.failures.push(`tx[${i}].sub[${j}]: ${f}`);
+                for (const f of subSink.reports) out.reports.push(`tx[${i}].sub[${j}]: ${f}`);
+            });
         }
         const bodyLen = sliceLength(body), witLen = sliceLength(wits[i]);
         const auxDataBytes = aux[i] ? auxBytesOf(i) : null;
@@ -498,18 +570,40 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
         const txHashHex = String(body.hash?.toString?.() ?? "").toLowerCase();
         const created = ((body.outputs ?? []) as any[]).map(outputLike);
         blockRefScripts.add(body, false, txHashHex, created);
-        if (rewardBalances) for (const w of (body.withdrawals?.map ?? []) as any[]) { const c = rewardAccountKey(w.rewardAccount); if (c && rewardBalances.has(c)) rewardBalances.set(c, 0n); }
+        if (rewardBalances && isDijkstraEra(block.era)) {
+            // Dijkstra: withdrawals may be partial and direct deposits credit accounts (sub-transactions first)
+            for (const b of [...subBodiesOf(body), body]) {
+                for (const e of rewardMapEntries(b.withdrawals)) if (rewardBalances.has(e.key)) rewardBalances.set(e.key, rewardBalances.get(e.key)! - e.amount);
+                for (const e of rewardMapEntries(b.directDeposits)) if (rewardBalances.has(e.key)) rewardBalances.set(e.key, rewardBalances.get(e.key)! + e.amount);
+            }
+        } else if (rewardBalances) for (const w of (body.withdrawals?.map ?? []) as any[]) { const c = rewardAccountKey(w.rewardAccount); if (c && rewardBalances.has(c)) rewardBalances.set(c, 0n); }
         for (const c of (body.certs ?? []) as any[]) {
             const d = drepState ? drepDelegationEffect(c) : null;
             if (d) drepState!.set(d.key, d.delegated);
             const r = regState ? stakeRegistrationEffect(c) : null;
             if (r) regState!.set(r.key, r.registered);
         }
+        if (isDijkstraEra(block.era)) for (const sb of subBodiesOf(body)) {
+            const subHex = String(sb.hash?.toString?.() ?? "").toLowerCase();
+            for (const c of (sb.certs ?? []) as any[]) {
+                const d = drepState ? drepDelegationEffect(c) : null;
+                if (d) drepState!.set(d.key, d.delegated);
+                const r = regState ? stakeRegistrationEffect(c) : null;
+                if (r) regState!.set(r.key, r.registered);
+            }
+            if (subHex) advanceResolved(resolved, subHex, [...(sb.inputs ?? [])], ((sb.outputs ?? []) as any[]).map(outputLike));
+        }
         if (txHashHex) advanceResolved(resolved, txHashHex, [...(body.inputs ?? [])], created);
     }
     const blockSink = { failures: out.failures, reports: out.reports };
-    blockRefScripts.check(blockSink, block.era);
-    checkHeaderProtVer(blockSink, block.era, String(ctx.config?.network ?? "mainnet"), numOrNull(b.header?.body?.protocolVersion?.major), params.protocolMajor ?? null);
+    if (isDijkstraEra(block.era)) {
+        // Dijkstra BBODY (bug 427): limits from the protocol parameters, HeaderProtVerTooLow, Peras / Leios
+        blockRefScripts.check(blockSink, block.era, dijkstraRefScriptParams(ctx.params?.raw).maxPerBlock ?? undefined);
+        checkDijkstraBlock(blockSink, { block: b, protocolMajor: params.protocolMajor ?? null });
+    } else {
+        blockRefScripts.check(blockSink, block.era);
+        checkHeaderProtVer(blockSink, block.era, String(ctx.config?.network ?? "mainnet"), numOrNull(b.header?.body?.protocolVersion?.major), params.protocolMajor ?? null);
+    }
     const raw = ctx.params?.raw ?? {};
     const maxBlockMem = raw.max_block_ex_mem != null ? big(raw.max_block_ex_mem, 0n) : null;
     const maxBlockSteps = raw.max_block_ex_steps != null ? big(raw.max_block_ex_steps, 0n) : null;

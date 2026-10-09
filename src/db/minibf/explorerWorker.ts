@@ -7,15 +7,15 @@
  * live messages), then repairs the spent marks of outputs that were spent during the copy.
  */
 import { Database } from "bun:sqlite";
-import { applyMbTx, rollbackMbToSlot, type MbTxDelta } from "./writer";
-import { ensureMinibfSchema } from "./schema";
+import { applyMbBlock, applyMbTx, rollbackMbToSlot, type MbBlockMsg, type MbTxDelta } from "./writer";
+import { ensureMinibfOutIndexes, ensureMinibfSchema } from "./schema";
 import { sqliteClient as client } from "./sqliteClient";
 
 declare const self: Worker;
 
 type Msg =
     | { t: "init"; path: string; mainDbPath: string | null }
-    | { t: "apply"; seq: number; items: MbTxDelta[] }
+    | { t: "apply"; seq: number; items: Array<MbTxDelta | MbBlockMsg> }
     | { t: "rollback"; seq: number; slot: number }
     | { t: "flush"; seq: number }
     | { t: "pace"; busy: boolean }
@@ -28,6 +28,8 @@ let migrating: { src: string; tables: string[]; ti: number; rowid: number; max: 
 let tipSlot = 0;
 /** Set by the main thread while the node bulk-syncs: the history copy waits (it competes for disk with the applier). */
 let paused = false;
+/** The credential indexes over mb_tx_out are built once, after `ready` (a table scan on a populated file). */
+let outIndexesPending = true;
 const MB_TABLES = ["mb_tx", "mb_block_tx", "mb_tx_in", "mb_tx_out", "mb_address_tx"];
 const COPY_CHUNK = 20_000;
 
@@ -40,7 +42,7 @@ async function init(path: string, mainDbPath: string | null): Promise<void> {
     db.run("PRAGMA synchronous = NORMAL");
     db.run("PRAGMA cache_size = -65536");
     db.run("PRAGMA busy_timeout = 5000");
-    await ensureMinibfSchema(client(db));
+    await ensureMinibfSchema(client(db), { deferOutIndexes: true });
     db.run("CREATE TABLE IF NOT EXISTS mb_meta (key TEXT PRIMARY KEY, value TEXT)");
     const tip = db.query("SELECT tip_slot FROM mb_cursor WHERE id = 1").get() as any;
     tipSlot = Number(tip?.tip_slot ?? 0);
@@ -120,7 +122,8 @@ async function handle(m: Msg): Promise<void> {
         db.run("BEGIN"); // deferred: IMMEDIATE would also try to reserve the attached ledger database
         try {
             for (const d of m.items) {
-                await applyMbTx(c, d);
+                if ((d as MbBlockMsg).kind === "block") await applyMbBlock(c, d as MbBlockMsg);
+                else await applyMbTx(c, d as MbTxDelta);
                 if (d.slot > tipSlot) tipSlot = d.slot;
             }
             db.run("COMMIT");
@@ -162,6 +165,16 @@ async function loop(): Promise<void> {
                 try { db?.run("ROLLBACK"); } catch { /* not in a transaction */ }
                 if ("seq" in m) post({ t: "ack", seq: m.seq, n: m.t === "apply" ? m.items.length : 0, tipSlot, failed: true });
             }
+        }
+        if (outIndexesPending && db) {
+            outIndexesPending = false;
+            try {
+                const t0 = performance.now();
+                await ensureMinibfOutIndexes(client(db));
+                const ms = Math.round(performance.now() - t0);
+                if (ms > 1000) log("info", `explorer: built the output credential indexes in ${ms} ms`);
+            } catch (err) { log("warn", `explorer: output credential indexes: ${err instanceof Error ? err.message : String(err)}`); }
+            continue;
         }
         if (migrating && !paused) {
             try { migrateStep(); } catch (err) { log("error", `explorer: migration step failed: ${err instanceof Error ? err.message : String(err)}`); migrating = null; }

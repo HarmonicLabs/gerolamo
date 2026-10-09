@@ -41,6 +41,8 @@ export interface Phase2Input {
     traces?: boolean;
     /** Network whose slot geometry turns validity bounds into POSIX time (default: the process-wide one). */
     network?: string;
+    /** Run every script with this budget instead of its redeemer's declared units (UTxO RPC EvalTx, Blockfrost / Ogmios evaluate measure the cost). */
+    budget?: { mem: bigint; cpu: bigint };
 }
 
 export interface RedeemerOutcome {
@@ -70,7 +72,8 @@ export interface Phase2Result {
 // ── scripts ──
 const programCache = new Map<string, Program | FlatError>();
 function program(hash: string, lang: Lang, pv: number, scriptBytes: Uint8Array): Program {
-    const key = `${hash}:${lang}:${pv >= 11 ? 11 : pv}`;
+    // decoding depends on the protocol version up to 11 (bounds, builtins) and at 12 (Plutus Core 1.2.0, V4)
+    const key = `${hash}:${lang}:${pv >= 12 ? 12 : pv >= 11 ? 11 : pv}`;
     let p = programCache.get(key);
     if (!p) {
         try { p = decodeProgram(unwrapFlat(scriptBytes), lang, pv); } catch (e) { p = e instanceof FlatError ? e : new FlatError(String((e as Error)?.message ?? e)); }
@@ -80,6 +83,38 @@ function program(hash: string, lang: Lang, pv: number, scriptBytes: Uint8Array):
     if (p instanceof FlatError) throw p;
     return p;
 }
+/** Protocol version each Plutus language is introduced in (`ledgerLanguageIntroducedIn`). */
+const LANGUAGE_INTRODUCED_IN: Record<Lang, number> = { 1: 5, 2: 7, 3: 9, 4: 12 }; // V4: Dijkstra (bug 433)
+
+const wellFormedCache = new Map<string, string | null>();
+/**
+ * plutus-ledger-api `deserialiseScript` as the Babbage UTXOW `validateScriptsWellFormed` uses it
+ * (`isValidPlutusScript`): the language exists at protocol `pv`, the bytes are one CBOR bytestring
+ * (nothing after it from Plutus V3 on: `RemainderError`) holding a flat program that decodes at `pv`
+ * (builtins and constant bounds of the language at that protocol version). The Plutus Core version's
+ * availability and the term's scoping are evaluation checks (`mkTermToEvaluate`, phase 2), not
+ * checked here: preview carries Plutus V2 reference scripts of version 1.1.0 from protocol 8.
+ * Returns null when the script is well formed, else why not.
+ */
+export function plutusScriptMalformed(hash: string, lang: Lang, pv: number, scriptBytes: Uint8Array): string | null {
+    const key = `${hash}:${lang}:${pv}`;
+    const hit = wellFormedCache.get(key);
+    if (hit !== undefined) return hit;
+    const why = scriptMalformed(lang, pv, scriptBytes);
+    wellFormedCache.set(key, why);
+    if (wellFormedCache.size > 4096) wellFormedCache.delete(wellFormedCache.keys().next().value!);
+    return why;
+}
+function scriptMalformed(lang: Lang, pv: number, scriptBytes: Uint8Array): string | null {
+    if (pv < LANGUAGE_INTRODUCED_IN[lang]) return `Plutus V${lang} is not available at protocol ${pv}`;
+    let n: ReturnType<typeof parseCbor>;
+    try { n = parseCbor(scriptBytes); } catch (e) { return `not CBOR: ${(e as Error).message}`; }
+    if (n.t !== "b") return "script is not a CBOR bytestring";
+    if (lang >= 3 && n.e !== scriptBytes.length) return `${scriptBytes.length - n.e} byte(s) after the script bytestring`;
+    try { decodeProgram(n.v, lang, pv, { deserialiseOnly: true }); } catch (e) { return e instanceof FlatError ? e.message : String((e as Error)?.message ?? e); }
+    return null;
+}
+
 /** A Plutus script's bytes are a CBOR bytestring holding the flat program. */
 function unwrapFlat(b: Uint8Array): Uint8Array {
     const n = parseCbor(b);
@@ -95,10 +130,21 @@ function scriptsOf(ctx: TxContext, resolved: Map<string, ResolvedUtxo>): Map<str
             const n = parseCbor(Buffer.from(u.referenceScriptCbor, "hex"));
             if (n.t !== "a" || n.v[0]?.t !== "u" || n.v[1]?.t !== "b") continue;
             const lang = Number(n.v[0].v);
-            if (lang < 1 || lang > 3) continue;
+            if (lang < 1 || lang > (ctx.era >= 8 ? 4 : 3)) continue; // tag 4 (Plutus V4) from Dijkstra
             const hash = u.referenceScriptHash?.toLowerCase();
             if (hash) out.set(hash, { lang: lang as Lang, bytes: n.v[1].v });
         } catch { /* not a script */ }
+    }
+    return out;
+}
+
+/** Body keys only Dijkstra has (14 as credentials, 23..27): their V1..V3 translation is not ported. */
+function dijkstraOnlyBodyKeys(ctx: TxContext): number[] {
+    const out: number[] = [];
+    const body: any = (ctx as any).body;
+    for (const e of Array.isArray(body) ? body : []) {
+        const k = Number(e?.[0]?.v ?? -1);
+        if (k >= 23 && k <= 27) out.push(k);
     }
     return out;
 }
@@ -131,6 +177,7 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
     for (const r of ctx.redeemers) {
         const out: RedeemerOutcome = { tag: r.tag, index: r.index, scriptHash: null, language: null, declared: { mem: r.mem, cpu: r.cpu }, ok: false };
         outcomes.push(out);
+        if (ctx.era >= 8 && r.tag > 5) return { ok: false, error: `redeemer tag ${r.tag} (guarding) is not supported yet (bug 435)`, redeemers: outcomes };
         const p: Purpose | null = ctx.purposeOf(r);
         if (!p) return { ok: false, error: `redeemer ${r.tag}:${r.index} points to nothing`, redeemers: outcomes };
         const hash = ctx.scriptHashOf(p);
@@ -139,6 +186,10 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
         const script = scripts.get(hash);
         if (!script) return { ok: false, error: `script ${hash.slice(0, 12)}… for redeemer ${r.tag}:${r.index} not found (or not Plutus)`, redeemers: outcomes };
         out.language = script.lang;
+        // Dijkstra (bug 435): the Plutus V4 script context and the V1..V3 contexts of transactions
+        // using Dijkstra-only fields are not built yet: no verdict (reported, never a failure)
+        if (ctx.era >= 8 && script.lang === 4) return { ok: false, error: "Plutus V4 script context is not implemented yet (bug 435)", redeemers: outcomes };
+        if (ctx.era >= 8 && dijkstraOnlyBodyKeys(ctx).length) return { ok: false, error: `Plutus V${script.lang} context of a Dijkstra transaction with body keys ${dijkstraOnlyBodyKeys(ctx).join(", ")} is not built yet (bug 435)`, redeemers: outcomes };
         const arr = models[script.lang];
         if (!arr) return { ok: false, error: `no cost model for Plutus V${script.lang}`, collect: true, redeemers: outcomes };
         let prog: Program;
@@ -146,7 +197,7 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
         catch (e) { return { ok: false, error: `script ${hash.slice(0, 12)}… does not decode: ${(e as Error).message}`, redeemers: outcomes }; }
         let term: Term;
         try {
-            const info = ctx.txInfo(script.lang);
+            const info = ctx.txInfo(script.lang as 1 | 2 | 3); // V4 returned "no verdict" above
             if (script.lang === 3) {
                 term = apply(prog.term, new DConstr(0n, [info, r.data, ctx.scriptInfoData(p)]));
             } else {
@@ -170,7 +221,8 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
     for (const j of jobs) {
         const costs = costTable(j.lang, j.arr, pv);
         const t0 = performance.now();
-        const res = evaluate(j.term, costs, { cpu: Number(j.out.declared.cpu), mem: Number(j.out.declared.mem) }, { logs: !!input.traces, pv });
+        const budget = input.budget ?? j.out.declared;
+        const res = evaluate(j.term, costs, { cpu: Number(budget.cpu), mem: Number(budget.mem) }, { logs: !!input.traces, pv });
         j.out.ms = performance.now() - t0;
         j.out.spent = { cpu: BigInt(res.cpu), mem: BigInt(res.mem) };
         if (input.traces) j.out.logs = res.logs;

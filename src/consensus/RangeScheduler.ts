@@ -30,6 +30,12 @@ export interface RangeSchedulerOptions<Pt extends RangePoint, Blk> {
     /** Throw when `blocks` do not match `points` (hash/slot/body). */
     verify: (points: Pt[], blocks: Blk[], peer: string) => void | Promise<void>;
     /**
+     * A peer returned more blocks than the range has points: true when every point is among them in order,
+     * i.e. the peer served the whole chain between our first and last point and the hole is in OUR point
+     * list, not a lie (bug 385). The range then fails without convicting anyone.
+     */
+    pointsAreSubsequence?: (points: Pt[], blocks: Blk[]) => boolean;
+    /**
      * Apply a verified range. Called strictly in submission order, one at a time. `stillCurrent` turns
      * false once `reset()` has dropped the range (a primary switch while it waited to apply).
      */
@@ -257,6 +263,9 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
                 try {
                     const blocks = await this.opts.fetch(peer, job.points);
                     if (gen !== this.generation) return;
+                    if (Array.isArray(blocks) && blocks.length > job.points.length && this.opts.pointsAreSubsequence?.(job.points, blocks)) {
+                        throw new RangeHole(`range seq=${job.seq} has a hole: ${job.points.length} points span ${blocks.length} blocks (peer ${peer} served them all); the range is ours to fix`);
+                    }
                     if (!Array.isArray(blocks) || blocks.length !== job.points.length) {
                         throw new RangeMismatch(
                             `peer ${peer} returned ${Array.isArray(blocks) ? blocks.length : "no"} blocks for ${job.points.length}-point range`,
@@ -267,6 +276,7 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
                     break;
                 } catch (err) {
                     if (gen !== this.generation) return;
+                    if (err instanceof RangeHole) throw err; // every peer would serve the same blocks: no retry, no conviction
                     const malicious = err instanceof RangeMismatch;
                     this.opts.onPeerFailure?.(peer, err, { malicious, seq: job.seq });
                     // Any hot peer may be asked for bodies, so a peer that is merely behind
@@ -354,6 +364,14 @@ export class SchedulerReset extends Error {
     constructor(reason: string) {
         super(reason);
         this.name = "SchedulerReset";
+    }
+}
+
+/** Our range's points skip blocks (see `pointsAreSubsequence`): fatal for the pipeline, never the peer's fault. */
+export class RangeHole extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "RangeHole";
     }
 }
 

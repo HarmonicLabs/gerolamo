@@ -13,13 +13,19 @@
  * — the value our header validator recomputes; the KES signature covers the
  * header_body bytes at evolution `slotKesPeriod − opcert.kesPeriod`.
  */
-import { Cbor, CborArray, CborBytes, CborMap, CborSimple, CborTag, CborUInt } from "@harmoniclabs/cbor";
+import { Cbor, CborArray, CborBytes, CborMap, CborSimple, CborTag, CborUInt, LazyCborArray, LazyCborMap } from "@harmoniclabs/cbor";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { vrf03ProofToHash, vrf03Prove } from "../consensus/fastVrf";
 import { praosVrfInput } from "../consensus/vrfInputs";
 import { evolveKesTo, kesPeriodOfSlot, kesSignAt, opcertToCborObj, type KesKey, type OpcertFields, type VrfKey } from "./keystore";
 
 export interface HeaderBodyFields {
+    /**
+     * Dijkstra (ledger era 8) header bodies carry two more fields:
+     * `block_body_contains_leios_cert` and `eb_references_announcement` (bug 425).
+     * Gerolamo forges neither a Leios certificate nor an endorser block: false / null.
+     */
+    dijkstra?: boolean;
     blockNumber: bigint;
     slot: bigint;
     /** null for the first block after genesis. */
@@ -56,6 +62,7 @@ export function encodeHeaderBody(f: HeaderBodyFields): Uint8Array {
         new CborBytes(f.bodyHash),
         opcertToCborObj(f.opcert),
         new CborArray([new CborUInt(BigInt(f.protocolVersion.major)), new CborUInt(BigInt(f.protocolVersion.minor))]),
+        ...(f.dijkstra ? [new CborSimple(false), new CborSimple(null)] : []),
     ]);
     return Cbor.encode(body).toBuffer();
 }
@@ -106,7 +113,7 @@ export function bodyCommitment(b: BodySegments): { size: number; hash: Uint8Arra
 }
 
 export interface ForgeInput {
-    era: number; // 6 Babbage, 7 Conway
+    era: number; // 6 Babbage, 7 Conway, 8 Dijkstra
     blockNumber: bigint;
     slot: bigint;
     prevHash: Uint8Array | null;
@@ -131,22 +138,57 @@ export interface ForgedBlock {
     kesEvolution: number;
 }
 
+const rawConcat = (parts: Uint8Array[]) => concat(...parts);
+
+/** CBOR array header for `n` raw items: definite up to 23, indefinite above (cardano-binary `encodeFoldableEncoder`). */
+function rawList(items: Uint8Array[]): Uint8Array {
+    if (items.length <= 23) return rawConcat([new Uint8Array([0x80 | items.length]), ...items]);
+    return rawConcat([new Uint8Array([0x9f]), ...items, new Uint8Array([0xff])]);
+}
+
+/**
+ * Dijkstra `block_body = [[* block_transaction], leios_certificate / nil, peras_certificate / nil]`
+ * from the Conway-style segments, every part copied as its original bytes:
+ * `block_transaction = [body, witness_set, auxiliary_data / nil, is_valid]` (bug 425).
+ */
+export function dijkstraBlockBodyFromSegments(b: BodySegments): Uint8Array {
+    const bodies = Cbor.parseLazy(b.txBodies);
+    const wits = Cbor.parseLazy(b.witnessSets);
+    if (!(bodies instanceof LazyCborArray) || !(wits instanceof LazyCborArray) || bodies.array.length !== wits.array.length) throw new Error("dijkstra body: tx bodies and witness sets differ in count");
+    const aux = new Map<number, Uint8Array>();
+    const auxMap = Cbor.parseLazy(b.auxiliaryData);
+    // cbor 1.6's LazyCborMap keeps its entries under `array` (typed `map`)
+    if (auxMap instanceof LazyCborMap) for (const e of ((auxMap as any).map ?? (auxMap as any).array ?? []) as Array<{ k: Uint8Array; v: Uint8Array }>) { const k = Cbor.parse(e.k); if (k instanceof CborUInt) aux.set(Number(k.num), e.v); }
+    const invalid = new Set<number>();
+    const inv = Cbor.parse(b.invalidTransactions);
+    const invArr = inv instanceof CborTag ? inv.data : inv;
+    if (invArr instanceof CborArray) for (const x of invArr.array) if (x instanceof CborUInt) invalid.add(Number(x.num));
+    const txs = bodies.array.map((bodyBytes, i) => rawConcat([
+        new Uint8Array([0x84]), bodyBytes, wits.array[i]!, aux.get(i) ?? new Uint8Array([0xf6]), new Uint8Array([invalid.has(i) ? 0xf4 : 0xf5]),
+    ]));
+    return rawConcat([new Uint8Array([0x83]), rawList(txs), new Uint8Array([0xf6, 0xf6])]);
+}
+
 /** Assemble, VRF-prove and KES-sign a block for `slot`. Pure apart from evolving the KES key forward. */
 export function forgeBlock(input: ForgeInput): ForgedBlock {
     const body = input.body ?? EMPTY_BODY;
-    const { size, hash } = bodyCommitment(body);
+    // Dijkstra (era 8): the header commits to blake2b-256 of the whole block_body and its length
+    const dijkstraBody = input.era >= 8 ? dijkstraBlockBodyFromSegments(body) : null;
+    const { size, hash } = dijkstraBody ? { size: dijkstraBody.length, hash: new Uint8Array(blake2b_256(dijkstraBody)) } : bodyCommitment(body);
     const vrf = vrfForSlot(input.vrf, input.slot, input.nonce);
     const evolution = Number(kesPeriodOfSlot(input.slot, input.slotsPerKESPeriod) - input.opcert.kesPeriod);
     if (evolution < 0) throw new Error(`slot ${input.slot} is before the operational certificate's KES period ${input.opcert.kesPeriod}`);
     const bodyBytes = encodeHeaderBody({
         blockNumber: input.blockNumber, slot: input.slot, prevHash: input.prevHash,
         issuerVkey: input.coldVkey, vrfVkey: input.vrf.vkey, vrfOutput: vrf.output, vrfProof: vrf.proof,
-        bodySize: size, bodyHash: hash, opcert: input.opcert, protocolVersion: input.protocolVersion,
+        bodySize: size, bodyHash: hash, opcert: input.opcert, protocolVersion: input.protocolVersion, dijkstra: dijkstraBody != null,
     });
     const headerBytes = signHeader(bodyBytes, input.kes, evolution);
     const header = Cbor.parse(headerBytes);
-    const block = new CborArray([header, Cbor.parse(body.txBodies), Cbor.parse(body.witnessSets), Cbor.parse(body.auxiliaryData), Cbor.parse(body.invalidTransactions)]);
-    const blockFetchBytes = Cbor.encode(new CborArray([new CborUInt(BigInt(input.era)), block])).toBuffer();
+    const blockFetchBytes = dijkstraBody
+        // `[8, [header, block_body]]` built from raw bytes so the body hashes exactly as committed
+        ? rawConcat([new Uint8Array([0x82]), Cbor.encode(new CborUInt(BigInt(input.era))).toBuffer(), new Uint8Array([0x82]), headerBytes, dijkstraBody])
+        : Cbor.encode(new CborArray([new CborUInt(BigInt(input.era)), new CborArray([header, Cbor.parse(body.txBodies), Cbor.parse(body.witnessSets), Cbor.parse(body.auxiliaryData), Cbor.parse(body.invalidTransactions)])])).toBuffer();
     const rollForwardData = Cbor.encode(new CborArray([new CborUInt(BigInt(input.era - 1)), new CborTag(24, new CborBytes(headerBytes))])).toBuffer();
     return { headerBytes, headerHash: headerHash(headerBytes), blockFetchBytes, rollForwardData, vrf, kesEvolution: evolution };
 }

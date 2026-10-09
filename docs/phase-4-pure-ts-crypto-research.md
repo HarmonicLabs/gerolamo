@@ -1,5 +1,11 @@
 # Phase 4 — Pure-TS Mithril crypto research spike
 
+> **Status 2026-10-08:** superseded. The production verifier is `src/mithril/verify/` (a direct
+> port of mithril-common's `MithrilCertificateVerifier` and mithril-stm's concatenation proof,
+> with the exact rational lottery), tested on real preview and mainnet certificates and on full
+> chain walks to genesis. See docs/parity/mithril.md items 460–462. The staged `pureTs/` modules
+> below remain only for the browser node and diagnostics.
+
 > **Status 2026-09-03:** the IOG WASM client (`@mithril-dev/mithril-client-wasm`) and the
 > dual-run engine (`--engine wasm|both|auto`, `dualRunCertificateChain`) are **removed**.
 > Pure TS (`src/mithril/httpClient.ts` + `pureTs/`) is the only in-process verifier and

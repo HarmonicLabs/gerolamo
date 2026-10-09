@@ -126,6 +126,10 @@ export interface MinFeeParams {
     priceStep: Rational | null;
     /** Conway `minFeeRefScriptCostPerByte`; null before Conway. */
     refScriptCostPerByte: Rational | null;
+    /** Dijkstra `refScriptCostStride` (Conway: the constant 25 600). */
+    refScriptStride?: number;
+    /** Dijkstra `refScriptCostMultiplier` (Conway: the constant 6/5). */
+    refScriptMultiplier?: Rational;
 }
 
 export interface MinFee { total: bigint; sizeFee: bigint; scriptFee: bigint; refScriptFee: bigint }
@@ -138,7 +142,7 @@ export interface MinFee { total: bigint; sizeFee: bigint; scriptFee: bigint; ref
 export function minFeeTx(p: MinFeeParams, era: number, txSize: number, exUnits: { mem: bigint; steps: bigint }, refScriptBytes: number): MinFee {
     const sizeFee = p.minFeeA * BigInt(txSize) + p.minFeeB;
     const scriptFee = era >= 5 && p.priceMem && p.priceStep && (exUnits.mem > 0n || exUnits.steps > 0n) ? scriptExecutionFee(exUnits.mem, exUnits.steps, p.priceMem, p.priceStep) : 0n;
-    const refScriptFee = era >= 7 && p.refScriptCostPerByte && refScriptBytes > 0 ? tierRefScriptFeeExact(refScriptBytes, p.refScriptCostPerByte) : 0n;
+    const refScriptFee = era >= 7 && p.refScriptCostPerByte && refScriptBytes > 0 ? tierRefScriptFeeExact(refScriptBytes, p.refScriptCostPerByte, p.refScriptStride, p.refScriptMultiplier) : 0n;
     return { total: sizeFee + scriptFee + refScriptFee, sizeFee, scriptFee, refScriptFee };
 }
 
@@ -202,8 +206,8 @@ export function txRefScriptsSize(body: any, lookup: (ref: string) => { reference
 }
 
 /** Conway LEDGER `ConwayTxRefScriptsSizeTooBig` (phase-2-valid transactions only). */
-export function checkTxRefScriptsSize(sink: RuleSink, era: number, size: number): void {
-    if (era >= 7 && size > MAX_REF_SCRIPT_SIZE_PER_TX) sink.failures.push(`ConwayTxRefScriptsSizeTooBig: reference scripts ${size} B > ${MAX_REF_SCRIPT_SIZE_PER_TX} B`);
+export function checkTxRefScriptsSize(sink: RuleSink, era: number, size: number, max: number = MAX_REF_SCRIPT_SIZE_PER_TX): void {
+    if (era >= 7 && size > max) sink.failures.push(`${era >= 8 ? "Dijkstra" : "Conway"}TxRefScriptsSizeTooBig: reference scripts ${size} B > ${max} B`);
 }
 
 /**
@@ -226,8 +230,8 @@ export class BlockRefScriptSize {
         createdOutputs.forEach((o, i) => { const ref = `${txHashHex}:${base + i}`; if (!this.created.has(ref)) this.created.set(ref, o); });
     }
 
-    check(sink: RuleSink, era: number): void {
-        if (era >= 7 && this.total > MAX_REF_SCRIPT_SIZE_PER_BLOCK) sink.failures.push(`BodyRefScriptsSizeTooBig: block reference scripts ${this.total} B > ${MAX_REF_SCRIPT_SIZE_PER_BLOCK} B`);
+    check(sink: RuleSink, era: number, max: number = MAX_REF_SCRIPT_SIZE_PER_BLOCK): void {
+        if (era >= 7 && this.total > max) sink.failures.push(`BodyRefScriptsSizeTooBig: block reference scripts ${this.total} B > ${max} B`);
     }
 }
 

@@ -11,6 +11,7 @@ import { GovWrites } from "../ledger/govStore";
 import { ccKey } from "../consensus/governance/govLedgerView";
 import { StakeWrites } from "../ledger/stakeStore";
 import { UtxoWrites } from "../ledger/utxoStore";
+import { markUtxoIndexBuilt } from "../ledger/utxoIndex";
 import { markLedgerSource, markSeeded } from "../ledger/nodeLedgerStore";
 import { streamTablesFile, txOutWireCbor } from "./importUtxo";
 import { decodeUtxoEntry } from "../state/utxohdMemCodec";
@@ -53,6 +54,7 @@ export async function importUtxoToLmdb(opts: ImportLmdbUtxoOptions): Promise<Imp
         if (result.entries % 250_000 === 0) log(`import-utxo (lmdb): ${result.entries} entries, ${result.inserted} rows, ${result.errors} error(s), ${((performance.now() - t0) / 1000).toFixed(0)}s`);
     }, { limit: opts.limit });
     if (batch.length) flush();
+    if (opts.fresh !== false) markUtxoIndexBuilt(st); // a fresh store whose every row went through UtxoWrites: the search indexes are complete
     for (const e of errorsShown) log(`import-utxo (lmdb) error: ${e}`);
     st.close();
     result.seconds = (performance.now() - t0) / 1000;

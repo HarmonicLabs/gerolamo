@@ -36,20 +36,24 @@ const BATCH1 = range(0, 50), BATCH2 = [51], BATCH3 = [52, 53], BATCH4A = range(5
  */
 const BATCH6 = range(87, 100);
 function range(a: number, b: number): number[] { const r: number[] = []; for (let i = a; i <= b; i++) r.push(i); return r; }
-const INTRODUCED: Record<1 | 2 | 3, Array<[number, number[]]>> = {
+const INTRODUCED: Record<1 | 2 | 3 | 4, Array<[number, number[]]>> = {
     1: [[5, BATCH1], [11, [...BATCH2, ...BATCH3, ...BATCH4A, ...BATCH4B, ...BATCH5, ...BATCH6]]],
     2: [[7, [...BATCH1, ...BATCH2]], [8, BATCH3], [10, BATCH4B], [11, [...BATCH4A, ...BATCH5, ...BATCH6]]],
     3: [[9, [...BATCH1, ...BATCH2, ...BATCH3, ...BATCH4A, ...BATCH4B]], [10, BATCH5], [11, BATCH6]],
+    // Plutus V4 (Dijkstra, protocol 12): batches 1..6 at once (bug 433)
+    4: [[12, [...BATCH1, ...BATCH2, ...BATCH3, ...BATCH4A, ...BATCH4B, ...BATCH5, ...BATCH6]]],
 };
 const availCache = new Map<string, Set<number>>();
-export function builtinsAvailable(lang: 1 | 2 | 3, pv: number): Set<number> {
+export function builtinsAvailable(lang: 1 | 2 | 3 | 4, pv: number): Set<number> {
     const key = `${lang}:${pv}`;
     let s = availCache.get(key);
     if (!s) { s = new Set(); for (const [p, tags] of INTRODUCED[lang]) if (p <= pv) for (const t of tags) s.add(t); availCache.set(key, s); }
     return s;
 }
-/** Plutus Core 1.1.0 (constr/case): V3 always; V1/V2 from van Rossem (PV 11). */
-export function plc110Available(lang: 1 | 2 | 3, pv: number): boolean { return lang === 3 || pv >= 11; }
+/** Plutus Core 1.1.0 (constr/case): V3 and V4 always; V1/V2 from van Rossem (PV 11). */
+export function plc110Available(lang: 1 | 2 | 3 | 4, pv: number): boolean { return lang >= 3 || pv >= 11; }
+/** Plutus Core 1.2.0: every language from Dijkstra (PV 12; `plcVersionsIntroducedIn`). */
+export function plc120Available(lang: 1 | 2 | 3 | 4, pv: number): boolean { void lang; return pv >= 12; }
 /** `maxBoundsByPV` (PlutusLedgerApi.Common.Versions): from van Rossem a constant's type has size ≤ 32, a `constr` ≤ 1024 fields. */
 export const MAX_CONST_TYPE_SIZE = 32, MAX_CONSTR_FIELDS = 1024;
 /** `defaultUniSize`: 1 per type constructor, + 1 per application (list a = |a| + 2, pair a b = |a| + |b| + 3). */
@@ -63,7 +67,14 @@ export function constTypeSize(t: ConstType): number {
 
 export class FlatError extends Error {}
 
-export function decodeProgram(bytes: Uint8Array, lang: 1 | 2 | 3, pv: number): Program {
+/**
+ * `deserialiseOnly`: what plutus-ledger-api `deserialiseScript` checks (phase 1, the ledger's
+ * `isValidPlutusScript`) and nothing that `mkTermToEvaluate` checks at evaluation: any Plutus Core
+ * version decodes (`constr` / `case` need the program's version ≥ 1.1.0, as in the UPLC flat
+ * decoder), the version's availability for the language and de Bruijn index 0 (scope) are not
+ * checked. Default: the evaluator's full set.
+ */
+export function decodeProgram(bytes: Uint8Array, lang: 1 | 2 | 3 | 4, pv: number, opts: { deserialiseOnly?: boolean } = {}): Program {
     let pos = 0; // bit position
     let v110 = false;
     const avail = builtinsAvailable(lang, pv);
@@ -161,7 +172,7 @@ export function decodeProgram(bytes: Uint8Array, lang: 1 | 2 | 3, pv: number): P
     const term = (): Term => {
         const tag = bits(4);
         switch (tag) {
-            case TK.Var: { const i = smallNat(); if (i === 0) throw new FlatError("flat: de Bruijn index 0"); return { k: TK.Var, i }; }
+            case TK.Var: { const i = smallNat(); if (i === 0 && !opts.deserialiseOnly) throw new FlatError("flat: de Bruijn index 0"); return { k: TK.Var, i }; }
             case TK.Delay: return { k: TK.Delay, b: term() };
             case TK.Lam: return { k: TK.Lam, b: term() };
             case TK.Apply: { const f = term(); return { k: TK.Apply, f, a: term() }; }
@@ -190,9 +201,12 @@ export function decodeProgram(bytes: Uint8Array, lang: 1 | 2 | 3, pv: number): P
     };
     const version: [number, number, number] = [smallNat(), smallNat(), smallNat()];
     const vkey = version.join(".");
-    if (vkey !== "1.0.0" && vkey !== "1.1.0") throw new FlatError(`flat: unsupported Plutus Core version ${vkey}`);
-    if (vkey === "1.1.0" && !plc110Available(lang, pv)) throw new FlatError(`flat: Plutus Core 1.1.0 not available in Plutus V${lang} at protocol ${pv}`);
-    v110 = vkey === "1.1.0";
+    if (opts.deserialiseOnly) v110 = version[0] > 1 || (version[0] === 1 && version[1] >= 1);
+    else {
+        if (vkey !== "1.0.0" && vkey !== "1.1.0" && !(vkey === "1.2.0" && plc120Available(lang, pv))) throw new FlatError(`flat: unsupported Plutus Core version ${vkey}`);
+        if (vkey === "1.1.0" && !plc110Available(lang, pv)) throw new FlatError(`flat: Plutus Core 1.1.0 not available in Plutus V${lang} at protocol ${pv}`);
+        v110 = vkey === "1.1.0" || vkey === "1.2.0";
+    }
     const t = term();
     filler();
     if ((pos >> 3) !== bytes.length) throw new FlatError("flat: trailing bytes after program");

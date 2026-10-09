@@ -8,6 +8,7 @@
  *   - Upsert by hash; re-runs refresh verdicts, never duplicate.
  */
 import { sql } from "../sql";
+import { stringifyJsonLossless } from "./verify/json";
 import { isGenesisCertificate } from "./pureTs";
 import type { MithrilCertificate } from "./types";
 
@@ -78,7 +79,7 @@ export async function persistMithrilCertificate(
             ${verdict.wasmOk ?? null},
             ${verdict.dualMatch ?? null},
             ${verdict.stagesOk ?? null},
-            ${JSON.stringify(cert)}
+            ${stringifyJsonLossless(cert)}
         )
         ON CONFLICT(hash) DO UPDATE SET
             previous_hash = excluded.previous_hash,

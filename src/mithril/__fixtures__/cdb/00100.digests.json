@@ -1,0 +1,14 @@
+[
+ {
+  "immutable_file_name": "00100.chunk",
+  "digest": "46fdc4d8d27ea8879c52e43cbf6691aa66541773bf654003a8c2fbf6838cedc3"
+ },
+ {
+  "immutable_file_name": "00100.primary",
+  "digest": "2bcc8bd8e0219f92a6ad3baae34ec78b081f6ce469c7e6cb620bd74964cf432a"
+ },
+ {
+  "immutable_file_name": "00100.secondary",
+  "digest": "1df33ad38d3910cfa0864b04cbae2d72d8d95d3db67ce56a8a0655f4b9ce6b4f"
+ }
+]

@@ -13,6 +13,7 @@ import { epochForSlot, getEpochNetwork } from "../utils/epochFromSlotCalculation
 import { getShelleyGenesisConfig } from "../utils/paths";
 import { withReadOnlyConnection } from "../sql";
 import type { MempoolLedgerView } from "./ValidatingMempool";
+import { ledgerStateExact } from "../ledger/nodeLedgerStore";
 
 export function dbLedgerView(config: any): MempoolLedgerView {
     let genesis: any = undefined;
@@ -39,6 +40,7 @@ export function dbLedgerView(config: any): MempoolLedgerView {
         rewardBalances: (creds) => withReadOnlyConnection(() => rewardBalancesFor(creds)),
         stake: (creds) => withReadOnlyConnection(() => stakeOf(creds)),
         epochNetwork: () => getEpochNetwork(),
+        exactness: () => ledgerStateExact(),
     };
 }
 

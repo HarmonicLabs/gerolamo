@@ -345,6 +345,10 @@ export async function downloadImmutableChunk(opts: {
     const zstBuf = new Uint8Array(await Bun.file(zstPath).arrayBuffer());
     const written = await extractTarZstToDir(zstBuf, root);
     log(`  extracted ${written.length} entries`);
+    // An immutable archive carries its own trio only; anything else could overwrite other chunks.
+    const allowed = new Set(["chunk", "primary", "secondary"].map((e) => `immutable/${padded}.${e}`));
+    const foreign = written.filter((w) => !allowed.has(w.replace(/^\.\//, "")));
+    if (foreign.length) throw new Error(`archive ${padded}.tar.zst carries unexpected entries: ${foreign.slice(0, 3).join(", ")}`);
 
     if (!opts.keepArchive) {
         await rm(zstPath, { force: true });

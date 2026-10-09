@@ -1,0 +1,3 @@
+Public test fixtures from input-output-hk/kes-agent (fixtures/, commit 44fdcec, Apache-2.0),
+generated there with cardano-cli: cold verification key, KES verification key and the
+operational certificate (counter 7, KES period 1430) linking them. No secret keys.

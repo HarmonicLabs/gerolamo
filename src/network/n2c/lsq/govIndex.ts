@@ -14,6 +14,7 @@ import { blake2b_256 } from "@harmoniclabs/crypto";
 import { cborItemLength } from "../../../storage/chunkFormat";
 import type { BlockStore } from "../../../storage/blockStore";
 import { logger } from "../../../utils/logger";
+import { epochForSlot } from "../../../utils/epochFromSlotCalculations";
 
 const log = logger.child("n2c.lsq.gov");
 const hex = (u: Uint8Array) => Buffer.from(u).toString("hex");
@@ -129,22 +130,32 @@ export function applyBlock(f: GovFacts, entry: Uint8Array): void {
 
 // ---------------------------------------------------------------- persistence
 
-const CACHE_VERSION = 1;
-function saveFacts(path: string, f: GovFacts, slot: number, hash: string): void {
+/** 2: also the facts at the last epoch boundaries (bug 389); a version-1 cache is rebuilt once. */
+const CACHE_VERSION = 2;
+/** Epoch boundaries whose facts are kept (the pulser snapshot of the current and the previous epochs). */
+const BOUNDARIES_KEPT = 3;
+type Boundary = { slot: number; hash: string; facts: GovFacts };
+const encodeFacts = (f: GovFacts) => {
     const m = (x: Map<string, Uint8Array | null>) => [...x].map(([k, v]) => [k, v ? hex(v) : null]);
-    const doc = { v: CACHE_VERSION, slot, hash, drepAnchor: m(f.drepAnchor), proposal: m(f.proposal as Map<string, Uint8Array | null>), credType: [...f.credType], ccResign: m(f.ccResign), stakeDeposit: [...f.stakeDeposit].map(([k, v]) => [k, v.toString()]) };
+    return { drepAnchor: m(f.drepAnchor), proposal: m(f.proposal as Map<string, Uint8Array | null>), credType: [...f.credType], ccResign: m(f.ccResign), stakeDeposit: [...f.stakeDeposit].map(([k, v]) => [k, v.toString()]) };
+};
+const decodeFacts = (d: ReturnType<typeof encodeFacts>): GovFacts => {
+    const m = (x: Array<[string, string | null]>) => new Map(x.map(([k, v]) => [k, v ? unhex(v) : null] as [string, Uint8Array | null]));
+    return { drepAnchor: m(d.drepAnchor as Array<[string, string | null]>), proposal: m(d.proposal as Array<[string, string | null]>) as Map<string, Uint8Array>, credType: new Map(d.credType), ccResign: m(d.ccResign as Array<[string, string | null]>), stakeDeposit: new Map((d.stakeDeposit as Array<[string, string]>).map(([k, v]) => [k, BigInt(v)])) };
+};
+function saveFacts(path: string, f: GovFacts, slot: number, hash: string, boundaries: Boundary[]): void {
+    const doc = { v: CACHE_VERSION, slot, hash, ...encodeFacts(f), boundaries: boundaries.map((b) => ({ slot: b.slot, hash: b.hash, facts: encodeFacts(b.facts) })) };
     writeFileSync(path + ".tmp", JSON.stringify(doc));
     renameSync(path + ".tmp", path);
 }
-function loadFacts(path: string): { facts: GovFacts; slot: number; hash: string } | null {
+function loadFacts(path: string): { facts: GovFacts; slot: number; hash: string; boundaries: Boundary[] } | null {
     try {
         if (!existsSync(path)) return null;
         const d = JSON.parse(readFileSync(path, "utf8"));
         if (d.v !== CACHE_VERSION) return null;
-        const m = (x: Array<[string, string | null]>) => new Map(x.map(([k, v]) => [k, v ? unhex(v) : null] as [string, Uint8Array | null]));
         return {
-            slot: d.slot, hash: d.hash,
-            facts: { drepAnchor: m(d.drepAnchor), proposal: m(d.proposal) as Map<string, Uint8Array>, credType: new Map(d.credType), ccResign: m(d.ccResign), stakeDeposit: new Map((d.stakeDeposit as Array<[string, string]>).map(([k, v]) => [k, BigInt(v)])) },
+            slot: d.slot, hash: d.hash, facts: decodeFacts(d),
+            boundaries: (d.boundaries ?? []).map((b: { slot: number; hash: string; facts: ReturnType<typeof encodeFacts> }) => ({ slot: b.slot, hash: b.hash, facts: decodeFacts(b.facts) })),
         };
     } catch { return null; }
 }
@@ -159,10 +170,23 @@ export class GovIndex {
     private building: Promise<void> | null = null;
     private savedAt = 0;
     private readonly overlays = new Map<string, GovFacts>();
+    /**
+     * Facts as of the last block before each recent epoch (by that block's hash). The pulser snapshot of an
+     * epoch reads its DRep anchors as of that block, which is immutable — below `base` — about k blocks into
+     * the epoch: answering from `base` then leaked anchor updates made since the boundary (bug 389).
+     */
+    private boundaries: Boundary[] = [];
 
     constructor(private readonly bs: BlockStore, private readonly fromSlot: number, private readonly cachePath: string | null) {
         const c = cachePath ? loadFacts(cachePath) : null;
-        if (c) { this.base = c.facts; this.baseSlot = c.slot; this.baseHash = c.hash; log.info(`gov index: cache ${cachePath} covers up to slot ${c.slot}`); }
+        if (c) { this.base = c.facts; this.baseSlot = c.slot; this.baseHash = c.hash; this.boundaries = c.boundaries; log.info(`gov index: cache ${cachePath} covers up to slot ${c.slot}`); }
+    }
+
+    /** Before folding a block of a later epoch than the base's last block: keep the base as that boundary's facts. */
+    private noteBoundary(nextSlot: number): void {
+        if (this.baseSlot < 0 || epochForSlot(nextSlot) <= epochForSlot(this.baseSlot)) return;
+        this.boundaries.push({ slot: this.baseSlot, hash: this.baseHash, facts: cloneFacts(this.base) });
+        while (this.boundaries.length > BOUNDARIES_KEPT) this.boundaries.shift();
     }
 
     /** Fold the immutable chunks above the base into it (the first call walks from the Conway fork). */
@@ -175,8 +199,10 @@ export class GovIndex {
             let n = 0, last = this.baseSlot, lastHash = this.baseHash;
             for await (const b of this.bs.chunks.iterate(Math.max(this.fromSlot, this.baseSlot + 1), imm.slot)) {
                 if (b.slot <= this.baseSlot) continue;
+                this.noteBoundary(b.slot);
                 try { applyBlock(this.base, b.bytes); } catch (err) { log.warn(`gov index: block at slot ${b.slot} not walkable: ${(err as Error).message}`); }
                 last = b.slot; lastHash = hex(b.hash);
+                this.baseSlot = last; this.baseHash = lastHash; // noteBoundary reads them
                 if (++n % 2000 === 0) await new Promise((r) => setImmediate(r));
             }
             this.baseSlot = last; this.baseHash = lastHash;
@@ -184,7 +210,7 @@ export class GovIndex {
             if (n > 1000) log.info(`gov index: walked ${n} blocks up to slot ${last} in ${((performance.now() - t0) / 1000).toFixed(1)} s`);
             // the cache (≈ 10 MB on preview) is rewritten after a long walk or every ten minutes, not per block
             if (this.cachePath && n && (n > 5000 || Date.now() - this.savedAt > 600_000)) {
-                try { saveFacts(this.cachePath, this.base, last, lastHash); this.savedAt = Date.now(); } catch (err) { log.warn(`gov index: cache not written: ${(err as Error).message}`); }
+                try { saveFacts(this.cachePath, this.base, last, lastHash, this.boundaries); this.savedAt = Date.now(); } catch (err) { log.warn(`gov index: cache not written: ${(err as Error).message}`); }
             }
         })().finally(() => { this.building = null; });
         return this.building;
@@ -194,7 +220,10 @@ export class GovIndex {
     async at(hashHex: string, slot: number): Promise<GovFacts> {
         await this.catchUp();
         if (slot <= this.baseSlot) {
-            if (slot < this.baseSlot) log.debug?.(`gov index: point slot ${slot} is below the indexed immutable tip ${this.baseSlot}; answering from the tip's facts`);
+            if (slot === this.baseSlot && hashHex.toLowerCase() === this.baseHash) return this.base;
+            const b = this.boundaries.find((x) => x.hash === hashHex.toLowerCase());
+            if (b) return b.facts;
+            if (slot < this.baseSlot) log.warn(`gov index: point slot ${slot} is below the indexed immutable tip ${this.baseSlot} and not a kept epoch boundary; answering from the tip's facts`);
             return this.base;
         }
         const hit = this.overlays.get(hashHex);

@@ -6,7 +6,7 @@
  *   - the built-in history of the public networks (`tableEra`).
  */
 import type { HardForkHistory } from "./HardForkHistory";
-import { LAST_REACHABLE_ERA } from "./hfc";
+import { lastReachableEra } from "./experimental";
 
 export function eraIndexAt(hfc: HardForkHistory | null, slot: bigint, tableEra: number): number {
     let era = tableEra;
@@ -15,5 +15,6 @@ export function eraIndexAt(hfc: HardForkHistory | null, slot: bigint, tableEra: 
         if (t != null && t > era) era = t;
         if (hfc.ready) { const e = hfc.eraOfSlot(slot); if (e > era) era = e; }
     }
-    return Math.min(LAST_REACHABLE_ERA, era);
+    // Conway, or Dijkstra once ExperimentalHardForksEnabled (bug 421)
+    return Math.min(hfc ? Math.max(hfc.lastReachableEra, lastReachableEra()) : lastReachableEra(), era);
 }

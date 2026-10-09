@@ -3,6 +3,7 @@
  * (tip, the last k block points every 30 s, the shared mempool, governor / inbound state, the
  * block producer). Metric names: see prometheus.ts; the cardano-node source of each is noted.
  */
+import { equivocationStats } from "../consensus/equivocation";
 import { getChainTip, getRecentBlockPoints } from "../db";
 import { getBlockProducer } from "../pool/startBlockProducer";
 import { slotAt } from "../pool/slotClock";
@@ -70,19 +71,39 @@ export async function collectNodeMetrics(ctx: { config: GerolamoConfig; startedA
     const fs = lastForgedSlot();
     if (fs != null) m.push({ name: "forgedSlotLast", kind: "int", value: fs });
 
+    // Equivocations: two valid headers from one pool for one slot (Gerolamo; Dingo exports dingo_equivocation_total)
+    const eq = equivocationStats();
+    m.push({ name: "equivocations", kind: "counter", value: eq.total }, { name: "equivocationsOwnPool", kind: "counter", value: eq.self });
+
     // Block producer: forging, ForgingStats, KES (KESInfo.hs)
     const bp = getBlockProducer();
     m.push({ name: "forging_enabled", kind: "int", value: bp && !bp.stats().dryRun ? 1 : 0 });
     if (bp) {
         const st = bp.stats();
-        const start = BigInt(st.opcert.kesPeriod);
-        const current = BigInt(st.kes.period);
-        const expiry = start + BigInt(st.kes.maxEvolutions);
+        if (st.opcert && st.kes) {
+            const start = BigInt(st.opcert.kesPeriod);
+            const current = BigInt(st.kes.period);
+            const expiry = start + BigInt(st.kes.maxEvolutions);
+            m.push(
+                { name: "operationalCertificateStartKESPeriod", kind: "int", value: start },
+                { name: "operationalCertificateExpiryKESPeriod", kind: "int", value: expiry },
+                { name: "currentKESPeriod", kind: "int", value: current },
+                { name: "remainingKESPeriods", kind: "int", value: expiry > current ? expiry - current : 0n },
+            );
+        }
+        // kes-agent client (Gerolamo names; cardano-node traces these but exports no metric)
+        const ag = st.credentials.agent;
+        if (ag) {
+            m.push(
+                { name: "kesAgent.connected", kind: "int", value: ag.connected ? 1 : 0 },
+                { name: "kesAgent.keysReceived", kind: "counter", value: ag.keysReceived },
+                { name: "kesAgent.keysAccepted", kind: "counter", value: ag.keysAccepted },
+                { name: "kesAgent.keysRejected", kind: "counter", value: ag.keysRejected },
+                { name: "kesAgent.disconnects", kind: "counter", value: ag.disconnects },
+            );
+        }
         m.push(
-            { name: "operationalCertificateStartKESPeriod", kind: "int", value: start },
-            { name: "operationalCertificateExpiryKESPeriod", kind: "int", value: expiry },
-            { name: "currentKESPeriod", kind: "int", value: current },
-            { name: "remainingKESPeriods", kind: "int", value: expiry > current ? expiry - current : 0n },
+            { name: "kesCredentialsInstalled", kind: "int", value: st.credentials.installed ? 1 : 0 },
             { name: "blocksForged", kind: "int", value: st.forged },
             { name: "nodeIsLeader", kind: "int", value: allCounters().get("Forge.node-is-leader") ?? 0 },
             { name: "nodeCannotForge", kind: "int", value: allCounters().get("Forge.could-not-forge") ?? 0 },

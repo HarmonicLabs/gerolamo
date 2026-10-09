@@ -3,6 +3,7 @@ import {
     AlonzoHeader,
     BabbageHeader,
     ConwayHeader,
+    DijkstraHeader,
     isIAllegraHeader,
     isIAlonzoHeader,
     isIBabbageHeader,
@@ -203,7 +204,7 @@ export class ValidatePostBabbageHeader {
 
     private getEraHeader(
         h: MultiEraHeader,
-    ): BabbageHeader | ConwayHeader | null {
+    ): BabbageHeader | ConwayHeader | DijkstraHeader | null {
         if (h.era < 6) return null;
         if (h.era === 6 && !isIBabbageHeader(h.header)) {
             throw new Error("Invalid Babbage header for era 6");
@@ -211,7 +212,12 @@ export class ValidatePostBabbageHeader {
         if (h.era === 7 && !isIConwayHeader(h.header)) {
             throw new Error("Invalid Conway header for era 7");
         }
-        return h.header as BabbageHeader | ConwayHeader;
+        // Dijkstra (bug 425): the Praos header plus the Leios fields; VRF, KES and opcert rules are unchanged.
+        if (h.era === 8 && !(h.header instanceof DijkstraHeader)) {
+            throw new Error("Invalid Dijkstra header for era 8");
+        }
+        if (h.era > 8) return null;
+        return h.header as BabbageHeader | ConwayHeader | DijkstraHeader;
     }
 
     public async validate(
@@ -226,7 +232,8 @@ export class ValidatePostBabbageHeader {
         const header = this.getEraHeader(h);
         if (
             !(header instanceof BabbageHeader ||
-                header instanceof ConwayHeader) || header === null
+                header instanceof ConwayHeader ||
+                header instanceof DijkstraHeader) || header === null
         ) {
             return null;
         }

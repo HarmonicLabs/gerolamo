@@ -1,5 +1,5 @@
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
-import { applyByronTxPayload, applyInvalidTransaction, applyTransaction, deleteBlockSpends, newBlockSpends, type KnownUtxoRow, type SqlClient, flushPendingUtxoWrites } from "../db";
+import { applyByronTxPayload, applyDirectDeposits, applyInvalidTransaction, applyTransaction, deleteBlockSpends, newBlockSpends, type KnownUtxoRow, type SqlClient, flushPendingUtxoWrites } from "../db";
 import { logger } from "../utils/logger";
 import { migrateGovCredentials } from "./governance/govCredMigration";
 import { sql } from "../sql";
@@ -56,6 +56,7 @@ export async function applyBlock(
     for (const txBody of txBodies) {
         const ctx = { slot: slotNum, txIndex, blockHeight, epoch: opts.epoch, govActionLifetime: opts.govActionLifetime, era: opts.era, knownInputs: opts.knownInputs, feeAcc, blockSpends };
         if (invalid.has(txIndex)) await applyInvalidTransaction(txBody, blockHash, client, ctx);
+        else if (Number(opts.era ?? 0) >= 8) await applyDijkstraTransaction(txBody, blockHash, client, ctx);
         else await applyTransaction(txBody, blockHash, client, ctx);
         txIndex++;
     }
@@ -73,4 +74,30 @@ export async function applyBlock(
         }
     }
     await flushPendingUtxoWrites(client ?? sql); // multi-row writes of this block's UTxO rows and deltas
+}
+
+/**
+ * Dijkstra (bug 429): a phase-2 valid top-level transaction applies its sub-transactions first
+ * (SUBLEDGERS, in order; each is a transaction of its own whose id is the hash of its body and
+ * which pays no fee), then its own effects, then its direct deposits (ENTITIES credits them
+ * after the certificates). A phase-2 invalid transaction only loses its collateral, its
+ * sub-transactions included (handled by `applyInvalidTransaction`).
+ */
+export async function applyDijkstraTransaction(
+    txBody: any,
+    blockHash: Uint8Array,
+    client: SqlClient | undefined,
+    ctx: Parameters<typeof applyTransaction>[3] & object,
+    deps: { applyTransaction: typeof applyTransaction; applyDirectDeposits: typeof applyDirectDeposits } = { applyTransaction, applyDirectDeposits },
+): Promise<void> {
+    for (const sub of (txBody.subTransactions ?? []) as any[]) {
+        const subBody = sub?.body ?? sub;
+        await deps.applyTransaction(subBody, blockHash, client, ctx);
+        // sub-transactions have no fee, so applyTransaction does not see their donation
+        const donation = BigInt(subBody?.donation ?? 0);
+        if (donation > 0n && ctx.feeAcc) ctx.feeAcc.donations += donation;
+        if (subBody?.directDeposits) await deps.applyDirectDeposits(subBody.directDeposits, blockHash, client);
+    }
+    await deps.applyTransaction(txBody, blockHash, client, ctx);
+    if (txBody.directDeposits) await deps.applyDirectDeposits(txBody.directDeposits, blockHash, client);
 }

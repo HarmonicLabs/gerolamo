@@ -27,6 +27,8 @@ export interface CandidatePoint {
     hash: string;
     /** Byron epoch-boundary block: the same slot also holds the epoch's first main block. */
     ebb?: boolean;
+    /** Parent header hash (lower-case hex): lets a fragment kept in arrival order be read as a chain (bug 385). */
+    prevHash?: string | null;
 }
 
 export type AgreementStatus = "agrees" | "divergent" | "unknown" | "ahead" | "behind";
@@ -378,6 +380,33 @@ export class CandidateSet {
             }
         }
         return { outvoted: false };
+    }
+
+    /**
+     * The unbroken chain in `key`'s fragment that extends `anchorHash`, oldest first: each point's parent is
+     * the one before it. The fragment is kept in arrival order, and a stream re-anchored on our tip replays
+     * older slots after newer ones, so slicing it by slot can skip blocks (bug 385: a 128-point range spanning
+     * 1693 blocks, and every honest peer that served it was convicted). Where the fragment holds two children
+     * of one block, the later arrival wins (the stream's current branch). Empty when nothing links on.
+     */
+    chainAfter(key: string, anchorHash: string): CandidatePoint[] {
+        const pts = this.peers.get(key)?.fragment.points;
+        if (!pts?.length) return [];
+        const byPrev = new Map<string, CandidatePoint>();
+        for (const p of pts) if (p.prevHash) byPrev.set(p.prevHash.toLowerCase(), p);
+        const out: CandidatePoint[] = [];
+        const seen = new Set<string>();
+        let cur = anchorHash.toLowerCase();
+        for (;;) {
+            const next = byPrev.get(cur);
+            if (!next) break;
+            const h = next.hash.toLowerCase();
+            if (seen.has(h)) break;
+            seen.add(h);
+            out.push(next);
+            cur = h;
+        }
+        return out;
     }
 
     /** Points a verifier holds that a scheduler could fetch from it (agreeing peers only). */

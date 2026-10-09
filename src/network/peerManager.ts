@@ -1,5 +1,5 @@
 import { logger } from "../utils/logger";
-import { ledgerBackfillRaw, ledgerStartupTipOverride, ledgerStoreMode, openNodeLedgerStore } from "../ledger/nodeLedgerStore";
+import { ledgerBackfillRaw, ledgerStartupTipOverride, ledgerStoreMode, openNodeLedgerStore, resolveLedgerDir } from "../ledger/nodeLedgerStore";
 import { epochForSlot, firstSlotOfEpoch } from "../utils/epochFromSlotCalculations";
 import { blockStoreMode, catchUpFromSqlite, configureBlockStoreMode, configureRelayStore, noteSelectedTip, persistSelectedTipTo, resolveStartupTip, selectedTipPathFor, openNodeBlockStore, relayChainStoreOverride, setNodeBlockStore } from "../storage/nodeBlockStore";
 import { latestSnapshotEpoch, listPoolRelays, poolStakeForEpoch } from "../db/leaderState";
@@ -140,9 +140,16 @@ export interface BlockFetchBatchConfig {
 
 export interface ProducerConfig {
     coldVkeyFile: string;
-    kesSkeyFile: string;
+    /** KES signing key file; exactly one of this and `kesAgentSocket`. */
+    kesSkeyFile?: string;
     vrfSkeyFile: string;
-    opcertFile: string;
+    /** Operational certificate file; required with `kesSkeyFile`. Ignored with `kesAgentSocket` (the agent sends it). */
+    opcertFile?: string;
+    /**
+     * kes-agent service socket (cardano-node `--shelley-kes-agent-socket`): the KES key and the
+     * operational certificate come from the agent, which pushes a new pair on rotation and evolution.
+     */
+    kesAgentSocket?: string;
     /** Where the last forged slot is persisted (never two blocks in one slot across restarts). */
     stateFile?: string;
     /** Log leadership without forging (read-only check against cardano-cli). */
@@ -226,6 +233,8 @@ export interface GerolamoConfig {
     readonly prometheus?: { host?: string; port: number; noSuffix?: boolean; enabled?: boolean };
     /** cardano-node's legacy spelling of `prometheus`: `["127.0.0.1", 12798]`. */
     readonly hasPrometheus?: [string, number];
+    /** UTxO RPC server (src/api/utxorpc): off unless `enabled`; host 127.0.0.1, port 50051 by default. Env GEROLAMO_UTXORPC=host:port | 0. */
+    readonly utxorpc?: { enabled?: boolean; host?: string; port?: number };
     /**
      * Chain selection and consensus mode (consensus/chainsel/ChainSelDriver.ts). `chainSelection`:
      * "legacy" (default: primary + verifier votes) or "praos" (ouroboros-consensus candidate
@@ -262,6 +271,11 @@ export interface GerolamoConfig {
         /** How long a rotated-out verifier waits warm before it may go hot again. Default 10 min. */
         readonly verifierLagHoldMs?: number;
     };
+    /**
+     * Serve a Mithril cardano-database v2 artifact store (made by `mithril-produce`) under
+     * /mithril with the aggregator's routes. Off by default; see src/mithril/cdb/serveConfig.ts.
+     */
+    readonly mithril?: import("../mithril/cdb/serveConfig").MithrilServeConfigInput;
     allPeers: Map<string, PeerClient>;
 }
 
@@ -1371,7 +1385,8 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
             setNodeBlockStore(store);
             persistSelectedTipTo(selectedTipPathFor(store.dir));
             if (blockStoreMode() === "primary") {
-                const start = await resolveStartupTip(store, store.dir);
+                const ledgerDir = ledgerStoreMode() !== "sqlite" ? resolveLedgerDir(config) : null;
+                const start = await resolveStartupTip(store, store.dir, ledgerDir ? join(ledgerDir, "diffs") : null);
                 const emptyStore = !start && store.chunks.chunks().length === 0 && store.volatile.size === 0;
                 if (emptyStore && config.syncFromGenesis) {
                     // A fresh from-genesis node: no block yet, the chain starts at the origin (bug 304; the

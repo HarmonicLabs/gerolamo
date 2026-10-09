@@ -276,6 +276,15 @@ export class LedgerStore {
         return this.ov && this.ov.tip === tipHex ? this.ov.chain : this.chain(tipHex);
     }
 
+    /** Keys of `db` the selected chain's volatile diffs set or deleted, with their newest value (undefined: deleted). */
+    volatileEntries(db: string): Array<[Uint8Array, Uint8Array | undefined]> {
+        const m = this.overlayFor(this.tip).maps.get(db);
+        if (!m) return [];
+        const out: Array<[Uint8Array, Uint8Array | undefined]> = [];
+        for (const [k, e] of m) if (e.hit) out.push([unhex(k), e.value]);
+        return out;
+    }
+
     volatileCount(): number { return this.diffs.size; }
     volatileBytes(): number { let n = 0; for (const d of this.diffs.values()) n += d.bytes; return n; }
     hasDiff(hash: Uint8Array): boolean { return this.diffs.has(hex(hash)); }

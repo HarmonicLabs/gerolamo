@@ -18,7 +18,7 @@ import { ledgerInputs, utxoRefOf } from "./resolvedUtxo";
 import { parseStoredAddress } from "./requiredSigners";
 import { unitsOf, type UnitMap } from "./value";
 import { Address, ByronAddress, CredentialType } from "@harmoniclabs/cardano-ledger-ts";
-import { bodyUintField, costModelArrays, expectedScriptDataHash, scriptLanguageOfCbor, witnessDatumBytes, type PlutusLanguage } from "./scriptDataHash";
+import { bodyUintField, costModelArrays, expectedScriptDataHash, maxPlutusLanguage, scriptLanguageOfCbor, witnessDatumBytes, type PlutusLanguage } from "./scriptDataHash";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { checkSupplementalDatums } from "./ledgerChecks";
 
@@ -227,6 +227,8 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
         }
         seen.add(key);
         const needed = tag === 0 ? neededSpend : tag === 1 ? neededMint : tag === 2 ? neededCert : tag === 3 ? neededWd : tag === 4 ? neededVote : tag === 5 ? neededPropose : null;
+        // Dijkstra adds tag 6 (guarding): the guard purposes are not modelled yet (bug 428), so report
+        if (tag === 6 && Number(tx.era) >= 8) { reports.push(`guarding redeemer ${idx}: purpose not checked (Dijkstra guards)`); continue; }
         if (!needed) { (tag > 5 ? failures : reports).push(`extra redeemer: unknown purpose tag ${tag}`); continue; }
         if (!needed.has(idx)) (tag >= 4 && !GOV_REDEEMERS_STRICT ? reports : failures).push(`extra redeemer: ${PURPOSES[tag]} index ${idx} needs no Plutus script`);
     }
@@ -260,7 +262,7 @@ export function evaluateAlonzoRules(tx: AlonzoRuleInput): { failures: string[]; 
     if (redeemers.length > 0 && !body.scriptDataHash) failures.push("redeemers present but no script_data_hash");
     if (redeemers.length === 0 && (ws.datums?.length ?? 0) === 0 && body.scriptDataHash) reports.push("script_data_hash present without redeemers or datums");
     if (tx.witnessSetBytes) {
-        const langs = scriptDataLanguages(neededHashes, tx.plutusLanguages, ws, body, tx.resolved);
+        const langs = scriptDataLanguages(neededHashes, tx.plutusLanguages, ws, body, tx.resolved, maxPlutusLanguage(tx.era));
         const expected = expectedScriptDataHash({ witnessSetBytes: tx.witnessSetBytes, languages: langs, models: costModelArrays(tx.rawParams), alonzoForm: tx.era <= 6 });
         const actual = body.scriptDataHash ? hex(body.scriptDataHash) : null;
         if (expected.reason) reports.push(`script_data_hash not checked: ${expected.reason}`);
@@ -320,6 +322,8 @@ export function scriptDataLanguages(
     ws: any,
     body: any,
     resolved: Map<string, { referenceScriptCbor?: string | null }>,
+    /** Highest language of the era (`maxPlutusLanguage`): 4 from Dijkstra. */
+    maxLanguage: PlutusLanguage = 3,
 ): Set<PlutusLanguage> {
     const langs = new Set<PlutusLanguage>();
     if (plutusLanguages) {
@@ -334,11 +338,12 @@ export function scriptDataLanguages(
     if ((ws.plutusV1Scripts?.length ?? 0) > 0) langs.add(1);
     if ((ws.plutusV2Scripts?.length ?? 0) > 0) langs.add(2);
     if ((ws.plutusV3Scripts?.length ?? 0) > 0) langs.add(3);
+    if ((ws.plutusV4Scripts?.length ?? 0) > 0) langs.add(4); // only Dijkstra witness sets carry V4 scripts
     for (const i of [...(body.inputs ?? []), ...(body.refInputs ?? [])] as any[]) {
         const r = utxoRefOf(i);
         const u = r ? resolved.get(r) : null;
         if (u?.referenceScriptCbor) {
-            const l = scriptLanguageOfCbor(u.referenceScriptCbor);
+            const l = scriptLanguageOfCbor(u.referenceScriptCbor, maxLanguage);
             if (l) langs.add(l);
         }
     }

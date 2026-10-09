@@ -24,6 +24,14 @@ import { comparePraos, comparePraosOrd, tieBreakInfoOf, vrfFlavorForEra, type Pr
 
 export interface Point { hash: string; slot: bigint; blockNo: bigint }
 
+/**
+ * Hash standing for the chain's origin (no block): the anchor of an empty chain (ChainSelDriver,
+ * sim.ts GENESIS). A Shelley-based chain's first block has a null previous hash; it extends the
+ * origin, and a ChainSync RollBackward to the origin point (no hash, slot 0) re-anchors a peer there
+ * (bug 401).
+ */
+export const ORIGIN_HASH = "00".repeat(32);
+
 export interface ChainHeader extends Point {
     prevHash: string | null;
     /** Hard-fork-combinator era index (Byron 0 … Conway 6). */
@@ -188,7 +196,7 @@ export class ChainSel {
     rollForward(peer: string, h: IncomingHeader): void {
         let f = this.peers.get(peer);
         if (!f) { this.addPeer(peer); f = this.peers.get(peer)!; }
-        const hash = h.hash.toLowerCase(), prev = h.prevHash?.toLowerCase() ?? null;
+        const hash = h.hash.toLowerCase(), prev = h.prevHash?.toLowerCase() ?? ORIGIN_HASH;
         this.noteLatestSlot(peer, h.slot);
         let parent: Point | null = null;
         const last = f.headers[f.headers.length - 1];
@@ -217,7 +225,8 @@ export class ChainSel {
     rollBackward(peer: string, point: { hash: string | null; slot: bigint }): void {
         const f = this.peers.get(peer);
         if (!f) return;
-        const h = point.hash?.toLowerCase() ?? null;
+        // the origin point (ChainSync `Origin`: no hash) re-anchors at the origin while it is in our window
+        const h = point.hash ? point.hash.toLowerCase() : point.slot === 0n ? ORIGIN_HASH : null;
         if (h) {
             const j = f.headers.findIndex((x) => x.hash === h);
             if (j >= 0) { f.headers.length = j + 1; return; }

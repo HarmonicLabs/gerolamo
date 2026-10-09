@@ -37,7 +37,8 @@ while true; do
     sleep 5
   fi
   while [ -d /proc/$pid ]; do
-    rss_kb=$(awk '/VmRSS/{print $2}' /proc/$pid/status 2>/dev/null); rss_kb=${rss_kb:-0}
+    # anonymous memory only: LMDB's mapped file pages count in VmRSS but are page cache (reclaimable)
+    rss_kb=$(awk '/RssAnon/{print $2}' /proc/$pid/status 2>/dev/null); rss_kb=${rss_kb:-0}
     if [ $((rss_kb / 1048576)) -ge "$MAX_GB" ]; then
       say "pid $pid rss $((rss_kb / 1024)) MB >= ${MAX_GB} GB, restarting"
       stop_node "$pid"; break

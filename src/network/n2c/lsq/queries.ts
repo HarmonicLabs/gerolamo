@@ -19,7 +19,7 @@ import { DB_UTXO } from "../../../ledger/utxoStore";
 import { primaryBlockStore } from "../../../storage/nodeBlockStore";
 import { getLedgerStore, ledgerStoreMode, ledgerStoreSummary, resolveLedgerDir } from "../../../ledger/nodeLedgerStore";
 import { logger } from "../../../utils/logger";
-import { conwayPParamsCbor } from "../pparamsCbor";
+import { pparamsCborFor } from "../pparamsCbor";
 import { encodeUtcTime, systemStartOf, type EraHistoryNetwork } from "../eraHistory";
 import { addressString, txInRef } from "../utxoCbor";
 import { ledgerTxOutBytes, writeLedgerTxOut } from "./txOut";
@@ -110,7 +110,8 @@ export function pparamsRaw(c: Ctx, epoch = c.epoch): Record<string, unknown> {
     if (!r) throw new LsqUnanswerable(`no protocol parameters for epoch ${epoch}`);
     return r;
 }
-const pparamsBytes = (raw: Record<string, unknown>) => toBytes(conwayPParamsCbor(raw));
+// Dijkstra's 54-field encoding once the parameters are at protocol 12 (bug 430)
+const pparamsBytes = (raw: Record<string, unknown>) => toBytes(pparamsCborFor(raw));
 
 let factsCachePath: string | null | undefined;
 let factsSource: ((hash: string | null, slot: number) => GovFacts | null) | null = null;

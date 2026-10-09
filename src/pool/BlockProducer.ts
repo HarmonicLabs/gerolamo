@@ -11,7 +11,7 @@
  * enforced across restarts through `stateFile`; the KES key only evolves
  * forward; nothing about keys is logged.
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { ledgerUtxoReads } from "../ledger/nodeLedgerStore";
 import { blockAtSlot, getChainTipFromHeader } from "../db";
 import { sql } from "../sql";
@@ -23,9 +23,13 @@ import { logger } from "../utils/logger";
 import { assembleBody, splitTx, type TxParts } from "./bodyAssembly";
 import { EMPTY_BODY, forgeBlock, type BodySegments } from "./forge";
 import {
-    checkOperationalCert, kesPeriodOfSlot, loadColdVerificationKey, loadKesSigningKey, loadVrfSigningKey, poolIdOf, readOperationalCert, vrfKeyHashOf, zeroise,
+    checkOperationalCert, evolveKesTo, kesEvolution, kesKeyFromAgent, kesPeriodOfSlot, kesProbe, loadColdVerificationKey, loadKesSigningKey, loadVrfSigningKey, poolIdOf, readOperationalCert, vrfKeyHashOf, zeroise,
     type KesKey, type OperationalCert, type VrfKey,
 } from "./keystore";
+import { KesAgentClient, type KesAgentClientState } from "./kesAgent/client";
+import { kesSourceOf, type KesSource } from "./kesSource";
+export { kesSourceOf, type KesSource } from "./kesSource";
+import { RecvResult, type AgentBundle } from "./kesAgent/protocol";
 import { noteForgeEvent } from "../network/nodeMetrics";
 import type { LeaderSlot } from "./leaderSchedule";
 import { decideForge, SlotTicker, slotAt, slotStartMs } from "./slotClock";
@@ -33,9 +37,17 @@ import { noteForgedBlock } from "./forgedBlocks";
 
 export interface ProducerKeysConfig {
     coldVkeyFile: string;
-    kesSkeyFile: string;
+    /** KES signing key file (cardano-cli `kes.skey`). Exactly one of this and `kesAgentSocket`. */
+    kesSkeyFile?: string;
     vrfSkeyFile: string;
-    opcertFile: string;
+    /** Operational certificate file; required with `kesSkeyFile`. With `kesAgentSocket` it is ignored: the agent sends the certificate. */
+    opcertFile?: string;
+    /**
+     * Service socket of a kes-agent (input-output-hk/kes-agent, as cardano-node's
+     * `--shelley-kes-agent-socket`): the KES key and the operational certificate come from the
+     * agent and are replaced whenever it pushes a new pair. Instead of `kesSkeyFile` + `opcertFile`.
+     */
+    kesAgentSocket?: string;
     stateFile?: string;
     dryRun?: boolean;
     greeting?: { paymentSkeyFile: string; paymentAddress: string };
@@ -131,7 +143,7 @@ export function kesHealthOf(evolution: number, maxEvolutions: number): KesHealth
 
 export type CredentialReload =
     | { ok: true; counter: bigint; kesPeriod: bigint; evolution: number }
-    | { ok: false; reason: string };
+    | { ok: false; reason: string; kind?: "invalid-opcert" | "outdated" | "other" };
 
 const bytesEq = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((x, i) => x === b[i]);
 
@@ -141,11 +153,19 @@ export const CONFIRM_DEPTH = 10;
 export interface ProducerStats {
     poolId: string;
     vrfKeyHash: string;
-    /** counter and start period from the certificate on disk; `chainCounter` is the last counter the chain has seen for this pool (null = none yet). */
-    opcert: { counter: string; kesPeriod: string; chainCounter: string | null };
-    kesEvolution: number;
-    /** KES key life: current period, evolutions used, evolutions left, and when the certificate expires. */
-    kes: { period: string; evolution: number; remaining: number; maxEvolutions: number; expiresAt: string; expiresSlot: string; health: KesHealth; counter: "ok" | "behind-chain" | "ahead-of-chain" | "unknown" };
+    /**
+     * counter and start period from the installed certificate; `chainCounter` is the last counter the chain has
+     * seen for this pool (null = none yet). Null while no credentials are installed (kes-agent mode before the
+     * agent's first key, or after it dropped the key).
+     */
+    opcert: { counter: string; kesPeriod: string; chainCounter: string | null } | null;
+    kesEvolution: number | null;
+    /** KES key life: current period, evolutions used, evolutions left, and when the certificate expires (null without credentials). */
+    kes: { period: string; evolution: number; remaining: number; maxEvolutions: number; expiresAt: string; expiresSlot: string; health: KesHealth; counter: "ok" | "behind-chain" | "ahead-of-chain" | "unknown" } | null;
+    /** Where the KES key + opcert come from, whether a pair is installed, when it last changed, and the kes-agent connection. */
+    credentials: { source: KesSource; installed: boolean; lastUpdate: string | null; agent: KesAgentClientState | null };
+    /** Highest slot a header was ever signed for (persisted before signing): no slot at or below it is forged again. */
+    signedSlot: string | null;
     /** Slots the wall-clock ticker never evaluated (late by more than a slot); gLiveView "Missed slot leader checks". */
     missedLeaderChecks: number;
     /** A schedule pass (VRF over an epoch) is running right now. */
@@ -169,10 +189,18 @@ export class BlockProducer {
     readonly poolId: string;
     private readonly coldVkey: Uint8Array;
     private readonly vrf: VrfKey;
-    /** Hot credentials: replaced as a pair by reloadCredentials() (SIGHUP), never mid-forge. */
-    private kes: KesKey;
-    private opcert: OperationalCert;
+    /**
+     * Hot credentials: replaced as a pair by reloadCredentials() (SIGHUP) or a kes-agent push, never
+     * mid-forge. Null in kes-agent mode until the agent's first key (and after it drops the key).
+     */
+    private kes: KesKey | null;
+    private opcert: OperationalCert | null;
+    readonly kesSource: KesSource;
+    private agent: KesAgentClient | null = null;
+    private credentialsAt: string | null = null;
     private reloading: Promise<CredentialReload> | null = null;
+    /** Serialises credential swaps (SIGHUP and agent pushes). */
+    private installQueue: Promise<unknown> = Promise.resolve();
     private readonly leaderSlots = new Map<string, LeaderSlot>(); // slot → entry
     private readonly scheduled = new Set<number>();
     /** The nonce each epoch's schedule was computed from: a schedule built from the evolver's peek before the epoch's last block is provisional. */
@@ -190,6 +218,12 @@ export class BlockProducer {
     /** Resolves when the first schedule pass (started by `start()`) has finished. */
     ready: Promise<void> = Promise.resolve();
     private lastForgedSlot: bigint | null = null;
+    /**
+     * Highest slot a header was signed for, written to the state file BEFORE the first signature
+     * of a slot: a crash between publishing a block and recording it cannot lead to a second,
+     * different block for that slot after a restart.
+     */
+    private signedSlot: bigint | null = null;
     /** Set once the greeting transaction has been in an adopted block on this network. */
     private greeted = false;
     /** Hash of the block that carried the greeting (cleared when that block leaves the chain). */
@@ -199,13 +233,20 @@ export class BlockProducer {
     private forging = false;
 
     constructor(private readonly cfg: ProducerKeysConfig, private readonly node: ProducerNode) {
+        this.kesSource = kesSourceOf(cfg);
         this.coldVkey = loadColdVerificationKey(cfg.coldVkeyFile);
         this.poolId = poolIdOf(this.coldVkey);
         this.vrf = loadVrfSigningKey(cfg.vrfSkeyFile);
-        this.kes = loadKesSigningKey(cfg.kesSkeyFile);
-        this.opcert = readOperationalCert(cfg.opcertFile);
-        if (Buffer.from(this.opcert.coldVkey).toString("hex") !== Buffer.from(this.coldVkey).toString("hex")) {
-            throw new Error("operational certificate was issued by a different cold key");
+        if (this.kesSource === "file") {
+            this.kes = loadKesSigningKey(cfg.kesSkeyFile!);
+            this.opcert = readOperationalCert(cfg.opcertFile!);
+            if (Buffer.from(this.opcert.coldVkey).toString("hex") !== Buffer.from(this.coldVkey).toString("hex")) {
+                throw new Error("operational certificate was issued by a different cold key");
+            }
+            this.credentialsAt = new Date((this.node.now ?? Date.now)()).toISOString();
+        } else {
+            this.kes = null;
+            this.opcert = null;
         }
         this.lastForgedSlot = this.readState();
     }
@@ -214,14 +255,20 @@ export class BlockProducer {
     async start(): Promise<void> {
         const now = (this.node.now ?? Date.now)();
         const slot = slotAt(now, this.node.network);
-        const check = checkOperationalCert(this.opcert, {
-            currentKesPeriod: kesPeriodOfSlot(slot, BigInt(this.node.genesis.slotsPerKESPeriod)),
-            maxKesEvolutions: BigInt(this.node.genesis.maxKESEvolutions),
-            lastOnChainCounter: (this.chainCounter = await this.node.lastOnChainOpcertCounter(this.poolId)),
-            kesVkey: this.kes.vkey,
-        });
-        if (!check.ok) throw new Error(`operational certificate rejected: ${check.reason}`);
-        logger.info(`Block producer: pool ${this.poolId}, VRF ${vrfKeyHashOf(this.vrf.vkey).slice(0, 16)}…, opcert counter ${this.opcert.cert.counter} period ${this.opcert.cert.kesPeriod}, KES evolution ${check.evolution}${this.cfg.dryRun ? " (dry run: no forging)" : ""}`);
+        if (this.kes && this.opcert) {
+            const check = checkOperationalCert(this.opcert, {
+                currentKesPeriod: kesPeriodOfSlot(slot, BigInt(this.node.genesis.slotsPerKESPeriod)),
+                maxKesEvolutions: BigInt(this.node.genesis.maxKESEvolutions),
+                lastOnChainCounter: (this.chainCounter = await this.node.lastOnChainOpcertCounter(this.poolId)),
+                kesVkey: this.kes.vkey,
+            });
+            if (!check.ok) throw new Error(`operational certificate rejected: ${check.reason}`);
+            logger.info(`Block producer: pool ${this.poolId}, VRF ${vrfKeyHashOf(this.vrf.vkey).slice(0, 16)}…, opcert counter ${this.opcert.cert.counter} period ${this.opcert.cert.kesPeriod}, KES evolution ${check.evolution}${this.cfg.dryRun ? " (dry run: no forging)" : ""}`);
+        } else {
+            this.chainCounter = await this.node.lastOnChainOpcertCounter(this.poolId).catch(() => null);
+            logger.info(`Block producer: pool ${this.poolId}, VRF ${vrfKeyHashOf(this.vrf.vkey).slice(0, 16)}…, KES key + operational certificate from the kes-agent at ${this.cfg.kesAgentSocket}; no forging until the agent sends them${this.cfg.dryRun ? " (dry run: no forging)" : ""}`);
+            this.startAgent();
+        }
         // The schedule (a VRF pass over the epoch, minutes under load) fills in behind the
         // ticker: startup must not hold the rest of the node (2026-09-12 09:40 UTC: the inbound
         // listener waited more than five minutes for it after a reboot).
@@ -233,6 +280,54 @@ export class BlockProducer {
     stop(): void {
         this.ticker?.stop();
         this.ticker = null;
+        this.agent?.stop();
+        this.agent = null;
+    }
+
+    /** kes-agent mode: connect to the agent and install every key it pushes (reconnects forever). */
+    private startAgent(): void {
+        if (this.agent || this.kesSource !== "kes-agent") return;
+        this.agent = new KesAgentClient({
+            socketPath: this.cfg.kesAgentSocket!,
+            onKey: (bundle) => this.installFromAgent(bundle),
+            onDrop: () => this.dropCredentials("the kes-agent dropped the key"),
+        });
+        this.agent.start();
+    }
+
+    /**
+     * Install a key bundle pushed by the kes-agent, through the same checks as a SIGHUP reload
+     * (cold key, cold signature, KES key match, period window, on-chain counter), plus: the key
+     * must sign for the certificate's KES key at its evolution (a self-sign probe, as Dingo), and
+     * a certificate older than the installed one is refused. Answers with a RecvResult code.
+     */
+    async installFromAgent(bundle: AgentBundle): Promise<number> {
+        let kes: KesKey;
+        try { kes = kesKeyFromAgent(bundle.kesSignKey); }
+        catch (err) {
+            this.lastError = `credential reload rejected: kes-agent key unusable: ${(err as Error)?.message ?? err}`;
+            logger.error(`Block producer: ${this.lastError}`);
+            return RecvResult.unknown;
+        }
+        const r = await this.installCredentials(kes, { cert: bundle.opcert, coldVkey: this.coldVkey }, "kes-agent");
+        if (r.ok) return RecvResult.ok;
+        return r.kind === "outdated" ? RecvResult.keyOutdated : r.kind === "invalid-opcert" ? RecvResult.invalidOpCert : RecvResult.unknown;
+    }
+
+    /** Forget the hot credentials (kes-agent DropKey): no forging until a new pair arrives. */
+    async dropCredentials(reason: string): Promise<number> {
+        const run = this.installQueue.then(async () => {
+            for (let waited = 0; this.forging && waited < 30_000; waited += 50) await Bun.sleep(50);
+            if (this.forging) return RecvResult.unknown;
+            if (this.kes) zeroise(this.kes.skey);
+            this.kes = null;
+            this.opcert = null;
+            this.credentialsAt = new Date((this.node.now ?? Date.now)()).toISOString();
+            logger.warn(`Block producer: KES key dropped (${reason}): no forging until new credentials arrive`);
+            return RecvResult.ok;
+        });
+        this.installQueue = run.catch(() => undefined);
+        return run;
     }
 
     /**
@@ -244,6 +339,9 @@ export class BlockProducer {
      * progress; the replaced KES secret is zeroed. Nothing about key material is logged.
      */
     reloadCredentials(): Promise<CredentialReload> {
+        if (this.kesSource === "kes-agent") {
+            return Promise.resolve({ ok: false, reason: "credentials come from the kes-agent (producer.kesAgentSocket); rotate them with kes-agent-control", kind: "other" });
+        }
         if (this.reloading) return this.reloading;
         this.reloading = this.doReload().finally(() => { this.reloading = null; });
         return this.reloading;
@@ -251,23 +349,43 @@ export class BlockProducer {
 
     private async doReload(): Promise<CredentialReload> {
         let kes: KesKey | null = null;
-        const fail = (reason: string): CredentialReload => {
-            if (kes) zeroise(kes.skey);
-            this.lastError = `credential reload rejected: ${reason}`;
-            logger.error(`Block producer: KES / operational certificate reload rejected, keeping counter ${this.opcert.cert.counter} period ${this.opcert.cert.kesPeriod}: ${reason}`);
-            return { ok: false, reason };
-        };
         let opcert: OperationalCert;
         try {
-            opcert = readOperationalCert(this.cfg.opcertFile);
-            kes = loadKesSigningKey(this.cfg.kesSkeyFile);
+            opcert = readOperationalCert(this.cfg.opcertFile!);
+            kes = loadKesSigningKey(this.cfg.kesSkeyFile!);
         } catch (err) {
-            return fail(`cannot read ${this.cfg.opcertFile} / the KES key: ${(err as Error)?.message ?? err}`);
+            if (kes) zeroise(kes.skey);
+            return this.rejectCredentials(`cannot read ${this.cfg.opcertFile} / the KES key: ${(err as Error)?.message ?? err}`, "files", "other");
         }
+        return this.installCredentials(kes, opcert, "files");
+    }
+
+    private rejectCredentials(reason: string, source: "files" | "kes-agent", kind: "invalid-opcert" | "outdated" | "other"): CredentialReload {
+        this.lastError = `credential reload rejected${source === "kes-agent" ? " (kes-agent)" : ""}: ${reason}`;
+        const keeping = this.opcert ? `keeping counter ${this.opcert.cert.counter} period ${this.opcert.cert.kesPeriod}` : "no credentials installed";
+        logger.error(`Block producer: KES / operational certificate ${source === "kes-agent" ? "from the kes-agent" : "reload"} rejected, ${keeping}: ${reason}`);
+        return { ok: false, reason, kind };
+    }
+
+    /**
+     * Check a new KES key + operational certificate pair and swap it in: the one path for a SIGHUP
+     * reload and a kes-agent push. Takes ownership of `kes` (zeroed when rejected or replaced).
+     */
+    private installCredentials(kes: KesKey, opcert: OperationalCert, source: "files" | "kes-agent"): Promise<CredentialReload> {
+        const run = this.installQueue.then(() => this.doInstall(kes, opcert, source));
+        this.installQueue = run.catch(() => undefined);
+        return run;
+    }
+
+    private async doInstall(kes: KesKey, opcert: OperationalCert, source: "files" | "kes-agent"): Promise<CredentialReload> {
+        const fail = (reason: string, kind: "invalid-opcert" | "outdated" | "other" = "invalid-opcert"): CredentialReload => {
+            zeroise(kes.skey);
+            return this.rejectCredentials(reason, source, kind);
+        };
         if (!bytesEq(opcert.coldVkey, this.coldVkey)) return fail("operational certificate was issued by a different cold key");
         let chainCounter: bigint | null;
         try { chainCounter = await this.node.lastOnChainOpcertCounter(this.poolId); }
-        catch (err) { return fail(`on-chain counter unavailable: ${(err as Error)?.message ?? err}`); }
+        catch (err) { return fail(`on-chain counter unavailable: ${(err as Error)?.message ?? err}`, "other"); }
         const slot = slotAt((this.node.now ?? Date.now)(), this.node.network);
         const check = checkOperationalCert(opcert, {
             currentKesPeriod: kesPeriodOfSlot(slot, BigInt(this.node.genesis.slotsPerKESPeriod)),
@@ -276,16 +394,26 @@ export class BlockProducer {
             kesVkey: kes.vkey,
         });
         if (!check.ok) return fail(check.reason);
+        if (source === "kes-agent") {
+            if (this.opcert && opcert.cert.counter < this.opcert.cert.counter) return fail(`certificate counter ${opcert.cert.counter} is older than the installed ${this.opcert.cert.counter}`, "outdated");
+            if (!kesProbe(kes, opcert.cert.kesVkey)) return fail("the KES key does not sign for the certificate's KES verification key (self-sign probe failed)");
+            // forward security: never hold an evolution older than the current slot needs
+            const at = kesEvolution(kes);
+            if (at < check.evolution) evolveKesTo(kes, check.evolution);
+            else if (at > check.evolution) logger.warn(`Block producer: the kes-agent key is at evolution ${at}, ahead of this node's clock (${check.evolution}); slots before KES period ${opcert.cert.kesPeriod + BigInt(at)} cannot be forged with it`);
+        }
         for (let waited = 0; this.forging && waited < 30_000; waited += 50) await Bun.sleep(50);
-        if (this.forging) return fail("a forge is still running after 30 s; try again");
-        const old = this.kes, before = this.opcert.cert;
+        if (this.forging) return fail("a forge is still running after 30 s; try again", "other");
+        const old = this.kes, before = this.opcert?.cert ?? null;
         this.kes = kes;
         this.opcert = opcert;
         this.chainCounter = chainCounter;
-        if (old !== kes) zeroise(old.skey);
+        this.credentialsAt = new Date((this.node.now ?? Date.now)()).toISOString();
+        if (old && old !== kes) zeroise(old.skey);
         if (this.lastError?.startsWith("credential reload rejected")) this.lastError = null;
-        const same = before.counter === opcert.cert.counter && before.kesPeriod === opcert.cert.kesPeriod && bytesEq(before.kesVkey, opcert.cert.kesVkey);
-        logger.info(`Block producer: credentials reloaded${same ? " (unchanged certificate)" : ""}: opcert counter ${before.counter} → ${opcert.cert.counter}, KES period ${before.kesPeriod} → ${opcert.cert.kesPeriod}, evolution ${check.evolution} of ${this.node.genesis.maxKESEvolutions}`);
+        const same = !!before && before.counter === opcert.cert.counter && before.kesPeriod === opcert.cert.kesPeriod && bytesEq(before.kesVkey, opcert.cert.kesVkey);
+        const from = source === "kes-agent" ? "from the kes-agent" : "reloaded";
+        logger.info(`Block producer: credentials ${from}${same ? " (unchanged certificate)" : ""}: opcert counter ${before?.counter ?? "none"} → ${opcert.cert.counter}, KES period ${before?.kesPeriod ?? "none"} → ${opcert.cert.kesPeriod}, evolution ${check.evolution} of ${this.node.genesis.maxKESEvolutions}`);
         return { ok: true, counter: opcert.cert.counter, kesPeriod: opcert.cert.kesPeriod, evolution: check.evolution };
     }
 
@@ -296,8 +424,9 @@ export class BlockProducer {
         const spk = BigInt(this.node.genesis.slotsPerKESPeriod);
         const maxEvo = this.node.genesis.maxKESEvolutions;
         const period = kesPeriodOfSlot(cur, spk);
-        const evolution = Number(period - this.opcert.cert.kesPeriod);
-        const expiresSlot = (this.opcert.cert.kesPeriod + BigInt(maxEvo)) * spk;
+        const oc = this.opcert?.cert ?? null;
+        const evolution = oc ? Number(period - oc.kesPeriod) : null;
+        const expiresSlot = oc ? (oc.kesPeriod + BigInt(maxEvo)) * spk : null;
         let next: bigint | null = null;
         const reports: LeaderSlotReport[] = [];
         // outcomes of slots the schedule pass has not (re)produced yet still show (a relaunch)
@@ -318,9 +447,13 @@ export class BlockProducer {
         const ideal = sigma && sigma.den > 0n ? (Number(sigma.num) / Number(sigma.den)) * this.node.genesis.activeSlotsCoeff * Number(epochLengthSlots(epoch, net)) : null;
         return {
             poolId: this.poolId, vrfKeyHash: vrfKeyHashOf(this.vrf.vkey),
-            opcert: { counter: this.opcert.cert.counter.toString(), kesPeriod: this.opcert.cert.kesPeriod.toString(), chainCounter: this.chainCounter?.toString() ?? null },
+            opcert: oc ? { counter: oc.counter.toString(), kesPeriod: oc.kesPeriod.toString(), chainCounter: this.chainCounter?.toString() ?? null } : null,
             kesEvolution: evolution,
-            kes: { period: period.toString(), evolution, remaining: Math.max(0, maxEvo - evolution), maxEvolutions: maxEvo, expiresAt: new Date(slotStartMs(expiresSlot, net)).toISOString(), expiresSlot: expiresSlot.toString(), health: kesHealthOf(evolution, maxEvo), counter: this.chainCounter == null ? "unknown" : this.opcert.cert.counter < this.chainCounter ? "behind-chain" : this.opcert.cert.counter > this.chainCounter + 1n ? "ahead-of-chain" : "ok" },
+            kes: oc && evolution != null && expiresSlot != null
+                ? { period: period.toString(), evolution, remaining: Math.max(0, maxEvo - evolution), maxEvolutions: maxEvo, expiresAt: new Date(slotStartMs(expiresSlot, net)).toISOString(), expiresSlot: expiresSlot.toString(), health: kesHealthOf(evolution, maxEvo), counter: this.chainCounter == null ? "unknown" : oc.counter < this.chainCounter ? "behind-chain" : oc.counter > this.chainCounter + 1n ? "ahead-of-chain" : "ok" }
+                : null,
+            credentials: { source: this.kesSource, installed: !!(this.kes && this.opcert), lastUpdate: this.credentialsAt, agent: this.agent?.state() ?? null },
+            signedSlot: this.signedSlot?.toString() ?? null,
             missedLeaderChecks: this.ticker?.missedSlots ?? 0,
             scheduling: this.scheduling !== null,
             carriers: this.node.carriers?.() ?? null,
@@ -436,11 +569,19 @@ export class BlockProducer {
         noteForgeEvent("about-to-lead");
         if (!this.leaderSlots.has(slot.toString())) { noteForgeEvent("node-not-leader"); return; }
         noteForgeEvent("node-is-leader");
+        if (!this.kes || !this.opcert) {
+            noteForgeEvent("could-not-forge");
+            const why = this.kesSource === "kes-agent" ? `no KES key: the kes-agent at ${this.cfg.kesAgentSocket} has not sent one${this.agent?.state().connected ? "" : " (not connected)"}` : "no KES key installed";
+            this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: why });
+            this.writeState(this.lastForgedSlot);
+            logger.warn(`Block producer: leader for slot ${slot} but not forging: ${why}`);
+            return;
+        }
         const tip = await this.node.tip();
         const verdict = decideForge(slot, nowMs, {
             leaderSlots: new Set(this.leaderSlots.keys()),
             tip: tip ? { slot: tip.slot, blockNumber: tip.blockNumber, hash: Uint8Array.from(Buffer.from(tip.hashHex, "hex")) } : null,
-            lastForgedSlot: this.lastForgedSlot,
+            lastForgedSlot: this.forgeGuardSlot(),
         }, { network: this.node.network });
         if (!verdict.forge) { noteForgeEvent("could-not-forge"); this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: verdict.reason }); this.writeState(this.lastForgedSlot); logger.warn(`Block producer: leader for slot ${slot} but not forging: ${verdict.reason}`); return; }
         if (this.cfg.dryRun) { this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: "dry run" }); logger.info(`Block producer (dry run): would forge slot ${slot} as block ${verdict.blockNumber} on ${tip!.hashHex.slice(0, 16)}…`); return; }
@@ -453,7 +594,22 @@ export class BlockProducer {
         }
     }
 
+    /** No slot at or below this is ever forged: the higher of the last adopted forge and the last signed slot. */
+    private forgeGuardSlot(): bigint | null {
+        const a = this.lastForgedSlot, b = this.signedSlot;
+        return a == null ? b : b == null ? a : a > b ? a : b;
+    }
+
     private async forgeAndAdopt(slot: bigint, blockNumber: bigint, prevHash: Uint8Array, epoch: number): Promise<void> {
+        // Credentials are captured once: a swap waits for `forging` to clear, so they cannot change mid-slot.
+        const kes = this.kes, opcert = this.opcert;
+        if (!kes || !opcert) { this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: "no KES key installed" }); return; }
+        const guard = this.forgeGuardSlot();
+        if (guard != null && slot <= guard) {
+            this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: `slot ${slot} is not after the last signed slot ${guard}` });
+            logger.error(`Block producer: refusing to forge slot ${slot}: a header was already signed for slot ${guard}`);
+            return;
+        }
         const nonceHex = await this.node.nonceFor(epoch);
         if (!nonceHex) { this.lastError = `no η0 for epoch ${epoch}`; this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: this.lastError }); return; }
         const nonce = Uint8Array.from(Buffer.from(nonceHex, "hex"));
@@ -471,7 +627,9 @@ export class BlockProducer {
         // what cannot be in this block (expired, spent inputs; at 08:44 UTC 2026-09-12 an
         // unvalidated mempool held 69 transactions of which most were stale).
         const validated = !!this.node.mempoolSnapshot;
-        const candidates = validated ? await this.node.mempoolSnapshot!(slot) : await this.node.mempoolTxs();
+        // Dijkstra (era 8): the mempool still validates Conway transactions only, so a Dijkstra block is
+        // forged empty until the mempool learns the era (bug 432, open)
+        const candidates = this.node.era >= 8 ? [] : validated ? await this.node.mempoolSnapshot!(slot) : await this.node.mempoolTxs();
         const stale = new Set<string>();
         if (!validated && this.node.txSanity && candidates.length) {
             try { for (const h of await this.node.txSanity(candidates, slot)) stale.add(Buffer.from(h).toString("hex")); }
@@ -489,12 +647,42 @@ export class BlockProducer {
         const t0 = performance.now();
         let attempt: { body: BodySegments; included: TxParts[] } | null = txs.length ? (() => { const a = assembleBody(txs, maxBody); return a.included.length ? { body: a.segments, included: a.included } : null; })() : null;
         let emptyTried = false;
+        const signed: string[] = []; // header hashes signed for this slot (attempts)
+        // Write-ahead: the slot is recorded as signed (durably) before the first signature. If that
+        // cannot be persisted the slot is given up: a restart could not know a block went out.
+        this.signedSlot = slot;
+        if (!this.writeState(this.lastForgedSlot)) {
+            this.lastError = `slot ${slot} not forged: the state file ${this.cfg.stateFile} cannot be written (one-block-per-slot guard)`;
+            this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: this.lastError });
+            logger.error(`Block producer: ${this.lastError}`);
+            return;
+        }
         for (let round = 0; round < 12; round++) {
             if (!attempt) { if (emptyTried) break; attempt = { body: EMPTY_BODY, included: [] }; emptyTried = true; }
+            if (round > 0) {
+                // A retry signs a different header for the same slot. Only safe while the earlier attempt
+                // is not on our chain: if adopt threw after applying it, stop here.
+                const t = await this.node.tip().catch(() => null);
+                if (t && t.slot >= slot) {
+                    if (signed.includes(t.hashHex.toLowerCase())) {
+                        // the attempt that "failed" is on our chain after all: it is the slot's block
+                        this.lastForgedSlot = slot;
+                        this.forged++;
+                        this.outcomes.set(slot.toString(), { outcome: "adopted", hash: t.hashHex.toLowerCase(), note: `block ${blockNumber} (adopt reported an error after applying it)` });
+                        noteForgedBlock(t.hashHex);
+                        this.writeState(slot);
+                        logger.warn(`Block producer: slot ${slot}: adopt reported an error but block ${t.hashHex.slice(0, 16)}… is our tip; not retrying`);
+                        return;
+                    }
+                    logger.warn(`Block producer: not retrying slot ${slot}: the chain tip is already at slot ${t.slot} (${t.hashHex.slice(0, 16)}…)`);
+                    break;
+                }
+            }
             const forged = forgeBlock({
-                era: this.node.era, blockNumber, slot, prevHash, nonce, coldVkey: this.coldVkey, vrf: this.vrf, kes: this.kes, opcert: this.opcert.cert,
+                era: this.node.era, blockNumber, slot, prevHash, nonce, coldVkey: this.coldVkey, vrf: this.vrf, kes, opcert: opcert.cert,
                 protocolVersion, slotsPerKESPeriod: BigInt(this.node.genesis.slotsPerKESPeriod), body: attempt.body,
             });
+            signed.push(Buffer.from(forged.headerHash).toString("hex"));
             noteForgeEvent("forged", slot);
             try {
                 await this.node.adopt(forged.blockFetchBytes);
@@ -555,8 +743,20 @@ export class BlockProducer {
     private readState(): bigint | null {
         const f = this.cfg.stateFile;
         if (!f || !existsSync(f)) return null;
+        let j: any;
+        try { j = JSON.parse(readFileSync(f, "utf8")); }
+        catch (err) {
+            // The file exists but is unreadable: which slots were already signed is unknown. Treat every
+            // slot up to now as signed, so only future slots are forged (none of them can have been).
+            this.signedSlot = slotAt((this.node.now ?? Date.now)(), this.node.network);
+            logger.error(`Block producer: state file ${f} is unreadable (${(err as Error)?.message ?? err}); no slot up to ${this.signedSlot} will be forged`);
+            return null;
+        }
+        if (j?.signedSlot != null) { try { this.signedSlot = BigInt(j.signedSlot); } catch { /* malformed: lastForgedSlot still guards */ } }
+        let last: bigint | null = null;
+        try { if (j?.lastForgedSlot != null) last = BigInt(j.lastForgedSlot); }
+        catch { this.signedSlot = slotAt((this.node.now ?? Date.now)(), this.node.network); logger.error(`Block producer: state file ${f}: lastForgedSlot unreadable; no slot up to ${this.signedSlot} will be forged`); }
         try {
-            const j = JSON.parse(readFileSync(f, "utf8"));
             this.greeted = j.greeted === this.node.network;
             this.greetingBlock = typeof j.greetingBlock === "string" ? j.greetingBlock.toLowerCase() : null;
             // outcomes survive a relaunch (2026-09-12 06:51 UTC: the first accepted block showed as
@@ -572,18 +772,27 @@ export class BlockProducer {
                     if (c && typeof c.nonce === "string" && Array.isArray(c.slots)) this.cachedSchedules.set(Number(e), { nonce: c.nonce, sigma: String(c.sigma ?? ""), slots: c.slots.map((s) => ({ slot: BigInt(s.slot), slotInEpoch: BigInt(s.slotInEpoch), time: s.time, vrfOutputHex: s.vrfOutputHex })) });
                 }
             }
-            return j.lastForgedSlot != null ? BigInt(j.lastForgedSlot) : null;
-        } catch { return null; }
+        } catch (err) { logger.warn(`Block producer: state file ${f}: some fields unreadable (${(err as Error)?.message ?? err})`); }
+        return last;
     }
 
-    private writeState(slot: bigint | null): void {
+    /**
+     * Persist the state file atomically (temporary file, fsync, rename): a crash mid-write leaves
+     * the previous version, never a truncated file. False when it could not be written.
+     */
+    private writeState(slot: bigint | null): boolean {
         const f = this.cfg.stateFile;
-        if (!f) return;
+        if (!f) return true;
+        const tmp = `${f}.tmp`;
         try {
             const outcomes = Object.fromEntries([...this.outcomes].slice(-64));
             const schedules = Object.fromEntries([...this.cachedSchedules].map(([e, c]) => [e, { nonce: c.nonce, sigma: c.sigma, slots: c.slots.map((s) => ({ slot: s.slot.toString(), slotInEpoch: s.slotInEpoch.toString(), time: s.time, vrfOutputHex: s.vrfOutputHex })) }]));
-            writeFileSync(f, JSON.stringify({ poolId: this.poolId, lastForgedSlot: slot?.toString() ?? null, greeted: this.greeted ? this.node.network : null, greetingBlock: this.greetingBlock, forged: this.forged, outcomes, schedules, at: new Date().toISOString() }) + "\n");
-        } catch (err) { logger.warn("Block producer: could not persist state:", err); }
+            const body = JSON.stringify({ poolId: this.poolId, lastForgedSlot: slot?.toString() ?? null, signedSlot: this.signedSlot?.toString() ?? null, greeted: this.greeted ? this.node.network : null, greetingBlock: this.greetingBlock, forged: this.forged, outcomes, schedules, at: new Date().toISOString() }) + "\n";
+            const fd = openSync(tmp, "w", 0o600);
+            try { writeSync(fd, body); fsyncSync(fd); } finally { closeSync(fd); }
+            renameSync(tmp, f);
+            return true;
+        } catch (err) { logger.warn("Block producer: could not persist state:", err); return false; }
     }
 }
 

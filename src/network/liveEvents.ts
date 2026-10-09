@@ -41,11 +41,20 @@ let chainChangedListener: ChainChangedListener | null = null;
 export function setChainChangedListener(cb: ChainChangedListener | null): void {
     chainChangedListener = cb;
 }
+/** Further chain-change subscribers (UTxO RPC streams); each gets every change, errors are contained. */
+const chainChangedSubscribers = new Set<ChainChangedListener>();
+export function subscribeChainChanged(cb: ChainChangedListener): () => void {
+    chainChangedSubscribers.add(cb);
+    return () => { chainChangedSubscribers.delete(cb); };
+}
 export function emitChainChanged(): void {
     try {
         chainChangedListener?.();
     } catch {
         /* */
+    }
+    for (const cb of chainChangedSubscribers) {
+        try { cb(); } catch { /* */ }
     }
 }
 

@@ -41,7 +41,7 @@ describe("explorer endpoints", () => {
         expect(body[0].time).toBe(1_655_769_600 + 86_400 * 20);
         expect(body[0].epoch).toBe(4);
         expect(body[0].epoch_slot).toBe(0);
-        expect(body[0].slot_leader).toMatch(/^[0-9a-f]{56}$/);
+        expect(body[0].slot_leader).toMatch(/^pool1[0-9a-z]+$/); // Blockfrost: the bech32 pool id
         expect(body[0].confirmations).toBe(0);
         expect(body[1].confirmations).toBe(1);
         expect(body[2].ebb).toBe(true);
@@ -66,7 +66,7 @@ describe("explorer endpoints", () => {
         expect((await get("/blocks/slot/4")).status).toBe(404);
         expect((await get("/blocks/3/txs")).status).toBe(200);
         const prev = await get(`/blocks/${h(8)}/previous?count=2`);
-        expect(prev.body.map((b: any) => b.height)).toEqual([5, null]);
+        expect(prev.body.map((b: any) => b.height)).toEqual([null, 5]); // Blockfrost: oldest first, ending right before the block
         const next = await get(`/blocks/${h(6)}/next?count=3`); // the EBB at 21600 → its main block, then the Shelley block
         expect(next.body.map((b: any) => b.height)).toEqual([5, 6]);
         expect((await get("/blocks/height/99")).status).toBe(404);

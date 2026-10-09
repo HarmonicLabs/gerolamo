@@ -15,7 +15,8 @@ import { sql } from "../sql";
 import { logger } from "../utils/logger";
 import { BlockStore } from "./blockStore";
 import { ChunkRelayChainStore } from "../network/n2n/ChunkRelayChainStore";
-import { persistSelectedTipTo, setSelectedTipHash } from "./blockReads";
+import { chainConnects, persistSelectedTipTo, setSelectedTipHash } from "./blockReads";
+import { existsSync } from "node:fs";
 import type { RelayChainStore } from "../network/n2n/RelayChainStore";
 
 const log = logger.child("blockstore");
@@ -138,6 +139,11 @@ export function relayChainStoreOverride(): RelayChainStore | undefined {
 }
 
 /** The consensus layer's selected tip after each applied range (resolves volatile forks for peers). */
+/** Make the primary block store's volatile writes durable (once per applied range, before its commit; bug 384). */
+export async function flushPrimaryBlockStore(): Promise<void> {
+    await primaryBlockStore()?.flush();
+}
+
 export function noteSelectedTip(hash: Uint8Array): void {
     relayStore?.setTip(hash);
     setSelectedTipHash(hash);
@@ -150,7 +156,7 @@ export function noteSelectedTip(hash: Uint8Array): void {
  * (exact right after the switch from mirror mode). The block must exist in the store at or above
  * the immutable tip. Returns the hash, or null when primary mode must not start.
  */
-export async function resolveStartupTip(store: BlockStore, dir: string): Promise<{ hash: Uint8Array; slot: number; source: string } | null> {
+export async function resolveStartupTip(store: BlockStore, dir: string, ledgerDiffDir?: string | null): Promise<{ hash: Uint8Array; slot: number; source: string } | null> {
     const imm = await store.immutableTip();
     const candidates: { hash: string; source: string }[] = [];
     // With the ledger in LMDB the SQLite journal is frozen (bug 129: a node restarted at a day-old
@@ -179,6 +185,18 @@ export async function resolveStartupTip(store: BlockStore, dir: string): Promise
         const b = await store.byHash(Uint8Array.from(Buffer.from(c.hash, "hex")));
         if (b && (!imm || b.slot >= imm.slot)) return { hash: b.hash, slot: b.slot, source: c.source };
         log.warn(`Block store startup tip candidate from ${c.source} (${c.hash.slice(0, 16)}…) is ${b ? `below the immutable tip (slot ${b.slot})` : "not in the store"}`);
+    }
+    // Last resort (bug 387): the newest stored block above the immutable tip that chains onto it and whose
+    // ledger diff was flushed — a block both stores hold. The ledger store's own recovery takes it from there.
+    if (ledgerDiffDir && existsSync(ledgerDiffDir)) {
+        const vols = store.volatile.all().filter((v) => !imm || v.slot >= imm.slot).sort((a, b) => b.slot - a.slot);
+        for (const v of vols) {
+            const h = Buffer.from(v.hash).toString("hex");
+            if (!existsSync(join(ledgerDiffDir, `${h}.diff`))) continue;
+            if (!chainConnects(store, v.hash, imm)) continue;
+            log.warn(`Block store startup tip: no recorded candidate is usable; taking the newest block both stores hold (${h.slice(0, 16)}…, slot ${v.slot})`);
+            return { hash: v.hash, slot: v.slot, source: "newest block with a ledger diff" };
+        }
     }
     return null;
 }

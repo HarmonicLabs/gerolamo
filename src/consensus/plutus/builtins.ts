@@ -61,6 +61,12 @@ export interface BuiltinCtx {
      * scalars at most 4096 bits; an argument outside is an evaluation failure.
      */
     bounded: boolean;
+    /**
+     * `ensurableInteger`: the `CInteger` bound of the arithmetic builtins and consByteString,
+     * variants D/E only. Variants F/G (protocol 12) keep every other bound of `bounded` but not
+     * this one (bug 434). Absent: same as `bounded`.
+     */
+    boundedInt?: boolean;
     logs: string[] | null;
     /** plutus-machine's BigInt cost lookup, for the delegated builtins. */
     bnCek: BnCEK | null;
@@ -153,7 +159,7 @@ const one = () => 1;
 // ── protocol-11 argument bounds (BuiltinCtx.bounded; PlutusCore.Default.Universe.Cardano) ──
 const CINT_MAX = (1n << 262143n) - 1n, CINT_MIN = -(1n << 262143n), CBS_MAX = 65536;
 /** A `CInteger` argument (variants D/E). */
-function cint(ctx: BuiltinCtx, n: bigint, name: string): bigint { if (ctx.bounded && (n > CINT_MAX || n < CINT_MIN)) fail(`${name}: Integer out of bounds`); return n; }
+function cint(ctx: BuiltinCtx, n: bigint, name: string): bigint { if ((ctx.boundedInt ?? ctx.bounded) && (n > CINT_MAX || n < CINT_MIN)) fail(`${name}: Integer out of bounds`); return n; }
 /** A `CByteString` argument (variants D/E). */
 function cbs(ctx: BuiltinCtx, b: Uint8Array, name: string): Uint8Array { if (ctx.bounded && b.length > CBS_MAX) fail(`${name}: ByteString overflow`); return b; }
 const vInt = (n: bigint) => new VCon(T.int, n);

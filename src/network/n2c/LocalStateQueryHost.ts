@@ -20,7 +20,7 @@ import { debugLedgerConfig } from "./lsq/ledgerConfig";
 import { HFC_ERA_NAMES, encodeUtcTime, interpreterFor, networkFromMagic, systemStartFor, type EraHistoryNetwork } from "./eraHistory";
 import { calculatePreProdCardanoEpoch } from "../../utils/epochFromSlotCalculations";
 import { readEpochParamsRaw } from "../../consensus/epochParams";
-import { conwayPParamsCbor } from "./pparamsCbor";
+import { pparamsCborFor } from "./pparamsCbor";
 import { addressString, txInRef, utxoMapCbor, type UtxoRowLike } from "./utxoCbor";
 import { logger } from "../../utils/logger";
 import { acquireView, viewCurrent, type LsqTarget, type LsqView } from "./lsq/view";
@@ -258,7 +258,7 @@ export class LocalStateQueryHost {
                 const epoch = tip ? Number(calculatePreProdCardanoEpoch(Number(tip.slot))) : 0;
                 const raw = (await readEpochParamsRaw(epoch)) ?? (await readEpochParamsRaw(epoch - 1));
                 if (!raw) throw new LsqUnanswerable(`no protocol parameters for epoch ${epoch}`);
-                return conwayPParamsCbor(raw);
+                return pparamsCborFor(raw);
             }
             case 6: {
                 const addrs = setItems(sq[1]).map((a) => (a instanceof CborBytes ? addressString(a.bytes) : null)).filter((a): a is string => !!a);

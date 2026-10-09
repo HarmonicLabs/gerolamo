@@ -59,10 +59,16 @@ export interface ConstitutionProposal { actionId: string; url: string; hash: str
  * verbatim except owners, re-encoded as a sorted CBOR set (tag 258).
  */
 function poolParamsOf(b: Uint8Array, cert: number[]): PoolRegistration {
-    const owners = items(b, cert[7]!).starts.map((s) => bytesAt(b, s)).map((x) => Uint8Array.from(x)).sort((x, y) => Buffer.compare(Buffer.from(x), Buffer.from(y)));
+    // Dijkstra (bug 424): an 11-element certificate carries `bls_key / nil` after the VRF key hash;
+    // a key is part of the PoolParams encoding from protocol 12, a nil is not (StakePool.hs)
+    const dijkstra = cert.length === 11;
+    const blsSlice = dijkstra ? slice(b, cert[3]!) : null;
+    const bls = blsSlice && !(blsSlice.length === 1 && blsSlice[0] === 0xf6) ? blsSlice : null;
+    const at = (i: number) => cert[dijkstra && i >= 3 ? i + 1 : i]!;
+    const owners = items(b, at(7)).starts.map((s) => bytesAt(b, s)).map((x) => Uint8Array.from(x)).sort((x, y) => Buffer.compare(Buffer.from(x), Buffer.from(y)));
     const ownersCbor = concat([Uint8Array.of(0xd9, 0x01, 0x02), arrayHead(owners.length), ...owners.map((o) => concat([Uint8Array.of(0x58, o.length), o]))]);
-    const fields = [1, 2, 3, 4, 5, 6].map((i) => slice(b, cert[i]!));
-    return { poolId: hex(bytesAt(b, cert[1]!)), paramsCbor: concat([arrayHead(9), ...fields, ownersCbor, slice(b, cert[8]!), slice(b, cert[9]!)]) };
+    const fields = [1, 2, ...(bls ? [-1] : []), 3, 4, 5, 6].map((i) => (i === -1 ? bls! : slice(b, at(i))));
+    return { poolId: hex(bytesAt(b, cert[1]!)), paramsCbor: concat([arrayHead(bls ? 10 : 9), ...fields, ownersCbor, slice(b, at(8)), slice(b, at(9))]) };
 }
 
 /** Scan one transaction body (CBOR bytes of the body map). */
@@ -74,7 +80,7 @@ export function scanTxBody(body: Uint8Array): { pools: PoolRegistration[]; const
         if (key === 4) {
             for (const c of items(body, v).starts) {
                 const f = items(body, c).starts;
-                if (f.length === 10 && uintAt(body, f[0]!) === 3) pools.push(poolParamsOf(body, f));
+                if ((f.length === 10 || f.length === 11) && uintAt(body, f[0]!) === 3) pools.push(poolParamsOf(body, f));
             }
         } else if (key === 20) {
             const props = items(body, v).starts;

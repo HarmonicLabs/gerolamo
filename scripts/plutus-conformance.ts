@@ -7,7 +7,7 @@
  * budget, and its result and budget compared with `<name>.uplc.expected` /
  * `<name>.uplc.budget.expected`.
  *
- *   bun scripts/plutus-conformance.ts <test-cases dir> <costs.json> [--filter <substr>] [--json <out>] [-v]
+ *   bun scripts/plutus-conformance.ts <test-cases dir> <costs.json> [--filter <substr>] [--json <out>] [--lang 3|4] [--pv n] [-v]
  *
  * costs.json: `cardano-cli conway query protocol-parameters` output (costModels.PlutusV3) or
  * `{"PlutusV3": […]}`; the suite's budgets are plutus' default cost model, which is what preview
@@ -21,6 +21,8 @@ import { runConformanceCase } from "../src/consensus/plutus/conformance";
 const args = process.argv.slice(2);
 const flag = (k: string) => { const i = args.indexOf(k); return i >= 0 ? args.splice(i, 2)[1] : undefined; };
 const filter = flag("--filter"), jsonOut = flag("--json");
+// --lang 4 --pv 12: Plutus V4 at Dijkstra (variant G), what the suite at plutus master evaluates with
+const langArg = Number(flag("--lang") ?? 3) as 3 | 4, pvArg = Number(flag("--pv") ?? 11);
 const verbose = args.includes("-v");
 const [root, costsPath] = args.filter((a) => a !== "-v");
 if (!root || !costsPath) { console.error("usage: plutus-conformance.ts <test-cases dir> <costs.json> [--filter s] [--json out] [-v]"); process.exit(2); }
@@ -37,12 +39,13 @@ const cases: Array<{ name: string; program: string; expected: string; budget: st
     try { statSync(f); } catch { return; }
     const name = relative(root, dir);
     if (filter && !name.includes(filter)) return;
-    cases.push({ name, program: readFileSync(f, "utf8"), expected: readFileSync(`${f}.expected`, "utf8"), budget: readFileSync(`${f}.budget.expected`, "utf8") });
+    cases.push({ name, program: readFileSync(f, "utf8"), expected: readFileSync(`${f}.expected`, "utf8"), budget: (() => { for (const b of [`${f}.budget.expected`, join(dir, `${base}.budget.expected`)]) { try { return readFileSync(b, "utf8"); } catch { /* next */ } } return ""; })() }); // plutus master names it <case>.budget.expected
 })(root);
 
 let pass = 0, resFail = 0, budFail = 0, skipped = 0;
 for (const c of cases) {
-    const r = runConformanceCase(c.program, c.expected, c.budget, v3);
+    const r = runConformanceCase(c.program, c.expected, c.budget, v3, { lang: langArg, pv: pvArg });
+    if (c.budget === "") r.budgetOk = true; // no budget file in this suite: the result alone decides
     if (r.skipped) { skipped++; if (verbose) console.log(`SKIP ${c.name}: ${r.skipped}`); continue; }
     if (r.resultOk && r.budgetOk) { pass++; continue; }
     if (!r.resultOk) resFail++;

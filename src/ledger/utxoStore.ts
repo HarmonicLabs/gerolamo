@@ -9,10 +9,12 @@
  *   utxo_rs       key refScriptHash(28) ‖ txid ‖ index    → empty   (reference-script lookups)
  *   stake_bal     key stakeKey(typed hex → bytes)          → u64     (sum of lovelace at the credential's addresses)
  *   utxo_stats    key "count" → u64
+ *   utxo_idx      payment / delegation credential and asset → output (see utxoIndex.ts; UTxO RPC searches)
  *
  * A UTxO reference is the string `txid:index` everywhere else in the node; keys are built from it.
  */
 import type { LedgerStore, LedgerView } from "./LedgerStore";
+import { DB_IDX, indexKeysOf, refKeyOfIndexKey, utxoIndexEnabled } from "./utxoIndex";
 
 export const DB_UTXO = "utxo", DB_ADDR = "utxo_addr", DB_RS = "utxo_rs", DB_STAKE_BAL = "stake_bal", DB_STATS = "utxo_stats";
 const COUNT_KEY = new TextEncoder().encode("count");
@@ -41,6 +43,7 @@ export function keyRef(key: Uint8Array): string {
 }
 
 const enc = new TextEncoder(), dec = new TextDecoder();
+const EMPTY = new Uint8Array(0);
 
 /** Record: u8 flags | u64 lovelace | u16 addrLen | addr | u8 rsLen | rs | u8 skLen | sk | u8 txHashLen | txHash | tx_out JSON. */
 export function encodeRow(r: Omit<UtxoRecord, "utxo_ref">): Uint8Array {
@@ -99,6 +102,7 @@ export class UtxoWrites {
         if (r.address) this.store.put(DB_ADDR, addrKey(r.address, key), new Uint8Array(0));
         if (r.reference_script_hash) this.store.put(DB_RS, rsKey(r.reference_script_hash, key), new Uint8Array(0));
         if (r.stake_key && r.lovelace) this.store.addU64(DB_STAKE_BAL, Buffer.from(r.stake_key, "hex"), BigInt(r.lovelace));
+        if (utxoIndexEnabled()) for (const ik of indexKeysOf(r, key)) this.store.put(DB_IDX, ik, EMPTY);
         if (!before) this.store.addU64(DB_STATS, COUNT_KEY, 1n);
     }
 
@@ -122,6 +126,7 @@ export class UtxoWrites {
         if (r.address) this.store.del(DB_ADDR, addrKey(r.address, key));
         if (r.reference_script_hash) this.store.del(DB_RS, rsKey(r.reference_script_hash, key));
         if (r.stake_key && r.lovelace) this.store.addU64(DB_STAKE_BAL, Buffer.from(r.stake_key, "hex"), -BigInt(r.lovelace));
+        if (utxoIndexEnabled()) for (const ik of indexKeysOf(r, key)) this.store.del(DB_IDX, ik);
     }
 }
 
@@ -157,6 +162,28 @@ export class UtxoReads {
             if (r) out.push(r);
         }
         return out;
+    }
+
+    /** Output keys (txid ‖ index) at an exact address, ascending. */
+    addressRefKeys(address: string, limit?: number): Uint8Array[] {
+        const a = enc.encode(address);
+        const prefix = new Uint8Array(a.length + 1); prefix.set(a);
+        const out: Uint8Array[] = [];
+        for (const [k] of this.s.range(DB_ADDR, prefix, { limit })) out.push(k.subarray(prefix.length));
+        return out;
+    }
+
+    /** Output keys under a `utxo_idx` prefix (payment / delegation credential, policy or asset; see utxoIndex.ts). */
+    indexRefKeys(prefix: Uint8Array, limit?: number): Uint8Array[] {
+        const out: Uint8Array[] = [];
+        for (const [k] of this.s.range(DB_IDX, prefix, { limit })) out.push(refKeyOfIndexKey(k));
+        return out;
+    }
+
+    /** One output by key (txid ‖ index). */
+    getByKey(key: Uint8Array): UtxoRecord | null {
+        const raw = this.s.get(DB_UTXO, key);
+        return raw ? decodeRow(keyRef(key), raw) : null;
     }
 
     refsWithReferenceScript(refs: string[]): number {

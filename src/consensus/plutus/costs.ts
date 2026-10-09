@@ -18,9 +18,10 @@
 import { COST_SHAPES, type Shape } from "./costShapes";
 import { PARAM_NAMES_V1, PARAM_NAMES_V2, PARAM_NAMES_V3 } from "./paramNames";
 
-export type Lang = 1 | 2 | 3;
+export type Lang = 1 | 2 | 3 | 4;
 const MAX_INT64 = 9223372036854775807n;
-const NAMES: Record<Lang, readonly string[]> = { 1: PARAM_NAMES_V1, 2: PARAM_NAMES_V2, 3: PARAM_NAMES_V3 };
+// V4's ParamName list is V3's (PlutusLedgerApi.V4.ParamName; bug 433)
+const NAMES: Record<Lang, readonly string[]> = { 1: PARAM_NAMES_V1, 2: PARAM_NAMES_V2, 3: PARAM_NAMES_V3, 4: PARAM_NAMES_V3 };
 
 /** The ledger's view of a cost-model list: `tagWithParamNames` (zip; missing → maxBound). */
 export function namedParams(lang: Lang, values: ReadonlyArray<number | bigint | string>): Map<string, bigint> {
@@ -31,10 +32,25 @@ export function namedParams(lang: Lang, values: ReadonlyArray<number | bigint | 
 }
 
 /** Semantics variant of a ledger language at a protocol version (PlutusLedgerApi.V*.EvaluationContext). */
-export function semanticsVariant(lang: Lang, pv: number): "A" | "B" | "C" | "D" | "E" {
-    if (lang === 3) return pv < 11 ? "C" : "E";
-    return pv < 9 ? "A" : pv < 11 ? "B" : "D";
+export function semanticsVariant(lang: Lang, pv: number): "A" | "B" | "C" | "D" | "E" | "F" | "G" {
+    // Note [Mapping of protocol versions and ledger languages to semantics variants]:
+    // from Dijkstra (protocol 12) V1/V2 use F and V3/V4 use G (bug 434)
+    if (lang === 4) return "G";
+    if (lang === 3) return pv < 11 ? "C" : pv < 12 ? "E" : "G";
+    return pv < 9 ? "A" : pv < 11 ? "B" : pv < 12 ? "D" : "F";
 }
+
+/** Cost-function shapes of a variant: F uses D's builtin cost model, G uses E's (ExBudgetingDefaults). */
+export function shapeVariant(variant: string): "A" | "B" | "C" | "D" | "E" {
+    return variant === "F" ? "D" : variant === "G" ? "E" : variant as "A" | "B" | "C" | "D" | "E";
+}
+
+/** plutus-core `ensurableInteger`: integer arguments bounded (`CInteger`) in variants D and E only. */
+export function variantBoundsIntegers(variant: string): boolean { return variant === "D" || variant === "E"; }
+/** plutus-core `ensurableByteString` (and the other protocol-11 argument bounds): variants D, E, F and G. */
+export function variantBoundsBytes(variant: string): boolean { return variant === "D" || variant === "E" || variant === "F" || variant === "G"; }
+/** `TextCostedByByteLength` string builtins: variants D, E, F and G. */
+export function variantTextByBytes(variant: string): boolean { return variantBoundsBytes(variant); }
 
 /** A cost function over argument sizes (x, y, z, u: arguments 1–4), as Numbers. `c` is set when it is constant. */
 export interface CostFn { c: number | null; at: (x: number, y: number, z: number, u?: number) => number }
@@ -141,7 +157,7 @@ export function costTable(lang: Lang, values: ReadonlyArray<number | bigint | st
     const hit = cache.get(key);
     if (hit) return hit;
     const named = namedParams(lang, values);
-    const shapes = COST_SHAPES[variant];
+    const shapes = COST_SHAPES[shapeVariant(variant)];
     const builtins: Array<BuiltinCost | undefined> = [];
     for (let t = 0; t < BUILTIN_NAMES.length; t++) {
         const name = BUILTIN_NAMES[t]!, s = shapes[name];

@@ -50,6 +50,8 @@ import {
     parseStoredTxOut,
 } from "./db/minibf/txOutMetadata";
 import { explorerIndexer, mbSql } from "./db/minibf/explorerIndexer";
+import { applyMbBlock } from "./db/minibf/writer";
+import { slotInEpoch } from "./utils/epochFromSlotCalculations";
 
 /** Optional Bun SQL client / transaction handle for batch hydrate. */
 export type SqlClient = typeof sql;
@@ -656,7 +658,7 @@ export async function ensureInitialized(): Promise<void> {
 	`;
 
     // MiniBF derived projections (mb_*) — never poison ledger tables
-    await ensureMinibfSchema(sql);
+    await ensureMinibfSchema(sql, { mainThread: true });
 
     logger.info(`DB initialized (journal_mode=${pragmas.journalMode}, synchronous=${pragmas.synchronous})`);
 }
@@ -2096,6 +2098,7 @@ export async function indexTransaction(
         addresses: Map<string, "in" | "out" | "both">;
         inputs?: MbTxIn[];
         outputs?: MbTxOut[];
+        valid?: boolean;
     },
 ): Promise<void> {
     try {
@@ -2121,6 +2124,7 @@ export async function indexTransaction(
                 addresses: opts.addresses,
                 inputs: opts.inputs ?? [],
                 outputs: opts.outputs ?? [],
+                valid: opts.valid,
             });
             return;
         }
@@ -2137,11 +2141,30 @@ export async function indexTransaction(
             addresses: opts.addresses,
             inputs: opts.inputs ?? [],
             outputs: opts.outputs ?? [],
+            valid: opts.valid,
         });
     } catch (e: any) {
         logger.warn(
             `Mini-BF forward index failed for tx ${opts.txHash}: ${e?.message || e}`,
         );
+    }
+}
+
+/**
+ * Block-level Blockfrost indexes (bug 500): block row, metadata, mint, certificates, withdrawals,
+ * redeemers, scripts, datums, votes, proposals. The bytes go to the explorer worker, which
+ * decodes them off the applier's thread; without the worker (tests, scripts) they are written
+ * inline. Call after the block's transactions were applied (their deltas come first).
+ */
+export async function indexBlock(bytes: Uint8Array, meta: { hash: Uint8Array; slot: number; height: number | null }): Promise<void> {
+    if (applySkipIndex()) return;
+    try {
+        const msg = { kind: "block" as const, hash: meta.hash, slot: meta.slot, height: meta.height, epoch: Number(epochForSlot(meta.slot)), epochSlot: Number(slotInEpoch(meta.slot)), bytes };
+        // own copies: posting a view clones its whole underlying buffer (a fetched range can be megabytes)
+        if (explorerIndexer.active) await explorerIndexer.enqueueBlock({ ...msg, hash: meta.hash.slice(), bytes: bytes.slice() });
+        else await applyMbBlock(sql as any, msg);
+    } catch (e: any) {
+        logger.warn(`Mini-BF block index failed at slot ${meta.slot}: ${e?.message || e}`);
     }
 }
 
@@ -2749,7 +2772,29 @@ export async function applyInvalidTransaction(
     try {
         if (toPot > 0n) await addFeeToPot(db, toPot);
     } catch { /* pots not initialised */ }
-    void indexCtx;
+    // Blockfrost lists phase-2-invalid transactions too (valid_contract false): their inputs are the
+    // collateral and their only output the collateral return (bug 501).
+    if (indexCtx && Number.isFinite(indexCtx.slot) && !applySkipIndex()) {
+        const addrDirs = new Map<string, "in" | "out" | "both">();
+        const outputs: MbTxOut[] = [];
+        if (ret) {
+            const row = buildUtxoRowForOutput(txId, (body.outputs ?? []).length, ret);
+            outputs.push({ outputIndex: (body.outputs ?? []).length, address: row.address, lovelace: row.lovelace, assetsJson: row.assetsJson, datumHash: row.metadata.datumHash, inlineDatumCbor: row.metadata.inlineDatumCbor, scriptRefHash: row.metadata.scriptRefHash });
+            if (row.address.length > 8) addrDirs.set(row.address, "in");
+        }
+        let size: number | null = null;
+        try { if (typeof body.toCborBytes === "function") size = body.toCborBytes().length; } catch { /* */ }
+        await indexTransaction(db, {
+            txHash: txId, blockHash, slot: indexCtx.slot, txIndex: indexCtx.txIndex, blockHeight: indexCtx.blockHeight ?? null,
+            fee: toPot.toString(), size,
+            invalidBefore: body.validityIntervalStart != null ? String(body.validityIntervalStart) : null,
+            invalidHereafter: body.ttl != null ? String(body.ttl) : null,
+            addresses: addrDirs,
+            inputs: refs.map((r, i) => ({ inputIndex: i, prevTxHash: r.slice(0, r.indexOf(":")), prevOutputIndex: Number(r.slice(r.indexOf(":") + 1)) })),
+            outputs,
+            valid: false,
+        });
+    }
 }
 
 /**
@@ -2810,6 +2855,25 @@ export async function applyWithdrawals(
                 amount: amount.toString(),
             }),
         );
+    }
+}
+
+/**
+ * Dijkstra `direct_deposits` (bug 429): credit each reward account (ENTITIES `applyDirectDeposits`).
+ * The account must be registered (the rules check it); the journal entry reuses the
+ * `withdrawal` action with a negative amount, like a reversed withdrawal.
+ */
+export async function applyDirectDeposits(
+    deposits: any,
+    blockHash: Uint8Array,
+    client?: SqlClient,
+): Promise<void> {
+    const db = client ?? sql;
+    for (const { stakeCred, amount } of withdrawalEntries(deposits)) {
+        if (amount <= 0n) continue;
+        ledgerStake()?.creditRewards(new Map([[toHex(stakeCred), amount]]));
+        if (sqlLedgerWrites()) await db`UPDATE rewards SET amount = amount + ${amount.toString()} WHERE stake_credentials = ${stakeCred}`;
+        await insertUtxoDelta(db, blockHash, "withdrawal", JSON.stringify({ stakeCred: toHex(stakeCred), amount: (-amount).toString(), directDeposit: true }));
     }
 }
 

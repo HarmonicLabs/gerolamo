@@ -24,10 +24,12 @@ import { collectShelleyWitnesses } from "../consensus/rules/witnesses";
 import { runWitnessVerifyJob } from "../consensus/workers/witnessJob";
 import type { ValidationPool } from "../consensus/workers/ValidationPool";
 import { outputLike, advanceResolved } from "../consensus/rules/blockRulesPure";
+import { rewardAccountKey } from "../consensus/rules/ledgerChecks";
 import { certStakeEffect, credKey, stakeCredentialsTouched, type CertView } from "../consensus/certificateRules";
 import { LedgerF, RuleRun, UtxoF, UtxosF, UtxowF } from "./applyTxErr";
 import { checkBlockGovernance, govRulesMode } from "../consensus/governance/govValidate";
 import { bodyHasGovernance } from "../consensus/governance/govTxDecode";
+import type { GovLedgerView } from "../consensus/governance/govRules";
 import { evaluateMempoolPhase1, MAX_REF_SCRIPT_SIZE_PER_BLOCK, totalExUnits, txRefScriptBytes, type MempoolLedgerState, type MempoolLookups, type WitnessVerdict } from "./conwayMempoolRules";
 import { parseMempoolTx, type MempoolTx } from "./mempoolTx";
 import type { MempoolPlutusJob, MempoolPlutusResult } from "./plutusJob";
@@ -47,6 +49,10 @@ export interface MempoolLedgerView {
     stake(creds: Array<{ hex: string; type: number }>): Promise<{ registered: Set<string>; delegated: Map<string, string> } | null>;
     /** The network name for slot → time in the Plutus context (preview / preprod / mainnet). */
     epochNetwork(): string;
+    /** Are the reward balances exact (nodeLedgerStore `ledgerStateExact`)? The withdrawal-amount rule is strict only then. Absent: not exact. */
+    exactness?(): { exact: boolean; why: string };
+    /** Governance state for the GOV / GOVCERT / DELEG / POOL checks; absent: the node's store (govLedgerView.ts). */
+    govLedgerView?(): Promise<GovLedgerView | undefined>;
 }
 
 /** Where the shared-memory copy lives (the outbound tx-submission clients read it). */
@@ -237,7 +243,7 @@ export class ValidatingMempool {
             const queued = this.entries.filter((e) => bodyHasGovernance(e.tx.bodyBytes)).map((e) => ({ bytes: e.tx.bodyBytes, txId: e.tx.txId }));
             const me = queued.length;
             try {
-                const gov = await checkBlockGovernance({ slot: Number(slot), epoch: state.params.epoch, bodies: [...queued, { bytes: tx.bodyBytes, txId: tx.txId }], invalid: new Set(), raw: state.params.raw, networkId: state.network === "mainnet" ? 1 : 0 });
+                const gov = await checkBlockGovernance({ slot: Number(slot), epoch: state.params.epoch, bodies: [...queued, { bytes: tx.bodyBytes, txId: tx.txId }], invalid: new Set(), raw: state.params.raw, networkId: state.network === "mainnet" ? 1 : 0, view: await this.opts.view.govLedgerView?.() });
                 const mine = gov.failures.filter((f) => f.startsWith(`tx[${me}]`));
                 if (mine.length && govRulesMode() === "strict") return this.reject(tx.txId, mine.map((f) => LedgerF.mempoolFailure(f)), mine, t0, source);
             } catch (err) { log.warn(`governance rules not evaluated for ${tx.txId.slice(0, 16)}: ${err instanceof Error ? err.message : String(err)}`); }
@@ -313,7 +319,9 @@ export class ValidatingMempool {
         }
         const body = tx.body;
         const poolIds = ((body.certs ?? []) as any[]).filter((c) => Number(c.certType) === 3).map((c) => String(c.poolParams?.operator?.toString?.() ?? "").toLowerCase());
-        const wdCreds = ((body.withdrawals?.map ?? []) as any[]).map((w) => String((w.rewardAccount?.credentials?.hash ?? w.rewardAccount?.credentials)?.toString?.() ?? "").toLowerCase()).filter(Boolean);
+        // typed keys ("01" + hash for a script account), as the block rules read them (bug 404: the bare
+        // hash read a script account's balance from the key account of the same hash)
+        const wdCreds = ((body.withdrawals?.map ?? []) as any[]).map((w) => rewardAccountKey(w.rewardAccount)).filter(Boolean);
         const certs: CertView[] = ((body.certs ?? []) as any[]).map((c) => ({
             certType: Number(c.certType),
             credHex: c.stakeCredential ? String(c.stakeCredential.hash?.toString?.() ?? "").toLowerCase() || null : null,
@@ -330,7 +338,11 @@ export class ValidatingMempool {
         ]);
         // earlier mempool transactions' certificates change the registration state too
         if (stake) for (const e of before) applyCertsToStake(e.tx, stake);
-        return { resolved, pools, rewardBalances, stake };
+        // ... and their withdrawals drain the accounts (a later transaction must withdraw 0), as the
+        // block rules carry it from one transaction to the next (blockRulesPure `applyOverlay`)
+        const balances = rewardBalances ? new Map(rewardBalances) : undefined;
+        if (balances) for (const e of before) for (const w of (e.tx.body.withdrawals?.map ?? []) as any[]) { const k = rewardAccountKey(w.rewardAccount); if (balances.has(k)) balances.set(k, 0n); }
+        return { resolved, pools, rewardBalances: balances, stake, exactness: this.opts.view.exactness?.() };
     }
 
     private async verifyWitnesses(tx: MempoolTx): Promise<WitnessVerdict> {

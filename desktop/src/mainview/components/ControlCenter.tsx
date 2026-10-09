@@ -21,10 +21,11 @@ import {
   ConfirmDialog,
 } from "./nodeUI";
 
-type PageId = "overview" | "node" | "mithril" | "transactions" | "logs" | "docs";
+type PageId = "overview" | "pools" | "node" | "mithril" | "transactions" | "logs" | "docs";
 
 const NAV: { id: PageId; label: string }[] = [
   { id: "overview", label: "Node" },
+  { id: "pools", label: "Pools" },
   { id: "node", label: "Config" },
   { id: "mithril", label: "Mithril" },
   { id: "transactions", label: "Transactions" },
@@ -134,8 +135,9 @@ const ControlCenter: Component = () => {
     try {
       const r = await manager.submitTx(id, hex);
       if (r.ok) {
-        const m = r.body as { hash?: string; mempool?: { nTxs?: number; status?: string } };
-        setTxResult({ ok: true, text: `accepted · tx ${m.hash ?? "?"} · mempool ${m.mempool?.status ?? "?"} (${m.mempool?.nTxs ?? "?"} tx)` });
+        // Blockfrost shape: the body is the tx id as a JSON string (older nodes sent { hash, mempool })
+        const m = (typeof r.body === "string" ? { hash: r.body } : r.body) as { hash?: string; mempool?: { nTxs?: number; status?: string } };
+        setTxResult({ ok: true, text: `accepted · tx ${m.hash ?? "?"}${m.mempool ? ` · mempool ${m.mempool.status ?? "?"} (${m.mempool.nTxs ?? "?"} tx)` : ""}` });
         setTxHex("");
         void refreshMempool();
       } else {
@@ -881,8 +883,6 @@ const ControlCenter: Component = () => {
                       const t = new Date(iso);
                       return Number.isNaN(t.getTime()) ? iso : t.toLocaleString(undefined, { hour12: false });
                     };
-                    const outcomeColor = (o: string) =>
-                      o === "adopted" || o === "confirmed" ? "text-green" : o === "upcoming" ? "text-accent" : o === "missed" || o === "invalid" ? "text-amber" : "text-red";
                     return (
                       <div class="glass-card-accent p-5 space-y-3" title="Block production, in gLiveView's terms: KES life, op-cert counters, missed slot leader checks, and this epoch's leader / ideal / luck, adopted, confirmed (10 blocks deep), invalid, missed, ghosted (rolled away), stolen (slot battle lost).">
                         <div class="flex items-center justify-between gap-3">
@@ -895,17 +895,6 @@ const ControlCenter: Component = () => {
                           <Stat label="OP cert disk | chain" title="Operational certificate counter on disk and the last one the chain has seen for this pool." value={`${p().opcert.counter} | ${p().opcert.chainCounter ?? "none"}`} size="sm" />
                           <Stat label="Missed slot checks" title="Slots the wall-clock ticker never evaluated because the process stalled for more than a slot." value={p().missedLeaderChecks} accent glow glowColor={p().missedLeaderChecks > 0 ? "orange" : "green"} size="sm" />
                         </div>
-                        <Show when={p().kes && p().kes!.health && p().kes!.health !== "ok"}>
-                          <div class={`rounded-lg border px-4 py-3 text-sm ${p().kes!.health === "rotate-soon" ? "border-amber/40 text-amber" : "border-red/40 text-red"}`} title="KES certificate life: rotate before it expires or the pool stops producing blocks.">
-                            {p().kes!.health === "rotate-soon" ? "KES: rotate soon" : p().kes!.health === "rotate-now" ? "KES: ROTATE NOW" : p().kes!.health === "expired" ? "KES certificate EXPIRED: no blocks can be forged" : "KES certificate not valid yet"}
-                            {` — ${p().kes!.remaining} of ${p().kes!.maxEvolutions} periods left, expires ${when(p().kes!.expiresAt)}. Rotate where the cold key lives: bun scripts/pool-register.ts rotate-kes --dir <pool keys>, copy kes.skey, kes.vkey and node.cert to the producer, restart it.`}
-                          </div>
-                        </Show>
-                        <Show when={p().kes?.counter === "ahead-of-chain" || p().kes?.counter === "behind-chain"}>
-                          <div class="rounded-lg border border-red/40 px-4 py-3 text-sm text-red">
-                            {`Operational certificate counter ${p().opcert.counter} does not follow the chain's ${p().opcert.chainCounter}: headers need the chain's counter or one above it. Blocks will be rejected.`}
-                          </div>
-                        </Show>
                         <Show when={es()}>
                           {(e) => (
                             <div class="grid grid-cols-3 md:grid-cols-6 gap-4">
@@ -917,24 +906,6 @@ const ControlCenter: Component = () => {
                               <Stat label="Next leader slot" title="Next slot this pool leads, with the countdown from the network clock." value={p().nextLeaderSlot ? Number(p().nextLeaderSlot).toLocaleString("en-US") : "none"} sub={nextIn() ?? undefined} accent size="sm" />
                             </div>
                           )}
-                        </Show>
-                        <Show when={p().leaderSlots.length > 0}>
-                          <div class="space-y-1">
-                            <For each={p().leaderSlots.slice(0, 12)}>
-                              {(ls) => (
-                                <div class="flex flex-wrap items-center gap-x-3 text-[12px] font-mono tabular-nums">
-                                  <span class="text-text">{Number(ls.slot).toLocaleString("en-US")}</span>
-                                  <span class="text-text-muted">{when(ls.time)}</span>
-                                  <span class={outcomeColor(ls.outcome)}>{ls.outcome}</span>
-                                  <Show when={ls.hash}><span class="text-text-dim">{ls.hash!.slice(0, 12)}…</span></Show>
-                                  <Show when={ls.note && ls.outcome !== "upcoming"}><span class="text-text-dim">{ls.note}</span></Show>
-                                </div>
-                              )}
-                            </For>
-                          </div>
-                        </Show>
-                        <Show when={p().lastError}>
-                          <p class="text-[12px] text-red">{p().lastError}</p>
                         </Show>
                       </div>
                     );
@@ -1154,6 +1125,93 @@ const ControlCenter: Component = () => {
                   <button onClick={() => go("node")} class={btnSecondary}>Node controls</button>
                   <button onClick={() => go("mithril")} class={btnSecondary}>Mithril</button>
                 </div>
+              </div>
+            </Show>
+
+            <Show when={page() === "pools"}>
+              <div class="space-y-4">
+                <Show when={!sync()?.producer}>
+                  <div class="glass-card p-5 space-y-2">
+                    <h2 class="text-h2">Pools</h2>
+                    <p class="text-[13px] text-text-secondary">This node is not running as a block producer. Pool operations — registering a pool, updating its parameters, KES rotation and retiring it — will live here.</p>
+                  </div>
+                </Show>
+                <Show when={sync()?.producer}>
+                  {(prod) => {
+                    const p = () => prod();
+                    const es = () => p().epochStats;
+                    const nextIn = () => {
+                      const next = p().nextLeaderSlot;
+                      const tip = sync()?.networkTipSlot;
+                      if (!next || !tip) return null;
+                      const d = Number(next) - Number(tip);
+                      if (d <= 0) return "now";
+                      return d < 5400 ? `in ${Math.round(d / 60)} min` : `in ${(d / 3600).toFixed(1)} h`;
+                    };
+                    const when = (iso: string | null) => {
+                      if (!iso) return "—";
+                      const t = new Date(iso);
+                      return Number.isNaN(t.getTime()) ? iso : t.toLocaleString(undefined, { hour12: false });
+                    };
+                    const outcomeColor = (o: string) =>
+                      o === "adopted" || o === "confirmed" ? "text-green" : o === "upcoming" ? "text-accent" : o === "missed" || o === "invalid" ? "text-amber" : "text-red";
+                    return (
+                      <div class="glass-card-accent p-5 space-y-3" title="Block production, in gLiveView's terms: KES life, op-cert counters, missed slot leader checks, and this epoch's leader / ideal / luck, adopted, confirmed (10 blocks deep), invalid, missed, ghosted (rolled away), stolen (slot battle lost).">
+                        <div class="flex items-center justify-between gap-3">
+                          <h2 class="text-h2">Block production</h2>
+                          <Badge variant={p().dryRun ? "muted" : "success"}>{p().dryRun ? "dry run" : "forging"}</Badge>
+                        </div>
+                        <div class="grid grid-cols-2 md:grid-cols-4 gap-4">
+                          <Stat label="Pool" title="Pool id (cold key hash) this node forges for." value={p().poolId.slice(0, 12) + "…"} size="sm" />
+                          <Stat label="KES current | remaining" title={`Current KES period, evolutions left of ${p().kes?.maxEvolutions ?? "?"}; the certificate expires ${when(p().kes?.expiresAt ?? null)}.`} value={p().kes ? `${p().kes!.period} | ${p().kes!.remaining}` : "—"} sub={p().kes ? `exp ${when(p().kes!.expiresAt)}` : undefined} size="sm" />
+                          <Stat label="OP cert disk | chain" title="Operational certificate counter on disk and the last one the chain has seen for this pool." value={`${p().opcert.counter} | ${p().opcert.chainCounter ?? "none"}`} size="sm" />
+                          <Stat label="Missed slot checks" title="Slots the wall-clock ticker never evaluated because the process stalled for more than a slot." value={p().missedLeaderChecks} accent glow glowColor={p().missedLeaderChecks > 0 ? "orange" : "green"} size="sm" />
+                        </div>
+                        <Show when={p().kes && p().kes!.health && p().kes!.health !== "ok"}>
+                          <div class={`rounded-lg border px-4 py-3 text-sm ${p().kes!.health === "rotate-soon" ? "border-amber/40 text-amber" : "border-red/40 text-red"}`} title="KES certificate life: rotate before it expires or the pool stops producing blocks.">
+                            {p().kes!.health === "rotate-soon" ? "KES: rotate soon" : p().kes!.health === "rotate-now" ? "KES: ROTATE NOW" : p().kes!.health === "expired" ? "KES certificate EXPIRED: no blocks can be forged" : "KES certificate not valid yet"}
+                            {` — ${p().kes!.remaining} of ${p().kes!.maxEvolutions} periods left, expires ${when(p().kes!.expiresAt)}. Rotate where the cold key lives: bun scripts/pool-register.ts rotate-kes --dir <pool keys>, copy kes.skey, kes.vkey and node.cert to the producer, restart it.`}
+                          </div>
+                        </Show>
+                        <Show when={p().kes?.counter === "ahead-of-chain" || p().kes?.counter === "behind-chain"}>
+                          <div class="rounded-lg border border-red/40 px-4 py-3 text-sm text-red">
+                            {`Operational certificate counter ${p().opcert.counter} does not follow the chain's ${p().opcert.chainCounter}: headers need the chain's counter or one above it. Blocks will be rejected.`}
+                          </div>
+                        </Show>
+                        <Show when={es()}>
+                          {(e) => (
+                            <div class="grid grid-cols-3 md:grid-cols-6 gap-4">
+                              <Stat label={`Epoch ${e().epoch} leader`} title="Leader slots scheduled for this pool in the epoch." value={e().leader} accent glow size="sm" />
+                              <Stat label="Ideal | luck" title="Expected slots for our stake (σ · f · epoch length) and leader / ideal." value={`${e().ideal == null ? "—" : e().ideal!.toFixed(2)} | ${e().luck == null ? "—" : e().luck!.toFixed(0) + "%"}`} size="sm" />
+                              <Stat label="Adopted | confirmed" title="Blocks forged and applied to our chain; confirmed once 10 blocks deep." value={`${e().adopted} | ${e().confirmed}`} glow glowColor="green" size="sm" />
+                              <Stat label="Invalid | missed" title="Forged blocks our own rules rejected; leader slots that passed without a forge." value={`${e().invalid} | ${e().missed}`} glow glowColor="orange" size="sm" />
+                              <Stat label="Ghosted | stolen" title="Adopted blocks that rolled away with nothing at the slot; slot battles lost to another pool." value={`${e().ghosted} | ${e().stolen}`} glow glowColor="red" size="sm" />
+                              <Stat label="Next leader slot" title="Next slot this pool leads, with the countdown from the network clock." value={p().nextLeaderSlot ? Number(p().nextLeaderSlot).toLocaleString("en-US") : "none"} sub={nextIn() ?? undefined} accent size="sm" />
+                            </div>
+                          )}
+                        </Show>
+                        <Show when={p().leaderSlots.length > 0}>
+                          <div class="space-y-1">
+                            <For each={p().leaderSlots.slice(0, 12)}>
+                              {(ls) => (
+                                <div class="flex flex-wrap items-center gap-x-3 text-[12px] font-mono tabular-nums">
+                                  <span class="text-text">{Number(ls.slot).toLocaleString("en-US")}</span>
+                                  <span class="text-text-muted">{when(ls.time)}</span>
+                                  <span class={outcomeColor(ls.outcome)}>{ls.outcome}</span>
+                                  <Show when={ls.hash}><span class="text-text-dim">{ls.hash!.slice(0, 12)}…</span></Show>
+                                  <Show when={ls.note && ls.outcome !== "upcoming"}><span class="text-text-dim">{ls.note}</span></Show>
+                                </div>
+                              )}
+                            </For>
+                          </div>
+                        </Show>
+                        <Show when={p().lastError}>
+                          <p class="text-[12px] text-red">{p().lastError}</p>
+                        </Show>
+                      </div>
+                    );
+                  }}
+                </Show>
               </div>
             </Show>
 

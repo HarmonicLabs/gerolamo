@@ -64,13 +64,24 @@ drop their tarball. Earlier `+conformance.N` version commits stay in the branch 
 
 ## 3. Publish order
 
-CI installs dependencies from npm, and plutus-data and cardano-ledger-ts only pass against the new cbor:
+Every branch is pushed to its default branch already (cbor and gerolamino as soon as Mike has write access). What
+is left is publishing, in this order, because plutus-data and cardano-ledger-ts need the new cbor:
 
-1. **Now, in any order:** cbor 2.1.0, cardano-costmodels-ts 1.7.0, kes 0.1.0, buildooor 0.2.10,
+1. **Any order:** cbor 2.1.0, cardano-costmodels-ts 1.7.0, kes 0.1.0, buildooor 0.2.10,
    ouroboros-miniprotocols-ts 0.0.6-dev0.
-2. **After cbor 2.1.0 is on npm:** plutus-data 2.1.0 (its last commit moves the cbor peer dependency to `^2.1.0`).
-3. **After cbor, plutus-data and costmodels are on npm:** cardano-ledger-ts 0.6.0 (its last commit moves those three
-   to the new versions).
+2. **After cbor 2.1.0 is on npm:** in plutus-data, move the cbor peer dependency to the release, then publish 2.1.0:
+   ```bash
+   npm pkg set "peerDependencies.@harmoniclabs/cbor=^2.1.0" && npm install --package-lock-only && npx jest
+   git commit -am "Use cbor 2.1.0" && git push
+   ```
+3. **After cbor, plutus-data and costmodels are on npm:** in cardano-ledger-ts, the same for its three dependencies,
+   then publish 0.6.0. Its CI on `main` stays red until this commit, because it installs the old cbor from npm:
+   ```bash
+   npm pkg set "peerDependencies.@harmoniclabs/cbor=^2.1.0" "peerDependencies.@harmoniclabs/plutus-data=^2.1.0" \
+     "peerDependencies.@harmoniclabs/cardano-costmodels-ts=^1.7.0"
+   npm install --package-lock-only && npm ci && npm test && npm run build
+   git commit -am "Use new cbor, plutus-data, costmodels" && git push
+   ```
 
 Access: Mike has read-only access to `cbor` (and `shared-cardano-mempool-ts`). For cbor, either grant him write access
 or push the branch yourself.

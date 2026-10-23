@@ -31,7 +31,9 @@ export class WsNodeSocket extends EventEmitter {
     /** Bun `websocket.message` handler feeds bytes here. */
     onMessage(data: string | ArrayBuffer | Uint8Array | Buffer): void {
         if (this.destroyed) return;
-        const buf = typeof data === "string" ? Buffer.from(data, "binary") : Buffer.from(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
+        // N2N over WebSocket is binary only (CIP draft, CIP/n2n-over-websocket): a text message is a protocol error
+        if (typeof data === "string") { this.destroy(new Error("text message on an N2N WebSocket")); return; }
+        const buf = Buffer.from(data instanceof ArrayBuffer ? new Uint8Array(data) : data);
         this.touch();
         this.emit("data", buf);
     }

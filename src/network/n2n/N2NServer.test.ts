@@ -14,7 +14,7 @@ import {
     KeepAliveClient,
     Multiplexer,
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { startN2NServer, type N2NServerHandle } from "./N2NServer";
+import { startN2NServer, type N2NServerHandle , N2N_WS_SUBPROTOCOL, N2N_WS_SUBPROTOCOL_LIGHTQUERY, selectN2NSubprotocol } from "./N2NServer";
 import type { RelayChainStore, RelayHeader } from "./RelayChainStore";
 
 const point = (slot: bigint, byte: number) => new ChainPoint({
@@ -160,5 +160,32 @@ describe("N2N over WebSocket", () => {
         }
         const res = await fetch(`http://127.0.0.1:${wsPort}/elsewhere`);
         expect(res.status).toBe(404);
+    });
+
+    test("announces its services as a WebSocket subprotocol (richest offered), none when none is offered", async () => {
+        const open = (port: number, protocols?: string[]) => new Promise<WebSocket>((resolve, reject) => {
+            const s = protocols ? new WebSocket(`ws://127.0.0.1:${port}/n2n`, protocols) : new WebSocket(`ws://127.0.0.1:${port}/n2n`);
+            s.addEventListener("open", () => resolve(s), { once: true });
+            s.addEventListener("error", () => reject(new Error("cannot open")), { once: true });
+        });
+        const both = [N2N_WS_SUBPROTOCOL_LIGHTQUERY, N2N_WS_SUBPROTOCOL];
+        for (const [lightQuery, expected] of [[true, N2N_WS_SUBPROTOCOL_LIGHTQUERY], [false, N2N_WS_SUBPROTOCOL]] as const) {
+            const h = await startN2NServer({
+                host: "127.0.0.1", port: 0, networkMagic: 2, store: new FakeStore(), maxConnections: 8,
+                handshakeTimeoutMs: 2_000, idleTimeoutMs: 5_000, ws: { host: "127.0.0.1", port: 0 },
+                ...(lightQuery ? { lightQuery: { networkMagic: 2, activeSlotsCoeff: 0.05 } } : {}),
+            });
+            try {
+                const a = await open(h.wsPort!, both);
+                expect(a.protocol).toBe(expected);
+                a.close();
+                const legacy = await open(h.wsPort!);
+                expect(legacy.protocol).toBe("");
+                legacy.close();
+            } finally { await h.stop(); }
+        }
+        expect(selectN2NSubprotocol("cardano-n2n.v1+lightquery, cardano-n2n.v1", true)).toBe("cardano-n2n.v1+lightquery");
+        expect(selectN2NSubprotocol("cardano-n2n.v1+lightquery", false)).toBeNull();
+        expect(selectN2NSubprotocol(null, true)).toBeNull();
     });
 });

@@ -30,7 +30,10 @@ are in `docs/WEBSOCKET_BEARER.md`. This page covers the Gerolamo side.
   to sync from a browser.
 - **Light query.** Gerolamo serves its light-query mini-protocol (mux protocol 7, `N2NLightQueryHost.ts`) on
   the same connection: epoch nonce, pool stake and immutable chunk files. With it, a browser verifies headers
-  and starts from a Mithril-certified chunk without a second channel.
+  and starts from a Mithril-certified chunk without a second channel. Since 2026-10-23 it also answers read-only
+  Blockfrost queries (`[8, id, path]` → `[9, id, status, json]`, from the node's own Blockfrost API, GET only, 30 per
+  10 s per peer, at most 512 KiB, answered strictly in request order): a browser node answers what it stored itself
+  and asks Gerolamo for ledger state and older blocks.
 
 Tests: `src/network/n2n/N2NServer.test.ts`, "N2N over WebSocket", handshakes and runs chain-sync on `/n2n`,
 `/relay` and `/`, and checks that another path gets 404.

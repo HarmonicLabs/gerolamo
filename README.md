@@ -315,6 +315,7 @@ bun src/index.ts start-gerolamo
 | [`docs/N2C_IMPLEMENTATION_PLAN.md`](./docs/N2C_IMPLEMENTATION_PLAN.md) | N2C phases |
 | [`docs/GEROLAMINO.md`](./docs/GEROLAMINO.md) | Gerolamino (browser extension node): what Gerolamo serves it over N2N-over-WebSocket |
 | [`docs/HARMONIC_LIBS_RELEASE.md`](./docs/HARMONIC_LIBS_RELEASE.md) | Release review of the HarmonicLabs libraries (cbor, plutus-data, costmodels, cardano-ledger-ts, kes, buildooor, miniprotocols): changes, breaking changes, tests, publish order |
+| [`CIP/`](./CIP/README.md) | CIP drafts: Node-to-Node over WebSocket (browser nodes, service announcement, light query, discovery) |
 
 ---
 

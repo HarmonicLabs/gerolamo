@@ -14,6 +14,22 @@ import { WsNodeSocket } from "./WsNodeSocket";
 
 /** Paths the N2N-over-WebSocket bearer answers on: the canonical /n2n, the root, and /relay (Gerolamino). */
 export const WS_N2N_PATHS = new Set(["/", "/n2n", "/relay"]);
+
+/**
+ * WebSocket subprotocols (Sec-WebSocket-Protocol) announcing the services a peer offers, so a browser knows before
+ * sending any N2N byte whether it may use the light query (CIP draft, CIP/n2n-websocket): `cardano-n2n.v1` is the
+ * standard N2N mini-protocols only; `cardano-n2n.v1+lightquery` adds Gerolamo's light query (mux protocol 7).
+ */
+export const N2N_WS_SUBPROTOCOL = "cardano-n2n.v1";
+export const N2N_WS_SUBPROTOCOL_LIGHTQUERY = "cardano-n2n.v1+lightquery";
+
+/** The subprotocol to select from a client's offer: the richest this server supports, or null (none offered, or none known). */
+export function selectN2NSubprotocol(offered: string | null, lightQuery: boolean): string | null {
+    const list = (offered ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+    if (lightQuery && list.includes(N2N_WS_SUBPROTOCOL_LIGHTQUERY)) return N2N_WS_SUBPROTOCOL_LIGHTQUERY;
+    if (list.includes(N2N_WS_SUBPROTOCOL)) return N2N_WS_SUBPROTOCOL;
+    return null;
+}
 import { N2NLightQueryHost, type LightQueryDeps } from "./N2NLightQueryHost";
 import { formatHostPort, normalizeHost } from "../relayAccessPoint";
 
@@ -137,8 +153,10 @@ export async function startN2NServer(
                 const url = new URL(req.url);
                 // "/relay" is the path Gerolamino (the browser-extension node) appends, as for its websockify relays
                 if (!WS_N2N_PATHS.has(url.pathname.replace(/\/+$/, "") || "/")) return new Response("Gerolamo N2N over WebSocket: connect at /n2n (also / or /relay)", { status: 404 });
-                if (clients.size >= maxConnections) return new Response("too many connections", { status: 503 });
-                const ok = server.upgrade(req, { data: { sock: null } });
+                if (clients.size >= maxConnections) return new Response("too many connections", { status: 503, headers: { "Retry-After": "30" } });
+                // announce the services: the richest subprotocol the client offered that this server supports
+                const selected = selectN2NSubprotocol(req.headers.get("sec-websocket-protocol"), !!options.lightQuery);
+                const ok = server.upgrade(req, { data: { sock: null }, ...(selected ? { headers: { "Sec-WebSocket-Protocol": selected } } : {}) });
                 return ok ? undefined : new Response("expected a WebSocket upgrade", { status: 426 });
             },
             websocket: {

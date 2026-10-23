@@ -8,13 +8,20 @@
  * Wire (CBOR, one message per request/reply):
  *   [0, epoch]                → [1, epoch, nonce(32) | null]
  *   [2, epoch, poolId(28)]    → [3, epoch, poolStake u64 | null, totalActiveStake u64 | null, activeSlotsCoeffNum, activeSlotsCoeffDen]
- *   [4]                       → [5, network magic, protocolVersionMajor]  (hello)
+ *   [4]                       → [5, network magic, 1, capabilities]  (hello; capabilities is a map of the request
+ *                               types this host serves: {"nonce": true, "stake": true, "chunk": bool,
+ *                               "blockfrost": {"rate": n, "window_ms": n, "max_body": n}}; version 0 had no map)
  *   [6, chunkNo]              → [7, chunkNo, chunk bytes, primary bytes, secondary bytes] | [7, chunkNo, null, null, null]
  *                               (a complete immutable chunk from the relay's block store, for a browser to check
  *                               against Mithril-certified digests and anchor on its last block)
+ *   [8, id, path]             → [9, id, status, body]   a read-only Blockfrost query (`path` under /api/v0, e.g.
+ *                               "/addresses/addr…/utxos"), answered by the node's own Blockfrost API; `body` is
+ *                               its JSON text. GET only, at most QUERY_RATE per QUERY_WINDOW_MS per peer, bodies over
+ *                               QUERY_MAX_BODY bytes answered 413. A browser node asks here for what it does not
+ *                               hold itself (ledger state, blocks before its start point).
  *   anything else             → [255, "text"]
  */
-import { Cbor, CborArray, CborBytes, CborSimple, CborText, CborUInt, type CborObj } from "@harmoniclabs/cbor";
+import { Cbor, CborArray, CborBytes, CborMap, CborSimple, CborText, CborUInt, type CborObj } from "@harmoniclabs/cbor";
 import type { Multiplexer } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { getEpochNonce } from "../../db";
 import { poolStakeForEpoch } from "../../db/leaderState";
@@ -23,6 +30,13 @@ import { chunkFileName } from "../../storage/chunkFormat";
 import { join } from "node:path";
 import { logger } from "../../utils/logger";
 import { sendN2NResponder } from "./N2NDirection";
+import { handleMiniBlockfrost } from "../../api/miniBlockfrost";
+
+/** Blockfrost queries per peer: at most QUERY_RATE in any QUERY_WINDOW_MS, bodies up to QUERY_MAX_BODY bytes. */
+export const QUERY_RATE = 30;
+export const QUERY_WINDOW_MS = 10_000;
+export const QUERY_MAX_BODY = 512 * 1024;
+const QUERY_MAX_PATH = 1024;
 
 /**
  * Mux protocol number. The multiplexer library only forwards known mini-protocol numbers, so the
@@ -35,6 +49,18 @@ const log = logger.child("n2n.lightquery");
 export interface LightQueryDeps {
     networkMagic: number;
     activeSlotsCoeff: number; // e.g. 0.05
+    /** Network name for the Blockfrost answers ("preview", ...). */
+    network?: string;
+    /** Answers a Blockfrost GET; defaults to the node's own API (tests inject one). */
+    blockfrost?: (path: string) => Promise<{ status: number; body: string }>;
+}
+
+/** The node's Blockfrost API as one GET: `path` is under /api/v0 ("/blocks/latest"). */
+async function localBlockfrost(path: string, network?: string): Promise<{ status: number; body: string }> {
+    const url = new URL("http://light-query.local/api/v0" + path);
+    const res = await handleMiniBlockfrost(new Request(url, { method: "GET" }), url, { network });
+    if (!res) return { status: 404, body: JSON.stringify({ status_code: 404, error: "Not Found", message: "unknown path" }) };
+    return { status: res.status, body: await res.text() };
 }
 
 /** Per-epoch stake distribution cache shared by all clients (one read per epoch). */
@@ -60,7 +86,11 @@ function coeffFraction(f: number): [bigint, bigint] {
 export class N2NLightQueryHost {
     private disposed = false;
     private queued: Uint8Array | null = null;
-    private readonly onPayload = (payload: Uint8Array) => { void this.handle(payload); };
+    private queryTimes: number[] = [];
+    /** Requests are answered strictly in arrival order: clients match replies by order, so a fast answer must not
+     *  overtake a slow one (a Blockfrost query waiting on the database, say). */
+    private chain: Promise<void> = Promise.resolve();
+    private readonly onPayload = (payload: Uint8Array) => { this.chain = this.chain.then(() => this.handle(payload)).catch(() => { /* answered with [255] */ }); };
 
     constructor(private readonly mplexer: Multiplexer, private readonly deps: LightQueryDeps, private readonly peer = "?") {
         this.mplexer.on(LIGHT_QUERY_PROTOCOL as any, this.onPayload);
@@ -90,11 +120,40 @@ export class N2NLightQueryHost {
         }
     }
 
+    /** The request types this host serves, announced in the hello reply so clients never probe. */
+    private capabilities(): CborMap {
+        const t = (s: string) => new CborText(s), yes = new CborSimple(true);
+        return new CborMap([
+            { k: t("nonce"), v: yes },
+            { k: t("stake"), v: yes },
+            { k: t("chunk"), v: new CborSimple(!!getNodeBlockStore()) },
+            { k: t("blockfrost"), v: new CborMap([
+                { k: t("rate"), v: new CborUInt(QUERY_RATE) },
+                { k: t("window_ms"), v: new CborUInt(QUERY_WINDOW_MS) },
+                { k: t("max_body"), v: new CborUInt(QUERY_MAX_BODY) },
+            ]) },
+        ]);
+    }
+
+    /** One read-only Blockfrost query, rate-limited per peer and size-capped. */
+    private async query(path: string): Promise<{ status: number; body: string }> {
+        const err = (status: number, error: string, message: string) => ({ status, body: JSON.stringify({ status_code: status, error, message }) });
+        if (typeof path !== "string" || !path.startsWith("/") || path.length > QUERY_MAX_PATH || path.includes(".."))
+            return err(400, "Bad Request", "path must start with / and stay under /api/v0");
+        const now = Date.now();
+        this.queryTimes = this.queryTimes.filter((t) => now - t < QUERY_WINDOW_MS);
+        if (this.queryTimes.length >= QUERY_RATE) return err(429, "Too Many Requests", `at most ${QUERY_RATE} queries per ${QUERY_WINDOW_MS / 1000} s`);
+        this.queryTimes.push(now);
+        const res = await (this.deps.blockfrost ?? ((p: string) => localBlockfrost(p, this.deps.network)))(path);
+        if (res.body.length > QUERY_MAX_BODY) return err(413, "Payload Too Large", `answer over ${QUERY_MAX_BODY} bytes; ask for a page (?count=, ?page=)`);
+        return res;
+    }
+
     private async answer(q: CborObj): Promise<void> {
         const arr = q instanceof CborArray ? q.array : null;
         const tag = arr && arr[0] instanceof CborUInt ? Number(arr[0].num) : -1;
         try {
-            if (tag === 4) { this.reply(new CborArray([new CborUInt(5), new CborUInt(this.deps.networkMagic), new CborUInt(0)])); return; }
+            if (tag === 4) { this.reply(new CborArray([new CborUInt(5), new CborUInt(this.deps.networkMagic), new CborUInt(1), this.capabilities()])); return; }
             if (tag === 0 && arr![1] instanceof CborUInt) {
                 const epoch = Number(arr![1].num);
                 const hexNonce = await getEpochNonce(epoch);
@@ -120,6 +179,12 @@ export class N2NLightQueryHost {
                 const files = await Promise.all((["chunk", "primary", "secondary"] as const).map((e) => Bun.file(join(dir, chunkFileName(n, e))).bytes().catch(() => null)));
                 if (files.some((f) => !f)) { this.reply(new CborArray([new CborUInt(7), new CborUInt(n), new CborSimple(null), new CborSimple(null), new CborSimple(null)])); return; }
                 this.reply(new CborArray([new CborUInt(7), new CborUInt(n), ...files.map((f) => new CborBytes(f!))]));
+                return;
+            }
+            if (tag === 8 && arr![1] instanceof CborUInt && arr![2] instanceof CborText) {
+                const id = arr![1];
+                const { status, body } = await this.query(arr![2].text);
+                this.reply(new CborArray([new CborUInt(9), id, new CborUInt(status), new CborText(body)]));
                 return;
             }
             this.reply(new CborArray([new CborUInt(255), new CborText(`unknown light query tag ${tag}`)]));

@@ -385,7 +385,7 @@ export async function start() {
         n2nHandle = await startN2NServer({
             store: relayChainStoreOverride(),
             ws: config.n2n.ws,
-            lightQuery: { networkMagic: config.networkMagic, activeSlotsCoeff: Number((await getShelleyGenesisConfig(config) as { activeSlotsCoeff?: number } | null)?.activeSlotsCoeff ?? 0.05) },
+            lightQuery: { networkMagic: config.networkMagic, network: process.env.NETWORK, activeSlotsCoeff: Number((await getShelleyGenesisConfig(config) as { activeSlotsCoeff?: number } | null)?.activeSlotsCoeff ?? 0.05) },
             host: config.n2n.host,
             port: config.n2n.port,
             networkMagic: config.networkMagic,

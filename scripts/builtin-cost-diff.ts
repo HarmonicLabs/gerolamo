@@ -94,7 +94,7 @@ for (const [name, term] of cases) {
         if (process.argv.includes("--new")) {
             const lang = ({ v1: 1, v2: 2, v3: 3 } as const)[langArg as "v1" | "v2" | "v3"];
             const prog = decodeProgram(compileUPLC(new UPLCProgram([1, 0, 0], t)).toBuffer().buffer, lang, 11);
-            const pvOpt = process.argv.indexOf("--pv"); const r = evaluate(prog.term, costTable(lang, arr, pvOpt > 0 ? Number(process.argv[pvOpt + 1]) : 10), { cpu: 1e13, mem: 1e13 });
+            const pvOpt = process.argv.indexOf("--pv"); const r = evaluate(prog, costTable(lang, arr, pvOpt > 0 ? Number(process.argv[pvOpt + 1]) : 10), { cpu: 1e13, mem: 1e13 });
             ours = { cpu: BigInt(r.cpu), mem: BigInt(r.mem) };
             const v: any = r.result;
             if (!r.ok) ourResult = `error ${r.error}`;

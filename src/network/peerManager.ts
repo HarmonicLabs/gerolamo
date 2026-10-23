@@ -390,6 +390,7 @@ function wirePeerConsensus(peer: PeerClient): void {
         });
     };
     peer.onAwaitReply = (peerId) => orch.handleAwaitReply(peerId); // Genesis: ChainSync Jumping disengages idle peers
+    peer.localBlockNo = () => orch.localBlockNo(); // pipelining depth near the tip (bug 390)
 }
 
 /**
@@ -1057,10 +1058,7 @@ async function governorTick(
         // Do NOT markFail — that cold-drops and orphans the socket in clientsByKey.
         if (silentMs > 0) {
             for (const rec of gov.pickSilentHot(silentMs, now)) {
-                const last =
-                    rec.client?.lastRollForwardAt ??
-                    rec.promotedAt ??
-                    rec.addedAt;
+                const last = PeerGovernor.lastAliveAt(rec);
                 logger.info(
                     `Silent hot→warm ${rec.key} idleMs=${now - last}`,
                 );

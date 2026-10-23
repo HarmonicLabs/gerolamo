@@ -98,7 +98,7 @@ for (let i = 0; i < count; i++) {
     let agree = refOk === ours.ok;
     if (agree && refOk) {
         agree = Number(m[2]) === ours.cpu && Number(m[3]) === ours.mem;
-        try { agree &&= termEq(discharge(ours.result!), parseProgram(`(program 1.1.0 ${m[4]})`).term); }
+        try { agree &&= termEq(discharge(ours.result!, ours.code!), parseProgram(`(program 1.1.0 ${m[4]})`).term); }
         catch (e) { agree = false; console.log(`  (reference result not parsed: ${(e as Error).message})`); }
     }
     if (agree) same++;

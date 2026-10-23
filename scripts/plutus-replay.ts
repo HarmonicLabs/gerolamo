@@ -208,7 +208,8 @@ await Promise.all(outstanding);
 progress();
 console.log("not-evaluated reasons:", Object.fromEntries([...reasons].sort((x, y) => y[1] - x[1]).slice(0, 20)));
 console.log("slowest:", slowest.slice(0, 15));
-out?.end();
-jobsOut?.end();
+// flush --out / --jobs-out before exiting: process.exit() right after end() truncated them (seen 2026-10-17: 106 of 1 671 lines)
+const closed = (w: ReturnType<typeof createWriteStream> | null) => new Promise<void>((resolve) => { if (!w) return resolve(); w.end(() => resolve()); });
+await Promise.all([closed(out), closed(jobsOut)]);
 for (const w of pool) w.terminate();
 process.exit(0);

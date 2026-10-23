@@ -303,6 +303,8 @@ export class ConsensusOrchestrator {
     private stopping = false;
     /** Chain height of the last applied main block (Byron EBBs do not count); loaded from the DB on first use. */
     private lastBlockNo: number | null = null;
+    /** Our chain's height as far as the applier knows it (null until the first block after a start or rollback). */
+    localBlockNo(): number | null { return this.lastBlockNo; }
     /**
      * Serialises the two DB writers that open their own transaction, `applyRange`
      * and `rollbackChainTo`: SQLite allows one open transaction per connection.
@@ -1201,7 +1203,7 @@ export class ConsensusOrchestrator {
         const wasPrimary = this.candidates.primary() === peerKey;
         this.candidates.removePeer(peerKey);
         if (wasPrimary && !this.stopping) { // during shutdown peers leave in bulk: no successors, no restarts
-            const next = this.candidates.bestSuccessor();
+            const next = this.candidates.bestSuccessor(undefined, (k) => this.peerByKey(k)?.source === "localRoot"); // a local root last (bug 394)
             this.lastAccepted = null; // re-anchor the contiguity check on the DB tip
             if (next) {
                 const anchored = this.candidates.agreement(next)?.status;
@@ -2001,6 +2003,7 @@ export class ConsensusOrchestrator {
             break; // nothing more to compare from this peer until the fork resolves
         }
         this.maybePromoteFasterVerifier();
+        this.handBackLocalRootPrimary();
     }
 
     /** Raw header bytes of recently seen headers by hash (tie-break input), bounded. */
@@ -2066,6 +2069,30 @@ export class ConsensusOrchestrator {
      * acceptPrimaryHeaders (contiguity, Byron OBFT state, range bookkeeping); nothing is
      * adopted from its verifier fragment directly. Runs under the adoption lock.
      */
+    private lastLocalRootHandBack = 0;
+    /**
+     * A local root became primary as the last resort (bug 394): hand the role to a public verifier as soon as
+     * one is available, else the relay only learns of network blocks through the extension fetches.
+     */
+    private handBackLocalRootPrimary(): void {
+        const now = Date.now();
+        if (now - this.lastLocalRootHandBack < 30_000) return;
+        const primary = this.candidates.primary();
+        if (!primary || this.peerByKey(primary)?.source !== "localRoot") return;
+        const avoid = (k: string) => this.peerByKey(k)?.source === "localRoot";
+        const next = this.candidates.bestSuccessor(primary, avoid);
+        if (!next || avoid(next)) return;
+        const succ = this.peerByKey(next);
+        if (!succ) return;
+        this.lastLocalRootHandBack = now;
+        const anchored = this.candidates.agreement(next)?.status;
+        logger.warn(`Primary ${primary} is a local root; handing the primary role to ${next}`);
+        this.candidates.setPrimary(next);
+        this.lastAccepted = null;
+        this.lastPrimaryByronHeaderHash = null;
+        void this.anchorPromotedPrimary(succ, next, anchored === "agrees" || anchored === "ahead", "primary handed over from a local root; re-anchor on DB tip");
+    }
+
     private maybePromoteFasterVerifier(): void {
         if (this.halted) return;
         // Only when the header side is what starves the applier. A primary blocked on
@@ -2185,13 +2212,43 @@ export class ConsensusOrchestrator {
         this.submitPoints(points);
     }
 
-    /** Hand contiguous chain points to the scheduler in ranges of at most `maxRangeBlocks`. */
-    private submitPoints(points: readonly CandidatePoint[]): void {
+    /** Hand contiguous chain points to the scheduler in ranges of at most `maxRangeBlocks`; `preferPeer` is asked first. */
+    private submitPoints(points: readonly { slot: bigint; hash: string }[], preferPeer?: string): void {
         const rangeBlocks = this.maxRangeBlocks();
         for (let i = 0; i < points.length; i += rangeBlocks) {
             const chunk = points.slice(i, i + rangeBlocks).map((p) => ({ slot: p.slot, hash: p.hash }));
-            this.ensureScheduler().submit(chunk).applied.catch(() => undefined);
+            this.ensureScheduler().submit(chunk, { preferPeer }).applied.catch(() => undefined);
         }
+    }
+
+    /** Extensions (first hash → when first seen / when requested) so an "extend" decision is acted on once (bug 393). */
+    private readonly extensionSeen = new Map<string, { at: number; requested: boolean }>();
+    private static readonly EXTENSION_GRACE_MS = 3_000;
+
+    /**
+     * Praos: the best candidate extends our chain with blocks the primary has not sent (bug 393). Waiting for the
+     * primary is right while the primary is merely slower; it never ends when only that peer has the blocks — our
+     * own producer behind this relay (a local root) forges them, and the network's next block arrives on the old
+     * tip 10–50 s later. The server relay ghosted three blocks this way on 2026-10-10. A local root's extension is
+     * fetched at once; anyone else's after `EXTENSION_GRACE_MS` without the primary delivering it.
+     */
+    private async fetchVerifierExtension(candidate: Candidate, primary: string | null): Promise<void> {
+        if (candidate.peer === primary || candidate.rollback !== 0 || candidate.suffix.length === 0) return;
+        const first = candidate.suffix[0]!;
+        const now = Date.now();
+        for (const [h, e] of this.extensionSeen) if (now - e.at > 120_000) this.extensionSeen.delete(h);
+        let seen = this.extensionSeen.get(first.hash);
+        if (!seen) { seen = { at: now, requested: false }; this.extensionSeen.set(first.hash, seen); }
+        if (seen.requested) return;
+        if (this.pendingHeaders.has(first.hash) || await this.isAlreadyApplied(first.hash)) { seen.requested = true; return; }
+        const peer = this.peerByKey(candidate.peer);
+        if (!peer) return;
+        const localRoot = peer.source === "localRoot";
+        if (!localRoot && now - seen.at < ConsensusOrchestrator.EXTENSION_GRACE_MS) return;
+        seen.requested = true;
+        const pts = candidate.suffix.map((h) => ({ slot: BigInt(h.slot), hash: h.hash }));
+        logger.warn(`Chain selection: fetching ${pts.length} block(s) extending our tip from ${candidate.peer}${localRoot ? " (local root)" : ""}: ${first.hash.slice(0, 16)}…@${first.slot} (primary ${primary ?? "∅"} has not sent them)`);
+        this.submitPoints(pts, candidate.peer);
     }
 
     // ─────────────────────── chainSelection "praos" (chainsel/ChainSelDriver) ───────────────────────
@@ -2243,6 +2300,7 @@ export class ConsensusOrchestrator {
         }
         const dec = v.decision;
         if (dec.kind === "switch") await this.switchToCandidate(dec.candidate);
+        else if (dec.kind === "extend" && dec.promote && this.peerByKey(dec.candidate.peer)?.source === "localRoot") await this.fetchVerifierExtension(dec.candidate, primary); // never make a local root the primary (bug 394): fetch its blocks instead
         else if (dec.kind === "extend" && dec.promote && this.candidates.hasPeer(dec.candidate.peer) && !d.isJumper(dec.candidate.peer)) { // a CSJ jumper streams nothing
             const next = this.peerByKey(dec.candidate.peer);
             if (next) {
@@ -2252,7 +2310,7 @@ export class ConsensusOrchestrator {
                 this.lastPrimaryByronHeaderHash = null;
                 await this.anchorPromotedPrimary(next, dec.candidate.peer, true, "chain selection: better chain");
             }
-        }
+        } else if (dec.kind === "extend" && !dec.promote) await this.fetchVerifierExtension(dec.candidate, primary);
         // the LoE moved: release the blocks it held back
         const limit = d.loeSlotLimit(this.candidates.primary());
         if (limit !== this.lastLoeLimit) { this.lastLoeLimit = limit; if (this.rangeBuffer.length) this.flushRanges(Math.max(1, this.lastRangeTarget)); }

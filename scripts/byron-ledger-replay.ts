@@ -16,6 +16,7 @@
  * Exit 1 on any failure: on a real chain each one is a false rejection by our code.
  */
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
+import { byronAddressType } from "../src/consensus/byron/byronAddressCompat";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { ChunkStore } from "../src/storage/chunkStore";
 import { splitEraBlock } from "../src/consensus/bodyHash";
@@ -55,7 +56,7 @@ const addrMemo = new Map<string, { type: number; root: string } | null>();
 const addrOf = (s: string) => {
     let a = addrMemo.get(s);
     if (a === undefined) {
-        try { const x = ByronAddress.fromBase58(s); a = { type: Number(x.type), root: toHex(x.rootHash) }; } catch { a = null; }
+        try { const x = ByronAddress.fromBase58(s); a = { type: byronAddressType(x), root: toHex(x.rootHash) }; } catch { a = null; }
         if (addrMemo.size > 200_000) addrMemo.clear();
         addrMemo.set(s, a);
     }

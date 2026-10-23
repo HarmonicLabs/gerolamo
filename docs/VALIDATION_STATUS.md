@@ -2472,3 +2472,343 @@ boundary block from that copy; any other point below the base now logs a warning
 `src/network/n2c/lsq/govIndex.test.ts` (blocks built with @harmoniclabs/cbor): the boundary keeps the old anchor
 while the tip has the new one, and the boundary facts come back from the cache after a restart. Both fail on the
 old code. Live: GetGovState byte-identical again on 3035, 3036 and 3037.
+
+## Bug 390 — ChainSync kept up to 32 requests queued at a peer's tip; a restart there stalled 7–10 minutes (2026-10-09, fixed)
+
+Soak finding (`scripts/soak-report.ts`, new): over 2026-10-08 08:00 → 10-09 22:30 the producer had 17 node-specific lag
+minutes (0.79 %) and 3036 had 11 (0.51 %), against 0 on 3037. The worst, the producer at 13:19–13:27 UTC on 10-08: a
+fork battle at slot 124809562, primary churn, and a new primary whose fragment held headers past our tip that did not
+chain onto it, so its ChainSync restarted (correct, bug 388). The restart waited for 23 outstanding MsgRequestNext. The
+pipeline keeps `maxDepth` (32) in flight until the server answers MsgAwaitReply, so on reaching the tip up to 31
+requests sit at the server, each answered only by a future block (about 20 s each on preview).
+
+Fix: `ChainSyncPipeline.noteRemaining(peerTipHeight − ourHeight)` (PeerClient feeds it on every RollForward from the
+orchestrator's `localBlockNo()`); the depth is that plus one, between 1 and `maxDepth`. Far behind, pipelining is
+unchanged; at the tip at most a couple of requests are in flight, so a restart drains within one or two blocks. Test:
+`ChainSyncPipeline.test.ts` "near the tip the depth follows the headers the server still has". 1 619 tests pass.
+
+Soak (preview, item 2 of the preprod checklist): starts 2026-10-09 22:37 UTC with this rollout; criteria in the
+header of `scripts/soak-report.ts` (≥ 3 epoch boundaries, no halt, every parity probe 64/64, forged blocks confirmed
+unless a slot battle explains it, no equivocation, no restart the operator did not make, node-specific lag < 0.1 % of
+minutes per node). Producer chain selection: shadow since 2026-10-09 22:29 UTC (watchdog env
+`GEROLAMO_CHAIN_SELECTION=shadow`); switch to praos after ≥ 24 h, right after a forged block with ≥ 2 h to the next slot.
+The 3036 praos run (10-05 → 10-08) reached 99.19 % within 60 s; 14 of its 35 lag minutes were bug 388 and restarts,
+and at the other minutes the legacy producer lagged as much, so the lag was not praos-specific.
+
+## Ops 2026-10-10 — the preview pool runs on the server; Dingo becomes the parity reference
+
+The block producer and the pool's public relay moved from the laptop to don@192.168.1.173 as Docker containers
+(docs/DOCKER.md "A pool on one host"), bootstrapped from Mithril and verified 64/64 against cardano-node before the
+handover (the whole UTxO set checked by SHA-256 beside each node: `scripts/lsq-answer-hash.ts`). The laptop keeps one
+Gerolamo node, 3037 (genesis-synced), as a reference; cardano-node is no longer run. The user's decision: Dingo
+(blinklabs, 0.81.0) runs beside Gerolamo on the server as the comparison node from now on. The preview soak and
+parity checks restart against Dingo once it is synced.
+
+## Bug 391 — the relay demoted its own producer as "silent" every 15 s; the 12:52 UTC block never left the host (2026-10-10, fixed)
+
+First leader slot after the move to the server (124980774, 12:52:54 UTC): the producer forged on the right parent, the
+relay had 12 outside peers attached, and the block was still ghosted: the network's next block (slot 124980825, 51 s
+later) was built on the same parent. The relay never adopted ours. Its log shows the producer, a local root, promoted
+hot and demoted again as "Silent hot→warm 172.22.0.3:3001 idleMs=…" every 15 s since 04:45 — 1 925 times — and the
+producer did the same to the relay. `pickSilentHot` measured silence from the last RollForward only; a peer serving
+our own chain answers MsgAwaitReply once and then has nothing to send until a new block, so it looked dead after
+`hotSilentMs` (180 s) and was demoted a moment after each promotion. When the producer forged, it was not hot on the
+relay, so no header reached it. On the laptop this never showed: the producer was the public node and outside peers
+pulled from it directly.
+
+Fix: local roots are never demoted for silence; for other peers liveness is the last ChainSync reply of any kind
+(`PeerClient.lastChainSyncReplyAt`, set on RollForward, RollBackward and AwaitReply), exposed as
+`PeerGovernor.lastAliveAt`. Test: `PeerGovernor.test.ts` "silent hot→warm demotion (bug 391)".
+
+## Bug 392 — the ChainSync host answered only one of several pipelined requests at the tip; Gerolamo-to-Gerolamo sessions died after catch-up (2026-10-10, fixed)
+
+Second server slot (124991439, 15:50:39 UTC): forged on the right parent, the relay held the producer hot the whole
+time (bug 391 fixed), and the block still never reached the relay. The relay's governor showed the producer's
+`lastRollForwardAt` frozen at 13:08:22, one minute after the restart, and the producer's view of the relay the same.
+The host traces of both sessions end with six MsgRequestNext in a row after the first RollBackward. Our client
+pipelines RequestNext while catching up (bug 390 keeps it to the headers left plus one); when it reaches the tip,
+several are outstanding. The host sent AwaitReply once, scheduled one poll, served one header when the next block
+came, and stopped: it never rescheduled, so the remaining requests were never answered and the client, owed
+replies, never sent another. Both directions were dead for five hours. cardano-node clients request one header at
+a time at the tip, which is why outside pullers (and the laptop producer's blocks) were never affected.
+
+Confirmed with `scripts/n2n-tip-watch.ts` (new): a fresh one-request-at-a-time client gets every header within a
+second of its slot from both containers, while the long-lived pipelined sessions got nothing.
+
+Fix: the host counts owed replies; each pipelined request gets its own MsgAwaitReply while waiting, the poll answers
+every owed request as headers become available and re-arms while any is owed, and a RollBackward counts as a reply.
+Test: `N2NChainSyncHost.test.ts` "pipelined RequestNext at the tip (bug 392)". Also affects the laptop's 3037
+(it pulls from the server relay).
+
+## Dingo 0.81.0 as the parity reference: coverage (2026-10-10)
+
+The user's decision of 2026-10-10 replaces cardano-node with Dingo as the comparison node. First full run of
+`scripts/n2c-compare.ts` (server relay vs Dingo, same host; the tool now reopens a side that closes its connection
+and reports such queries as unsupported, `scripts/lib/n2cCompare.ts`): **18 of 64 byte-identical, 33 not answered by
+Dingo (it closes the connection: era starts, non-myopic rewards, stake distribution, UTxO by address, reward
+provenance, pool state, pool distr, constitution, gov state, DRep stake distr, committee state, SPO stake distr,
+ratify state, future pparams, ledger peer snapshots, default vote, max major version, DRep delegations, debug config,
+reward info pools), 13 different** (GetInterpreter, GetCurrentPParams, GetGenesisConfig, GetStakeSnapshots,
+GetDRepState, GetFilteredVoteDelegatees, GetProposals, GetLedgerPeerSnapshot(legacy), GetPoolDistr2 and the wrong-era
+probes). Gerolamo's answers to all 64 are byte-identical with cardano-node, so the 13 differences are Dingo's own
+encodings or gaps (full list with sizes: docs/parity/dingo-reference.md). As a byte-level reference Dingo covers 18
+queries today; cardano-node remains the only complete one. The parity probe is off on the laptop until a reference is
+chosen.
+
+## Bug 393 — the relay never fetched a block only its producer had: "extend" decisions waited for the primary (2026-10-10, fixed)
+
+Third server slot (125018142, 23:15:42 UTC): the producer forged on the right parent and the relay's session to it
+was healthy (bugs 391/392 fixed, the header arrived within a second), and the block still never reached the relay:
+its log holds no trace of the hash, and the network's next block 14 s later was built on the old tip. In praos mode
+the relay's driver saw the producer's candidate as a one-block extension of our chain with `rollback 0`; the
+primary's own candidate was level with ours, so the primary was "fine" and the decision was `extend` without
+`promote` — which the orchestrator did not act on at all, trusting the primary to stream the block eventually. The
+primary is an outside node; it can only learn of our block from us. `extendsPromoted` was 0 over 1 498 decisions.
+
+Fix: `fetchVerifierExtension` — on an `extend` decision whose candidate is not the primary, the candidate's suffix
+is submitted to the range scheduler with that peer as the preferred fetch source (`RangeScheduler.submit(points,
+{ preferPeer })`, asked first, the others on failure). A local root's extension is fetched at once; another peer's
+after 3 s without the primary delivering it (the primary usually does, a moment later). Each extension is acted on
+once (`extensionSeen`, 2 min). The applied block then follows the normal fork handling when the primary's competing
+header arrives. Tests: `RangeScheduler.test.ts` "preferred fetch peer (bug 393)". Legacy mode is unchanged: the
+producer (shadow) forges and serves its own block; the laptop's 3037 follows a single root.
+
+**Result (2026-10-11 02:14:42 UTC):** the next leader slot after bug 393, 125028882, was forged, fetched by the relay
+from the producer within the same second, and confirmed on chain at height 4745878 with the network's next block
+built on it — the first block confirmed from the server deployment. The relay path producer → relay → outside
+peers works end to end with bugs 391, 392 and 393 fixed.
+
+## Bug 394 — the relay made its own producer the primary; the relay then lagged the network (2026-10-13, fixed)
+
+After 8 confirmed blocks in a row, slot 125228896 (09:48:16 UTC) was lost although the relay adopted it within a
+second: the network's next block, 36 s later, was built on the parent. The relay's log explains the environment: four
+times since 10-11 ("Primary X left; 172.22.0.3:3001 promoted to primary") the relay chose the producer as its
+successor primary, because `bestSuccessor` ranks verifiers by agreed slot and the producer, a local root on our own
+chain, always agrees at our tip. A producer behind a relay knows only what the relay tells it, so with it as primary
+the relay received network blocks only through the 3-second grace-period extension fetches from verifiers (126 of
+them in 6 h) and its inbound peers saw a lagging chain. 27 primary changes in 24 h.
+
+Fix: `bestSuccessor(exclude, avoid)` ranks peers the orchestrator marks as poor primaries (local roots) last; one is
+chosen only when no other verifier exists. The praos "extend with promote" path never promotes a local root either;
+it fetches the extension from it instead (bug 393's path). Test: `CandidateSet.test.ts` "bestSuccessor avoids poor
+primaries (bug 394)".
+
+**Follow-up (2026-10-13 12:24 UTC):** the producer became the relay's primary once more, as the last resort: when the
+primary left, every other verifier carried a divergence recorded against that departing primary, and
+`bestSuccessor` skipped them. Two changes: a verifier divergent from the old primary now ranks above an avoided
+peer (the divergence is re-evaluated against the new primary anyway), and `handBackLocalRootPrimary` hands the
+primary role to the first public verifier available (checked on every verifier header batch, at most every 30 s)
+whenever a local root holds it. Test extended in `CandidateSet.test.ts`.
+
+## Bug 395 — a dead session to a local root kept the laptop node frozen for five hours (2026-10-13, fixed)
+
+The laptop's reference node 3037 stopped at slot 125229433 at 09:57 UTC and stayed there until it was restarted at
+15:07. Its only hot peer was the server relay, a local root reached over a VPN. The relay container was recreated
+twice in that window, at 10:25 and 14:30 for the bug 394 fixes, but no reset ever reached the laptop. The session
+stayed ESTABLISHED and listed as hot, with no headers, no errors and no log line for five hours. Bug 391 exempts
+local roots from silent-peer demotion, so nothing else recycled it. The watchdog alerted after 7 minutes but restarts
+only halted nodes.
+
+Cause: the peer client sent a keep-alive request every 10 s and never checked that replies came back.
+
+Fix: the keep-alive tick closes the connection when no reply arrived for 60 s (`GEROLAMO_KEEPALIVE_TIMEOUT_MS`), as
+cardano-node does; the governor then reconnects as for any reset. A tick that fires more than two intervals late
+means our own event loop was blocked, so it never judges. Gerolamo's inbound server answers keep-alive
+(`N2NKeepAliveHost`), so Gerolamo-to-Gerolamo sessions are unaffected. Test: `src/network/keepAliveWatch.test.ts`.
+
+## Bug 396 — a quiet network made the relay demote every public peer at once (2026-10-13, fixed)
+
+The 4-hour check after bug 394 found the producer promoted to the relay's primary twice, at 15:29:00 and 16:36:30
+UTC. Both times preview had produced no block for about 3.5 minutes (225 s and 210 s; such gaps occur about once a
+day at f = 0.05). Every public hot peer had answered its last request ~184 s earlier, so the silent-peer rule
+(180 s since the peer's last chain-sync reply, measured against the wall clock) demoted all of them in one tick. The
+producer, a local root that is never silent-demoted, was the only hot peer left and became primary. The bug 394
+hand-back moved the role to a public peer 31 s and 18 s later.
+
+Fix: `pickSilentHot` measures silence against the freshest hot peer instead of the wall clock: a peer is silent when
+it trails the most recently heard hot peer by the threshold. A quiet network therefore demotes nobody, and a peer
+stuck while the others deliver blocks is still demoted. When every hot peer has been quiet for 10 minutes
+(`QUIET_NETWORK_MAX_MS`; a preview gap that long has probability about e^-30) the upstream is presumed dead and all
+are rotated as before. Test: `PeerGovernor.test.ts` "a network-wide quiet spell demotes nobody … (bug 396)".
+
+**Live check of bugs 395 and 396 (server relay and producer, 2026-10-14 16:25–23:26 UTC):** no producer promotion to
+relay primary, no silent-peer demotion, no restarts, equivocations 0, both nodes at the tip. One keep-alive timeout:
+the relay closed its session to the old producer container 47 s after that container was replaced (70 s without a
+reply), the half-open case bug 395 targets; the relay reconnected to the new producer.
+
+## Node diversity conformance (pragma-org/node-diversity-conformance, 2026-10-15)
+
+Gerolamo now produces all four reports of pragma's cross-implementation site: ledger rules 276/277, UPLC conformance
+1059/1059 (budget 753/753), UPLC turbo 0/24 within the 1.5 CPU ratio (median 2.8; flat decoding is about half of
+each script's time), CBOR decoding 4983/9200 (every failure is in the HarmonicLabs cbor / cardano-ledger-ts
+libraries). Harnesses: `src/conformance/ndc/`, CLIs `scripts/ndc/`; details, bugs 530–533 (mempool), 550–551 (UPLC text
+tooling) and library items 570–589 in `docs/parity/ndc-*.md`.
+
+## Bug 534 — block validation checked only the collateral of a transaction marked invalid (2026-10-15, fixed)
+
+Found by the ledger-rules work. For an `is_valid = false` transaction the block rules ran the collateral checks,
+signature validity and phase 2 only. cardano-ledger runs the whole UTXOW / UTXO rule for it (inputs exist, fee, value
+conservation, validity interval, witnesses, outputs, network, size) and skips only LEDGER's withdrawal / treasury
+checks, CERTS and GOV. A block carrying an invalid-marked transaction that broke a phase-1 rule would have been
+accepted by Gerolamo and rejected by cardano-node.
+
+Fix: `evaluateTxRules` takes `isValid`; with false it skips the CERTS withdrawal-balance check and the LEDGER
+withdrawal-account, DRep-delegation and treasury checks. The block rules run it for invalid-marked transactions
+(Dijkstra keeps its own path), and keep the "marked invalid but carries no redeemers" rejection (UTXOS
+ValidationTagMismatch). Tests: `withdrawalBalances.test.ts` "transactions marked invalid still pass UTXO / UTXOW (bug
+534)"; Blueprint vectors 2574/2574 on both paths; ledger-rules corpus 276/277.
+
+## Bug 535 — the block execution-unit limit left out invalid transactions (2026-10-15, fixed)
+
+BBODY's `maxBlockExUnits` check sums the redeemer units of every transaction in the block, invalid ones included
+(cardano-ledger Alonzo `validateExUnits`: `foldMap getTotalExUnits txs`). Gerolamo summed only valid transactions, so
+it could accept an over-budget block. Fixed in `evaluateShelleyBlockWithInputs`. Test: `withdrawalBalances.test.ts`
+"block execution units count invalid transactions (bug 535)".
+
+**Replay of bugs 534 + 535 (2026-10-15):** `scripts/utxo-rules-replay.ts` over node 3036's immutable chunks, genesis → slot
+124 942 719, read-only, Plutus off: 4 742 667 blocks, 6 995 370 transactions, 242 marked invalid — zero failures (2 h 32
+min). Deployed 17:29 UTC to the server relay and producer (image gerolamo:bug534; previous kept as
+gerolamo:prev-20261015) and to laptop node 3037; all at the tip, no rule failures.
+
+## Conformance builds of the HarmonicLabs libraries (2026-10-15)
+
+cardano-ledger-ts, cbor, plutus-data and cardano-costmodels-ts are now vendored from `conformance-fixes`
+branches (vendor/README.md). CBOR decoding 4 983 → 9 194 / 9 200, ledger rules 276 → 277 / 277. Checks
+with the tarballs installed: `bun test src` 1 678 pass / 0 fail; Blueprint 2 574 / 2 574 on both paths (one
+vector now rejected at decode, as cardano-ledger does: Allegra metadatum over 64 bytes); every preview block
+(4 742 667) decodes and re-encodes byte for byte; `scripts/utxo-rules-replay.ts` genesis → slot 124 942 719
+with the new decoders: 6 995 370 transactions, 242 marked invalid, zero failures (2 h 31 min).
+
+Found on the way: the era-agnostic `TxOut.fromCbor` (Mithril UTxO import, replay tools) applied Conway's
+decoder rules to stored outputs of every era and threw on a Mary output with a zero-quantity asset (legal
+before protocol 9). Fixed in the ledger-ts branch: era-agnostic entry points decode at version 7 unless an
+era context is set.
+
+**2026-10-17, CBOR decoding 9 200 / 9 200.** ledger-ts `0.6.0-dijkstra.1+conformance.3`: `ConwayTxOut` and `Script`
+re-encode exactly as cardano-ledger does (Babbage `EncCBOR TxOut`: compact `[addr, value]` / `[addr, value, dh]`
+when there is no inline datum and no script, else the `encodeTxOut` map; `Script` = definite `[tag, payload]` with
+the payload bytes kept, Alonzo `encodeScript`). The last 6 corpus failures were outputs whose script_ref wrapper was
+an indefinite array. Node impact: none on the block path (blocks, transactions and bodies re-emit their own bytes;
+`referenceScriptCbor`, fee sizes and hashes come from the output's source bytes, which `cborRef` still carries);
+`toCbor()` of a decoded output now returns the rebuilt encoding. Checks: Blueprint 2 574 / 2 574 on both paths,
+ledger-rules 277 / 277, 200 000-block decode / re-encode replay 0 problems, `bun test src/conformance/ndc/cborDecoding.test.ts`
+floors raised to 9 200. Publishing tooling: `scripts/ndc/report-all.ts`, `scripts/ndc/publish.ts`,
+`docs/parity/ndc-publish.md`, node entry in `docs/parity/ndc-node-entry/`.
+
+## Plutus speed, round 1 (2026-10-17): decoder and CEK rewritten, verdicts and budgets unchanged
+
+For the node-diversity-conformance `uplc-turbo` scenario (max of 10 samples of flat decode + evaluation ≤ 1.5 ×
+the CPU budget at 1 ps/unit), and for block validation generally.
+
+- **Flat decoder** (`src/consensus/plutus/flat.ts`, `data.ts`, `cbor.ts`): iterative with an explicit parent stack
+  (a 200 000-deep term now decodes where the recursive decoder overflowed the stack: a non-`FlatError` the ledger
+  treats as malformed, so a consensus divergence against the Haskell node), 32-bit bit accumulator, number arithmetic
+  up to 2^49 then bigint, table-driven tags, shared immutable leaves. Decode 2.5–3× faster in isolation (5 KB script
+  ~75 µs); the remaining cost is per-node object allocation. Correctness: truncated input used to spin or read past
+  the end (one mutated input took 21 GB); every truncation is now a `FlatError`. `flat.test.ts` (18 tests) covers
+  truncations, bit flips, depth, integer widths, UTF-8 and the protocol-version gates. 9 000 corpus decodes and 1 446
+  conformance vectors × 3 modes decode identically to the old decoder.
+- **CEK** (`cek.ts`, `builtins.ts`, `costs.ts`, `values.ts`): frame stack as parallel arrays, literal term-kind
+  dispatch, step costs from tables, budget counters as locals synced around builtin calls, positional builtin
+  arguments, a per-tag switch for the 20 hottest builtins, two-step environment links, fused `[(lam M) N]`. Every
+  step still charges in the machine's order with a budget check after each charge. Evaluation 2.0–2.2× faster
+  (~13–14 ns/step); the floor is ~0.6 allocations per step.
+- **Checks**: `bun test src` 1 697 pass / 0 fail; NDC UPLC conformance 1 059 / 1 059 with budgets bit-exact
+  (753 / 753); IntersectMBO vectors pass; `scripts/plutus-replay.ts` over preview chunks 28280–28299 and
+  28900–28921 (5 017 Plutus transactions, 50 537 redeemers): verdict, cpu and mem per redeemer identical to the
+  previous tree; 2.59 → 1.58 ms per transaction including context building.
+- **Turbo result**, laptop pinned to an idle core: 15 / 24 (median ratio 1.31; was 0 / 24, median 2.79). Systematic
+  misses: the two 7.3 KB Data-heavy scripts with 163 / 168 µs budgets, one deep-environment script (317 µs), one
+  borderline (391 µs), and the script Amaru also fails (280 µs, Amaru 2.33). The rest are single machine-noise
+  spikes (this laptop runs three stuck 90 %-CPU processes and the powersave governor). Round 2 targets the
+  systematic ones (lazy Data constants, fewer allocations).
+- **Harness**: CBOR unwrap and cost tables outside the timed region, as in Amaru's `turbo_decode_eval`; a
+  time-based JIT warm-up (≥ 3 s) before the samples; no forced GC (it made the next sample slower and would hide
+  cost); the `setup.measurement` string states all of it, including the CPU affinity.
+
+## Plutus speed, round 2 (2026-10-17): typed-array programs, CEK on node indices
+
+Round one's remaining systematic misses were not Data-heavy scripts (the four 7.3 KB scripts hold 3 Data constants,
+~900 bytes, decoded in 3–7 µs): they have 7 786 term nodes, and the decode floor was per-node header handling
+(~9 ns/node of branch mispredictions on an unpredictable tag stream), not allocation. Design change:
+
+- **Program = typed arrays** (`flat.ts` `Code`): a `Uint8Array` of node kinds and an `Int32Array` of operands,
+  one slot per node in pre-order, with side tables for constants, constr/case and large indexes. The body of
+  lam/delay/force and the function of an apply are implicitly the next node. The decoder is table-driven for the
+  common headers with a pending-child counter instead of a switch per node; the protocol-version / language
+  availability checks are a 4 096-entry table. Decode 1.51× faster than round one in isolation (sum of means over
+  the 24 scripts 2 304 → 1 525 µs), 3.5–5× faster than before round one.
+- **CEK on node indices**: closures hold a body index; builtin values are a shared per-tag table; frame stacks are
+  reused across evaluations; closures are 32 B objects dispatched with `instanceof`. Eval 1.09× over round one.
+  `Program` has a lazy `term` getter (`materialise`, iterative) for the text tooling; phase 2 applies datum,
+  redeemer and context through `applyData` without building object nodes.
+- **Checks**: `bun test src` 1 701 pass / 0 fail; NDC UPLC conformance 1 059 / 1 059, budget 753 / 753 bit-exact;
+  IntersectMBO vectors pass; decoder differential against round one's decoder: 14 765 comparisons, 0 differences
+  (626 turbo scripts at pv 10 / 11, 1 086 use-case programs × modes, every truncation and bit flip of hand-made
+  constr/case programs, 5 000-deep and 1 030-field terms); real chain `plutus-replay.ts` over preview chunks
+  28280–28299 and 28900–28921: all 5 017 transactions and all 50 537 redeemers identical in verdict, cpu and mem.
+- **Turbo result**, laptop, `taskset -c 0,10` (two idle P-cores, so the runtime's GC and JIT helper threads run
+  beside the mutator): **22, 22 and 23 of 24** over three runs; median ratio 0.65–0.83; mean per script
+  250–278 µs (Amaru's report: 375 µs mean, 23 / 24). No script is systematically over budget any more (the
+  round-one misses sit at 0.7–1.0); every remaining miss is one sample of 0.8–1.1 ms on a script whose mean is at
+  50–75 % of budget, and each coincides with a JSC eden collection (`BUN_JSC_logGC`; threshold ~110 MB, pause
+  0.5–1 ms; a run allocates 90–120 MB in its timed phase, so about one collection lands in it). Allocation per
+  sample is at this design's floor (93 % environments and closures); no forced GC or runtime tuning is used, and
+  the `setup.measurement` string records the affinity mask.
+- With CBOR 9 200 / 9 200, ledger rules 277 / 277 and UPLC conformance 1 059 / 1 059, the site's overall score is
+  97.9 % (22 / 24) or 98.96 % (23 / 24) against Amaru's 97.32 %.
+
+**Replay of 2026-10-17 (ledger-ts `+conformance.3`, new flat decoder):** `scripts/utxo-rules-replay.ts` genesis → slot
+124 942 719, read-only, Plutus off: 4 742 667 blocks, 6 995 370 transactions, 242 marked invalid, zero failures
+(2 h 57 min on the E-cores). Plutus semantics of round 2 are covered separately: 50 537 real redeemers identical in
+verdict, cpu and mem (`plutus-replay.ts`), and node 3037 at the tip with phase 2 enforced, 0 mismatches.
+
+## pragma rework adopted (2026-10-18): 99.99 % on pragma's own build, tied with Amaru
+
+pragma-org/node-diversity-conformance commit 8974561 (2026-10-17) renamed the report schemas (`version`), moved the
+scoring into its build, and replaced both UPLC corpora: `uplc-conformance.tar.zst` (1 064 vectors, protocol-version
+folders, cost models provided; sha256 8bd4ad4f…) and `turbo.tar.zst` (3 997 mainnet V1/V2/V3 scripts in epoch
+folders, epochs 290–521 → protocol 8: 3 079, protocol 9: 918; sha256 821af55e…). Turbo now scores the mean pure
+CEK time of the best 30 of 50 runs against the counted budget (pass: ≤ 2 × budget or < 200 µs), and the counted
+budgets must agree with the majority of nodes (cardano-node as tie-break).
+
+- **Cost models per protocol version** come from plutus' `defaultCostModelParamsForVariant` (variants A for pv 8,
+  B/C for 9–10, D/E for 11; `plutus-core/cost-model/data/*{A..E}.json` at IntersectMBO/plutus 40b6705e), fixture
+  `src/consensus/__fixtures__/plutus-default-cost-models.json`, generator `scripts/ndc/plutus-default-cost-models.ts`.
+  pragma's `cost-models/protocol-version-10` and `-11` are byte-identical to the B/B/C and D/D/E derivations.
+- **Budget agreement: 3 997 / 3 997 scripts equal cardano-node's `budget_cpu` and `budget_mem`** (Amaru's agree too):
+  Gerolamo's costing at protocol 8 and 9 reproduces the Haskell node bit-exactly over 3 997 real mainnet scripts.
+  Mainnet's actual epoch-400 parameters differ from variant A in three secp256k1 V2 costs (the corpus wants the
+  defaults; with mainnet's values two scripts differ by exactly 702 423 units). The harness uses mainnet's
+  `maxTxExecutionUnits` 10 B / 14 M, as both reference reports do (five scripts exceed 10 M mem).
+- **Turbo result:** 3 995 / 3 997 (the same two misses as Amaru): `8100C5F1…-v2` is a big-integer multiply loop at
+  the 9.95 B cap that every node fails (ours 87.8 ms, cardano-node 33 ms, Amaru 100 ms; variant A prices
+  multiplyInteger linearly), and `6447DEA6…-v2` sits at delta 1.02 (494.5 µs vs 244.8 budget; cardano-node 180,
+  Amaru 233; 27 % of its time is blake2b, 13 % byte concatenation). cpu_us over the corpus: Gerolamo median 48.8 µs,
+  p90 405.8; cardano-node 61.8 / 397.7; Amaru 63 / 489.
+- **Conformance:** 1 064 / 1 064 (budget 750 / 750). The 58 earlier misses were 20 `builtin/parser/value` vectors
+  (bug 552: `value` literals must be canonical, as plutus master's parser requires), 31 Value-builtin budgets that
+  only match under the corpus's cost models (plutus master parameters, not 1.63's), and 7 vectors whose Plutus Core
+  version is unavailable at the protocol version, which is a decode error, not an evaluation failure (bug 553).
+  Both bugs are in the text tooling; the on-chain flat path was already right.
+- **Checks:** `bun test src` 1 717 pass / 0 fail; tsc clean; `plutus-replay.ts` over preview chunks 28900–28921:
+  3 346 transactions, 44 838 redeemers, identical to the original-tree baseline (verdict, class, counts, cpu).
+- **Catalog** (`python3 scripts/build.py --preview`, pragma's build): Amaru 99.99 % (3 995 / 3 997), **Gerolamo 99.99 %
+  (3 995 / 3 997)**, cardano-node 99.74 % (3 956 / 3 997), Dingo 25 % (CBOR only). Equal ratios sort by name.
+- Tooling: `scripts/ndc/fetch-corpora.ts --dir <dir>` fetches everything (pinned ndc commit, both archives with
+  digests, `corpora.json`); `report-all.ts --corpora <dir>` produces and validates the four reports and prints our
+  score beside the site's rule (`ndcScore.ts`, a port of build.py's scorers). Run: `docs/parity/ndc-run.md`.
+
+**Round 4 (2026-10-18): 3 996 / 3 997, strictly first.** `src/consensus/plutus/blake2b.ts`: a one-shot pure-TypeScript
+BLAKE2b for builtins 20 / 72 (3.5× faster than noble's on the 32–64-byte inputs scripts hash; bit-identical on every
+length 0–4096 and on all 215 inputs the corpus hashes) plus an `intSize` fast path. Script `6447DEA6…-v2` went from
+delta 1.02 to 0.21–0.68; the only miss left is the big-integer loop every node fails. `bun test src` 1 725 pass / 0
+fail; replay of 3 346 real Plutus transactions identical; node 3037 restarted on it. Catalog: **Gerolamo 99.99 %
+(3 996 / 3 997)**, Amaru 99.99 % (3 995), cardano-node 99.74 %, Dingo 25 %.
+
+**Deployed to the server 2026-10-20 01:13 UTC** (image `gerolamo:conf20261020`, built on the laptop from the live tree
+and loaded over the LAN; previous kept as `gerolamo:prev-20261020`): the conformance libraries (ledger-ts
+`+conformance.3`, cbor, plutus-data, costmodels), bugs 530–535, the Plutus decoder / CEK / blake2b work and the
+`/relay` WebSocket path. Relay at tip 20 s after start, producer 20 s; praos, KES ok, equivocations 0; the relay
+handed its primary role to a public peer 9 s after the producer joined (bug 394). `n2n-ws-smoke` on `/relay`: PASS.
+Live soak from here: leader slots 05:36, 08:47, 13:15, 18:43 UTC; phase-2 verdict mismatches must stay 0.

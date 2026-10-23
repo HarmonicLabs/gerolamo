@@ -4,6 +4,14 @@
  * Constant types are interned objects with a structural `key`, so type equality is one string
  * compare. Lists are immutable: an array view (`LArr`, O(1) tail over data fields and list
  * items) or a cons cell (`LCons`, O(1) mkCons), never copied by the list builtins.
+ *
+ * Constants, constructors and builtins carry a numeric `kind` (`VK`) so the machine dispatches on
+ * them with one switch; closures (`VLam`, `VDelay`) do not: they are the bulk of what an evaluation
+ * allocates, and with two inline properties they take 32 bytes instead of 48 in JavaScriptCore's
+ * size classes, so the machine tests them with `instanceof` (a structure check). A partially
+ * applied builtin is a chain of six-field objects, one per argument (no array per application);
+ * `args` is a view for the few callers that print or discharge values. Environments carry a skip
+ * pointer two bindings back, halving the walk of a de Bruijn lookup.
  */
 import type { Data } from "./data";
 
@@ -47,17 +55,47 @@ export function listToArray(l: List): any[] {
     return out;
 }
 
+/** Value kinds (`kind` field of the constant, constructor and builtin values; closures have none). */
+export const enum VK { Con = 0, Constr = 3, Builtin = 4 }
+
 /** A constant: `v` is bigint | Uint8Array | string | null (unit) | boolean | Data | List | VPair | VArray | BLS point | VValue (multiasset.ts). */
-export class VCon { constructor(readonly type: ConstType, readonly v: any) {} }
-export class VLam { constructor(readonly body: any, readonly env: Env) {} }
-export class VDelay { constructor(readonly body: any, readonly env: Env) {} }
-export class VConstr { constructor(readonly tag: number, readonly fields: Value[]) {} }
-/** A builtin awaiting `forces` more forces, then arguments (all forces precede all arguments). */
-export class VBuiltin { constructor(readonly fn: number, readonly forces: number, readonly args: Value[]) {} }
+export class VCon { readonly kind: number; constructor(readonly type: ConstType, readonly v: any) { this.kind = 0; } }
+/** A closure: `body` is a node of the program being evaluated (flat.ts `Code`). Two properties: 32 bytes. */
+export class VLam { constructor(readonly body: number, readonly env: Env | null) {} }
+export class VDelay { constructor(readonly body: number, readonly env: Env | null) {} }
+export class VConstr { readonly kind: number; constructor(readonly tag: number, readonly fields: Value[]) { this.kind = 3; } }
+/**
+ * A builtin awaiting `forces` more forces, then arguments (all forces precede all arguments);
+ * `n` arguments applied so far. A partial application (n ≥ 1) holds its last argument in `arg`
+ * and the application before it in `link` (so the arguments form a chain; a builtin takes at most
+ * 6 and the last one is never stored: that application saturates). For an unapplied builtin
+ * (n = 0) `link` caches the value one more force yields (such a value is immutable and shared,
+ * so the cache is sound). Six fields: the object stays within the inline property storage.
+ */
+export class VBuiltin {
+    readonly kind: number;
+    link: VBuiltin | null;
+    constructor(readonly fn: number, readonly forces: number, readonly n: number, readonly arg: Value | null, link: VBuiltin | null) { this.link = link; this.kind = 4; }
+    /** The applied arguments, in order (a copy). */
+    get args(): Value[] {
+        const out: Value[] = [];
+        for (let b: VBuiltin | null = this; b !== null && b.n > 0; b = b.link) out.push(b.arg!);
+        return out.reverse();
+    }
+}
+/** An unapplied builtin value. */
+export function mkBuiltin(fn: number, forces: number): VBuiltin { return new VBuiltin(fn, forces, 0, null, null); }
 export type Value = VCon | VLam | VDelay | VConstr | VBuiltin;
 
-/** Environment: a linked list, index 1 = innermost binding (de Bruijn). */
-export class Env { constructor(readonly v: Value, readonly next: Env | null) {} }
+/**
+ * Environment: a linked list, index 1 = innermost binding (de Bruijn). `s2` skips two bindings
+ * (the node after `next`), so a lookup of index i walks about i/2 nodes: compiled scripts look up
+ * 7–12 bindings deep on average, and the walk is dependent loads.
+ */
+export class Env {
+    readonly s2: Env | null;
+    constructor(readonly v: Value, readonly next: Env | null) { this.s2 = next === null ? null : next.next; }
+}
 
 export const UNIT = new VCon(T.unit, null);
 export const TRUE = new VCon(T.bool, true);

@@ -54,6 +54,8 @@ interface RangeJob<Pt, Blk> {
     points: Pt[];
     blocks: Blk[] | null;
     peer: string | null;
+    /** Peer to ask first (the one known to hold the blocks: a verifier whose chain extends ours, bug 393). */
+    preferPeer?: string;
     attempts: number;
     triedPeers: Set<string>;
     scheduled: { resolve: () => void; reject: (e: unknown) => void };
@@ -124,7 +126,7 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
      * (back-pressure for the header stream) and `applied` when `onRange`
      * finished for this range.
      */
-    submit(points: Pt[]): { seq: number; scheduled: Promise<void>; applied: Promise<void> } {
+    submit(points: Pt[], opts: { preferPeer?: string } = {}): { seq: number; scheduled: Promise<void>; applied: Promise<void> } {
         if (points.length === 0) throw new Error("RangeScheduler.submit: empty range");
         if (this.poisoned) {
             const err = this.poisoned;
@@ -139,6 +141,7 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
         const job: RangeJob<Pt, Blk> = {
             seq: this.seq++,
             points,
+            preferPeer: opts.preferPeer,
             blocks: null,
             peer: null,
             attempts: 0,
@@ -235,6 +238,7 @@ export class RangeScheduler<Pt extends RangePoint, Blk> {
         const eligible = this.opts.pickPeers(end).filter((p) => !this.busyPeers.has(p));
         if (eligible.length === 0) return null;
         const untried = eligible.filter((p) => !job.triedPeers.has(p));
+        if (job.preferPeer && untried.includes(job.preferPeer)) return job.preferPeer;
         const pool = untried.length > 0 ? untried : eligible;
         return pool[this.rr++ % pool.length]!;
     }

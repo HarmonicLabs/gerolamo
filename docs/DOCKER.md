@@ -84,3 +84,23 @@ the node logs to the container's stdout, so use `docker compose logs`.
 - The node-to-client socket is `<data dir>/node.socket` on the host, so cardano-cli can use it directly
   (`CARDANO_NODE_SOCKET_PATH=<data dir>/node.socket`).
 - Do not run two containers on the same data directory: one store, one writer.
+
+## A pool on one host: relay + producer containers
+
+`docker-compose.preview.yml` on the server (2026-10-10) runs the preview pool as two containers: `gerolamo-relay`
+(role relay, N2N published on 3001, the address registered for the pool) and `gerolamo-producer` (role producer,
+keys mounted read-only, N2N on 3002 for the LAN only). Each container's topology names the other as a local root
+(compose DNS: `gerolamo-relay`, `gerolamo-producer`) plus the public roots from `src/config/preview/topology.json`.
+Resource caps per container: `mem_limit: 5g`, `GEROLAMO_MAX_RSS_GB=4` (the in-container supervisor restarts the node
+before the cgroup limit kills it) and `cpus: 6`, so other work on the host keeps its share.
+
+Bootstrap without copying stores: the relay bootstraps from Mithril with `GEROLAMO_KEEP_SNAPSHOT=1`; the producer's
+data dir then gets `cp -a data/relay/snapshots data/producer/snapshots` and bootstraps from the same chunks
+(verified again, no second download).
+
+Moving block production from another machine, in this order so two producers never run at once:
+1. Start the producer container with a relay-role config (no `producer` block) and let it reach the tip.
+2. On the old machine, change the node's role to `relay`, remove its `producer` block, restart it.
+3. Copy the producer state file (`producer-state.json`: last signed slot, outcomes) into the new data dir, put the
+   producer config in place, `docker compose restart gerolamo-producer`, and check the log for
+   "Block producer started", `/metrics` `producer.nextLeaderSlot` and `equivocations.total == 0`.

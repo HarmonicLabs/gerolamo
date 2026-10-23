@@ -38,7 +38,8 @@ describe("Babbage UTXOW validateScriptsWellFormed (bug 400)", () => {
         const out = outputWithRef(2, MALFORMED);
         expect(outputPlutusRefScript(out)!.hash).toBe(hashOf(2, MALFORMED));
         checkScriptsWellFormed(sink, 7, 10, new Map(), [out]);
-        expect(sink.failures).toEqual([`MalformedReferenceScripts: ${hashOf(2, MALFORMED).slice(0, 12)}… (script is not a CBOR bytestring)`]);
+        // "invalid" starts with 0x69: a 9-byte text string of which only 6 bytes follow — truncated CBOR, not a bytestring
+        expect(sink.failures).toEqual([`MalformedReferenceScripts: ${hashOf(2, MALFORMED).slice(0, 12)}… (not CBOR: cbor: out of input)`]);
     });
 
     test("well-formed scripts pass; nothing is checked before Babbage", () => {

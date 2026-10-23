@@ -9,6 +9,7 @@
  * `tag ‖ cbor(protocolMagic) ‖ cbor(txHash)` with tag 1 (PkWitness) or 2 (Redeem).
  */
 import type { ByronAddress } from "@harmoniclabs/cardano-ledger-ts";
+import { byronAddressType } from "../byron/byronAddressCompat";
 import { CborArray, CborBytes, CborUInt, Cbor, CborMap, CborTag } from "@harmoniclabs/cbor";
 import { blake2b_224 } from "@harmoniclabs/crypto";
 // Bug 305: @noble/hashes (pure TS, 32-bit lanes) instead of @harmoniclabs/crypto's BigInt Keccak — ~8 µs
@@ -157,16 +158,17 @@ export function collectByronWitnesses(
             continue;
         }
         const attrs = byronAddressAttributesCbor(addr);
-        if (type === 0 && addr.type === 0) {
+        const addrType = byronAddressType(addr);
+        if (type === 0 && addrType === 0) {
             out.items.push({ publicKey: pub.subarray(0, 32), signature: sig, message: byronSignedMessage(1, protocolMagic, txHash) });
             out.roots.push({ root: byronAddressRoot(0, 0, pub, attrs), inputRef: inp.ref });
             out.types.push(0);
-        } else if (type === 2 && addr.type === 2) {
+        } else if (type === 2 && addrType === 2) {
             out.items.push({ publicKey: pub.subarray(0, 32), signature: sig, message: byronSignedMessage(2, protocolMagic, txHash) });
             out.roots.push({ root: byronAddressRoot(2, 2, pub, attrs), inputRef: inp.ref });
             out.types.push(2);
         } else {
-            out.problems.push(`input ${inp.ref}: witness type ${type} does not match address type ${addr.type}`);
+            out.problems.push(`input ${inp.ref}: witness type ${type} does not match address type ${addrType}`);
         }
     }
     return out;

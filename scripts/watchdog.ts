@@ -42,6 +42,7 @@ interface NodeSpec {
     producer?: boolean;        // watch leader-slot outcomes
     relaunch?: boolean;        // relaunch the supervisor when it is missing (default true)
     restartOnHaltMin?: number; // SIGTERM the node after this long halted (default 5; 0 = never)
+    restartOnStallMin?: number; // not catchingUp: SIGTERM after the tip is frozen this long while behind (default 30; 0 = never)
     catchingUp?: boolean;      // a node syncing history (e.g. from genesis): no "behind" alert; alert when its tip stops advancing instead
     stallMin?: number;         // catchingUp: tip unchanged this long → "stalled" alert (default 15)
     parity?: boolean;          // continuous verification against the relay (default true when it has an N2C socket)
@@ -197,6 +198,19 @@ for (const n of cfg.nodes) {
     } else if (behind > behindAlert && !halted) {
         state.strikes[sk] = (state.strikes[sk] ?? 0) + 1;
         if (state.strikes[sk]! >= 2) problem(sk, `${tag}: ${Math.round(behind / 60)} min behind`, `Tip slot ${m.tipSlot}, ${behind} s behind the wall clock; ${m.sync?.blocksPerSec ?? 0} blocks/s, ${m.peers?.hot ?? 0} hot peers${ls ? `, ledger ${ls.mode} ${ls.volatileBlocks} diffs` : ""}.`, behind > 1800);
+        // 2026-10-13 (bug 395): 3037 sat frozen at a tip for 5 h with a dead "hot" session and no halt; alerts only.
+        // A frozen tip far behind the wall clock gets the same recovery as a halt: SIGTERM, the supervisor relaunches.
+        const tip = Number(m.tipSlot ?? 0), pg = (state.progress ??= {});
+        if (!pg[tag] || tip !== pg[tag]!.slot) pg[tag] = { slot: tip, at: now };
+        const stallAfter = (n.restartOnStallMin ?? 30) * 60_000;
+        const lastRestart = (state.haltRestarts ?? {})[tag] ?? 0;
+        if (stallAfter > 0 && now - pg[tag]!.at >= stallAfter && now - lastRestart >= 3_600_000 && procs.node) {
+            state.haltRestarts = { ...(state.haltRestarts ?? {}), [tag]: now };
+            try { process.kill(procs.node, "SIGTERM"); } catch { /* gone already */ }
+            log(`${tag}: tip ${tip} frozen ${Math.round((now - pg[tag]!.at) / 60_000)} min, ${behind} s behind; SIGTERM to node pid ${procs.node} (supervisor relaunches)`);
+            notify(`${tag}: restarted after a frozen tip`, `Tip slot ${tip} unchanged for ${Math.round((now - pg[tag]!.at) / 60_000)} min, ${behind} s behind the wall clock, not halted. Node pid ${procs.node} got SIGTERM; the supervisor relaunches it.`, true);
+            continue;
+        }
     } else state.strikes[sk] = 0;
     const pr = m.inbound?.publicReachable;
     if (n.producer && pr && pr.ok === false) {

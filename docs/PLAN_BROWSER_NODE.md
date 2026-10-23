@@ -213,3 +213,23 @@ proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection "upgrade"; p
   only after its chain verified.
 
 Remaining: ledger rules in the browser, built on the LMDB ledger.
+
+## Live on the server relay (2026-10-14)
+
+The preview relay on the server serves N2N over WebSocket on port 3004 (`GEROLAMO_N2N_WS_PORT=3004`, LAN only; a
+public endpoint needs `wss://` through a TLS reverse proxy, see above). This is the endpoint Gerolamino, the browser
+extension node, connects to. `scripts/n2n-ws-smoke.ts` runs this browser client in Bun against an endpoint and passes
+when the handshake is accepted and every received header links, matches its body and passes its crypto and leader
+checks. First run, 16:27 UTC: N2N version 14, light-query present, epoch 1450 nonce over the WebSocket, 2 of 2
+blocks fully verified.
+
+```
+bun scripts/n2n-ws-smoke.ts --endpoint ws://192.168.1.173:3004/n2n --magic 2 --seconds 120
+```
+
+## Successor: Gerolamino (2026-10-16)
+
+The browser node in `browser/` was the prototype. Its successor is **Gerolamino**: a standalone Chrome MV3
+extension node that does not import Gerolamo. It lives on the `ts-rebuild` branch of HarmonicLabs/gerolamino
+(`../gerolamino-ts`). It is pure TypeScript on `@harmoniclabs/*` only, stores the chain in OPFS, and has its own
+Mithril verifier. Gerolamo stays its server. See `docs/GEROLAMINO.md`.

@@ -11,6 +11,9 @@ import { N2NTxSubmissionHost, type TxSubmissionMempool } from "./N2NTxSubmission
 import type { RelayChainStore } from "./RelayChainStore";
 import { SqliteRelayChainStore } from "./SqliteRelayChainStore";
 import { WsNodeSocket } from "./WsNodeSocket";
+
+/** Paths the N2N-over-WebSocket bearer answers on: the canonical /n2n, the root, and /relay (Gerolamino). */
+export const WS_N2N_PATHS = new Set(["/", "/n2n", "/relay"]);
 import { N2NLightQueryHost, type LightQueryDeps } from "./N2NLightQueryHost";
 import { formatHostPort, normalizeHost } from "../relayAccessPoint";
 
@@ -132,7 +135,8 @@ export async function startN2NServer(
             port: wsPort,
             fetch(req, server) {
                 const url = new URL(req.url);
-                if (url.pathname !== "/" && url.pathname !== "/n2n") return new Response("Gerolamo N2N over WebSocket: connect at / or /n2n", { status: 404 });
+                // "/relay" is the path Gerolamino (the browser-extension node) appends, as for its websockify relays
+                if (!WS_N2N_PATHS.has(url.pathname.replace(/\/+$/, "") || "/")) return new Response("Gerolamo N2N over WebSocket: connect at /n2n (also / or /relay)", { status: 404 });
                 if (clients.size >= maxConnections) return new Response("too many connections", { status: 503 });
                 const ok = server.upgrade(req, { data: { sock: null } });
                 return ok ? undefined : new Response("expected a WebSocket upgrade", { status: 426 });

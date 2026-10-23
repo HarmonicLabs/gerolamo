@@ -125,3 +125,40 @@ describe("N2NServer loopback interoperability", () => {
         expect(handle.clientCount()).toBe(1);
     });
 });
+
+describe("N2N over WebSocket", () => {
+    // Gerolamino (the browser-extension node) connects at `${base}/relay`; the canonical path is /n2n
+    test("handshakes and serves ChainSync on /n2n, /relay and /; other paths get 404", async () => {
+        const store = new FakeStore();
+        handle = await startN2NServer({
+            host: "127.0.0.1",
+            port: 0,
+            networkMagic: 2,
+            store,
+            maxConnections: 8,
+            handshakeTimeoutMs: 2_000,
+            idleTimeoutMs: 5_000,
+            ws: { host: "127.0.0.1", port: 0 },
+        });
+        const wsPort = handle.wsPort!;
+        expect(wsPort).toBeGreaterThan(0);
+        for (const path of ["/n2n", "/relay", "/", "/relay/"]) {
+            const ws = await new Promise<WebSocket>((resolve, reject) => {
+                const s = new WebSocket(`ws://127.0.0.1:${wsPort}${path}`);
+                s.binaryType = "arraybuffer";
+                s.addEventListener("open", () => resolve(s), { once: true });
+                s.addEventListener("error", () => reject(new Error(`cannot open ${path}`)), { once: true });
+            });
+            const mux = new Multiplexer({ protocolType: "node-to-node", connect: () => ws as any });
+            const accepted = await within(new HandshakeClient(mux).propose({ networkMagic: 2, query: false }), `handshake ${path}`);
+            expect(accepted).toBeInstanceOf(HandshakeAcceptVersion);
+            const chainSync = new ChainSyncClient(mux);
+            const intersection = await within(chainSync.findIntersect([store.headers[0]!.point]), `intersect ${path}`);
+            expect(intersection).toBeInstanceOf(ChainSyncIntersectFound);
+            mux.close();
+            ws.close();
+        }
+        const res = await fetch(`http://127.0.0.1:${wsPort}/elsewhere`);
+        expect(res.status).toBe(404);
+    });
+});

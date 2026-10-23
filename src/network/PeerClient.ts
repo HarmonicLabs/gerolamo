@@ -18,6 +18,7 @@ import {
 } from "@harmoniclabs/ouroboros-miniprotocols-ts";
 import { connect, Socket } from "node:net";
 import { logger } from "../utils/logger";
+import { keepAliveTimeoutMs, keepAliveVerdict } from "./keepAliveWatch";
 import { fromHex } from "@harmoniclabs/uint8array-utils";
 import { AnnounceWindow, encodeInit, encodeReplyTxIds, encodeReplyTxs, hashBytes, hfcEraIndexNow, parseTxSubmissionMessages } from "./txSubmissionCodec";
 export { hashBytes } from "./txSubmissionCodec";
@@ -164,6 +165,8 @@ export class PeerClient implements IPeerClient {
     private csjPaused = false;
     /** The server said MsgAwaitReply (no more headers): CSJ disengages such a peer. */
     onAwaitReply?: (peerId: string) => void;
+    /** Our chain's height (the orchestrator's), for the ChainSync pipelining depth near the tip (bug 390). */
+    localBlockNo?: () => number | null;
     /**
      * PeerSharing as *negotiated* in the handshake (ours AND theirs). Starting the
      * mini-protocol when the peer did not agree to it is a protocol violation —
@@ -173,6 +176,8 @@ export class PeerClient implements IPeerClient {
     isSyncing = false;
     /** ms epoch of last ChainSync rollForward (hot liveness for PeerGovernor). */
     lastRollForwardAt?: number;
+    /** ms epoch of the last ChainSync reply of any kind (RollForward, RollBackward, AwaitReply): the peer is alive and answering. */
+    lastChainSyncReplyAt?: number;
     shelleyGenesisConfig: ShelleyGenesisConfig;
 
     readonly txSubmitClient!: TxSubmitClient;
@@ -629,10 +634,13 @@ export class PeerClient implements IPeerClient {
             async (rollForward: ChainSyncRollForward) => {
                 if (!this.isSyncing || this.terminated) return;
                 this.lastRollForwardAt = Date.now();
+                this.lastChainSyncReplyAt = this.lastRollForwardAt;
                 this.notePeerTip(rollForward.tip.point);
                 const tip =
                     rollForward.tip.point.blockHeader?.slotNumber ?? 0n;
                 this.csPipeline?.noteReply();
+                const ours = this.localBlockNo?.();
+                if (ours != null) this.csPipeline?.noteRemaining(Number(rollForward.tip.blockNo) - ours);
                 if (this.csDraining) return; // stale reply from before a restart
                 const rollForwardCborBytes = rollForward.toCborBytes();
                 this.csIntersect = null; // positioned: later rollbacks are real
@@ -658,6 +666,7 @@ export class PeerClient implements IPeerClient {
         // MsgAwaitReply: the server has nothing newer — we are at its tip, so
         // stop stacking requests (depth 1) until it pulls ahead again.
         this.chainSyncClient.on("awaitReply", () => {
+            this.lastChainSyncReplyAt = Date.now(); // at the peer's tip: alive, nothing new to send (bug 391)
             this.csPipeline?.noteAwaitReply();
             try { this.onAwaitReply?.(this.peerId); } catch { /* observer only */ }
         });
@@ -1057,15 +1066,32 @@ export class PeerClient implements IPeerClient {
      */
     startKeepAlive(interval: number = 10_000) {
         if (this.keepAliveInterval) return;
+        // Bug 395: an unanswered keep-alive means a dead bearer even when the socket still looks open
+        // (half-open TCP over VPN/NAT); close it like cardano-node does so the governor reconnects.
+        const timeoutMs = keepAliveTimeoutMs();
+        let lastReplyAt = Date.now();
+        let lastTickAt = Date.now();
         const tick = () => {
             if (this.terminated) return;
+            const now = Date.now();
+            const verdict = keepAliveVerdict({ now, lastReplyAt, lastTickAt, intervalMs: interval, timeoutMs });
+            lastTickAt = now;
+            if (verdict === "overdue") {
+                const reason = `keep-alive reply overdue (${Math.round((now - lastReplyAt) / 1000)} s without one)`;
+                logger.warn(`peer ${this.peerKey}: ${reason}; closing the connection`);
+                this.terminate(reason);
+                return;
+            }
             this.cookieCounter = (this.cookieCounter + 1) % 65536;
             logger.debug(
                 `Sending keepAliveRequest cookie for peer ${this.peerId}:`,
                 this.cookieCounter,
             );
             try {
-                this.keepAliveClient.request(this.cookieCounter);
+                this.keepAliveClient.request(this.cookieCounter).then(
+                    () => { lastReplyAt = Date.now(); },
+                    () => { /* terminated */ },
+                );
             } catch (err) {
                 logger.error(
                     `keepAlive request failed for ${this.peerId}:`,

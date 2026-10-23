@@ -74,6 +74,8 @@ export interface GovernorPeerClient {
     readonly port: number | bigint;
     /** ms epoch of last ChainSync rollForward (hot liveness). */
     lastRollForwardAt?: number;
+    /** ms epoch of the last ChainSync reply of any kind, AwaitReply included (bug 391). */
+    lastChainSyncReplyAt?: number;
     /** The peer's last reported tip slot (from ChainSync). */
     peerSlotNumber?: number | null;
     /** Negotiated in the handshake. */
@@ -228,6 +230,9 @@ export function retryBackoffMs(failCount: number): number {
     const n = Math.max(1, failCount);
     return Math.min(5 * 60_000, 15_000 * 2 ** Math.min(n - 1, 5));
 }
+
+/** Bug 396: a quiet spell this long on every hot peer means our upstream is dead, not the network (P(no preview block for 10 min) ≈ e^-30). */
+export const QUIET_NETWORK_MAX_MS = 600_000;
 
 export class PeerGovernor {
     private readonly peers = new Map<string, PeerRecord>();
@@ -783,14 +788,30 @@ export class PeerGovernor {
      * Spec (network-design): hot→warm is normal churn; never empty the hot set.
      * Prefer demoting non-trustable / non-valency-critical first.
      */
+    /**
+     * When the peer last proved it is alive on ChainSync: any reply counts, not only a RollForward. A peer on
+     * our own chain answers MsgAwaitReply and then has nothing to send until a new block — that is not silence.
+     * Bug 391: the server relay demoted its own producer (a local root serving the same chain) every 15 s for
+     * eight hours, so the producer's block never reached the relay and was ghosted.
+     */
+    static lastAliveAt(p: PeerRecord): number {
+        return Math.max(p.client?.lastChainSyncReplyAt ?? 0, p.client?.lastRollForwardAt ?? 0) || p.promotedAt || p.addedAt;
+    }
+
     pickSilentHot(silentMs: number, now = Date.now()): PeerRecord[] {
         const hot = this.listByTier("hot").filter((p) => p.client && p.syncing);
         // Never silent-demote the last hot peer — tip freezes if hot hits 0.
         if (hot.length <= 1) return [];
+        // Bug 396: silence is judged against the freshest hot peer, not the wall clock. When the whole network is
+        // quiet (preview has a 3–4 min block gap about once a day) every peer is silent, and demoting them all left
+        // the relay with only its producer (2026-10-13 15:29 and 16:36 UTC). Only a quiet spell far longer than any
+        // honest gap (QUIET_NETWORK_MAX_MS) still rotates every hot peer.
+        const freshest = Math.min(now, Math.max(...hot.map((p) => PeerGovernor.lastAliveAt(p))));
         const out: PeerRecord[] = [];
         for (const p of hot) {
-            const last = p.client?.lastRollForwardAt ?? p.promotedAt ?? p.addedAt;
-            if (now - last >= silentMs) out.push(p);
+            if (p.source === "localRoot") continue; // a local root is kept hot whatever it sends (bug 391)
+            const last = PeerGovernor.lastAliveAt(p);
+            if (freshest - last >= silentMs || now - last >= Math.max(silentMs, QUIET_NETWORK_MAX_MS)) out.push(p);
         }
         // Prefer demoting non-trustable / non-valency first
         out.sort((a, b) => {

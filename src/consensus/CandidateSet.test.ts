@@ -365,3 +365,24 @@ describe("CandidateSet: stale divergences (producer 2026-09-29, bugs 285 and 286
         expect(cs.agreement("v1")!.divergence?.slot).toBe(2237n);
     });
 });
+
+describe("bestSuccessor avoids poor primaries (bug 394)", () => {
+    test("a local root is chosen only when no other verifier is available", () => {
+        const cs = new CandidateSet();
+        cs.addPeer("primary", "primary");
+        cs.addPeer("root", "verifier");
+        cs.addPeer("pub", "verifier");
+        for (const k of ["primary", "root", "pub"]) { cs.observe(k, { slot: 10n, hash: h("a") }); cs.observe(k, { slot: 20n, hash: h("b") }); }
+        cs.observe("root", { slot: 30n, hash: h("c") }); // the root is further ahead, yet a public peer is preferred
+        const avoid = (k: string) => k === "root";
+        expect(cs.bestSuccessor(undefined, avoid)).toBe("pub");
+        expect(cs.bestSuccessor(undefined)).toBe("root");
+        // a public verifier recorded as divergent from the old primary still ranks above the local root
+        cs.observe("pub", { slot: 30n, hash: h("d") });
+        cs.observe("primary", { slot: 30n, hash: h("c") });
+        expect(cs.agreement("pub")?.status).toBe("divergent");
+        expect(cs.bestSuccessor(undefined, avoid)).toBe("pub");
+        cs.removePeer("pub");
+        expect(cs.bestSuccessor(undefined, avoid)).toBe("root");
+    });
+});

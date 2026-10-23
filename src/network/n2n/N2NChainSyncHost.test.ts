@@ -153,3 +153,41 @@ describe("N2NChainSyncHost: our chain switches branches under a client (bug 287)
         expect(decode(mux.sent[3]!)).toBeInstanceOf(ChainSyncRollForward);
     });
 });
+
+describe("N2NChainSyncHost: pipelined RequestNext at the tip (bug 392)", () => {
+    test("every outstanding request is answered as blocks arrive, one AwaitReply each while waiting", async () => {
+        const { ChainSyncAwaitReply } = await import("@harmoniclabs/ouroboros-miniprotocols-ts");
+        const mux = new FakeMux();
+        const store = new FakeStore();
+        const host = new N2NChainSyncHost(mux as unknown as Multiplexer, store, { pollIntervalMs: 10 });
+        // intersect at the tip, roll back to it, then pipeline three requests with nothing to serve
+        mux.emit(MiniProtocol.ChainSync as any, new ChainSyncFindIntersect({ points: [store.headers[2]!.point] }).toCborBytes());
+        await Bun.sleep(0);
+        mux.emit(MiniProtocol.ChainSync as any, new ChainSyncRequestNext().toCborBytes()); // → RollBackward
+        await Bun.sleep(0);
+        for (let i = 0; i < 3; i++) { mux.emit(MiniProtocol.ChainSync as any, new ChainSyncRequestNext().toCborBytes()); await Bun.sleep(0); }
+        await Bun.sleep(5);
+        const kinds = () => mux.sent.map((b) => decode(b).constructor.name);
+        expect(kinds()).toEqual(["ChainSyncIntersectFound", "ChainSyncRollBackwards", "ChainSyncAwaitReply", "ChainSyncAwaitReply", "ChainSyncAwaitReply"]);
+        expect(host.owedReplies).toBe(3);
+        // three new blocks arrive over time: each owed request gets its RollForward, in order
+        store.headers.push({ point: point(30n, 4), blockNo: 4n, data: new CborArray([new CborUInt(30)]) });
+        await Bun.sleep(40);
+        expect(kinds().filter((k) => k === "ChainSyncRollForward").length).toBe(1);
+        expect(host.owedReplies).toBe(2);
+        store.headers.push({ point: point(31n, 5), blockNo: 5n, data: new CborArray([new CborUInt(31)]) }, { point: point(35n, 6), blockNo: 6n, data: new CborArray([new CborUInt(35)]) });
+        await Bun.sleep(40);
+        const forwards = mux.sent.map((b) => decode(b)).filter((m): m is ChainSyncRollForward => m instanceof ChainSyncRollForward);
+        expect(forwards.map((f) => f.data)).toEqual([store.headers[3]!.data, store.headers[4]!.data, store.headers[5]!.data]);
+        expect(host.owedReplies).toBe(0);
+        expect(mux.sent.map((b) => decode(b)).filter((m) => m instanceof ChainSyncAwaitReply).length).toBe(3);
+        // a new request after the tip is reached: an AwaitReply again, then served by the poll
+        mux.emit(MiniProtocol.ChainSync as any, new ChainSyncRequestNext().toCborBytes());
+        await Bun.sleep(5);
+        expect(host.owedReplies).toBe(1);
+        store.headers.push({ point: point(40n, 7), blockNo: 7n, data: new CborArray([new CborUInt(40)]) });
+        await Bun.sleep(40);
+        expect(host.owedReplies).toBe(0);
+        host.dispose();
+    });
+});

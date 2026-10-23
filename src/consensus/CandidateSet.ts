@@ -196,19 +196,26 @@ export class CandidateSet {
     /**
      * Pick the best replacement primary: an agreeing verifier with the highest
      * agreed slot, else the verifier with the longest fragment, else null.
+     * `avoid` marks peers that make a poor primary (a local root that only knows what we tell it — the
+     * relay's own producer, bug 394): one is chosen only when no other verifier is available. A verifier
+     * recorded as divergent from the departing primary ranks above an avoided peer: that divergence was
+     * judged against the old primary, which may have been the one on a dead branch, and the new primary's
+     * fragment re-evaluates every verifier anyway (the relay sat on its producer for hours this way).
      */
-    bestSuccessor(exclude?: string): string | null {
+    bestSuccessor(exclude?: string, avoid?: (key: string) => boolean): string | null {
         let best: PeerState | null = null;
+        const rank = (p: PeerState) => (avoid?.(p.key) ? 2 : p.divergence ? 1 : 0);
+        const better = (p: PeerState, q: PeerState) => {
+            const rp = rank(p), rq = rank(q);
+            if (rp !== rq) return rp < rq;
+            const a = p.agreedAtSlot ?? -1n;
+            const b = q.agreedAtSlot ?? -1n;
+            return a > b || (a === b && p.fragment.points.length > q.fragment.points.length);
+        };
         for (const p of this.peers.values()) {
             if (p.key === exclude || p.role === "primary") continue;
-            if (p.divergence) continue;
-            if (!best) {
-                best = p;
-                continue;
-            }
-            const a = p.agreedAtSlot ?? -1n;
-            const b = best.agreedAtSlot ?? -1n;
-            if (a > b || (a === b && p.fragment.points.length > best.fragment.points.length)) best = p;
+            if (p.divergence && !avoid) continue; // the legacy rule when no preference is given
+            if (!best || better(p, best)) best = p;
         }
         return best?.key ?? null;
     }

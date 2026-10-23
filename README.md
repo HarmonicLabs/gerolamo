@@ -313,6 +313,8 @@ bun src/index.ts start-gerolamo
 | [`docs/gerolamo-vs-dolos-gap.md`](./docs/gerolamo-vs-dolos-gap.md) | vs Dolos / Blockfrost |
 | [`docs/mithril-native-client-research.md`](./docs/mithril-native-client-research.md) | Native Mithril options |
 | [`docs/N2C_IMPLEMENTATION_PLAN.md`](./docs/N2C_IMPLEMENTATION_PLAN.md) | N2C phases |
+| [`docs/GEROLAMINO.md`](./docs/GEROLAMINO.md) | Gerolamino (browser extension node): what Gerolamo serves it over N2N-over-WebSocket |
+| [`docs/HARMONIC_LIBS_RELEASE.md`](./docs/HARMONIC_LIBS_RELEASE.md) | Release review of the HarmonicLabs libraries (cbor, plutus-data, costmodels, cardano-ledger-ts, kes, buildooor, miniprotocols): changes, breaking changes, tests, publish order |
 
 ---
 
@@ -329,6 +331,18 @@ Logs: config `logs.logDirectory` (often `./logs/…`) JSONL when enabled.
 Do not commit `ledger/`, `.hydrate/`, or secrets.
 
 Branch for Lab work: **`The-Lab`**.
+
+### Vendored libraries (`vendor/`)
+
+Some HarmonicLabs libraries are installed from tarballs in [`vendor/`](./vendor) rather than npm.
+Four of them are **conformance builds**: `cardano-ledger-ts`, `cbor`, `plutus-data` and
+`cardano-costmodels-ts`, each built from a branch named **`conformance-fixes`** in its own
+repository. They make Gerolamo's decoders match cardano-ledger exactly, for pragma-org's
+[node-diversity-conformance](https://github.com/pragma-org/node-diversity-conformance) scenarios
+(CBOR decoding 9 200 / 9 200, ledger rules 277 / 277, UPLC 1 059 / 1 059). Gerolamo's own root
+`cbor` stays 1.6.6; `package.json` `overrides` give the conformance builds only to the 2.x
+consumers. What changed, how they are wired and how to refresh them: [`vendor/README.md`](./vendor/README.md).
+Harnesses for the scenarios: `scripts/ndc/`, results and remaining items: `docs/parity/ndc-*.md`.
 
 ---
 

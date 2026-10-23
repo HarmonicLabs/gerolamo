@@ -502,8 +502,44 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
         if (invalid.has(i)) {
             // Phase-2 failure marked by the block producer: the collateral is consumed
             // (and the collateral return produced) instead of the inputs and outputs.
-            const a = evaluateAlonzoRules({ era: block.era, collateralOnly: true, body, witnessSet: wits[i], resolved, plutusScripts: new Set(), nativeScripts: new Set(), params });
-            for (const f of a.failures) out.failures.push(`tx[${i}]: ${f}`);
+            if (isDijkstraEra(block.era)) {
+                const a = evaluateAlonzoRules({ era: block.era, collateralOnly: true, body, witnessSet: wits[i], resolved, plutusScripts: new Set(), nativeScripts: new Set(), params });
+                for (const f of a.failures) out.failures.push(`tx[${i}]: ${f}`);
+            } else if (phase !== "shadow") {
+                // Bug 534: cardano-ledger runs the whole UTXOW / UTXO rule for a transaction marked invalid (inputs,
+                // fee, value conservation, validity interval, witnesses, outputs, collateral); only LEDGER's
+                // withdrawal / treasury checks, CERTS and GOV are skipped. Before, only collateral was checked here.
+                const bodyLen = sliceLength(body), witLen = sliceLength(wits[i]);
+                const auxDataBytes = aux[i] ? auxBytesOf(i) : null;
+                const auxLen = aux[i] ? (auxDataBytes?.length ?? null) : 1;
+                const r = evaluateTxRules({
+                    era: block.era,
+                    body,
+                    witnessSet: wits[i],
+                    slot: ctx.slot,
+                    resolved,
+                    provenKeys,
+                    provenRoots,
+                    isPoolRegistered: (p) => pools.has(p.toLowerCase()),
+                    params,
+                    txSizeBytes: bodyLen != null && witLen != null && auxLen != null ? feeSizeBytes(bodyLen, witLen, auxLen) : null,
+                    auxDataBytes,
+                    stakeRegistered,
+                    refScriptBytes: block.era >= 7 ? txRefScriptsSize(body, (r) => resolved.get(r)) : 0,
+                    exactness: inputs.exactness,
+                    isValid: false,
+                });
+                for (const f of r.failures) out.failures.push(`tx[${i}]: ${f}`);
+                for (const f of r.reports) out.reports.push(`tx[${i}]: ${f}`);
+                // with nothing to run, nothing can fail: UTXOS ValidationTagMismatch (PassedUnexpectedly)
+                if (block.era >= 5 && effectiveRedeemers((wits[i]?.redeemers ?? []) as any[], Number(block.era)).length === 0) out.failures.push(`tx[${i}]: marked invalid (phase-2) but carries no redeemers`);
+            }
+            // Bug 535: BBODY's maxBlockExUnits sums every transaction of the block, invalid ones included
+            // (cardano-ledger Alonzo `validateExUnits`: foldMap getTotalExUnits over all txs)
+            for (const rd of effectiveRedeemers((wits[i]?.redeemers ?? []) as any[], Number(block.era))) {
+                blockMem += BigInt(rd.execUnits?.mem ?? 0);
+                blockSteps += BigInt(rd.execUnits?.steps ?? rd.execUnits?.cpu ?? 0);
+            }
             // …and its scripts must really fail (UTXOS: ValidationTagMismatch otherwise)
             if (phase2Here && block.era >= 5 && ((wits[i]?.redeemers ?? []) as any[]).length > 0) runPhase2(i, true);
             const txHashHex = String(body.hash?.toString?.() ?? "").toLowerCase();

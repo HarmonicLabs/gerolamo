@@ -181,3 +181,52 @@ describe("simulated governor loop", () => {
         expect(churned).toBeGreaterThan(0);
     });
 });
+
+describe("silent hot→warm demotion (bug 391)", () => {
+    test("a local root is never demoted for silence; a peer that answered AwaitReply recently is alive; a truly silent peer is picked", () => {
+        const g = new PeerGovernor({ targetHot: 4, targetWarm: 2 });
+        g.registerLocalRootGroup("lr_0", 1, 1);
+        const now = 1_800_000_000_000;
+        const root = g.noteKnown("172.22.0.3", 3001, "localRoot", false, "lr_0");
+        const atTip = g.noteKnown("8.8.8.8", 3001, "publicRoot");
+        const silent = g.noteKnown("9.9.9.9", 3001, "publicRoot");
+        const fresh = g.noteKnown("7.7.7.7", 3001, "publicRoot");
+        // the root served our own chain: one AwaitReply hours ago, no RollForward ever
+        connect(g, root, "hot", { lastChainSyncReplyAt: now - 8 * 3_600_000 });
+        // at our tip: AwaitReply 30 s ago, last RollForward 10 min ago
+        connect(g, atTip, "hot", { lastRollForwardAt: now - 600_000, lastChainSyncReplyAt: now - 30_000 });
+        // silent: nothing for 10 min
+        connect(g, silent, "hot", { lastRollForwardAt: now - 600_000, lastChainSyncReplyAt: now - 600_000 });
+        connect(g, fresh, "hot", { lastRollForwardAt: now - 5_000, lastChainSyncReplyAt: now - 5_000 });
+        for (const r of [root, atTip, silent, fresh]) g.get(r.key)!.syncing = true;
+        expect(g.pickSilentHot(180_000, now).map((p) => p.key)).toEqual([silent.key]);
+        expect(PeerGovernor.lastAliveAt(g.get(atTip.key)!)).toBe(now - 30_000);
+    });
+
+    test("a network-wide quiet spell demotes nobody; a peer behind the others is still picked; 10 min of total silence rotates all (bug 396)", () => {
+        const now = 1_800_000_000_000;
+        const build = (ages: number[]) => {
+            const g = new PeerGovernor({ targetHot: 6, targetWarm: 2 });
+            g.registerLocalRootGroup("lr_0", 1, 1);
+            const root = g.noteKnown("172.22.0.3", 3001, "localRoot", false, "lr_0");
+            connect(g, root, "hot", { lastChainSyncReplyAt: now - 8 * 3_600_000 });
+            g.get(root.key)!.syncing = true;
+            const keys = ages.map((age, i) => {
+                const r = g.noteKnown(`10.0.0.${i + 1}`, 3001, "publicRoot");
+                connect(g, r, "hot", { lastRollForwardAt: now - age, lastChainSyncReplyAt: now - age });
+                g.get(r.key)!.syncing = true;
+                return r.key;
+            });
+            return { g, keys };
+        };
+        // 2026-10-13 15:29 UTC: no preview block for ~225 s, all five public peers last spoke ~184 s ago
+        const quiet = build([184_627, 184_616, 184_567, 184_554, 184_523]);
+        expect(quiet.g.pickSilentHot(180_000, now)).toEqual([]);
+        // one peer stuck while the others delivered a block 5 s ago
+        const stuck = build([5_000, 6_000, 200_000, 5_500]);
+        expect(stuck.g.pickSilentHot(180_000, now).map((p) => p.key)).toEqual([stuck.keys[2]]);
+        // every public peer silent for 11 min: the upstream is dead, rotate them (one hot peer always stays)
+        const dead = build([660_000, 661_000, 662_000]);
+        expect(dead.g.pickSilentHot(180_000, now).length).toBe(3);
+    });
+});

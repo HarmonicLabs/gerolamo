@@ -147,6 +147,8 @@ export const UtxoF = {
     collateralContainsNonAda: (value: Map<string, bigint>) => sum(15, valueCbor(value)),
     /** Serialised expected (the node's network) first, then the body's. */
     wrongNetworkInTxBody: (expected: number, supplied: number) => sum(16, U(expected), U(supplied)),
+    /** `OutsideForecast SlotNo`: the validity upper bound the epoch info cannot translate. */
+    outsideForecast: (slot: bigint) => sum(17, U(slot)),
     /** Serialised maximum first, then supplied. */
     tooManyCollateralInputs: (max: number, supplied: number) => sum(18, U(max), U(supplied)),
     noCollateralInputs: () => sum(19),
@@ -155,10 +157,15 @@ export const UtxoF = {
     nonDisjointRefInputs: (refs: string[]) => sum(22, new CborArray(refs.map(parseRef).sort(compareRefs).map(txInCbor))),
 };
 
-/** ConwayUtxosPredFailure (UTXOS rule): `ValidationTagMismatch isValid (FailedUnexpectedly [PlutusFailure text bytes])`. */
+/**
+ * ConwayUtxosPredFailure (UTXOS rule): `ValidationTagMismatch isValid description`, the description
+ * `PassedUnexpectedly` (`[0]`: marked invalid, every script passed — also with no script at all) or
+ * `FailedUnexpectedly [PlutusFailure text bytes]` (`[1, …]`: marked valid, a script failed).
+ */
 export const UtxosF = {
     validationTagMismatch: (isValid: boolean, failures: Array<{ message: string; context: Uint8Array }>) =>
         sum(0, new CborSimple(isValid), sum(1, new CborArray(failures.map((f) => sum(1, new CborText(f.message), Bs(f.context)))))),
+    validationTagPassedUnexpectedly: () => sum(0, new CborSimple(false), sum(0)),
 };
 
 /** ConwayUtxowPredFailure (UTXOW rule). */

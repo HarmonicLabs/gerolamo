@@ -191,6 +191,38 @@ afterAll(async () => {
     rmSync(dir, { recursive: true, force: true });
 });
 
+describe("a verifier's extension the primary has not sent is fetched from that verifier (bug 393)", () => {
+    test("a local root's one-block extension is submitted at once with the root as preferred peer; a public peer's after the grace period; each once", async () => {
+        await scenario("n-wins", true);
+        const o = orch as any;
+        const [prim, root, pub] = KEYS.map((k) => peers.get(k)!);
+        for (const p of [prim!, root!, pub!]) orch.registerHotPeer(p.peerKey);
+        (root as any).source = "localRoot";
+        (pub as any).source = "ledger";
+        const submitted: Array<{ points: Array<{ slot: bigint; hash: string }>; preferPeer?: string }> = [];
+        o.ensureScheduler = () => ({ submit: (points: any, opts: any) => { submitted.push({ points, preferPeer: opts?.preferPeer }); return { applied: Promise.resolve() }; } });
+        const cand = (peer: string, b: Blk) => ({ peer, intersection: { slot: Number(P.slot), hash: P.hash }, rollback: 0, suffix: [{ slot: Number(b.slot), hash: b.hash, prevHash: b.prev, hfcEra: 6 }], tip: { slot: Number(b.slot), hash: b.hash }, reason: "longer" });
+        // the primary's own extension: nothing to do (its stream delivers it)
+        await o.fetchVerifierExtension(cand(prim!.peerKey, W[0]!), prim!.peerKey);
+        expect(submitted.length).toBe(0);
+        // the local root (our producer) forged W1: fetched at once, from it
+        await o.fetchVerifierExtension(cand(root!.peerKey, W[0]!), prim!.peerKey);
+        expect(submitted.length).toBe(1);
+        expect(submitted[0]!.preferPeer).toBe(root!.peerKey);
+        expect(submitted[0]!.points.map((p) => p.hash)).toEqual([W[0]!.hash]);
+        // the same extension again (every 200 ms evaluation): not resubmitted
+        await o.fetchVerifierExtension(cand(root!.peerKey, W[0]!), prim!.peerKey);
+        expect(submitted.length).toBe(1);
+        // a public verifier's extension (N): only after the grace period
+        await o.fetchVerifierExtension(cand(pub!.peerKey, N), prim!.peerKey);
+        expect(submitted.length).toBe(1);
+        o.extensionSeen.get(N.hash)!.at -= 10_000;
+        await o.fetchVerifierExtension(cand(pub!.peerKey, N), prim!.peerKey);
+        expect(submitted.length).toBe(2);
+        expect(submitted[1]!.preferPeer).toBe(pub!.peerKey);
+    }, 60_000);
+});
+
 describe("a promoted primary with nothing past our tip keeps its stream (bug 388)", () => {
     test("no ChainSync restart when the fragment holds no header beyond our tip; restart when it holds unchained ones", async () => {
         await scenario("n-wins", true);

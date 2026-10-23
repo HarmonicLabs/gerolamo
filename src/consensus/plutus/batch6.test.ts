@@ -39,7 +39,7 @@ describe("builtin availability (plutus-ledger-api 1.63 builtinsIntroducedIn)", (
     });
     test("a script using insertCoin decodes at protocol 11, not at 10", () => {
         const b = encodeProgramFlat(parseProgram("(program 1.0.0 (builtin insertCoin))"));
-        expect(decodeProgram(b, 3, 11).term).toEqual({ k: TK.Builtin, fn: 94, cached: null });
+        expect(decodeProgram(b, 3, 11).term).toEqual({ k: TK.Builtin, fn: 94 });
         expect(() => decodeProgram(b, 3, 10)).toThrow(FlatError);
         expect(() => decodeProgram(b, 1, 10)).toThrow(FlatError);
         expect(decodeProgram(b, 1, 11).term.k).toBe(TK.Builtin);
@@ -246,7 +246,7 @@ describe("Value builtins (PlutusCore.Value): results and errors beyond the confo
     });
     test("valueData fails above 40000 entries; unValueData is strict", () => {
         const many = (n: number) => new VCon(T.value, valueFromList([[new Uint8Array([1]), Array.from({ length: n }, (_, i) => [new Uint8Array([i >> 16, (i >> 8) & 255, i & 255]), 1n] as const)]]));
-        const vd = (n: number) => evaluate({ k: TK.Apply, f: { k: TK.Builtin, fn: 98, cached: null }, a: { k: TK.Const, v: many(n) } }, costTable(3, MODELS[3], 11), UNLIMITED, { pv: 11 });
+        const vd = (n: number) => evaluate({ k: TK.Apply, f: { k: TK.Builtin, fn: 98 }, a: { k: TK.Const, v: many(n) } }, costTable(3, MODELS[3], 11), UNLIMITED, { pv: 11 });
         expect(vd(40000).ok).toBe(true);
         fails(vd(40001));
         const uvd = (d: string) => run(`[(builtin unValueData) (con data ${d})]`);

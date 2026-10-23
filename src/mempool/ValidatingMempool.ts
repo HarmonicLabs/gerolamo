@@ -239,8 +239,10 @@ export class ValidatingMempool {
         if (r.failures.length) return this.reject(tx.txId, r.failures, r.reasons, t0, source);
         // Conway GOV / GOVCERT (consensus/governance/govValidate.ts), with the queued transactions ahead
         // of this one as the block prefix, so a DRep registered earlier in the mempool is known here.
-        if (bodyHasGovernance(tx.bodyBytes)) {
-            const queued = this.entries.filter((e) => bodyHasGovernance(e.tx.bodyBytes)).map((e) => ({ bytes: e.tx.bodyBytes, txId: e.tx.txId }));
+        // Only a phase-2-valid transaction reaches CERTS and GOV (Conway LEDGER: `isValid == IsValid True`);
+        // one marked invalid only forfeits its collateral (bug 531).
+        if (tx.isValid && bodyHasGovernance(tx.bodyBytes)) {
+            const queued = this.entries.filter((e) => e.tx.isValid && bodyHasGovernance(e.tx.bodyBytes)).map((e) => ({ bytes: e.tx.bodyBytes, txId: e.tx.txId }));
             const me = queued.length;
             try {
                 const gov = await checkBlockGovernance({ slot: Number(slot), epoch: state.params.epoch, bodies: [...queued, { bytes: tx.bodyBytes, txId: tx.txId }], invalid: new Set(), raw: state.params.raw, networkId: state.network === "mainnet" ? 1 : 0, view: await this.opts.view.govLedgerView?.() });
@@ -260,6 +262,8 @@ export class ValidatingMempool {
                 // decoding; not reproduced — carried as a MEMPOOL text.)
                 const run = new RuleRun();
                 if (res.kind === "CollectErrors") run.fail(LedgerF.mempoolFailure(`CollectErrors: ${res.detail ?? "no script context"}`));
+                // is_valid = false and the scripts passed (or there are none): PassedUnexpectedly (bug 530)
+                else if (!tx.isValid) run.fail(LedgerF.utxow(UtxowF.utxo(UtxoF.utxos(UtxosF.validationTagPassedUnexpectedly()))));
                 else run.fail(LedgerF.utxow(UtxowF.utxo(UtxoF.utxos(UtxosF.validationTagMismatch(tx.isValid, [{ message: res.detail ?? "script failure", context: new Uint8Array(0) }])))));
                 return this.reject(tx.txId, [...run.failures], [`plutus: ${res.detail ?? "script failure"}`], t0, source);
             }
@@ -303,6 +307,14 @@ export class ValidatingMempool {
     }
 
     private applyToOverlay(tx: MempoolTx, spent: Set<string>, created: Map<string, ResolvedUtxo>): void {
+        if (!tx.isValid) {
+            // A transaction marked invalid spends its collateral and creates only the collateral return,
+            // at index |outputs| (Babbage `collOuts`); its inputs stay unspent (bug 531).
+            for (const r of tx.collateral) { spent.add(r); created.delete(r); }
+            const ret = tx.body.collateralReturn;
+            if (ret) advanceResolved(created, tx.txId, [], [outputLike(ret)], ((tx.body.outputs ?? []) as any[]).length);
+            return;
+        }
         for (const r of tx.inputs) { spent.add(r); created.delete(r); }
         const outs = ((tx.body.outputs ?? []) as any[]).map(outputLike);
         advanceResolved(created, tx.txId, [], outs);
@@ -337,11 +349,11 @@ export class ValidatingMempool {
             stakeCreds.size ? this.opts.view.stake([...stakeCreds.values()]) : Promise.resolve(null),
         ]);
         // earlier mempool transactions' certificates change the registration state too
-        if (stake) for (const e of before) applyCertsToStake(e.tx, stake);
+        if (stake) for (const e of before) if (e.tx.isValid) applyCertsToStake(e.tx, stake);
         // ... and their withdrawals drain the accounts (a later transaction must withdraw 0), as the
         // block rules carry it from one transaction to the next (blockRulesPure `applyOverlay`)
         const balances = rewardBalances ? new Map(rewardBalances) : undefined;
-        if (balances) for (const e of before) for (const w of (e.tx.body.withdrawals?.map ?? []) as any[]) { const k = rewardAccountKey(w.rewardAccount); if (balances.has(k)) balances.set(k, 0n); }
+        if (balances) for (const e of before) if (e.tx.isValid) for (const w of (e.tx.body.withdrawals?.map ?? []) as any[]) { const k = rewardAccountKey(w.rewardAccount); if (balances.has(k)) balances.set(k, 0n); }
         return { resolved, pools, rewardBalances: balances, stake, exactness: this.opts.view.exactness?.() };
     }
 
@@ -349,14 +361,17 @@ export class ValidatingMempool {
         const c = collectShelleyWitnesses(tx.txIdBytes, tx.witnessSet);
         const ok = c.items.length === 0 ? [] : this.opts.pool ? (await this.opts.pool.verifyWitnesses({ kind: "witnesses", items: c.items })).ok : runWitnessVerifyJob({ kind: "witnesses", items: c.items }).ok;
         const v: WitnessVerdict = { provenKeys: new Set(), provenRoots: new Set(), allKeyHashes: new Set(), invalidVkeys: [] };
-        const invalid: Array<{ hash: string; vkey: Uint8Array }> = [];
+        // Shelley UTXOW `validateVerifiedWits`: the vkeys of failing vkey witnesses, then those of failing
+        // bootstrap witnesses (a bootstrap witness with a bad signature was dropped, bug 533)
+        const invalid: Array<{ hash: string; vkey: Uint8Array }> = [], invalidBoot: Array<{ hash: string; vkey: Uint8Array }> = [];
         c.proves.forEach((p, i) => {
             v.allKeyHashes.add(p.hash);
             if (ok[i]) (p.kind === "key" ? v.provenKeys : v.provenRoots).add(p.hash);
-            else if (p.kind === "key") invalid.push({ hash: p.hash, vkey: c.items[i]!.publicKey });
+            else (p.kind === "key" ? invalid : invalidBoot).push({ hash: p.hash, vkey: c.items[i]!.publicKey });
         });
-        invalid.sort((a, b) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0));
-        v.invalidVkeys = invalid.map((x) => x.vkey);
+        const byHash = (a: { hash: string }, b: { hash: string }) => (a.hash < b.hash ? -1 : a.hash > b.hash ? 1 : 0);
+        invalid.sort(byHash); invalidBoot.sort(byHash);
+        v.invalidVkeys = [...invalid, ...invalidBoot].map((x) => x.vkey);
         return v;
     }
 

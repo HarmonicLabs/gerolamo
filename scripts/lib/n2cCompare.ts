@@ -6,7 +6,7 @@
  * committee members, stake credentials and governance actions picked from the reference's own
  * answers at that block); every answer is compared byte for byte.
  */
-import { Cbor, CborArray, CborUInt, CborBytes, CborTag, type CborObj } from "@harmoniclabs/cbor";
+import { Cbor, CborArray, CborMap, CborUInt, CborBytes, CborTag, type CborObj } from "@harmoniclabs/cbor";
 import type { LsqClient } from "./lsq";
 
 export const U = (n: number | bigint) => new CborUInt(n);
@@ -77,25 +77,39 @@ export const EXTRA_QUERY_NAMES = ["DebugLedgerConfig", "[2] GetNonMyopicMemberRe
  * at the acquired block. `extra` adds the wallet reward queries and DebugLedgerConfig (EXTRA_QUERY_NAMES),
  * `huge` GetUTxOWhole and the debug dumps.
  */
-export async function buildQuerySet(ref: LsqClient, opts: { era?: number; pools?: string[]; ownerCred?: string; huge?: boolean; extra?: boolean } = {}): Promise<CompareQuery[]> {
+/**
+ * `reopenRef`: a reference that closes its connection on a query it does not support (Dingo does; cardano-node
+ * too for undecodable queries) is reopened through it, and the lookup falls back to defaults, so one unsupported
+ * argument query does not end the run.
+ */
+export async function buildQuerySet(ref: LsqClient, opts: { era?: number; pools?: string[]; ownerCred?: string; huge?: boolean; extra?: boolean; reopenRef?: () => Promise<LsqClient> } = {}): Promise<CompareQuery[]> {
     const era = opts.era ?? 6;
     const pools = [...(opts.pools?.length ? opts.pools : [DEFAULT_POOL])].sort(); // Conway sets must be sorted: a cardano-node drops the connection otherwise
     const owner = opts.ownerCred ?? DEFAULT_OWNER_CRED;
     const L = (q: CborObj[], e = era) => ledger(q, e);
     const poolSet = () => S(pools.map(B));
-    const pick = async (q: CborObj[]) => (await ref.query(L(q))) as CborArray;
+    const EMPTY = A([new CborMap([])]);
+    const pick = async (q: CborObj[]): Promise<CborArray> => {
+        try { return (await ref.query(L(q))) as CborArray; }
+        catch (e) {
+            console.log(`note: the reference could not answer an argument lookup (query tag ${(q[0] as CborUInt).num}): ${(e as Error).message}; using defaults`);
+            if (ref.isClosed() && opts.reopenRef) ref = await opts.reopenRef();
+            return EMPTY;
+        }
+    };
     const mapEntries = (o: CborObj): Array<{ k: CborObj; v: CborObj }> => ((o as any)?.map ?? []) as Array<{ k: CborObj; v: CborObj }>;
     const drepStates = mapEntries((await pick([U(25), S([])])).array[0]!);
     const dreps = drepStates.slice(0, 3).map((e) => e.k); // credentials [type, hash]
     const drepIds = [...dreps.map((d) => d), A([U(2)]), A([U(3)])]; // DRep = [0|1, hash] | [2] | [3]
     const committee = (await pick([U(27), S([]), S([]), S([])])).array[0] as CborArray;
-    const members = mapEntries(committee.array[0]!);
+    const members = committee instanceof CborArray ? mapEntries(committee.array[0]!) : [];
     const colds = members.slice(0, 2).map((e) => e.k);
     const hots = members.map((e) => (e.v as CborArray).array[0] as CborArray).filter((s) => Number((s.array[0] as CborUInt).num) === 0).slice(0, 1).map((s) => s.array[1]!);
     const delegs = mapEntries((await pick([U(28), S([])])).array[0]!);
     const stakeCreds = [delegs[0], delegs[Math.floor(delegs.length / 2)], delegs[delegs.length - 1]].filter(Boolean).map((e) => e!.k);
     const ownerCred = cred(0, owner); // our pool's reward account
-    const proposals = ((await pick([U(31), S([])])).array[0] as CborArray).array.map((g) => (g as CborArray).array[0]!).slice(0, 2);
+    const proposalsAnswer = (await pick([U(31), S([])])).array[0];
+    const proposals = proposalsAnswer instanceof CborArray ? proposalsAnswer.array.map((g) => (g as CborArray).array[0]!).slice(0, 2) : [];
     const sortSet = (xs: CborObj[]) => S([...xs].sort((a, b) => Buffer.compare(Buffer.from(Cbor.encode(a).toBuffer()), Buffer.from(Cbor.encode(b).toBuffer()))));
     // cardano-node sorts nothing for us: a set argument must be in the key type's order (Credential: script first)
     const credSet = (xs: CborObj[]) => S([...xs].sort((a, b) => { const ta = Number(((a as CborArray).array[0] as CborUInt).num), tb = Number(((b as CborArray).array[0] as CborUInt).num); return ta !== tb ? tb - ta : Buffer.compare(Buffer.from(((a as CborArray).array[1] as CborBytes).bytes), Buffer.from(((b as CborArray).array[1] as CborBytes).bytes)); }));
@@ -179,17 +193,32 @@ export async function buildQuerySet(ref: LsqClient, opts: { era?: number; pools?
  * block) are retried up to `liveAttempts` times when the two sides are not on one block. A query
  * error ends the run: a cardano-node drops the connection on a query it cannot decode.
  */
-export async function compareQueries(ours: LsqClient, ref: LsqClient, queries: CompareQuery[], opts: { shared: boolean; liveAttempts?: number; retryWaitMs?: number; onResult?: (r: QueryResult) => void; onDiff?: (name: string, ours: Uint8Array, ref: Uint8Array) => void }): Promise<QueryResult[]> {
+export async function compareQueries(ours: LsqClient, ref: LsqClient, queries: CompareQuery[], opts: { shared: boolean; liveAttempts?: number; retryWaitMs?: number; onResult?: (r: QueryResult) => void; onDiff?: (name: string, ours: Uint8Array, ref: Uint8Array) => void; reopen?: (side: "ours" | "ref") => Promise<LsqClient> }): Promise<QueryResult[]> {
     const out: QueryResult[] = [];
     for (const [name, q, live] of queries) {
         let a = "", b = "", err = "";
+        let closedSide: "ours" | "ref" | null = null;
         const attempts = live && !opts.shared ? (opts.liveAttempts ?? 5) : 1;
         for (let attempt = 0; attempt < attempts; attempt++) {
             if (attempt) await new Promise((r) => setTimeout(r, opts.retryWaitMs ?? 3000)); // no wait after the last try (was 3 s per DIFF)
-            try { [a, b] = await Promise.all([ours.queryRaw(q).then(hex), ref.queryRaw(q).then(hex)]); } catch (e) { err = (e as Error).message; break; }
+            // one side at a time: a side that drops the connection must not leave the other side's promise unobserved
+            let failed: "ours" | "ref" | null = null;
+            try { a = hex(await ours.queryRaw(q)); } catch (e) { err = (e as Error).message; failed = "ours"; }
+            if (!failed) { try { b = hex(await ref.queryRaw(q)); } catch (e) { err = (e as Error).message; failed = "ref"; } }
+            if (failed) { closedSide = failed; break; }
             if (a === b) break;
         }
-        if (err) { const r: QueryResult = { name, same: false, ours: 0, ref: 0, err }; out.push(r); opts.onResult?.(r); break; }
+        if (err) {
+            // A side that closed the connection did not support the query (Dingo, or cardano-node on one it cannot
+            // decode). With `reopen` the run continues on fresh connections; without it the run ends here.
+            const closed = ours.isClosed() ? "ours" : ref.isClosed() ? "ref" : closedSide;
+            const r: QueryResult = { name, same: false, ours: 0, ref: 0, err: closed ? `not supported by ${closed === "ref" ? "the reference" : "ours"} (it closed the connection)` : err };
+            out.push(r); opts.onResult?.(r);
+            if (!closed || !opts.reopen) break;
+            if (ours.isClosed()) ours = await opts.reopen("ours");
+            if (ref.isClosed()) ref = await opts.reopen("ref");
+            continue;
+        }
         const r: QueryResult = { name, same: a === b, ours: a.length / 2, ref: b.length / 2 };
         if (!r.same) { let i = 0; while (i < a.length && a[i] === b[i]) i++; r.firstDiff = i >> 1; r.excerpt = `ours …${a.slice(Math.max(0, i - 16), i + 32)} ref …${b.slice(Math.max(0, i - 16), i + 32)}`; opts.onDiff?.(name, Buffer.from(a, "hex"), Buffer.from(b, "hex")); }
         out.push(r); opts.onResult?.(r);

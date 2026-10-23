@@ -33,7 +33,8 @@ describe("plutus-conformance 1.63.0.0 (UPLC evaluation: results and budgets)", (
         test(`${g} (${cs.length})`, () => {
             const bad: string[] = [];
             for (const c of cs) {
-                const r = runConformanceCase(c.program, c.expected, c.budget, fx.costModels.PlutusV3);
+                // 1.63's text parser normalised value literals (`Value.fromList`); its builtin/constant/value vectors expect that (bug 552)
+                const r = runConformanceCase(c.program, c.expected, c.budget, fx.costModels.PlutusV3, { valueLiterals: "normalise" });
                 if (r.skipped) { if (!SATURATING.some((s) => c.name.endsWith(s))) bad.push(`${c.name}: skipped (${r.skipped})`); continue; }
                 if (!r.resultOk || !r.budgetOk) bad.push(`${c.name}: ${r.resultOk ? "" : `result ${r.detail} `}${r.budgetOk ? "" : `budget ${r.got?.cpu}/${r.got?.mem} vs ${c.budget.replace(/\s+/g, " ")}`}`);
             }

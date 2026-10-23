@@ -55,6 +55,14 @@ export class N2NChainSyncHost {
     private handleChain: Promise<void> = Promise.resolve();
     private pollTimer: ReturnType<typeof setTimeout> | undefined;
     private disposed = false;
+    /**
+     * MsgRequestNext received and not yet answered with a RollForward / RollBackward. A client may pipeline
+     * several (ours does while catching up); each gets its own MsgAwaitReply when we are at the tip, and the
+     * poll keeps answering them one header at a time until none is owed. Bug 392: answering only the first
+     * left the rest unanswered for ever — the server relay's session to the producer died a minute after it
+     * started (2026-10-10), so the producer's blocks never reached the relay.
+     */
+    private owed = 0;
 
     constructor(
         mplexer: Multiplexer,
@@ -154,12 +162,15 @@ export class N2NChainSyncHost {
             return;
         }
         if (message instanceof ChainSyncRequestNext) {
+            this.owed++;
             if (this.pendingRollback) {
                 const point = this.pendingRollback;
                 this.pendingRollback = null;
+                this.owed--;
                 this.send(new ChainSyncRollBackwards({ point, tip: await this.store.getTip() }));
                 return;
             }
+            if (this.pollTimer) { this.send(new ChainSyncAwaitReply()); return; } // already waiting at the tip for an earlier request: this one waits too
             await this.sendNextOrAwait();
             return;
         }
@@ -175,6 +186,11 @@ export class N2NChainSyncHost {
         }
         this.send(new ChainSyncAwaitReply());
         this.schedulePoll();
+    }
+
+    /** How many MsgRequestNext are waiting for a reply (tests, stats). */
+    get owedReplies(): number {
+        return this.owed;
     }
 
     private remember(point: ChainPoint): void {
@@ -201,6 +217,7 @@ export class N2NChainSyncHost {
         if (pointEq(back.point, this.cursor)) return false; // the client's position is still on our chain: a gap in the store, not a fork
         while (this.served.length && !pointEq(this.served[this.served.length - 1]!, back.point)) this.served.pop();
         this.cursor = back.point;
+        this.owed = Math.max(0, this.owed - 1);
         this.send(new ChainSyncRollBackwards({ point: back.point, tip: await this.store.getTip() }));
         return true;
     }
@@ -209,6 +226,7 @@ export class N2NChainSyncHost {
         const tip = await this.store.getTip();
         this.cursor = header.point;
         this.remember(header.point);
+        this.owed = Math.max(0, this.owed - 1);
         this.send(new ChainSyncRollForward({ data: header.data, tip }));
         noteServed("header");
     }
@@ -224,12 +242,14 @@ export class N2NChainSyncHost {
     private async pollForNext(): Promise<void> {
         if (this.disposed) return;
         try {
-            const next = await this.store.getNextHeader(this.cursor);
-            if (next) {
-                if (await this.rolledBackInstead(next)) return;
+            // Answer every owed request we can now; the rest wait for the next poll (bug 392).
+            while (this.owed > 0) {
+                const next = await this.store.getNextHeader(this.cursor);
+                if (!next) break;
+                if (await this.rolledBackInstead(next)) continue; // the rollback answered one request
                 await this.sendHeader(next);
-                return;
             }
+            if (this.owed === 0) return;
         } catch (error) {
             log.warn("tip poll failed:", error);
         }

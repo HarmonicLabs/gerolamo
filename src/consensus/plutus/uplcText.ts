@@ -10,10 +10,10 @@
  */
 import { bls12_381_G1_uncompress, bls12_381_G2_uncompress } from "@harmoniclabs/crypto";
 import { DBytes, DConstr, DInt, DList, DMap, DPair, dataEq, encodeData as encodeDataBytes, type Data } from "./data";
-import { TK, type Term } from "./flat";
+import { TK, TK_APPLY_X, materialise, type Code, type Term } from "./flat";
 import { BUILTIN_NAMES } from "./costs";
 import { SIGNATURE } from "./builtins";
-import { valueEq, valueFromList, type VValue } from "./multiasset";
+import { MAX_KEY_LEN, QUANTITY_MAX, QUANTITY_MIN, buildValueStrict, valueEq, valueFromList, type VValue } from "./multiasset";
 import { ConstT, Env, T, VArray, VBuiltin, VCon, VConstr, VDelay, VLam, VPair, listToArray, mkListFromArray, type ConstType, type Value } from "./values";
 
 export class UplcParseError extends Error {}
@@ -21,9 +21,24 @@ export class UplcParseError extends Error {}
 export class FreeVariableError extends Error {}
 
 const BUILTIN_TAGS = new Map(BUILTIN_NAMES.slice(0, 101).map((n, i) => [n, i]));
+// `verifySignature`: the pre-Vasil name of verifyEd25519Signature (flat tag 21), which the
+// amaru-uplc regression corpus still writes in textual programs (bug 551). Text only: on chain a
+// builtin is its flat tag.
+BUILTIN_TAGS.set("verifySignature", BUILTIN_TAGS.get("verifyEd25519Signature")!);
 const isIdent = (c: string) => /[A-Za-z0-9_']/.test(c);
 
-export function parseProgram(src: string): { version: [number, number, number]; term: Term } {
+export interface ParseOptions {
+    /**
+     * How a `value` literal is read: `canonical` (default; plutus master's `conValue`, bug 552) rejects
+     * anything not already in canonical form; `normalise` is plutus 1.63's parser (`Value.fromList`:
+     * duplicate keys summed, zero quantities and empty inner lists dropped, keys sorted), which the
+     * 1.63 conformance suite's `builtin/constant/value` vectors expect. Keys longer than 32 bytes and
+     * quantities outside the signed 128-bit range are parse errors either way.
+     */
+    valueLiterals?: "canonical" | "normalise";
+}
+
+export function parseProgram(src: string, opts: ParseOptions = {}): { version: [number, number, number]; term: Term } {
     let p = 0;
     const err = (m: string): never => { throw new UplcParseError(`${m} at ${p}`); };
     const ws = () => {
@@ -141,8 +156,14 @@ export function parseProgram(src: string): { version: [number, number, number]; 
             }
             case 11: return err("bls12_381_mlresult constants are not supported");
             case 13: {
-                const xs = listOf(() => pairOf(() => hexBytes("#"), () => listOf(() => pairOf(() => hexBytes("#"), decimal))));
-                try { return valueFromList(xs); } catch (e) { return err((e as Error).message); }
+                // plutus-core `conValue` (bug 552): a value literal must already be in canonical form —
+                // keys of at most 32 bytes and quantities within the signed 128-bit range (checked as
+                // they are read), then `Value.buildValueWith`: currencies and tokens strictly ascending,
+                // no empty inner list, no zero quantity. Anything else is a parse error, never normalised.
+                const key = (): Uint8Array => { const b = hexBytes("#"); if (b.length > MAX_KEY_LEN) err(`key longer than ${MAX_KEY_LEN} bytes`); return b; };
+                const quantity = (): bigint => { const q = decimal(); if (q < QUANTITY_MIN || q > QUANTITY_MAX) err("Quantity out of bounds"); return q; };
+                const xs = listOf(() => pairOf(key, () => listOf(() => pairOf(key, quantity))));
+                try { return opts.valueLiterals === "normalise" ? valueFromList(xs) : buildValueStrict(xs, "Invalid literal value"); } catch (e) { return err((e as Error).message); }
             }
         }
         return err("unsupported constant type");
@@ -168,7 +189,7 @@ export function parseProgram(src: string): { version: [number, number, number]; 
                 case "delay": t = { k: TK.Delay, b: term(scope) }; break;
                 case "force": t = { k: TK.Force, b: term(scope) }; break;
                 case "error": t = { k: TK.Error }; break;
-                case "builtin": { const n = ident(); const fn = BUILTIN_TAGS.get(n); if (fn === undefined) err(`unknown builtin ${n}`); t = { k: TK.Builtin, fn: fn!, cached: null }; break; }
+                case "builtin": { const n = ident(); const fn = BUILTIN_TAGS.get(n); if (fn === undefined) err(`unknown builtin ${n}`); t = { k: TK.Builtin, fn: fn! }; break; }
                 case "con": { const ty = type(); t = { k: TK.Const, v: new VCon(ty, constant(ty, true)) }; break; }
                 case "constr": {
                     if (!v110) err("constr needs 1.1.0");
@@ -197,9 +218,10 @@ export function parseProgram(src: string): { version: [number, number, number]; 
     const parts = src.slice(vs, p).split(".").map(Number);
     if (parts.length !== 3 || parts.some((n) => !Number.isInteger(n))) err("bad version");
     const version = parts as [number, number, number];
-    v110 = version[0] === 1 && version[1] >= 1;
-    // 1.2.0 (plutus master, Dijkstra) adds no term form; whether a ledger language may use it is the flat decoder's call
-    if (version[0] !== 1 || version[1] > 2 || version[2] !== 0) err("unsupported version");
+    // Any version parses (bug 550): whether a ledger language may use it at a protocol version is
+    // the flat decoder's (or, for text, conformance.ts `programUnavailable`'s) call — a decode error
+    // of the ledger, not of this parser (bug 553). constr / case need 1.1.0 or later.
+    v110 = version[0] > 1 || (version[0] === 1 && version[1] >= 1);
     const t = term([]);
     sym(")"); ws();
     if (p !== src.length) err("trailing input");
@@ -207,35 +229,38 @@ export function parseProgram(src: string): { version: [number, number, number]; 
     return { version, term: t };
 }
 
-/** `dischargeCekValue`: a result value as a closed term (environments substituted). */
-export function discharge(v: Value): Term {
+/** `dischargeCekValue`: a result value as a closed term (environments substituted); `code` is the program its closures refer to. */
+export function discharge(v: Value, code: Code): Term {
     if (v instanceof VCon) return { k: TK.Const, v };
-    if (v instanceof VDelay) return { k: TK.Delay, b: dischargeTerm(v.body, v.env, 0) };
-    if (v instanceof VLam) return { k: TK.Lam, b: dischargeTerm(v.body, v.env, 1) };
-    if (v instanceof VConstr) return { k: TK.Constr, tag: v.tag, fields: v.fields.map(discharge) };
+    if (v instanceof VDelay) return { k: TK.Delay, b: dischargeNode(code, v.body, v.env, 0) };
+    if (v instanceof VLam) return { k: TK.Lam, b: dischargeNode(code, v.body, v.env, 1) };
+    if (v instanceof VConstr) return { k: TK.Constr, tag: v.tag, fields: v.fields.map((f) => discharge(f, code)) };
     if (v instanceof VBuiltin) {
-        let t: Term = { k: TK.Builtin, fn: v.fn, cached: null };
+        let t: Term = { k: TK.Builtin, fn: v.fn };
         for (let i = SIGNATURE[v.fn]![0] - v.forces; i > 0; i--) t = { k: TK.Force, b: t };
-        for (const a of v.args) t = { k: TK.Apply, f: t, a: discharge(a) };
+        for (const a of v.args) t = { k: TK.Apply, f: t, a: discharge(a, code) };
         return t;
     }
     throw new Error("unknown value");
 }
-function dischargeTerm(t: Term, env: Env | null, depth: number): Term {
-    switch (t.k) {
+function dischargeNode(c: Code, t: number, env: Env | null, depth: number): Term {
+    switch (c.K[t]) {
         case TK.Var: {
-            if (t.i <= depth) return t;
-            let e = env, i = t.i - depth;
-            while (--i > 0 && e) e = e.next;
-            return e ? discharge(e.v) : t;
+            const i = c.A[t]!;
+            if (i < 0) return materialise(c, t); // an index beyond 2^31: free
+            if (i <= depth) return { k: TK.Var, i };
+            let e = env, j = i - depth;
+            while (--j > 0 && e) e = e.next;
+            return e ? discharge(e.v, c) : { k: TK.Var, i };
         }
-        case TK.Lam: return { k: TK.Lam, b: dischargeTerm(t.b, env, depth + 1) };
-        case TK.Delay: return { k: TK.Delay, b: dischargeTerm(t.b, env, depth) };
-        case TK.Force: return { k: TK.Force, b: dischargeTerm(t.b, env, depth) };
-        case TK.Apply: return { k: TK.Apply, f: dischargeTerm(t.f, env, depth), a: dischargeTerm(t.a, env, depth) };
-        case TK.Constr: return { k: TK.Constr, tag: t.tag, fields: t.fields.map((f) => dischargeTerm(f, env, depth)) };
-        case TK.Case: return { k: TK.Case, s: dischargeTerm(t.s, env, depth), bs: t.bs.map((b) => dischargeTerm(b, env, depth)) };
-        default: return t;
+        case TK.Lam: return { k: TK.Lam, b: dischargeNode(c, t + 1, env, depth + 1) };
+        case TK.Delay: return { k: TK.Delay, b: dischargeNode(c, t + 1, env, depth) };
+        case TK.Force: return { k: TK.Force, b: dischargeNode(c, t + 1, env, depth) };
+        case TK.Apply: return { k: TK.Apply, f: dischargeNode(c, t + 1, env, depth), a: dischargeNode(c, c.A[t]!, env, depth) };
+        case TK_APPLY_X: { const x = c.xapps[c.A[t]!]!; return { k: TK.Apply, f: dischargeNode(c, x.f, env, depth), a: dischargeNode(c, x.a, env, depth) }; }
+        case TK.Constr: { const ct = c.ctrs[c.A[t]!]!; return { k: TK.Constr, tag: ct.tag, fields: ct.fields.map((f) => dischargeNode(c, f, env, depth)) }; }
+        case TK.Case: return { k: TK.Case, s: dischargeNode(c, t + 1, env, depth), bs: c.cases[c.A[t]!]!.map((b) => dischargeNode(c, b, env, depth)) };
+        default: return materialise(c, t); // const, error, builtin
     }
 }
 

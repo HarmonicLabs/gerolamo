@@ -169,79 +169,146 @@ function enc(w: Writer, d: Data) {
 }
 export function encodeData(d: Data): Uint8Array { const w = new Writer(); enc(w, d); return w.out(); }
 
-/**
- * Decode Plutus Data from CBOR (tolerant of definite/indefinite forms, as the ledger decoder).
- * Bytestrings are always fresh copies: `Buffer#slice` is a view, and a value sharing memory with
- * the block would let any mutation reach the transaction bytes (seen with a delegated builtin).
- */
-export function decodeData(b: Uint8Array): Data {
-    let p = 0;
-    const arg = (ai: number): number | bigint => {
+/** Small bigints shared by the decoder (constructor tags, small integers): bigints compare by value, so sharing is invisible. */
+const SMALL_BIG: bigint[] = []; for (let n = 0; n < 256; n++) SMALL_BIG[n] = BigInt(n);
+const SMALL_NEG: bigint[] = []; for (let n = 0; n < 256; n++) SMALL_NEG[n] = -1n - BigInt(n);
+const MAX_SAFE_BIG = BigInt(Number.MAX_SAFE_INTEGER);
+const OUT_OF_INPUT = "cbor: out of input";
+
+/** A CBOR cursor over one Data item; reading past the end throws (a truncated item is never read as zeros). */
+class DataReader {
+    p = 0;
+    readonly len: number;
+    constructor(readonly b: Uint8Array) { this.len = b.length; }
+    /** The argument of a head byte: a Number up to 2^53, a bigint beyond, −1 for indefinite length. */
+    arg(ai: number): number | bigint {
         if (ai < 24) return ai;
-        if (ai === 24) return b[p++]!;
-        if (ai === 25) { const v = (b[p]! << 8) | b[p + 1]!; p += 2; return v; }
-        if (ai === 26) { const v = ((b[p]! << 24) >>> 0) + ((b[p + 1]! << 16) | (b[p + 2]! << 8) | b[p + 3]!); p += 4; return v; }
-        if (ai === 27) { let v = 0n; for (let i = 0; i < 8; i++) v = (v << 8n) | BigInt(b[p++]!); return v <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(v) : v; }
+        const b = this.b, p = this.p;
+        if (ai === 24) { if (p + 1 > this.len) throw new Error(OUT_OF_INPUT); this.p = p + 1; return b[p]!; }
+        if (ai === 25) { if (p + 2 > this.len) throw new Error(OUT_OF_INPUT); this.p = p + 2; return (b[p]! << 8) | b[p + 1]!; }
+        if (ai === 26) { if (p + 4 > this.len) throw new Error(OUT_OF_INPUT); this.p = p + 4; return ((b[p]! << 24) >>> 0) + ((b[p + 1]! << 16) | (b[p + 2]! << 8) | b[p + 3]!); }
+        if (ai === 27) {
+            if (p + 8 > this.len) throw new Error(OUT_OF_INPUT);
+            this.p = p + 8;
+            const hi = ((b[p]! << 24) >>> 0) + ((b[p + 1]! << 16) | (b[p + 2]! << 8) | b[p + 3]!);
+            const lo = ((b[p + 4]! << 24) >>> 0) + ((b[p + 5]! << 16) | (b[p + 6]! << 8) | b[p + 7]!);
+            if (hi < 0x200000) return hi * 4294967296 + lo; // < 2^53
+            const v = (BigInt(hi) << 32n) | BigInt(lo);
+            return v <= MAX_SAFE_BIG ? Number(v) : v;
+        }
         if (ai === 31) return -1;
         throw new Error(`cbor: bad additional info ${ai}`);
-    };
-    const bytesItem = (ai: number): Uint8Array => {
-        const n = arg(ai);
-        if (n !== -1) { const len = Number(n); const out = Uint8Array.prototype.slice.call(b, p, p + len); p += len; return out; }
-        const parts: Uint8Array[] = [];
-        while (b[p] !== 0xff) {
-            const ib = b[p++]!;
-            if (ib >> 5 !== 2) throw new Error("cbor: bad bytes chunk");
-            const len = Number(arg(ib & 31)); parts.push(b.subarray(p, p + len)); p += len;
+    }
+    /** A definite length as a Number (a bigint length is beyond any input). */
+    length(ai: number): number {
+        const n = this.arg(ai);
+        if (typeof n !== "number") throw new Error(OUT_OF_INPUT);
+        return n;
+    }
+    head(): number {
+        if (this.p >= this.len) throw new Error(OUT_OF_INPUT);
+        return this.b[this.p++]!;
+    }
+    /** `true` and consumed when the next byte is the break (0xff). */
+    atBreak(): boolean {
+        if (this.p >= this.len) throw new Error(OUT_OF_INPUT);
+        if (this.b[this.p] !== 0xff) return false;
+        this.p++;
+        return true;
+    }
+    /** Bytes after a major-2 head: a fresh copy (TypedArray slice copies, a `Buffer#slice` would be a view). */
+    bytesItem(ai: number): Uint8Array {
+        const n = this.length(ai);
+        if (n !== -1) {
+            const p = this.p;
+            if (p + n > this.len) throw new Error(OUT_OF_INPUT);
+            this.p = p + n;
+            return Uint8Array.prototype.slice.call(this.b, p, p + n);
         }
-        p++;
-        const total = parts.reduce((s, x) => s + x.length, 0), out = new Uint8Array(total);
-        let o = 0; for (const x of parts) { out.set(x, o); o += x.length; }
+        // indefinite: definite chunks up to the break; measure, then copy once
+        const start = this.p;
+        let total = 0;
+        while (!this.atBreak()) {
+            const ib = this.head();
+            if (ib >> 5 !== 2) throw new Error("cbor: bad bytes chunk");
+            const len = this.length(ib & 31);
+            if (len === -1 || this.p + len > this.len) throw new Error(OUT_OF_INPUT);
+            total += len; this.p += len;
+        }
+        const out = new Uint8Array(total);
+        let p = start, o = 0;
+        for (;;) {
+            const ib = this.b[p++]!;
+            if (ib === 0xff) break;
+            const ai2 = ib & 31;
+            let len: number;
+            if (ai2 < 24) len = ai2;
+            else if (ai2 === 24) len = this.b[p++]!;
+            else if (ai2 === 25) { len = (this.b[p]! << 8) | this.b[p + 1]!; p += 2; }
+            else if (ai2 === 26) { len = ((this.b[p]! << 24) >>> 0) + ((this.b[p + 1]! << 16) | (this.b[p + 2]! << 8) | this.b[p + 3]!); p += 4; }
+            else { const save = this.p; this.p = p; len = this.length(ai2); p = this.p; this.p = save; }
+            out.set(this.b.subarray(p, p + len), o); o += len; p += len;
+        }
         return out;
-    };
-    const items = (ai: number): Data[] => {
-        const n = arg(ai), out: Data[] = [];
-        if (n === -1) { while (b[p] !== 0xff) out.push(item()); p++; } else for (let i = 0; i < Number(n); i++) out.push(item());
+    }
+    items(ai: number): Data[] {
+        const n = this.length(ai), out: Data[] = [];
+        if (n === -1) { while (!this.atBreak()) out.push(this.item()); }
+        else for (let i = 0; i < n; i++) out.push(this.item());
         return out;
-    };
-    const item = (): Data => {
-        const ib = b[p++]!;
+    }
+    constrFields(): Data[] {
+        const ib = this.head();
+        if (ib >> 5 !== 4) throw new Error("cbor: constr fields not a list");
+        return this.items(ib & 31);
+    }
+    item(): Data {
+        const ib = this.head();
         const major = ib >> 5, ai = ib & 31;
         switch (major) {
-            case 0: return new DInt(BigInt(arg(ai)));
-            case 1: return new DInt(-1n - BigInt(arg(ai)));
-            case 2: return new DBytes(bytesItem(ai));
-            case 4: return new DList(items(ai));
+            case 0: { const n = this.arg(ai); return new DInt(typeof n === "number" ? (n < 256 ? SMALL_BIG[n]! : BigInt(n)) : n); }
+            case 1: { const n = this.arg(ai); return new DInt(typeof n === "number" ? (n < 256 ? SMALL_NEG[n]! : -1n - BigInt(n)) : -1n - n); }
+            case 2: return new DBytes(this.bytesItem(ai));
+            case 4: return new DList(this.items(ai));
             case 5: {
-                const n = arg(ai), out: DPair[] = [];
-                if (n === -1) { while (b[p] !== 0xff) { const k = item(); out.push(new DPair(k, item())); } p++; }
-                else for (let i = 0; i < Number(n); i++) { const k = item(); out.push(new DPair(k, item())); }
+                const n = this.length(ai), out: DPair[] = [];
+                if (n === -1) { while (!this.atBreak()) { const k = this.item(); out.push(new DPair(k, this.item())); } }
+                else for (let i = 0; i < n; i++) { const k = this.item(); out.push(new DPair(k, this.item())); }
                 return new DMap(out);
             }
             case 6: {
-                const t = Number(arg(ai));
-                if (t >= 121 && t <= 127) { const ib2 = b[p++]!; if (ib2 >> 5 !== 4) throw new Error("cbor: constr fields not a list"); return new DConstr(BigInt(t - 121), items(ib2 & 31)); }
-                if (t >= 1280 && t <= 1400) { const ib2 = b[p++]!; if (ib2 >> 5 !== 4) throw new Error("cbor: constr fields not a list"); return new DConstr(BigInt(t - 1280 + 7), items(ib2 & 31)); }
+                const t = this.arg(ai);
+                if (t >= 121 && t <= 127) return new DConstr(SMALL_BIG[(t as number) - 121]!, this.constrFields());
+                if (t >= 1280 && t <= 1400) return new DConstr(SMALL_BIG[(t as number) - 1280 + 7]!, this.constrFields());
                 if (t === 102) {
-                    const ib2 = b[p++]!;
-                    if (ib2 !== 0x82) throw new Error("cbor: tag 102 not a pair");
-                    const ib3 = b[p++]!; if (ib3 >> 5 !== 0) throw new Error("cbor: tag 102 alternative");
-                    const alt = BigInt(arg(ib3 & 31));
-                    const ib4 = b[p++]!; if (ib4 >> 5 !== 4) throw new Error("cbor: tag 102 fields");
-                    return new DConstr(alt, items(ib4 & 31));
+                    if (this.head() !== 0x82) throw new Error("cbor: tag 102 not a pair");
+                    const ib3 = this.head(); if (ib3 >> 5 !== 0) throw new Error("cbor: tag 102 alternative");
+                    const a = this.arg(ib3 & 31);
+                    const alt = typeof a === "number" ? (a < 256 ? SMALL_BIG[a]! : BigInt(a)) : a;
+                    return new DConstr(alt, this.constrFields());
                 }
                 if (t === 2 || t === 3) {
-                    const ib2 = b[p++]!; if (ib2 >> 5 !== 2) throw new Error("cbor: bignum not bytes");
-                    const mag = bytesItem(ib2 & 31);
-                    let v = 0n; for (const x of mag) v = (v << 8n) | BigInt(x);
+                    const ib2 = this.head(); if (ib2 >> 5 !== 2) throw new Error("cbor: bignum not bytes");
+                    const mag = this.bytesItem(ib2 & 31);
+                    let v = 0n;
+                    for (let i = 0; i < mag.length; i++) v = (v << 8n) | BigInt(mag[i]!);
                     return new DInt(t === 2 ? v : -1n - v);
                 }
                 throw new Error(`cbor: unexpected tag ${t} in Data`);
             }
         }
         throw new Error(`cbor: unexpected major type ${major} in Data`);
-    };
-    const d = item();
-    if (p !== b.length) throw new Error("cbor: trailing bytes after Data");
+    }
+}
+
+/**
+ * Decode Plutus Data from CBOR (tolerant of definite/indefinite forms, as the ledger decoder).
+ * Bytestrings are always fresh copies: `Buffer#slice` is a view, and a value sharing memory with
+ * the block would let any mutation reach the transaction bytes (seen with a delegated builtin).
+ */
+export function decodeData(b: Uint8Array): Data {
+    const r = new DataReader(b);
+    const d = r.item();
+    if (r.p !== b.length) throw new Error("cbor: trailing bytes after Data");
     return d;
 }

@@ -16,13 +16,14 @@
  *   UTXOW:   ScriptWitnessNotValidating, Extraneous/MissingScriptWitnesses, UnspendableUTxONoDatumHash,
  *            MissingRequiredDatums, NotAllowedSupplementalDatums, ExtraRedeemers, InvalidWitnesses,
  *            MissingVKeyWitnesses, metadata hash, script integrity hash
- *   UTXO:    OutsideValidityInterval, InputSetEmpty, FeeTooSmall + collateral (ScriptsNotPaid,
+ *   UTXO:    OutsideValidityInterval, OutsideForecast, InputSetEmpty, FeeTooSmall + collateral (ScriptsNotPaid,
  *            CollateralContainsNonADA, InsufficientCollateral, IncorrectTotalCollateralField,
  *            NoCollateralInputs), BadInputs, ValueNotConserved, BabbageOutputTooSmall, OutputTooBig,
  *            WrongNetwork, WrongNetworkWithdrawal, WrongNetworkInTxBody, MaxTxSize, ExUnitsTooBig,
  *            TooManyCollateralInputs
  * Not modelled (block rules still reject them, as a text failure): MissingRedeemers, GOV,
- * treasury value, withdrawal amounts/DRep delegation, OutsideForecast, bootstrap attribute size.
+ * treasury value, withdrawal amounts/DRep delegation, bootstrap attribute size.
+ * A transaction marked invalid (is_valid = false) skips the withdrawal checks and CERTS, as LEDGER does.
  */
 import { Cbor, CborArray, CborBytes, CborMap, CborTag, CborUInt, CborNegInt, type CborObj } from "@harmoniclabs/cbor";
 import { Address, ByronAddress, CredentialType, Script } from "@harmoniclabs/cardano-ledger-ts";
@@ -39,6 +40,7 @@ import { costModelArrays, languageViews, scriptLanguageOfCbor, witnessDatumBytes
 import { evaluateTxRules, tierRefScriptFee, type TxRuleParams } from "../consensus/rules/txRules";
 import { addAll, addUnit, unitsEqual, unitsOf, type UnitMap } from "../consensus/rules/value";
 import { toFraction } from "../network/n2c/pparamsCbor";
+import { EPOCH_GEOMETRY, getEpochNetwork, type EpochGeometry } from "../utils/epochFromSlotCalculations";
 import {
     ALL_INPUTS_SPENT, CertsF, compareRewardAccounts, LedgerF, RuleRun, UtxoF, UtxowF, type TxOutParts,
 } from "./applyTxErr";
@@ -49,6 +51,30 @@ export const MAX_REF_SCRIPT_SIZE_PER_TX = 200 * 1024;
 /** Conway `maxRefScriptSizePerBlock`. */
 export const MAX_REF_SCRIPT_SIZE_PER_BLOCK = 1024 * 1024;
 
+/**
+ * The per-transaction reference-script limit: Conway's constant, unless the parameter record carries
+ * `max_ref_script_size_per_tx` (a protocol parameter from Dijkstra on; test corpora vary it too).
+ */
+export function maxRefScriptSizePerTx(raw: Record<string, unknown> | undefined): number {
+    const n = Number(raw?.max_ref_script_size_per_tx);
+    return raw?.max_ref_script_size_per_tx != null && Number.isFinite(n) && n >= 0 ? n : MAX_REF_SCRIPT_SIZE_PER_TX;
+}
+
+/**
+ * The slot the ledger's `EpochInfo` cannot translate to time from (ouroboros-consensus HFC, the last
+ * era with no transition known): the first epoch boundary at or after `next(tip) + safe zone`, the
+ * safe zone being the stability window 3k/f (`History.mkUpperBound` over `slotToEpochBound`, which
+ * rounds up). `nextSlot` is the slot after the ledger tip (the mempool's ticked slot). Null when the
+ * geometry has no stability window or the slot precedes the Shelley-era start.
+ */
+export function forecastHorizonSlot(nextSlot: bigint, g: EpochGeometry): bigint | null {
+    if (g.stabilityWindow == null || g.shelleySlotsPerEpoch <= 0n) return null;
+    const s = nextSlot + g.stabilityWindow;
+    if (s < g.shelleyStartSlot) return null;
+    const e = g.shelleySlotsPerEpoch;
+    return g.shelleyStartSlot + ((s - g.shelleyStartSlot + e - 1n) / e) * e;
+}
+
 /** The ledger state a transaction is validated against (the tip ticked to the next slot). */
 export interface MempoolLedgerState {
     /** Tip slot + 1: cardano-node ticks the mempool's ledger state to the successor slot. */
@@ -56,6 +82,8 @@ export interface MempoolLedgerState {
     params: EpochBodyParams;
     genesis: any;
     network: "mainnet" | "testnet";
+    /** The first slot past the forecast horizon; absent: from the active epoch geometry (`forecastHorizonSlot`), null: unchecked. */
+    forecastHorizon?: bigint | null;
 }
 
 /** What the transaction reads from the ledger (after earlier mempool transactions). */
@@ -234,7 +262,8 @@ export function mempoolMeasureFailure(tx: MempoolTx, resolved: Map<string, Resol
         return { failure: LedgerF.utxow(UtxowF.utxo(UtxoF.exUnitsTooBig([maxMem, maxSteps], [mem, steps]))), reason: `execution units (${mem}, ${steps}) > max (${maxMem}, ${maxSteps})` };
     }
     const refBytes = txRefScriptBytes(tx, resolved);
-    if (refBytes > MAX_REF_SCRIPT_SIZE_PER_TX) return { failure: LedgerF.txRefScriptsSizeTooBig(refBytes, MAX_REF_SCRIPT_SIZE_PER_TX), reason: `reference scripts ${refBytes} B > max ${MAX_REF_SCRIPT_SIZE_PER_TX}` };
+    const maxRef = maxRefScriptSizePerTx(raw);
+    if (refBytes > maxRef) return { failure: LedgerF.txRefScriptsSizeTooBig(refBytes, maxRef), reason: `reference scripts ${refBytes} B > max ${maxRef}` };
     return null;
 }
 
@@ -380,13 +409,15 @@ export function evaluateMempoolPhase1(tx: MempoolTx, state: MempoolLedgerState, 
 
     const ledger = new RuleRun();
     const refBytes = txRefScriptBytes(tx, resolved);
-    if (refBytes > MAX_REF_SCRIPT_SIZE_PER_TX) { ledger.fail(LedgerF.txRefScriptsSizeTooBig(refBytes, MAX_REF_SCRIPT_SIZE_PER_TX)); reasons.push(`reference scripts ${refBytes} B > max`); }
+    const maxRef = maxRefScriptSizePerTx(raw);
+    if (refBytes > maxRef) { ledger.fail(LedgerF.txRefScriptsSizeTooBig(refBytes, maxRef)); reasons.push(`reference scripts ${refBytes} B > max`); }
 
     // Withdrawals (Conway LEDGER, protocol 10+): a key-hash reward account must be delegated to a
     // DRep, and (11+) must exist. Only unregistered accounts are judged here — an unregistered
     // account is certainly neither; DRep delegation and exact balances of registered accounts are
     // left to the block rules.
-    const missingAccounts = look.stake ? tx.withdrawals.filter((w) => !look.stake!.registered.has(credKey(w.credType, w.credHex))) : [];
+    // Only a phase-2-valid transaction runs these and CERTS (Conway LEDGER `isValid == IsValid True`, bug 531).
+    const missingAccounts = look.stake && tx.isValid ? tx.withdrawals.filter((w) => !look.stake!.registered.has(credKey(w.credType, w.credHex))) : [];
     if (pv >= 10 && missingAccounts.some((w) => w.credType === 0)) {
         ledger.fail(LedgerF.wdrlNotDelegatedToDRep(missingAccounts.filter((w) => w.credType === 0).map((w) => w.credHex)));
         reasons.push("withdrawal from a key account not delegated to a DRep");
@@ -399,7 +430,7 @@ export function evaluateMempoolPhase1(tx: MempoolTx, state: MempoolLedgerState, 
     // CERTS: the certificate sequence against the registration state (certificateRules.ts);
     // before protocol 11 the withdrawal accounts are checked here (WithdrawalsNotInRewardsCERTS).
     const certsRun = new RuleRun(LedgerF.certs);
-    if (look.stake && (body.certs ?? []).length) {
+    if (look.stake && tx.isValid && (body.certs ?? []).length) {
         const views = certViews(body);
         const verdict = checkCertificateSequence(views, new Set(look.stake.registered), new Map(look.stake.delegated));
         if (!verdict.ok) {
@@ -521,6 +552,12 @@ export function evaluateMempoolPhase1(tx: MempoolTx, state: MempoolLedgerState, 
     const start = body.validityIntervalStart != null ? BigInt(body.validityIntervalStart) : null;
     const ttl = body.ttl != null ? BigInt(body.ttl) : null;
     if ((start != null && slot < start) || (ttl != null && slot >= ttl)) { utxo.fail(UtxoF.outsideValidityInterval(start, ttl, slot)); reasons.push(`outside validity interval [${start ?? "-"}, ${ttl ?? "-"}) at slot ${slot}`); }
+    // Alonzo `validateOutsideForecast`: with redeemers, the upper bound must translate to time (the
+    // script context carries it), i.e. lie before the forecast horizon (bug 532)
+    if (ttl != null && effectiveRedeemers((tx.witnessSet?.redeemers ?? []) as any[], 7).length > 0) {
+        const horizon = state.forecastHorizon !== undefined ? state.forecastHorizon : forecastHorizonSlot(slot, EPOCH_GEOMETRY[getEpochNetwork()]);
+        if (horizon != null && ttl >= horizon) { utxo.fail(UtxoF.outsideForecast(ttl)); reasons.push(`validity upper bound ${ttl} past the forecast horizon ${horizon}`); }
+    }
     if (tx.inputs.length === 0) { utxo.fail(UtxoF.inputSetEmpty()); reasons.push("no inputs"); }
     const fee = BigInt(body.fee ?? 0);
     {

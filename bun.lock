@@ -1,5 +1,5 @@
 {
-  "lockfileVersion": 2,
+  "lockfileVersion": 3,
   "configVersion": 1,
   "workspaces": {
     "": {
@@ -10,11 +10,11 @@
         "@connectrpc/connect": "1.4.0",
         "@connectrpc/connect-node": "1.4.0",
         "@harmoniclabs/buildooor": "^0.1.31",
-        "@harmoniclabs/cardano-ledger-ts": "file:vendor/harmoniclabs-cardano-ledger-ts-0.6.0-dijkstra.1.tgz",
+        "@harmoniclabs/cardano-ledger-ts": "file:vendor/harmoniclabs-cardano-ledger-ts-0.6.0.tgz",
         "@harmoniclabs/cardano-math-ts": "^0.0.5",
         "@harmoniclabs/cbor": "^1.6.6",
         "@harmoniclabs/crypto": "^0.3.1",
-        "@harmoniclabs/kes": "file:vendor/harmoniclabs-kes-0.1.0-dev2.tgz",
+        "@harmoniclabs/kes": "file:vendor/harmoniclabs-kes-0.1.0.tgz",
         "@harmoniclabs/obj-utils": "^1.0.0",
         "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.5-dev7",
         "@harmoniclabs/shared-cardano-mempool-ts": "file:vendor/harmoniclabs-shared-cardano-mempool-ts-0.0.0.tgz",
@@ -48,6 +48,15 @@
     "@harmoniclabs/cardano-ledger-ts@0.4.8": "patches/@harmoniclabs%2Fcardano-ledger-ts@0.4.8.patch",
     "@harmoniclabs/plutus-machine@2.1.3": "patches/@harmoniclabs%2Fplutus-machine@2.1.3.patch",
   },
+  "overrides": {
+    "@harmoniclabs/cardano-costmodels-ts": "file:vendor/harmoniclabs-cardano-costmodels-ts-1.7.0.tgz",
+    "@harmoniclabs/cbor@^2": {
+      ".": "file:vendor/harmoniclabs-cbor-2.1.0.tgz",
+    },
+    "@harmoniclabs/plutus-data@^2": {
+      ".": "file:vendor/harmoniclabs-plutus-data-2.1.0.tgz",
+    },
+  },
   "packages": {
     "@blockfrost/blockfrost-js": ["@blockfrost/blockfrost-js@6.2.0", "", { "dependencies": { "@blockfrost/openapi": "0.1.92", "@emurgo/cardano-serialization-lib-nodejs": "^15.0.3", "@emurgo/cip14-js": "3.0.1", "bottleneck": "^2.19.5", "form-data": "^4.0.0", "got": "^11.8.6", "json-bigint": "^1.0.0" } }, "sha512-5vU1jI7MLZA1fNSirtixr4mQ+sSGhXTIXj7YvXM+CZSDrU84YtrVcyOpMRHix/vuX7QtWwyc7VXsUfszQccgug=="],
 
@@ -79,9 +88,9 @@
 
     "@harmoniclabs/bytestring": ["@harmoniclabs/bytestring@1.0.0", "", { "dependencies": { "@harmoniclabs/uint8array-utils": "^1.0.0" } }, "sha512-d5m10O0okKc6QNX0pSRriFTkk/kNMnMBGbo5X3kEZwKaXTI4tDVoTZBL7bwbYHwOEdSxWJjVtlO9xtB7ZrYZNg=="],
 
-    "@harmoniclabs/cardano-costmodels-ts": ["@harmoniclabs/cardano-costmodels-ts@1.6.1", "", { "dependencies": { "@harmoniclabs/cbor": "^2.0.1", "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" } }, "sha512-rbkhdCXbG2C8RgQxWAgAAIrOEQCGr6qVk8IzF4aVjVqrcXDPmaWFVqCpHk3GjX8D9NVj277TfEEav3gIR2hMFQ=="],
+    "@harmoniclabs/cardano-costmodels-ts": ["@harmoniclabs/cardano-costmodels-ts@vendor/harmoniclabs-cardano-costmodels-ts-1.7.0.tgz", { "dependencies": { "@harmoniclabs/cbor": "^2.0.2", "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" } }, "sha512-5HG/qYkBaYxHrx0IbwI/X934wUt/Tko8tDa9qVD+Lrr2THn1NieLoOqbpjcmC8U9ZUXcky2+0fR1O6fj94AZYQ=="],
 
-    "@harmoniclabs/cardano-ledger-ts": ["@harmoniclabs/cardano-ledger-ts@vendor/harmoniclabs-cardano-ledger-ts-0.6.0-dijkstra.1.tgz", { "dependencies": { "@harmoniclabs/bigint-utils": "^1.0.0", "@harmoniclabs/bip32_ed25519": "^0.1.3", "@harmoniclabs/cardano-costmodels-ts": "^1.5.0", "@harmoniclabs/cbor": "^2.0.1", "@harmoniclabs/crypto": "^0.3.0", "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/pair": "^1.0.0", "@harmoniclabs/plutus-data": "^2.0.1", "@harmoniclabs/plutus-machine": "^3.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4", "@harmoniclabs/uplc": "^2.0.5" } }, "sha512-E1xCEDtq30egZ/DVpoPTzwKWM6ibRe+FHXv7KxgKVFokPDWEEXQaVvs1e9lhN2DeF3xC+WjSNtVD0X8L1XSK/g=="],
+    "@harmoniclabs/cardano-ledger-ts": ["@harmoniclabs/cardano-ledger-ts@vendor/harmoniclabs-cardano-ledger-ts-0.6.0.tgz", { "dependencies": { "@harmoniclabs/bigint-utils": "^1.0.0", "@harmoniclabs/bip32_ed25519": "^0.1.3", "@harmoniclabs/cardano-costmodels-ts": "^1.6.1", "@harmoniclabs/cbor": "^2.0.1", "@harmoniclabs/crypto": "^0.3.0", "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/pair": "^1.0.0", "@harmoniclabs/plutus-data": "^2.0.1", "@harmoniclabs/plutus-machine": "^3.0.3", "@harmoniclabs/uint8array-utils": "^1.0.4", "@harmoniclabs/uplc": "^2.0.5" } }, "sha512-RtEM48gbHv5OgX8EtooeHi8KgsTYrOk90DDM7gWfg//zxPXnHf7fQHXFtCXVAITopreCWCZ0cj9aFe2Mc5k4VQ=="],
 
     "@harmoniclabs/cardano-math-ts": ["@harmoniclabs/cardano-math-ts@0.0.5", "", { "dependencies": { "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" } }, "sha512-hDicmdXNqyZ0x4CQWeO+rcIpn3YURK4SxBRbmo9MtGqdiKyQhRDDkkm/4mkLtwxs33PRGBMdmu0e38M3C7rXTw=="],
 
@@ -93,7 +102,7 @@
 
     "@harmoniclabs/crypto": ["@harmoniclabs/crypto@0.3.1", "", { "dependencies": { "@harmoniclabs/bitstream": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.3" } }, "sha512-KA9KgI+2c+9KddAU0A5mTAC/O94J25IwvU6z6wzvgIZMYY5f4VxWLvPWA6aRpAe9pO7hOC9s5hu1FzZWxJkZ5A=="],
 
-    "@harmoniclabs/kes": ["@harmoniclabs/kes@vendor/harmoniclabs-kes-0.1.0-dev2.tgz", { "dependencies": { "@harmoniclabs/crypto": "^0.3.0" } }, "sha512-13f7G1abiLIAo2gfpGvQyIrsm8mF0tdLvRVIrzS1+ziTNPX24mm8WkAKF3AGkgh0R0DLpV/imlwods6mjtGepg=="],
+    "@harmoniclabs/kes": ["@harmoniclabs/kes@vendor/harmoniclabs-kes-0.1.0.tgz", { "dependencies": { "@harmoniclabs/crypto": "^0.3.1" } }, "sha512-Nxc4j2HnqVO3uJpfDmINwDlkg8E1TeaufJDoBhICLlZCyN5XylriWPwzoVSrLhUg66t/O0NuH4JzssL3urRCOA=="],
 
     "@harmoniclabs/obj-utils": ["@harmoniclabs/obj-utils@1.0.0", "", {}, "sha512-EO1bQBZAORrutcP+leP5YNDwNd/9TOE23VEvs3ktniXg6w0knUrLjUIl2Pkcbs/D1VQxqmsNpXho+vaMj00qxA=="],
 
@@ -121,7 +130,7 @@
 
     "@szmarczak/http-timer": ["@szmarczak/http-timer@4.0.6", "", { "dependencies": { "defer-to-connect": "^2.0.0" } }, "sha512-4BAffykYOgO+5nzBWYwE3W90sBgLJoUPRWWcL8wlyiM8IB8ipJz3UMJ9KXQd1RKQXpKp8Tutn80HZtWsu2u76w=="],
 
-    "@types/bun": ["@types/bun@1.4.2", "", { "dependencies": { "bun-types": "1.4.2" } }, "sha512-GimotNn7+ZV0uVArItBbriZsR1oNf0+WTzPkdcFrzShI7k2norL0uzEaJT8T33dWr7O/c9ZDuAFQrctKCi72oQ=="],
+    "@types/bun": ["@types/bun@1.4.3", "", { "dependencies": { "bun-types": "1.4.3" } }, "sha512-N67Pqy8JXbAY/j0tNraS3V5mubGvc6rrrNDmDCtZLlFzccbUJPDb0tvgUBC5q4m8ybkP93Jcn1QB+RYQ6PvBhw=="],
 
     "@types/cacheable-request": ["@types/cacheable-request@6.0.3", "", { "dependencies": { "@types/http-cache-semantics": "*", "@types/keyv": "^3.1.4", "@types/node": "*", "@types/responselike": "^1.0.0" } }, "sha512-IQ3EbTzGxIigb1I3qPZc1rWJnH0BmSKv5QYTalEwweFvyBDLSAe24zP0le/hyi7ecGfZVlIVAg4BZqb8WBwKqw=="],
 
@@ -153,7 +162,7 @@
 
     "bare-stream": ["bare-stream@2.13.4", "", { "dependencies": { "b4a": "^1.8.1", "streamx": "^2.25.0", "teex": "^1.0.1" }, "peerDependencies": { "bare-abort-controller": "*", "bare-buffer": "*", "bare-events": "*" }, "optionalPeers": ["bare-abort-controller", "bare-buffer", "bare-events"] }, "sha512-PcrQ8lVLbiJscNm1Kez+Yp4Gy4AHGcN1lzwjvf5NybWen7VvEgUfyfnXYJ2zNqWnzOfCb1Abq6lH8ti0syQszA=="],
 
-    "bare-url": ["bare-url@2.5.4", "", { "dependencies": { "bare-path": "^3.0.0" } }, "sha512-Gxa7UVWBr0/edU1b+TJhn/AZvMQUj9OGspvYsaTYQrAbZA4BOTZGL3LiZxvD+CeMlDH4juwD84+eTAp/bLYW5g=="],
+    "bare-url": ["bare-url@2.5.5", "", { "dependencies": { "bare-path": "^3.0.0" } }, "sha512-iM9qJCruvpt2rPaLsrumVDru9pogI7PHziHIa9kTNRFt8C8HuSa+kI9kFezK+NvHEFnnz71rKGZ1EAilq/3V/Q=="],
 
     "base64-js": ["base64-js@1.5.1", "", {}, "sha512-AKpaYlHn8t4SVbOHCy+b5+KKgvR4vrsD8vbvrbiQJps7fKDTkjkDry6ji0rUJjC0kzbNePLwzxq8iypo41qeWA=="],
 
@@ -171,7 +180,7 @@
 
     "buffer": ["buffer@6.0.3", "", { "dependencies": { "base64-js": "^1.3.1", "ieee754": "^1.2.1" } }, "sha512-FTiCpNxtwiZZHEZbcbTIcZjERVICn9yq/pDFkTl95/AxzD1naBctN7YO68riM/gLSDY7sdrMby8hofADYuuqOA=="],
 
-    "bun-types": ["bun-types@1.4.2", "", { "dependencies": { "@types/node": "*" } }, "sha512-bxV1FgK7yBIzjRe5zBozIM4Bem11ZJcCXSrjWRG3YWLt8yFDePu4cLjpebO8OvPeIE9trbyPF4fuj3Cia4Fj3w=="],
+    "bun-types": ["bun-types@1.4.3", "", { "dependencies": { "@types/node": "*", "undici-types": "*" } }, "sha512-tinRJNGOmUN+tEAsn2y2e942n9JHRHR42iUYzDH75NmhJqVBokGSQkkfSFdNWwsANIdrK6ACH9t01M452YyTwg=="],
 
     "cacheable-lookup": ["cacheable-lookup@5.0.4", "", {}, "sha512-2/kNscPhpcxrOigMZzbiWF7dz8ilhb/nIHU3EyZiXWXpeq/au8qJ8VhdftMkty3n7Gj6HIGalQG8oiBNB3AJgA=="],
 
@@ -325,7 +334,7 @@
 
     "undici": ["undici@5.29.0", "", { "dependencies": { "@fastify/busboy": "^2.0.0" } }, "sha512-raqeBD6NQK4SkWhQzeYKd1KmIG6dllBOTt55Rmkt4HtI9mwdWtJljnrXjAFUBLTSN67HWrOIZ3EPF4kjUw80Bg=="],
 
-    "undici-types": ["undici-types@6.21.0", "", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
+    "undici-types": ["undici-types@8.12.2", "", {}, "sha512-VoMeD2O0KdHhcn+oPqOrpivN+7aDOklVSwOLD7JNjbzV1CboAFek9IFOXnreoufTUtAsCsOK0iETiERPNR/fDA=="],
 
     "which": ["which@2.0.2", "", { "dependencies": { "isexe": "^2.0.0" }, "bin": { "node-which": "./bin/node-which" } }, "sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA=="],
 
@@ -335,11 +344,11 @@
 
     "@harmoniclabs/buildooor/@harmoniclabs/cardano-ledger-ts": ["@harmoniclabs/cardano-ledger-ts@0.4.8", "", { "dependencies": { "@harmoniclabs/bigint-utils": "^1.0.0", "@harmoniclabs/crypto": "^0.3.0", "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" }, "peerDependencies": { "@harmoniclabs/bip32_ed25519": "^0.1.3", "@harmoniclabs/cardano-costmodels-ts": "^1.3.0", "@harmoniclabs/cbor": "^1.6.6", "@harmoniclabs/pair": "^1.0.0", "@harmoniclabs/plutus-data": "^1.2.6", "@harmoniclabs/plutus-machine": "^2.1.1", "@harmoniclabs/uplc": "^1.4.1" } }, "sha512-T1reZL09JoHke0YGvvTJb9I7OBQ0pUQF3fUnJVoR5hoRjNa5OoYn5+KxMnKzJ+cBAIYsIe1v62BDheXWOq8LlQ=="],
 
-    "@harmoniclabs/cardano-costmodels-ts/@harmoniclabs/cbor": ["@harmoniclabs/cbor@2.0.2", "", { "dependencies": { "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" } }, "sha512-D4rWOZqux7YScgXwBLoTomB7YkBsjOh+JLJZcIxauZn9UAio0yLORBfN1kblmQ1Ta32hZMQ+H0hJ08CPYWfY4A=="],
+    "@harmoniclabs/cardano-costmodels-ts/@harmoniclabs/cbor": ["@harmoniclabs/cbor@vendor/harmoniclabs-cbor-2.1.0.tgz", { "dependencies": { "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" } }, "sha512-r3rMx0i2rxmqSctwDIEAV0hPCf8teWIs3c092k7Z+hrc1AVzCugDBDbDUPJAsA79feHdKigDWYjO/s3eMTRWbw=="],
 
-    "@harmoniclabs/cardano-ledger-ts/@harmoniclabs/cbor": ["@harmoniclabs/cbor@2.0.2", "", { "dependencies": { "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" } }, "sha512-D4rWOZqux7YScgXwBLoTomB7YkBsjOh+JLJZcIxauZn9UAio0yLORBfN1kblmQ1Ta32hZMQ+H0hJ08CPYWfY4A=="],
+    "@harmoniclabs/cardano-ledger-ts/@harmoniclabs/cbor": ["@harmoniclabs/cbor@vendor/harmoniclabs-cbor-2.1.0.tgz", { "dependencies": { "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" } }, "sha512-r3rMx0i2rxmqSctwDIEAV0hPCf8teWIs3c092k7Z+hrc1AVzCugDBDbDUPJAsA79feHdKigDWYjO/s3eMTRWbw=="],
 
-    "@harmoniclabs/cardano-ledger-ts/@harmoniclabs/plutus-data": ["@harmoniclabs/plutus-data@2.0.1", "", { "dependencies": { "@harmoniclabs/crypto": "^0.3.0", "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" }, "peerDependencies": { "@harmoniclabs/cbor": "^2.0.1" } }, "sha512-JOU1SgcFdss9cTR4fifpoqXIIiimv837OC4jX0yRzT97ACxOVNFy7DvqfG2ur5k50+RzGdF3qYtEaV8dbTJ2Qw=="],
+    "@harmoniclabs/cardano-ledger-ts/@harmoniclabs/plutus-data": ["@harmoniclabs/plutus-data@vendor/harmoniclabs-plutus-data-2.1.0.tgz", { "dependencies": { "@harmoniclabs/cbor": "^2.0.1", "@harmoniclabs/crypto": "^0.3.0", "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.4" } }, "sha512-XQEPWQaXtOW7jtpc7HzsckLSI5+Cb2wprFYFWuMku5W+fVUTrYm9KKAtnNIfLynXTpmoLcm23/2PKPhB5Sk3Bg=="],
 
     "@harmoniclabs/cardano-ledger-ts/@harmoniclabs/plutus-machine": ["@harmoniclabs/plutus-machine@3.0.3", "", { "dependencies": { "@harmoniclabs/bigint-utils": "^1.0.0", "@harmoniclabs/cardano-costmodels-ts": "^1.6.1", "@harmoniclabs/crypto": "^0.3.0", "@harmoniclabs/obj-utils": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.3", "@noble/curves": "1.9.7", "@noble/hashes": "1.7.2" }, "peerDependencies": { "@harmoniclabs/cbor": "^2.0.1", "@harmoniclabs/plutus-data": "^2.0.1", "@harmoniclabs/uplc": "^2.0.6" } }, "sha512-G/nU8H+om2H2c2nqRtXba1K8Q5TrezwXSP1LwjOAfyr9weQqFRfdmrIe0zC0RJKiMMi/KwMISj1cDYqdrqlU/w=="],
 
@@ -354,6 +363,8 @@
     "@types/cacheable-request/@types/node": ["@types/node@26.6.5", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg=="],
 
     "@types/keyv/@types/node": ["@types/node@26.6.5", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg=="],
+
+    "@types/node/undici-types": ["undici-types@6.21.0", "", {}, "sha512-iwDZqg0QAGrg9Rav5H4n0M64c3mkR59cJ6wQp+7C4nI0gsmExaedaYLNO44eT4AtBBwjbTiGPMlt2Md0T9H9JQ=="],
 
     "@types/responselike/@types/node": ["@types/node@26.6.5", "", { "dependencies": { "undici-types": "~8.9.0" } }, "sha512-uMzsv9stDdofIZBx4UGh4Z9ZgXnGC9seRDscilBcTHAeOFk67MZg/k9bWVfO+bk4qZmG+l52hRnLwUiH2LnJTg=="],
 

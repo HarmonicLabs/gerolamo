@@ -45,4 +45,19 @@ describe("ChainSyncPipeline", () => {
         expect(p.inFlight).toBe(0);
         expect(p.isAtTip).toBe(false);
     });
+    test("near the tip the depth follows the headers the server still has (bug 390)", () => {
+        const p = new ChainSyncPipeline({ maxDepth: 32 });
+        p.noteRemaining(5000); // far behind: full pipelining
+        expect(p.toSend()).toBe(32);
+        p.noteSent(32);
+        // the tip comes close: 3 headers left, so at most 4 in flight
+        for (let i = 0; i < 29; i++) { p.noteReply(); p.noteRemaining(3); }
+        expect(p.inFlight).toBe(3);
+        expect(p.toSend()).toBe(1);
+        p.noteSent(1);
+        p.noteReply(); p.noteRemaining(0);
+        expect(p.toSend()).toBe(0); // 3 still in flight ≥ depth 1: nothing more is queued at the server
+        p.reset();
+        expect(p.toSend()).toBe(32); // a reset forgets the estimate
+    });
 });

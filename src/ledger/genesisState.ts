@@ -42,6 +42,7 @@
  */
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { ByronAddress } from "@harmoniclabs/cardano-ledger-ts";
+import { byronAddressType } from "../consensus/byron/byronAddressCompat";
 import type { LedgerStore, LedgerView } from "./LedgerStore";
 import { UtxoWrites, DB_UTXO, decodeRow, keyRef, refKey, type UtxoRecord } from "./utxoStore";
 import { StakeWrites } from "./stakeStore";
@@ -133,7 +134,7 @@ function byronGenesisRecords(byron: any): UtxoRecord[] {
 /** Is this Byron (base58) address a redeem (AVVM) address — `isBootstrapRedeemer`? */
 export function isRedeemAddress(address: string | null): boolean {
     if (!address || address.startsWith("addr") || address.startsWith("stake")) return false;
-    try { return ByronAddress.isValid(address) && ByronAddress.fromBase58(address).type === 2; } catch { return false; }
+    try { return ByronAddress.isValid(address) && byronAddressType(ByronAddress.fromBase58(address)) === 2; } catch { return false; }
 }
 
 /** Build the genesis state (pure: no store). Throws on a configuration cardano-node would refuse. */

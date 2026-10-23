@@ -2,6 +2,7 @@ import { blake2b_256 } from "@harmoniclabs/crypto";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { ByronAddress } from "@harmoniclabs/cardano-ledger-ts";
 import { byronAddressAttributesCbor, byronAddressRoot } from "../rules/witnesses";
+import { byronAddressBytes } from "./byronAddressCompat";
 
 /**
  * Byron genesis UTxO set.
@@ -85,7 +86,7 @@ export function avvmGenesisAddress(redeemPkBase64url: string, protocolMagic?: nu
     const attributes = protocolMagic !== undefined && protocolMagic !== BYRON_MAINNET_MAGIC ? { networkMagic: protocolMagic } : {};
     const attrs = byronAddressAttributesCbor(new ByronAddress({ rootHash: new Uint8Array(28), attributes, type: 2 }));
     const addr = new ByronAddress({ rootHash: Uint8Array.from(Buffer.from(byronAddressRoot(2, 2, pk, attrs), "hex")), attributes, type: 2 });
-    return { address: addr.toBase58(), txId: toHex(blake2b_256(addr.toBytes())) };
+    return { address: addr.toBase58(), txId: toHex(blake2b_256(byronAddressBytes(addr))) };
 }
 const BYRON_MAINNET_MAGIC = 764824073;
 

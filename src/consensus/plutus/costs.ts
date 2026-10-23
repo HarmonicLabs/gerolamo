@@ -54,7 +54,9 @@ export function variantTextByBytes(variant: string): boolean { return variantBou
 
 /** A cost function over argument sizes (x, y, z, u: arguments 1–4), as Numbers. `c` is set when it is constant. */
 export interface CostFn { c: number | null; at: (x: number, y: number, z: number, u?: number) => number }
-export interface BuiltinCost { cpu: CostFn; mem: CostFn }
+/** `k`: both functions constant, the charge is `(cc, cm)` and no argument size is needed; else `cc` / `cm` are −1 where the function varies. */
+export interface BuiltinCost { cpu: CostFn; mem: CostFn; k: boolean; cc: number; cm: number }
+export function mkBuiltinCost(cpu: CostFn, mem: CostFn): BuiltinCost { return { cpu, mem, k: cpu.c !== null && mem.c !== null, cc: cpu.c ?? -1, cm: mem.c ?? -1 }; }
 export interface MachineStepCosts { startup: [number, number]; var: [number, number]; constant: [number, number]; lam: [number, number]; delay: [number, number]; force: [number, number]; apply: [number, number]; builtin: [number, number]; constr: [number, number]; case: [number, number] }
 export interface CostTable { lang: Lang; variant: string; machine: MachineStepCosts; builtins: Array<BuiltinCost | undefined>; named: Map<string, bigint> }
 
@@ -162,7 +164,7 @@ export function costTable(lang: Lang, values: ReadonlyArray<number | bigint | st
     for (let t = 0; t < BUILTIN_NAMES.length; t++) {
         const name = BUILTIN_NAMES[t]!, s = shapes[name];
         if (!s) { builtins[t] = undefined; continue; }
-        try { builtins[t] = { cpu: toFn(compile(s.cpu, `${name}-cpu-arguments`, named)), mem: toFn(compile(s.memory, `${name}-memory-arguments`, named)) }; }
+        try { builtins[t] = mkBuiltinCost(toFn(compile(s.cpu, `${name}-cpu-arguments`, named)), toFn(compile(s.memory, `${name}-memory-arguments`, named))); }
         catch { builtins[t] = undefined; } // parameters this language does not have: the builtin is not available to it either
     }
     const has = (k: string) => named.has(`${k}-exBudgetCPU`);

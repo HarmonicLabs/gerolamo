@@ -338,3 +338,25 @@ describe("RangeScheduler: no silent stall, superseded ranges (bugs 284, 285)", (
         expect(seen).toEqual([true, false]);
     });
 });
+
+describe("preferred fetch peer (bug 393)", () => {
+    test("a range submitted with preferPeer is asked from that peer first, then from the others on failure", async () => {
+        const asked: string[] = [];
+        const s = new RangeScheduler<Pt, Blk>({
+            maxInFlight: 1,
+            retryLimit: 4,
+            pickPeers: () => ["a", "b", "producer"],
+            fetch: async (peer, points) => { asked.push(peer); if (peer !== "producer") throw new Error(`peer ${peer} returned MsgNoBlocks`); return points.map((p) => ({ slot: p.slot, hash: p.hash, from: peer })); },
+            verify,
+            onRange: async () => {},
+        });
+        await s.submit(pts(0, 2), { preferPeer: "producer" }).applied;
+        expect(asked[0]).toBe("producer");
+        expect(asked.length).toBe(1);
+        // without a preference the round-robin order applies; the preferred peer is only a first choice
+        asked.length = 0;
+        await s.submit(pts(2, 2)).applied;
+        expect(asked[asked.length - 1]).toBe("producer");
+        expect(asked.length).toBeGreaterThanOrEqual(1);
+    });
+});

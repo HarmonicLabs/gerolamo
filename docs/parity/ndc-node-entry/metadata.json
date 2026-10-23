@@ -1,0 +1,26 @@
+{
+  "id": "gerolamo",
+  "name": "Gerolamo",
+  "language": "TypeScript",
+  "repository": "https://github.com/HarmonicLabs/gerolamo",
+  "website": null,
+  "color": "#0f2442",
+  "reports": {
+    "cbor-decoding": {
+      "github_releases": "HarmonicLabs/gerolamo",
+      "asset": "gerolamo-*-cbor-conformance.json"
+    },
+    "ledger-rules": {
+      "github_releases": "HarmonicLabs/gerolamo",
+      "asset": "gerolamo-*-ledger-rules.json"
+    },
+    "uplc-conformance": {
+      "github_releases": "HarmonicLabs/gerolamo",
+      "asset": "gerolamo-*-uplc-conformance.json"
+    },
+    "uplc-turbo": {
+      "github_releases": "HarmonicLabs/gerolamo",
+      "asset": "gerolamo-*-uplc-turbo.json"
+    }
+  }
+}

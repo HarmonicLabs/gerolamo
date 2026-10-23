@@ -21,7 +21,7 @@ import { parseCbor } from "../plutus/cbor";
 import { ContextError, TxContext, type Purpose } from "../plutus/context";
 import { DConstr, type Data } from "../plutus/data";
 import { costTable, type Lang } from "../plutus/costs";
-import { decodeProgram, FlatError, TK, type Program, type Term } from "../plutus/flat";
+import { applyData, decodeProgram, FlatError, type Program } from "../plutus/flat";
 import { evaluate } from "../plutus/cek";
 import { T, VCon } from "../plutus/values";
 import { costModelArrays } from "./scriptDataHash";
@@ -149,7 +149,6 @@ function dijkstraOnlyBodyKeys(ctx: TxContext): number[] {
     return out;
 }
 
-const apply = (f: Term, d: Data): Term => ({ k: TK.Apply, f, a: { k: TK.Const, v: new VCon(T.data, d) } });
 
 export function slotToPosixMs(slot: bigint, network?: string): bigint {
     // Only a name the geometry table knows selects a clock; anything else ("testnet" in the config
@@ -173,7 +172,7 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
     const scripts = scriptsOf(ctx, input.resolved);
     const outcomes: RedeemerOutcome[] = [];
     // collect (the ledger's collectPlutusScriptsWithContext): every redeemer's script, context and arguments
-    const jobs: Array<{ out: RedeemerOutcome; term: Term; lang: Lang; arr: ReadonlyArray<number | bigint> }> = [];
+    const jobs: Array<{ out: RedeemerOutcome; term: Program; lang: Lang; arr: ReadonlyArray<number | bigint> }> = [];
     for (const r of ctx.redeemers) {
         const out: RedeemerOutcome = { tag: r.tag, index: r.index, scriptHash: null, language: null, declared: { mem: r.mem, cpu: r.cpu }, ok: false };
         outcomes.push(out);
@@ -195,20 +194,21 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
         let prog: Program;
         try { prog = program(hash, script.lang, pv, script.bytes); }
         catch (e) { return { ok: false, error: `script ${hash.slice(0, 12)}… does not decode: ${(e as Error).message}`, redeemers: outcomes }; }
-        let term: Term;
+        let term: Program;
         try {
             const info = ctx.txInfo(script.lang as 1 | 2 | 3); // V4 returned "no verdict" above
             if (script.lang === 3) {
-                term = apply(prog.term, new DConstr(0n, [info, r.data, ctx.scriptInfoData(p)]));
+                term = applyData(prog, [new DConstr(0n, [info, r.data, ctx.scriptInfoData(p)])]);
             } else {
                 const sc = new DConstr(0n, [info, ctx.purposeData(p, script.lang)]);
-                term = prog.term;
+                const args: Data[] = [];
                 if (p.tag === 0) {
                     const d = ctx.spendingDatum(p);
                     if (!d) return { ok: false, error: `no datum for spend redeemer ${r.index}`, redeemers: outcomes };
-                    term = apply(term, d);
+                    args.push(d);
                 }
-                term = apply(apply(term, r.data), sc);
+                args.push(r.data, sc);
+                term = applyData(prog, args);
             }
         } catch (e) {
             if (e instanceof ContextError) return { ok: false, error: `script context: ${e.message}`, collect: true, redeemers: outcomes };

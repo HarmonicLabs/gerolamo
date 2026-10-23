@@ -19,14 +19,11 @@ const fx = JSON.parse(new TextDecoder().decode(Bun.gunzipSync(readFileSync(new U
 /** Int64-saturating costs (as in the 1.63 suite). */
 const SATURATING = ["dropList-09", "dropList-10", "dropList-14", "dropList-15", "dropList-16"];
 /**
- * Cases about the UPLC *text* parser (test tooling, not the on-chain flat decoder): value literals
- * must be sorted / non-zero, and free variables are a parse-time error upstream.
+ * Cases about the UPLC *text* parser (test tooling, not the on-chain flat decoder): free variables
+ * are a parse-time error upstream, an evaluation failure here. (The builtin/parser/value cases —
+ * literals must be canonical — pass since bug 552.)
  */
-const TEXT_PARSER_GAPS = [
-    "builtin/parser/value/currencyIDs-unordered", "builtin/parser/value/duplicate-currencyIDs", "builtin/parser/value/duplicate-tokenIDs",
-    "builtin/parser/value/empty-tokens", "builtin/parser/value/tokenIDs-unordered", "builtin/parser/value/zero-asset",
-    "term/free-vars/constr-free-var", "term/free-vars/unused-free-var", "term/free-vars/var",
-];
+const TEXT_PARSER_GAPS = ["term/free-vars/constr-free-var", "term/free-vars/unused-free-var", "term/free-vars/var"];
 
 describe("plutus-conformance at plutus master as Plutus V4, protocol 12 (variant G)", () => {
     test("fixture: the whole suite and a 361-entry V4 cost model", () => {
@@ -44,8 +41,8 @@ describe("plutus-conformance at plutus master as Plutus V4, protocol 12 (variant
             if (!TEXT_PARSER_GAPS.includes(c.name)) bad.push(`${c.name}: ${r.detail ?? ""} ${r.budgetOk ? "" : "budget"}`);
         }
         expect(bad).toEqual([]);
-        expect(pass).toBe(997);
-    });
+        expect(pass).toBe(1003);
+    }, 120_000); // 1011 cases: ~9 s on an idle machine, more under load (the 5 s default timed out on 2026-10-10)
     test("case on Data needs protocol 12: the same programs fail as V3 at protocol 11", () => {
         const data = fx.cases.filter((c) => c.name.startsWith("term/constant-case/data/") && c.expected.trim() !== "evaluation failure");
         expect(data.length).toBeGreaterThan(0);

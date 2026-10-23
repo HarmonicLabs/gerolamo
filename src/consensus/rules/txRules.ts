@@ -133,6 +133,12 @@ export interface TxRuleInput {
     refScriptBytes?: number;
     /** Are `rewardBalances` and `treasury` exact (nodeLedgerStore `ledgerStateExact`)? The withdrawal-amount and treasury rules are strict only then; `why` goes into the report otherwise. */
     exactness?: { exact: boolean; why: string };
+    /**
+     * The transaction's `is_valid` flag (default true). Bug 534: a transaction marked invalid still goes through the
+     * whole UTXOW / UTXO rule (inputs, fee, value conservation, validity interval, witnesses, outputs, …); cardano-ledger
+     * skips only LEDGER's withdrawal / treasury checks, CERTS and GOV for it. With false those parts are skipped here.
+     */
+    isValid?: boolean;
 }
 
 export interface TxRuleOutcome {
@@ -399,7 +405,8 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
     // 8b. withdrawals must take the whole reward balance, as of the state before the tx's certificates
     // (strict when the balances are exact; unregistered accounts are WithdrawalsMissingAccounts below)
     const balancesStrict = WITHDRAWALS_STRICT || tx.exactness?.exact === true;
-    if (tx.rewardBalances && !isDijkstraEra(era)) {
+    const ledgerChecks = tx.isValid !== false; // bug 534: CERTS and LEDGER checks only for a valid transaction
+    if (ledgerChecks && tx.rewardBalances && !isDijkstraEra(era)) {
         const rule = era >= 7 && (pv ?? 0) >= 11 ? "ConwayIncompleteWithdrawals" : era >= 7 ? "WithdrawalsNotInRewardsCERTS" : "WithdrawalsNotInRewardsDELEGS";
         for (const w of (body.withdrawals?.map ?? []) as any[]) {
             const cred = rewardAccountKey(w.rewardAccount);
@@ -410,9 +417,11 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
         }
     }
     // 8c. Conway LEDGER: DRep-delegated withdrawals (protocol ≥ 10), treasury value
-    checkWithdrawalAccounts(sink, body, era, tx.stakeRegistered, WITHDRAWAL_ACCOUNTS_STRICT);
-    if (!isDijkstraEra(era)) checkWithdrawalsDelegated(sink, body, era, pv, tx.drepDelegated); // removed in Dijkstra
-    if (era >= 7) checkTreasuryValue(sink, body, tx.treasury, TREASURY_VALUE_STRICT || tx.exactness?.exact === true, tx.exactness?.why);
+    if (ledgerChecks) {
+        checkWithdrawalAccounts(sink, body, era, tx.stakeRegistered, WITHDRAWAL_ACCOUNTS_STRICT);
+        if (!isDijkstraEra(era)) checkWithdrawalsDelegated(sink, body, era, pv, tx.drepDelegated); // removed in Dijkstra
+        if (era >= 7) checkTreasuryValue(sink, body, tx.treasury, TREASURY_VALUE_STRICT || tx.exactness?.exact === true, tx.exactness?.why);
+    }
 
     // 8d. auxiliary data: hash binding and metadatum sizes
     checkAuxiliaryData(sink, body, tx.auxDataBytes, pv);

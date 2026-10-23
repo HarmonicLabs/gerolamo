@@ -84,3 +84,39 @@ describe("withdrawals inside one block (bug 272)", () => {
         expect(next.rewardBalances!.get(KEY_B)).toBe(0n);
     });
 });
+
+describe("transactions marked invalid still pass UTXO / UTXOW (bug 534)", () => {
+    // a phase-2-invalid transaction: cardano-ledger runs the whole UTXOW / UTXO rule for it and skips only
+    // LEDGER's withdrawal / treasury checks, CERTS and GOV; Gerolamo checked only its collateral
+    const tx = (lovelaceOut: bigint, withdrawal: bigint) => ({ hash: { toString: () => TXH2 }, inputs: [input(`${TXH}:0`)], outputs: [out(addrOf(KEY_A), lovelaceOut)], fee: 200_000n, ...wd(KEY_B, withdrawal) });
+    const block = (body: any): any => ({ era: 2, block: { header: { body: { slot: 1000 } }, transactionBodies: [body], transactionWitnessSets: [{}], invalidTransactions: [0] } });
+    const inputs = (): BlockRuleInputs => ({
+        resolved: new Map([[`${TXH}:0`, utxo(`${TXH}:0`, addrOf(KEY_A), 10_000_000n)]]),
+        pools: new Set(), rewardBalances: new Map([[KEY_B, 5_000_000n]]), exactness: EXACT,
+    });
+    const ctx = { config: { network: "mainnet" }, pool: null, params: null, genesis: { protocolParams: {} }, slot: 1000n, preVerified: [], phase: "rules" as const };
+    test("an invalid transaction that does not conserve value is rejected", async () => {
+        const r = await evaluateShelleyBlockWithInputs(block(tx(99_000_000n, 5_000_000n)), ctx as any, inputs());
+        expect(r.failures.some((f) => f.startsWith("tx[0]: value not conserved"))).toBe(true);
+    });
+    test("its withdrawal amount is not checked (CERTS is skipped for it)", async () => {
+        // conserved with a 1 ADA withdrawal, but the reward balance is 5 ADA: a CERTS failure for a valid transaction only
+        const r = await evaluateShelleyBlockWithInputs(block(tx(10_800_000n, 1_000_000n)), ctx as any, inputs());
+        expect(r.failures.filter((f) => f.includes("reward balance"))).toEqual([]);
+        expect(r.failures.some((f) => f.startsWith("tx[0]: value not conserved"))).toBe(false);
+    });
+});
+
+describe("block execution units count invalid transactions (bug 535)", () => {
+    // cardano-ledger Alonzo BBODY validateExUnits: foldMap getTotalExUnits over every transaction of the block
+    const body = { hash: { toString: () => TXH2 }, inputs: [input(`${TXH}:0`)], outputs: [out(addrOf(KEY_A), 9_800_000n)], fee: 200_000n };
+    const block: any = { era: 2, block: { header: { body: { slot: 1000 } }, transactionBodies: [body], transactionWitnessSets: [{ redeemers: [{ tag: 0, index: 0, execUnits: { mem: 200n, steps: 50n } }] }], invalidTransactions: [0] } };
+    const inputs = (): BlockRuleInputs => ({ resolved: new Map([[`${TXH}:0`, utxo(`${TXH}:0`, addrOf(KEY_A), 10_000_000n)]]), pools: new Set(), rewardBalances: new Map() });
+    const ctx = (mem: number) => ({ config: { network: "mainnet" }, pool: null, params: { raw: { max_block_ex_mem: mem, max_block_ex_steps: 1_000 } }, genesis: { protocolParams: {} }, slot: 1000n, preVerified: [], phase: "rules" as const });
+    test("an invalid transaction's redeemers count toward maxBlockExUnits", async () => {
+        const over = await evaluateShelleyBlockWithInputs(block, ctx(100) as any, inputs());
+        expect(over.failures.some((f) => f.startsWith("block execution memory 200 > max 100"))).toBe(true);
+        const under = await evaluateShelleyBlockWithInputs(block, ctx(1_000) as any, inputs());
+        expect(under.failures.some((f) => f.startsWith("block execution"))).toBe(false);
+    });
+});

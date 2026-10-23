@@ -49,12 +49,16 @@ export async function openLsq(sockPath: string, magic: number, opts: { versions?
   const t0 = Date.now();
   const send = (proto: number, payload: Uint8Array) => { for (let o = 0; o < payload.length; o += 12288) { const part = payload.subarray(o, Math.min(payload.length, o + 12288)); const h = Buffer.alloc(8); h.writeUInt32BE((Date.now() - t0) & 0xffffffff, 0); h.writeUInt16BE(proto, 4); h.writeUInt16BE(part.length, 6); sock.write(Buffer.concat([h, Buffer.from(part)])); } };
   const timeoutMs = opts.timeoutMs ?? 120_000;
-  const recv = (proto: number, ms = timeoutMs) => new Promise<Uint8Array>((resolve, reject) => {
-    if (closed) return reject(new Error("connection closed"));
-    const w = { proto, resolve: (b: Uint8Array) => { clearTimeout(t); resolve(b); }, reject: (e: Error) => { clearTimeout(t); reject(e); } };
-    const t = setTimeout(() => { tryComplete(proto, true); const i = waiters.indexOf(w); if (i >= 0) { waiters.splice(i, 1); reject(new Error(`timeout after ${ms} ms`)); } }, ms);
-    waiters.push(w);
-  });
+  const recv = (proto: number, ms = timeoutMs) => {
+    const p = new Promise<Uint8Array>((resolve, reject) => {
+      if (closed) return reject(new Error("connection closed"));
+      const w = { proto, resolve: (b: Uint8Array) => { clearTimeout(t); resolve(b); }, reject: (e: Error) => { clearTimeout(t); reject(e); } };
+      const t = setTimeout(() => { tryComplete(proto, true); const i = waiters.indexOf(w); if (i >= 0) { waiters.splice(i, 1); reject(new Error(`timeout after ${ms} ms`)); } }, ms);
+      waiters.push(w);
+    });
+    p.catch(() => undefined); // a reply nobody awaits any more (the peer closed on us mid-run) is not an unhandled rejection
+    return p;
+  };
   const versions = opts.versions ?? [19, 20, 21, 22, 23];
   send(0, Cbor.encode(new CborArray([new CborUInt(0), new CborMap(versions.map((v) => ({ k: new CborUInt(0x8000 | v), v: new CborArray([new CborUInt(magic), new CborSimple(false)]) })))])).toBuffer());
   const hs = Cbor.parse(await recv(0)) as CborArray;

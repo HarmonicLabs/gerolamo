@@ -71,7 +71,10 @@ describe("Cardano Blueprint ledger conformance vectors", () => {
         // not vacuous: every expected rejection was rejected by a named rule
         const rejected = results.filter(({ v, o }) => !v.success && o && !o.accepted);
         expect(rejected.length).toBe(results.filter(({ v }) => !v.success).length);
-        expect(rejected.every(({ o }) => o!.failures.length > 0 && !o!.failures.some((f) => f.startsWith("block does not decode")))).toBe(true);
+        // Rejected while decoding, as cardano-node does: ImpSpec skips serialization, so the vector reaches UTXOW, but
+        // cardano-ledger's decodeMetadatum enforces the 64-byte metadatum limit from Allegra (conformance-fixes ledger-ts).
+        const DECODE_REJECTS = new Set(["Conway.Imp.AllegraImpSpec.UTXOW.InvalidMetadata/0"]);
+        expect(rejected.filter(({ v, o }) => !DECODE_REJECTS.has(`${v.test}/${v.index}`) && (o!.failures.length === 0 || o!.failures.some((f) => f.startsWith("block does not decode")))).map(({ v }) => `${v.test}/${v.index}`)).toEqual([]);
     }, 300_000);
 
     test("every vector: the mempool admits exactly what the LEDGER rule accepts", async () => {

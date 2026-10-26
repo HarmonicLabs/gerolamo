@@ -9,7 +9,7 @@
  *   [0, epoch]                → [1, epoch, nonce(32) | null]
  *   [2, epoch, poolId(28)]    → [3, epoch, poolStake u64 | null, totalActiveStake u64 | null, activeSlotsCoeffNum, activeSlotsCoeffDen]
  *   [4]                       → [5, network magic, 1, capabilities]  (hello; capabilities is a map of the request
- *                               types this host serves: {"nonce": true, "stake": true, "chunk": bool,
+ *                               types this host serves: {"nonce": true, "stake": true, "chunk": bool, "digests": bool,
  *                               "blockfrost": {"rate": n, "window_ms": n, "max_body": n}}; version 0 had no map)
  *   [6, chunkNo]              → [7, chunkNo, chunk bytes, primary bytes, secondary bytes] | [7, chunkNo, null, null, null]
  *                               (a complete immutable chunk from the relay's block store, for a browser to check
@@ -19,6 +19,11 @@
  *                               its JSON text. GET only, at most QUERY_RATE per QUERY_WINDOW_MS per peer, bodies over
  *                               QUERY_MAX_BODY bytes answered 413. A browser node asks here for what it does not
  *                               hold itself (ledger state, blocks before its start point).
+ *   [10, from, to]            → [11, from, to, [[file name, sha256(32)], …]] | [11, from, to, null]
+ *                               the Mithril cardano-database digests of immutable files numbered from..to (at most
+ *                               DIGESTS_MAX_FILES numbers; `to` in the reply is where the page ends), computed from
+ *                               this node's own chunk files; null while they are not hashed yet (immutableDigests.ts).
+ *                               The client checks them against the Merkle root a Mithril certificate signs.
  *   anything else             → [255, "text"]
  */
 import { Cbor, CborArray, CborBytes, CborMap, CborSimple, CborText, CborUInt, type CborObj } from "@harmoniclabs/cbor";
@@ -31,6 +36,7 @@ import { join } from "node:path";
 import { logger } from "../../utils/logger";
 import { sendN2NResponder } from "./N2NDirection";
 import { handleMiniBlockfrost } from "../../api/miniBlockfrost";
+import { DIGESTS_MAX_FILES, immutableDigestsFor } from "./immutableDigests";
 
 /** Blockfrost queries per peer: at most QUERY_RATE in any QUERY_WINDOW_MS, bodies up to QUERY_MAX_BODY bytes. */
 export const QUERY_RATE = 30;
@@ -127,6 +133,7 @@ export class N2NLightQueryHost {
             { k: t("nonce"), v: yes },
             { k: t("stake"), v: yes },
             { k: t("chunk"), v: new CborSimple(!!getNodeBlockStore()) },
+            { k: t("digests"), v: new CborSimple(!!getNodeBlockStore()) },
             { k: t("blockfrost"), v: new CborMap([
                 { k: t("rate"), v: new CborUInt(QUERY_RATE) },
                 { k: t("window_ms"), v: new CborUInt(QUERY_WINDOW_MS) },
@@ -153,7 +160,23 @@ export class N2NLightQueryHost {
         const arr = q instanceof CborArray ? q.array : null;
         const tag = arr && arr[0] instanceof CborUInt ? Number(arr[0].num) : -1;
         try {
-            if (tag === 4) { this.reply(new CborArray([new CborUInt(5), new CborUInt(this.deps.networkMagic), new CborUInt(1), this.capabilities()])); return; }
+            if (tag === 4) {
+                // a light client may ask for Mithril digests next: start hashing the immutable files if not done yet
+                const store = getNodeBlockStore();
+                if (store) void immutableDigestsFor(store.chunks.dir).warm();
+                this.reply(new CborArray([new CborUInt(5), new CborUInt(this.deps.networkMagic), new CborUInt(1), this.capabilities()]));
+                return;
+            }
+            if (tag === 10 && arr![1] instanceof CborUInt && arr![2] instanceof CborUInt) {
+                const from = Number(arr![1].num), to = Number(arr![2].num);
+                if (to < from) throw new Error("digests: to < from");
+                const store = getNodeBlockStore();
+                const page = store ? await immutableDigestsFor(store.chunks.dir).page(from, Math.min(to, from + DIGESTS_MAX_FILES - 1)) : null;
+                this.reply(page
+                    ? new CborArray([new CborUInt(11), new CborUInt(page.from), new CborUInt(page.to), new CborArray(page.entries.map((e) => new CborArray([new CborText(e.name), new CborBytes(Uint8Array.from(Buffer.from(e.digest, "hex")))])))])
+                    : new CborArray([new CborUInt(11), new CborUInt(from), new CborUInt(to), new CborSimple(null)]));
+                return;
+            }
             if (tag === 0 && arr![1] instanceof CborUInt) {
                 const epoch = Number(arr![1].num);
                 const hexNonce = await getEpochNonce(epoch);

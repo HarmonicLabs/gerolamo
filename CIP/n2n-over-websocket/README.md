@@ -129,12 +129,17 @@ headers alone. It is offered only on connections whose selected subprotocol incl
 | `[2, epoch, pool_id]` | `[3, epoch, pool_stake / null, total_active_stake / null, f_num, f_den]` | A pool's active stake in the epoch's stake distribution and the active slot coefficient f, for the leader check. |
 | `[6, chunk_no]` | `[7, chunk_no, chunk, primary, secondary]` or `[7, chunk_no, null, null, null]` | A complete immutable chunk in cardano-node's on-disk format, for a start that can be checked against a Mithril-certified digest. |
 | `[8, id, path]` | `[9, id, status, body]` | A read-only Blockfrost query: `path` under `/api/v0`, `body` the JSON answer, `status` its HTTP status. |
+| `[10, from, to]` | `[11, from, to, [[name, digest], …]]` or `[11, from, to, null]` | Mithril cardano-database digests (SHA-256, 32 bytes) of the server's immutable files numbered `from` to `to`, file names as Mithril writes them (`"00042.chunk"`). The reply's `to` is where the page ends; `null` means not available yet. |
 | anything else | `[255, text]` | Unknown or failed request. |
 
-- **Capabilities.** The hello's map has text keys: `"nonce"`, `"stake"` and `"chunk"` with boolean values, and
+- **Capabilities.** The hello's map has text keys: `"nonce"`, `"stake"`, `"chunk"` and `"digests"` with boolean values, and
   `"blockfrost"` with a map of its limits (`"rate"` requests per `"window_ms"`, `"max_body"` bytes). A client MUST
   only send request types the map lists. Version 0 of the hello had no map; a client MUST treat it as "nonce, stake,
   chunk".
+- **Digests.** A server MAY cap a page (Gerolamo: 2 000 immutable files) and SHOULD compute the digests from its own
+  files, which are byte-identical to cardano-node's. The client MUST check the list against the Merkle root a
+  verified Mithril certificate signs and MUST NOT trust it otherwise; it saves the client the aggregator's download
+  (10 MB on preview). A client SHOULD fall back to the aggregator when the server answers `null` or the root differs.
 - **Blockfrost queries.** Only GET semantics. A server SHOULD rate-limit per peer (answering 429), cap answer size
   (answering 413 and suggesting paging), and refuse paths that leave `/api/v0` (400).
 

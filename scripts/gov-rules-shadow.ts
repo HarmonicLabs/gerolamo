@@ -5,7 +5,7 @@
  * anchor or a volatile diff) the view is pinned to the parent and `checkBlockGovernance` runs as the
  * body validator would. This exercises the LMDB readers the SQLite replay (gov-replay.ts) does not.
  *
- *   GEROLAMO_DB_PATH=<scratch>/x.db bun scripts/gov-rules-shadow.ts --node <node dir> [--blocks 600] [--network preview]
+ *   bun scripts/gov-rules-shadow.ts --db-path <scratch>/x.db --node <node dir> [--blocks 600] [--network preview]
  *
  * Nothing of the node is written: the LMDB environment is opened read-only, the chunk and volatile
  * stores read-only, SQLite not at all (the node's parameters come from its LMDB store).
@@ -18,14 +18,17 @@ import { epochForSlot, setEpochNetwork } from "../src/utils/epochFromSlotCalcula
 import { blockTxBodies, decodeCbor } from "../src/consensus/governance/govTxDecode";
 import { checkBlockGovernance, govRuleSummary } from "../src/consensus/governance/govValidate";
 import { logger, LogLevel } from "../src/utils/logger";
+import { initSettings } from "../src/config/settings";
 
 const argv = process.argv.slice(2);
 const opt = (k: string, d?: string) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1]! : d; };
 const node = opt("node")!;
 const network = opt("network", "preview")!;
 const want = Number(opt("blocks", "600"));
-if (!node) { console.error("usage: bun scripts/gov-rules-shadow.ts --node <node dir> [--blocks N]"); process.exit(2); }
-if (!process.env.GEROLAMO_DB_PATH) { console.error("set GEROLAMO_DB_PATH to a scratch file: this tool must not open the node's SQLite"); process.exit(2); }
+if (!node) { console.error("usage: bun scripts/gov-rules-shadow.ts --db-path <scratch>.db --node <node dir> [--blocks N]"); process.exit(2); }
+const scratchDb = opt("db-path");
+if (!scratchDb) { console.error("pass --db-path <scratch file>: this tool must not open the node's SQLite"); process.exit(2); }
+initSettings({ dbPath: scratchDb });
 setEpochNetwork(network);
 logger.setLogConfig({ logLevel: LogLevel.ERROR, logToFile: false, logToConsole: true } as any);
 

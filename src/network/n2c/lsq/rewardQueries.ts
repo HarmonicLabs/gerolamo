@@ -8,6 +8,7 @@
  *   [2]  ToCBOR (definite maps): { Left coin [0, c] | Right credential [1, cred] → { pool → coin } }
  *   [18] EncCBOR: [[nOpt, a0, rPot, totalStake], { pool → [stake, pledge, ownerStake, cost, margin, perf (float64)] }]
  */
+import { settings } from "../../../config/settings";
 import { Cbor, CborArray, CborBytes, CborUInt, type CborObj } from "@harmoniclabs/cbor";
 import { readFileSync } from "node:fs";
 import type { StakeReads } from "../../../ledger/stakeStore";
@@ -141,13 +142,13 @@ export function nonMyopicMemberRewardsBytes(snap: CurrentSnapshot, pparams: Reco
 const seedMemo = new Map<string, Promise<NonMyopicState | null>>();
 /**
  * `esNonMyopic` of the view's epoch: what its boundary recorded; failing that (a store bootstrapped
- * before bug 262), `GEROLAMO_LSQ_NONMYOPIC_SEED=<cardano-node ledger state file>` seeds it in memory,
+ * before bug 262), `--lsq-nonmyopic-seed <cardano-node ledger state file>` seeds it in memory,
  * advanced over the store's boundaries (scripts/lsq-host.ts on a node's stores, read-only). Null: unknown.
  */
 export async function nonMyopicFor(stake: StakeReads, gov: GovReads, epoch: number, key: string, env: AdvanceEnv): Promise<NonMyopicState | null> {
     const stored = stake.nonMyopic(epoch);
     if (stored) return stored;
-    const seedPath = process.env.GEROLAMO_LSQ_NONMYOPIC_SEED;
+    const seedPath = settings().lsqNonmyopicSeed ?? undefined;
     if (!seedPath) return null;
     const k = `${epoch}:${key}`;
     let p = seedMemo.get(k);

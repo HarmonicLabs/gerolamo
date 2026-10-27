@@ -29,7 +29,7 @@ export async function startBlockProducer(config: GerolamoConfig): Promise<BlockP
     if (!consensus) throw new Error("consensus orchestrator not initialised");
     const pc = config.producer!;
     const genesis = await Bun.file(config.shelleyGenesisFile).json() as { activeSlotsCoeff: number; slotsPerKESPeriod: number; maxKESEvolutions: number };
-    // The network the node set at startup (from NETWORK / --network); `config.network` is not
+    // The network the node set at startup (from --network / --network); `config.network` is not
     // always populated, and its default is preprod — the producer then computed KES period 1015
     // on preview (period 944) and refused a valid certificate (2026-09-10 06:11 UTC).
     const network = getEpochNetwork();

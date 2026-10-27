@@ -1,3 +1,4 @@
+import { settings } from "./config/settings";
 import { SQL } from "bun";
 import { createSyncSqlClient } from "./sqlSync";
 import { AsyncLocalStorage } from "node:async_hooks";
@@ -8,7 +9,7 @@ import { dirname, resolve } from "node:path";
  * Shared SQLite SQL client for Gerolamo.
  *
  * Bun's default `import { sql } from "bun"` is Postgres. Gerolamo stores
- * chain state in SQLite (config.dbPath / DATABASE_URL / ./.live/test.db).
+ * chain state in SQLite (config.dbPath / --db-path / ./.live/test.db).
  *
  * Call `initSql(dbPath)` from start() before ensureInitialized().
  * `sql` resolves its connection per call, so initSql() is visible to all importers,
@@ -18,39 +19,38 @@ import { dirname, resolve } from "node:path";
  * Default path is the live Mithril-populated DB (not ./ledger/gerolamo.db).
  */
 
-function filenameFromEnvOrDefault(): string {
-    const url = process.env.DATABASE_URL;
-    if (url?.startsWith("sqlite://")) {
-        // sqlite:///abs/path or sqlite://./relative
-        return url.slice("sqlite://".length);
-    }
-    if (url?.startsWith("file:")) {
-        return url.slice("file:".length);
-    }
-    return process.env.GEROLAMO_DB_PATH || "./.live/test.db";
+/** The database file: --db-path / config dbPath (src/config/settings.ts). */
+function defaultFilename(): string {
+    return settings().dbPath;
 }
 
 /** Resolved absolute path of the open SQLite file (Bun SQL does not expose options.filename). */
-let currentDbPath: string = resolve(filenameFromEnvOrDefault());
+let openedPath: string | null = null;
+/** The open file, or the one the writer will open. */
+const currentDbPath = (): string => openedPath ?? resolve(defaultFilename());
 
 /**
  * The writer is the synchronous bun:sqlite client (src/sqlSync.ts) with the same tagged-template
  * surface — no query objects, no promise per statement, prepared statements cached. Default since
  * 2026-09-07 (2–3× faster on the applier's statement mix, ~25 % less apply time per block byte on
- * the preview replay); GEROLAMO_SYNC_SQL=0 falls back to Bun.SQL. The read-only API connection
+ * the preview replay); --no-sync-sql falls back to Bun.SQL. The read-only API connection
  * stays on Bun.SQL either way.
  */
-export const SYNC_SQL = process.env.GEROLAMO_SYNC_SQL !== "0";
+export const syncSqlWriter = (): boolean => settings().syncSql;
 function openSqlite(filename: string): SQL {
     const abs = resolve(filename);
     mkdirSync(dirname(abs), { recursive: true });
-    currentDbPath = abs;
-    if (SYNC_SQL) return createSyncSqlClient(abs) as unknown as SQL;
+    openedPath = abs;
+    if (syncSqlWriter()) return createSyncSqlClient(abs) as unknown as SQL;
     return new SQL({ adapter: "sqlite", filename: abs });
 }
 
-/** The writer: every query outside a read-only context goes here. Reassigned by initSql(). */
-let writer: SQL = openSqlite(filenameFromEnvOrDefault());
+/**
+ * The writer: every query outside a read-only context goes here. Opened on first use (the settings are resolved by
+ * then), or by initSql().
+ */
+let writerConn: SQL | null = null;
+const writerSql = (): SQL => (writerConn ??= openSqlite(defaultFilename()));
 
 /**
  * Read-only companion connection for HTTP GET handlers (`withReadOnlyConnection`).
@@ -76,7 +76,7 @@ function readerFor(path: string): SQL {
 }
 
 function currentSql(): SQL {
-    return readContext.getStore() ?? writer;
+    return readContext.getStore() ?? writerSql();
 }
 
 /**
@@ -86,11 +86,11 @@ function currentSql(): SQL {
  * export are preserved because every call resolves the connection at call time.
  */
 /**
- * GEROLAMO_SQL_PROFILE=1: time every tagged-template statement on the shared client and
+ * --trace-sql: time every tagged-template statement on the shared client and
  * log the heaviest ones each minute. Bun's SQLite driver runs statements synchronously
  * when the query is awaited, so creation-to-settle ≈ execution time on the main thread.
  */
-const SQL_PROFILE = process.env.GEROLAMO_SQL_PROFILE === "1";
+const sqlProfileOn = (): boolean => settings().traceSql;
 const sqlProfile = new Map<string, { n: number; ms: number; rows: number }>();
 let sqlProfileLast = Date.now();
 // Keyed by the template's strings array (stable identity per call site): joining and
@@ -133,7 +133,7 @@ function sqlProfileWrap(q: any, key: string, t0: number): any {
 export const sql: SQL = new Proxy(function sqlProxyTarget() {} as unknown as SQL, {
     apply(_t, _thisArg, args: unknown[]) {
         const c = currentSql();
-        if (SQL_PROFILE) {
+        if (sqlProfileOn()) {
             const t0 = performance.now();
             return sqlProfileWrap(Reflect.apply(c as unknown as (...a: unknown[]) => unknown, c, args), sqlProfileKey(args[0]), t0);
         }
@@ -165,17 +165,17 @@ export function isReadOnlyContext(): boolean {
  * simply runs on the writer there.
  */
 export function withReadOnlyConnection<T>(fn: () => Promise<T> | T): Promise<T> {
-    if (currentDbPath === ":memory:" || currentDbPath.endsWith("/:memory:") || readContext.getStore()) {
+    if (currentDbPath() === ":memory:" || currentDbPath().endsWith("/:memory:") || readContext.getStore()) {
         return Promise.resolve().then(fn);
     }
-    return readContext.run(readerFor(currentDbPath), () => Promise.resolve().then(fn));
+    return readContext.run(readerFor(currentDbPath()), () => Promise.resolve().then(fn));
 }
 
 export function initSql(dbPath?: string): SQL {
-    const filename = dbPath?.trim() || filenameFromEnvOrDefault();
+    const filename = dbPath?.trim() || defaultFilename();
     // Prefer closing previous connection if the API exists (best-effort).
     try {
-        void (writer as any).close?.();
+        void (writerConn as any)?.close?.();
     } catch {
         /* ignore */
     }
@@ -186,14 +186,14 @@ export function initSql(dbPath?: string): SQL {
     }
     reader = null;
     readerPath = null;
-    writer = openSqlite(filename);
+    writerConn = openSqlite(filename);
     return sql;
 }
 
 /** Close the shared connections (checkpoints the WAL). Queries after this reject with "Connection closed". */
 export async function closeSql(): Promise<void> {
     try {
-        await (writer as any).close?.();
+        await (writerConn as any)?.close?.();
     } catch {
         /* already closed */
     }
@@ -207,5 +207,5 @@ export async function closeSql(): Promise<void> {
 }
 
 export function getSqlFilename(): string {
-    return currentDbPath;
+    return currentDbPath();
 }

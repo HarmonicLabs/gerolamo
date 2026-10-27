@@ -1,3 +1,4 @@
+import { settings } from "./config/settings";
 import { stdout } from "process";
 import { stdin, stdout as stdOut } from "process"; // rename to avoid conflict
 import { toHex } from "@harmoniclabs/uint8array-utils";
@@ -147,7 +148,7 @@ export async function prettyBlockValidationLog(
         center(""),
         center(
             `${colors.cardanoBlueGlow}Network: ${
-                process.env.NETWORK?.toUpperCase() || "PREPROD"
+                settings().network.toUpperCase()
             }${colors.reset}`,
         ),
         center(`${colors.cardanoBlue}ERA ${era}${colors.reset}`),

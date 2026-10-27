@@ -1,3 +1,4 @@
+import { withSettings } from "../config/settings";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -328,7 +329,7 @@ async function txScenario(name: string, opts: { sqlWrites: boolean; praos: boole
     await orch?.stop().catch(() => undefined);
     getLedgerStore()?.close();
     configureLedgerStore("sqlite"); // params and funding rows go to SQLite first; the LMDB store is seeded from them
-    if (opts.sqlWrites) delete process.env.GEROLAMO_LEDGER_SQL_WRITES; else process.env.GEROLAMO_LEDGER_SQL_WRITES = "0";
+    withSettings({ ledgerSqlWrites: !!opts.sqlWrites }); // restored with the rest after the test
     const sub = join(dir, name);
     const dbPath = join(sub, "preview.db");
     initSql(dbPath);
@@ -408,8 +409,7 @@ describe("same-slot battle at the tip, the loser applied first, both blocks carr
         ["lmdb, chainSelection praos", { sqlWrites: true, praos: true }],
     ] as const) {
         test(`${name}: the winning block validates on the rolled-back ledger (no halt)`, async () => {
-            const sqlWritesBefore = process.env.GEROLAMO_LEDGER_SQL_WRITES, failedDirBefore = process.env.GEROLAMO_FAILED_BLOCK_DIR;
-            process.env.GEROLAMO_FAILED_BLOCK_DIR = join(dir, "failed-blocks"); // a halt dumps the block: not into the checkout
+            const restoreSettings = withSettings({ failedBlockDir: join(dir, "failed-blocks") }); // a halt dumps the block: not into the checkout
             try {
                 await txScenario(`battle-${opts.sqlWrites}-${opts.praos}`, opts);
                 const o = orch as any;
@@ -439,8 +439,7 @@ describe("same-slot battle at the tip, the loser applied first, both blocks carr
                     expect(refs.sort()).toEqual([`${T1.id}:0`, `${T2.id}:0`].sort());
                 }
             } finally {
-                if (sqlWritesBefore == null) delete process.env.GEROLAMO_LEDGER_SQL_WRITES; else process.env.GEROLAMO_LEDGER_SQL_WRITES = sqlWritesBefore;
-                if (failedDirBefore == null) delete process.env.GEROLAMO_FAILED_BLOCK_DIR; else process.env.GEROLAMO_FAILED_BLOCK_DIR = failedDirBefore;
+                restoreSettings();
             }
         }, 60_000);
     }

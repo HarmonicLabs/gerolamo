@@ -31,15 +31,12 @@ RUN chmod -R a+rX /app && chmod +x /usr/local/bin/gerolamo-entrypoint && mkdir -
 # directory there (docker-compose.yml does) so it outlives the container. The image runs as any UID
 # (`user:` in compose); /app is read-only to it and everything it writes goes to /data.
 VOLUME ["/data"]
-ENV HOME=/tmp \
-    NETWORK=preview \
-    GEROLAMO_PORT=3030 \
-    GEROLAMO_DATA=/data \
-    GEROLAMO_LEDGER_SQL_WRITES=0 \
-    GEROLAMO_BOOTSTRAP=mithril \
-    GEROLAMO_MAX_RSS_GB=8
+# Settings are flags, not environment variables: pass them as the container command, e.g.
+#   docker run ... gerolamo --network preview --port 3030 --role relay -- --n2n-ws-port 3004
+# (docker/entrypoint.sh lists its flags; the node's are in docs/CONFIG.md). HOME is only for Bun's cache.
+ENV HOME=/tmp
 # 3030 HTTP (/health, /metrics, /stats, WS /ws/stats, mini-Blockfrost); 3001 node-to-node (relay / producer role).
 EXPOSE 3030 3001
 HEALTHCHECK --interval=60s --timeout=10s --start-period=30m --retries=5 \
-  CMD curl -fsS "http://127.0.0.1:${GEROLAMO_PORT}/health" > /dev/null || exit 1
+  CMD curl -fsS "http://127.0.0.1:$(cat /data/.http-port 2>/dev/null || echo 3030)/health" > /dev/null || exit 1
 ENTRYPOINT ["/usr/bin/tini", "--", "gerolamo-entrypoint"]

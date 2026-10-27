@@ -15,7 +15,8 @@ const opt = (k: string, d?: string) => { const i = argv.indexOf(`--${k}`); retur
 const node = opt("node"), network = opt("network", "preview")!, verbose = argv.includes("--verbose");
 if (!node) { console.error("usage: bun scripts/gov-store-compare.ts --node <node dir> [--network preview] [--stake-epochs N] [--verbose]"); process.exit(2); }
 const scratch = `/tmp/gov-store-compare-${process.pid}.db`;
-process.env.GEROLAMO_DB_PATH = scratch;
+const { initSettings } = await import("../src/config/settings");
+initSettings({ dbPath: scratch }); // the process' SQL client opens on first use: the scratch file, never the node's
 const { attachReadOnlyLedgerStore, getLedgerStore, seedGovFromSqlite } = await import("../src/ledger/nodeLedgerStore");
 const { LedgerStore } = await import("../src/ledger/LedgerStore");
 const { GDB, GovReads, GovWrites } = await import("../src/ledger/govStore");

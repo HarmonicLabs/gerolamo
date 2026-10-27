@@ -15,7 +15,7 @@ import type { GerolamoConfig } from "./peerManager";
  *   (block plan). Its relays pull the forged blocks over the inbound listener,
  *   so inbound N2N is on; PeerSharing stays off (a producer is not advertised).
  *
- * Config: top-level `role`. `n2n.enabled` / GEROLAMO_N2N_PORT still turn the
+ * Config: top-level `role`. `n2n.enabled` / --n2n-port still turn the
  * listener on for a data node (legacy), and `peerGovernor.peerSharing` can
  * force the PeerSharing flag either way.
  */

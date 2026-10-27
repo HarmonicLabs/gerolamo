@@ -43,7 +43,7 @@ const ledgerDir = join(dir, "ledger"), blockDir = join(dir, "db");
 const genesis = JSON.parse(readFileSync(join(import.meta.dir, "..", "src", "config", net, "shelley-genesis.json"), "utf8"));
 const k = Number(genesis.securityParam ?? 2160);
 
-/** Pids (other than ours) whose command line or environment names the node directory. */
+/** Pids (other than ours) whose command line (a node's --db-path / --config) or environment (a node started before 2026-10-26) names the node directory. */
 function processesUsing(path: string): number[] {
     const out: number[] = [];
     for (const p of readdirSync("/proc")) {

@@ -8,6 +8,7 @@
  * is rebuilt from bytes with buildooor's classes, and everything handed to the
  * UPLC machine is converted to the root plutus-data copy through CBOR.
  */
+import { settings } from "../../config/settings";
 import {
     AlonzoTxBody, BabbageTxBody, ConwayTxBody,
     AlonzoTxWitnessSet, BabbageTxWitnessSet, TxWitnessSet as ConwayTxWitnessSet,
@@ -35,38 +36,40 @@ import { sortedInputRefs } from "./alonzoRules";
 
 /**
  * Wall-clock cap per redeemer for the shadow (report-only): keeps heavy scripts
- * from stalling the sync. `GEROLAMO_PLUTUS_SHADOW_MS` overrides it (default 2000);
- * `GEROLAMO_PLUTUS_SHADOW_SAMPLE=n` evaluates only every n-th Plutus transaction.
+ * from stalling the sync. `--plutus-shadow-ms` overrides it (default 2000);
+ * `--plutus-shadow-sample n` evaluates only every n-th Plutus transaction.
  */
-export const SHADOW_REDEEMER_WALL_MS = Math.max(50, Number(process.env.GEROLAMO_PLUTUS_SHADOW_MS ?? 2000) || 2000);
-export const SHADOW_SAMPLE_EVERY = Math.max(1, Number(process.env.GEROLAMO_PLUTUS_SHADOW_SAMPLE ?? 1) || 1);
+export const shadowRedeemerWallMs = (): number => Math.max(50, settings().plutusShadowMs || 2000);
+export const shadowSampleEvery = (): number => Math.max(1, settings().plutusShadowSample || 1);
 /**
  * Capacity limits of the JS evaluator. A redeemer declaring more CPU than
- * `GEROLAMO_PLUTUS_SHADOW_MAX_CPU` (default 3·10⁹) cannot finish within the
+ * `--plutus-shadow-max-cpu` (default 3·10⁹) cannot finish within the
  * wall-clock cap and is skipped up front; a single builtin step costing more
- * than `GEROLAMO_PLUTUS_SHADOW_STEP_CPU` (default 2·10⁷, about two 160 KB
+ * than `--plutus-shadow-step-cpu` (default 2·10⁷, about two 160 KB
  * integers multiplied) is refused before it runs, because JavaScriptCore's
  * quadratic BigInt arithmetic would hold the main thread for minutes (preprod
  * slot 21835905: exponentiation by squaring, 9.3·10⁹ CPU declared).
  */
-export const SHADOW_MAX_DECLARED_CPU = BigInt(Math.max(1, Number(process.env.GEROLAMO_PLUTUS_SHADOW_MAX_CPU ?? 3e9) || 3e9));
-export const SHADOW_MAX_STEP_CPU = BigInt(Math.max(1, Number(process.env.GEROLAMO_PLUTUS_SHADOW_STEP_CPU ?? 2e7) || 2e7));
+export const shadowMaxDeclaredCpu = (): bigint => BigInt(Math.max(1, Number(settings().plutusShadowMaxCpu) || 3e9));
+export const shadowMaxStepCpu = (): bigint => BigInt(Math.max(1, Number(settings().plutusShadowStepCpu) || 2e7));
 
 /**
- * `GEROLAMO_PLUTUS_TRACE=1`: record every builtin cost charged during an evaluation
+ * `--trace-plutus 1`: record every builtin cost charged during an evaluation
  * (tag, argument sizes, cpu, mem) and append the per-builtin totals to mismatch notes.
  * Diagnoses cost-model disagreements such as the constant +1453 cpu seen on preview
  * (PLAN_LEDGER_INTEGRITY.md C). Off by default: it wraps the machine's cost lookup.
  */
-export let SHADOW_TRACE = process.env.GEROLAMO_PLUTUS_TRACE === "1" || process.env.GEROLAMO_PLUTUS_TRACE === "2";
-/** GEROLAMO_PLUTUS_TRACE=2: also print the (argument sizes → cpu/mem) distribution of every builtin, not only the division family. */
-let TRACE_SIZES = process.env.GEROLAMO_PLUTUS_TRACE === "2";
+let traceOverride: 0 | 1 | 2 | null = null;
+/** --trace-plutus 1 or 2 (config trace.plutus), or setShadowTrace(). */
+const traceLevel = (): number => traceOverride ?? settings().tracePlutus;
+const shadowTraceOn = (): boolean => traceLevel() > 0;
+/** Level 2: also print the (argument sizes → cpu/mem) distribution of every builtin, not only the division family. */
+const traceSizes = (): boolean => traceLevel() === 2;
 /** Turn the builtin cost trace on or off at run time (tests: the module may already be loaded without the env flag). */
-export function setShadowTrace(level: 0 | 1 | 2): void { SHADOW_TRACE = level > 0; TRACE_SIZES = level === 2; }
-/** GEROLAMO_PLUTUS_DUMP_DIR: write every applied program (CBOR-wrapped flat, hex) there as `<tag>-<idx>.hex` for an external evaluator (`aiken uplc eval --cbor`). */
-const DUMP_DIR = process.env.GEROLAMO_PLUTUS_DUMP_DIR || null;
+export function setShadowTrace(level: 0 | 1 | 2): void { traceOverride = level; }
+/** --plutus-dump-dir: write every applied program (CBOR-wrapped flat, hex) there as `<tag>-<idx>.hex` for an external evaluator (`aiken uplc eval --cbor`). */
+const dumpDir = (): string | null => settings().plutusDumpDir || null;
 let traceBuf: Array<{ tag: number; args: string; cpu: bigint; mem: bigint }> | null = null; // cpu xor mem per entry
-if (SHADOW_TRACE) logger.info("Plutus builtin cost tracing enabled (GEROLAMO_PLUTUS_TRACE=1)");
 /**
  * A view of `machine` whose builtin cost lookup records every charge. The machine reads
  * `this.getBuiltinCostFuction` inside `eval`, so a Proxy over the instance is enough and
@@ -106,7 +109,7 @@ function traceSummary(): string {
     const DIV = new Set(["divideInteger", "modInteger", "quotientInteger", "remainderInteger"]);
     return " trace[" + [...agg].sort((x, y) => Number(y[1].cpu - x[1].cpu)).map(([tag, a]) => {
         const nm = name(tag);
-        const detail = TRACE_SIZES ? " {" + [...a.sizes].map(([args, sz]) => `[${args}]→${sz.cpu}/${sz.mem}×${sz.n}`).join(" ") + "}"
+        const detail = traceSizes() ? " {" + [...a.sizes].map(([args, sz]) => `[${args}]→${sz.cpu}/${sz.mem}×${sz.n}`).join(" ") + "}"
             : DIV.has(nm) ? " {" + [...a.sizes].map(([args, sz]) => `[${args}]→${sz.mem}×${sz.n}`).join(" ") + "}" : "";
         return `${nm}×${a.n}:${a.cpu}/${a.mem}${detail}`;
     }).join(" ") + "]";
@@ -161,7 +164,7 @@ function machinesFor(raw: Record<string, any>): Partial<Record<"v1" | "v2" | "v3
         // as there).
         const m: any = lang === 1 ? toCostModelV1(arr as any) : lang === 2 ? toCostModelV2(arr as any) : arr;
         try {
-            out[k] = SHADOW_TRACE ? tracedMachine(new Machine(m)) : new Machine(m);
+            out[k] = shadowTraceOn() ? tracedMachine(new Machine(m)) : new Machine(m);
         } catch {
             /* unusable cost model for this language */
         }
@@ -247,17 +250,17 @@ function rebuildWitnessSet(era: number, bytes: Uint8Array): any {
 /**
  * Phase-2 evaluation with the shadow result shape (signature kept for the mempool worker job and
  * the tools): runs rules/phase2.ts (the CEK machine in src/consensus/plutus and Gerolamo's own
- * script contexts). `GEROLAMO_PLUTUS_LEGACY_SHADOW=1` selects the previous evaluator below
+ * script contexts). `--plutus-legacy-shadow` selects the previous evaluator below
  * (plutus-machine + buildooor contexts), kept for differential debugging only.
  * Mapping: a verdict that differs from the transaction's is_valid flag — or a context the
  * ledger cannot build (collect error: the transaction is invalid either way) — is `mismatch`;
  * "no verdict" (missing script or datum, unresolved input, unsupported builtin) is `note`.
  */
 export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEvalResult> {
-    if (process.env.GEROLAMO_PLUTUS_LEGACY_SHADOW === "1") return shadowEvaluateTxLegacy(input);
+    if (settings().plutusLegacyShadow) return shadowEvaluateTxLegacy(input);
     const redeemersRoot: any[] = input.witnessSet?.redeemers ?? [];
     if (redeemersRoot.length === 0) return { evaluated: 0, skipped: 0, mismatch: null };
-    if (!input.forceSample && SHADOW_SAMPLE_EVERY > 1 && (shadowCounter++ % SHADOW_SAMPLE_EVERY) !== 0) return { evaluated: 0, skipped: 0, mismatch: null };
+    if (!input.forceSample && shadowSampleEvery() > 1 && (shadowCounter++ % shadowSampleEvery()) !== 0) return { evaluated: 0, skipped: 0, mismatch: null };
     if (!input.bodyBytes || !input.witnessSetBytes) return { evaluated: 0, skipped: redeemersRoot.length, mismatch: null, note: "original body/witness bytes unavailable" };
     const { evaluatePhase2Sync, verdictOf } = await import("./phase2");
     const p2 = { era: input.era, bodyBytes: input.bodyBytes, witnessSetBytes: input.witnessSetBytes, resolved: input.resolved, params: input.params, markedInvalid: input.markedInvalid, network: input.network };
@@ -274,7 +277,7 @@ export async function shadowEvaluateTx(input: ShadowEvalInput): Promise<ShadowEv
 export async function shadowEvaluateTxLegacy(input: ShadowEvalInput): Promise<ShadowEvalResult> {
     const redeemersRoot: any[] = input.witnessSet?.redeemers ?? [];
     if (redeemersRoot.length === 0) return { evaluated: 0, skipped: 0, mismatch: null };
-    if (!input.forceSample && SHADOW_SAMPLE_EVERY > 1 && (shadowCounter++ % SHADOW_SAMPLE_EVERY) !== 0) return { evaluated: 0, skipped: 0, mismatch: null };
+    if (!input.forceSample && shadowSampleEvery() > 1 && (shadowCounter++ % shadowSampleEvery()) !== 0) return { evaluated: 0, skipped: 0, mismatch: null };
     const raw = input.params?.raw ?? {};
     const machines = machinesFor(raw);
     if (!machines.v1 && !machines.v2 && !machines.v3) return { evaluated: 0, skipped: redeemersRoot.length, mismatch: null, note: "no cost models in the epoch parameters" };
@@ -402,11 +405,11 @@ export async function shadowEvaluateTxLegacy(input: ShadowEvalInput): Promise<Sh
                 const bDatum = datumCbor ? bDataFromCbor(toHex(datumCbor)) : undefined;
                 const info = getScriptInfoData(r, bodyLike, version, bDatum);
                 const ctx = new DataConstr(0, [toRootData(txInfo), redeemerData, toRootData(info)]);
-                if (DUMP_DIR) writeFileSync(`${DUMP_DIR}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx).toBuffer()));
+                if (dumpDir()) writeFileSync(`${dumpDir()}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx).toBuffer()));
                 term = new Application(program, UPLCConst.data(ctx));
             } else {
                 const ctx = new DataConstr(0, [toRootData(txInfo), toRootData(purpose)]);
-                if (DUMP_DIR) writeFileSync(`${DUMP_DIR}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx).toBuffer()));
+                if (dumpDir()) writeFileSync(`${dumpDir()}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx).toBuffer()));
                 let t: any = program;
                 if (tag === 0) {
                     if (!datumCbor) {
@@ -424,16 +427,16 @@ export async function shadowEvaluateTxLegacy(input: ShadowEvalInput): Promise<Sh
             failureNote = failureNote ?? `context build failed: ${err instanceof Error ? err.message : String(err)}`;
             continue;
         }
-        if (DUMP_DIR) {
+        if (dumpDir()) {
             try {
                 const flat = compileUPLC(new UPLCProgram(progVersion, term)).toBuffer().buffer;
-                writeFileSync(`${DUMP_DIR}/${tag}-${idx}.hex`, toHex(Cbor.encode(new CborBytes(flat)).toBuffer()));
+                writeFileSync(`${dumpDir()}/${tag}-${idx}.hex`, toHex(Cbor.encode(new CborBytes(flat)).toBuffer()));
             } catch (err) { logger.warn(`plutus dump ${tag}:${idx} failed: ${err instanceof Error ? err.message : String(err)}`); }
         }
         const declared = r.execUnits as ExBudget | undefined;
-        if (declared && BigInt(declared.cpu) > SHADOW_MAX_DECLARED_CPU) {
+        if (declared && BigInt(declared.cpu) > shadowMaxDeclaredCpu()) {
             skipped++;
-            failureNote = failureNote ?? `redeemer ${tag}:${idx} declares cpu ${declared.cpu}, beyond the shadow evaluator's capacity (${SHADOW_MAX_DECLARED_CPU})`;
+            failureNote = failureNote ?? `redeemer ${tag}:${idx} declares cpu ${declared.cpu}, beyond the shadow evaluator's capacity (${shadowMaxDeclaredCpu()})`;
             continue;
         }
         // Hard stop at the declared budget (vendored patch): a script the chain rejected
@@ -442,18 +445,18 @@ export async function shadowEvaluateTxLegacy(input: ShadowEvalInput): Promise<Sh
         // reference, so a heavy (but valid) script is skipped rather than stalling the sync.
         // …and a per-step cap: one builtin on huge integers cannot be interrupted once started.
         (machine as any).maxBudget = declared
-            ? { mem: BigInt(declared.mem), cpu: BigInt(declared.cpu), deadlineMs: Date.now() + SHADOW_REDEEMER_WALL_MS, maxStepCpu: SHADOW_MAX_STEP_CPU }
-            : { mem: 1n << 62n, cpu: 1n << 62n, deadlineMs: Date.now() + SHADOW_REDEEMER_WALL_MS, maxStepCpu: SHADOW_MAX_STEP_CPU };
+            ? { mem: BigInt(declared.mem), cpu: BigInt(declared.cpu), deadlineMs: Date.now() + shadowRedeemerWallMs(), maxStepCpu: shadowMaxStepCpu() }
+            : { mem: 1n << 62n, cpu: 1n << 62n, deadlineMs: Date.now() + shadowRedeemerWallMs(), maxStepCpu: shadowMaxStepCpu() };
         let result: any, budgetSpent: any, overBudget = false;
         try {
-            if (SHADOW_TRACE) traceBuf = [];
+            if (shadowTraceOn()) traceBuf = [];
             ({ result, budgetSpent } = machine.eval(term));
         } catch (err: any) {
             if (err?.timedOut) {
                 skipped++;
                 failureNote = failureNote ?? (err.stepTooLarge
                     ? `redeemer ${tag}:${idx} skipped: ${err.message}`
-                    : `redeemer ${tag}:${idx} not finished within ${SHADOW_REDEEMER_WALL_MS} ms (cpu ${err.budgetSpent?.cpu}/${declared?.cpu})`);
+                    : `redeemer ${tag}:${idx} not finished within ${shadowRedeemerWallMs()} ms (cpu ${err.budgetSpent?.cpu}/${declared?.cpu})`);
                 continue;
             }
             if (!err?.budgetExceeded) throw err;
@@ -465,7 +468,7 @@ export async function shadowEvaluateTxLegacy(input: ShadowEvalInput): Promise<Sh
         if (!overBudget && declared) overBudget = BigInt(budgetSpent.mem) > BigInt(declared.mem) || BigInt(budgetSpent.cpu) > BigInt(declared.cpu);
         if (result instanceof ErrorUPLC || overBudget) {
             allValid = false;
-            failureNote = failureNote ?? (overBudget ? `redeemer ${tag}:${idx} exceeded its declared budget (mem ${budgetSpent.mem}/${declared?.mem}, cpu ${budgetSpent.cpu}/${declared?.cpu})${SHADOW_TRACE ? traceSummary() : ""}` : `redeemer ${tag}:${idx} script error${SHADOW_TRACE ? traceSummary() : ""}`);
+            failureNote = failureNote ?? (overBudget ? `redeemer ${tag}:${idx} exceeded its declared budget (mem ${budgetSpent.mem}/${declared?.mem}, cpu ${budgetSpent.cpu}/${declared?.cpu})${shadowTraceOn() ? traceSummary() : ""}` : `redeemer ${tag}:${idx} script error${shadowTraceOn() ? traceSummary() : ""}`);
         }
     }
     if (skipped > 0) return { evaluated, skipped, mismatch: null, note: `could not evaluate ${skipped} redeemer(s): ${failureNote}` };

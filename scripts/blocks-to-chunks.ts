@@ -16,7 +16,8 @@ const opt = (n: string) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? a
 const db = opt("db"), dst = opt("dst");
 const k = Number(opt("k") ?? 432);
 if (!db || !dst) { console.error("usage: bun scripts/blocks-to-chunks.ts --db <sqlite> --dst <block store dir> [--k 432] [--from <slot>]"); process.exit(2); }
-process.env.GEROLAMO_DB_PATH = db;
+const { initSettings } = await import("../src/config/settings");
+initSettings({ dbPath: db }); // src/sql opens settings().dbPath on first use
 const { sql, closeSql, withReadOnlyConnection } = await import("../src/sql");
 
 const store = await BlockStore.open(dst, { k });

@@ -7,6 +7,7 @@
  * Databases are named strings; keys and values are bytes. The UTxO layout and the other groups'
  * encodings live in `encodings.ts` / the group modules; this class is the storage mechanism.
  */
+import { settings } from "../config/settings";
 import { closeSync, existsSync, fdatasyncSync, fsyncSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeSync } from "node:fs";
 import { open as openAsync } from "node:fs/promises";
 import { join } from "node:path";
@@ -25,7 +26,7 @@ export interface Anchor { slot: number; hash: Uint8Array }
 const META = "meta";
 const ANCHOR_KEY = new TextEncoder().encode("anchor");
 /**
- * How a diff file becomes durable (`GEROLAMO_LEDGER_DIFF_FSYNC`, read at open):
+ * How a diff file becomes durable (`--ledger-diff-fsync`, read at open):
  *   - unset / "1" — batched (bug 380): a block's diff goes to `<hash>.diff.tmp` with no fsync; `flushDiffs`
  *     (the end of every applied range, and before a promotion, a direct LMDB write or close) fdatasyncs the
  *     batch's temp files in parallel, renames them and fsyncs the directory once;
@@ -33,7 +34,7 @@ const ANCHOR_KEY = new TextEncoder().encode("anchor");
  *   - "0" — never fsync (temp + rename at once): a crash then loses more recent diffs, which the recovery rolls past.
  */
 type DiffSyncPolicy = "batch" | "block" | "never";
-function diffSyncPolicy(): DiffSyncPolicy { const v = process.env.GEROLAMO_LEDGER_DIFF_FSYNC; return v === "0" ? "never" : v === "block" ? "block" : "batch"; }
+function diffSyncPolicy(): DiffSyncPolicy { const v = settings().ledgerDiffFsync; return v === "none" ? "never" : v === "block" ? "block" : "batch"; }
 /** fsyncs in flight at once in a batched flush: concurrent fsyncs share journal commits (ext4: ~7× fewer per file than one after another). */
 const FLUSH_PARALLEL = 32;
 

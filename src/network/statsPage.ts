@@ -299,7 +299,7 @@ function renderProducer(m) {
   var car = p.carriers;
   if (car) {
     var ncar = car.inbound.length + car.duplex.length;
-    el("carriers").innerHTML = "Carriers now: " + badge(ncar > 0 && car.publicReachable !== false ? "ok" : "bad", ncar + " · " + car.inbound.length + " inbound pulling · " + car.duplex.length + " duplex" + (car.publicReachable === false ? " · PUBLIC PORT UNREACHABLE" : "")) + (ncar === 0 ? ' <span class="muted">a block forged now would not leave this node</span>' : "");
+    el("carriers").innerHTML = "Carriers now: " + badge(ncar > 0 && car.publicReachable !== false ? "ok" : "bad", ncar + " · " + car.inbound.length + " inbound pulling · " + car.duplex.length + " duplex" + (car.publicReachable === false ? " · PUBLIC --port UNREACHABLE" : "")) + (ncar === 0 ? ' <span class="muted">a block forged now would not leave this node</span>' : "");
   } else el("carriers").textContent = "";
   el("slotRows").innerHTML = slots.length ? slots.map((s) =>
     "<tr><td>" + fmt(s.slot) + "</td><td>" + esc(when(s.time)) + '</td><td><span class="out ' + esc(s.outcome) + '">' + esc(s.outcome) + '</span></td><td class="wrap">' + (s.hash ? "<code>" + short(s.hash, 12) + "</code> " : "") + esc(s.note && s.outcome !== "upcoming" ? s.note : "") + "</td></tr>"
@@ -379,7 +379,7 @@ function applyView(m, gov) {
   const pullers = (inb.duplexPullers || []).length;
   el("serveV").textContent = (inb.listening ? inb.clients : "—") + " · " + pullers;
   var pr = inb.publicReachable;
-  el("serveNote").innerHTML = (inb.listening ? "inbound clients · duplex pulls" : "inbound off · duplex pulls " + pullers) + (pr ? " · " + badge(pr.ok ? "ok" : "bad", pr.ok ? "public port reachable" : "PUBLIC PORT UNREACHABLE") : "");
+  el("serveNote").innerHTML = (inb.listening ? "inbound clients · duplex pulls" : "inbound off · duplex pulls " + pullers) + (pr ? " · " + badge(pr.ok ? "ok" : "bad", pr.ok ? "public port reachable" : "PUBLIC --port UNREACHABLE") : "");
   const mp = m.mempool || { count: 0, bytes: 0, txs: [] };
   el("mpV").textContent = fmt(mp.count);
   el("mpNote").textContent = fmtBytes(mp.bytes);

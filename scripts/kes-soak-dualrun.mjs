@@ -5,6 +5,7 @@
  * Usage:
  *   bun scripts/kes-soak-dualrun.mjs [--db PATH] [--limit N] [--offset M]
  *                                    [--from-slot S] [--json-out PATH]
+ *                                    [--network preprod|mainnet]
  *
  * Exit 0 iff diverge === 0.
  */
@@ -33,7 +34,7 @@ const offset = Number(arg("offset") ?? 0);
 const fromSlot = arg("from-slot") != null ? Number(arg("from-slot")) : null;
 const jsonOut = arg("json-out");
 
-const network = process.env.NETWORK === "mainnet" ? "mainnet" : "preprod";
+const network = arg("network") === "mainnet" ? "mainnet" : "preprod";
 const genesisPath =
   network === "mainnet"
     ? "src/config/mainnet/shelley-genesis.json"

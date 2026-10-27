@@ -9,6 +9,7 @@
  * hashes (`ScriptHashObj` is the first constructor), a `DRep` orders key, script, abstain, no
  * confidence; hashes compare bytewise.
  */
+import { settings } from "../../../config/settings";
 import { Cbor, CborArray, CborBytes, CborTag, CborText, CborUInt, type CborObj } from "@harmoniclabs/cbor";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -98,7 +99,9 @@ export function genesis(network: EraHistoryNetwork | null, era: "shelley" | "con
     const net = network ?? "preview";
     const key = `${net}:${era}`;
     if (!genesisCache.has(key)) {
-        const override = era === "shelley" ? process.env.GEROLAMO_SHELLEY_GENESIS : process.env.GEROLAMO_CONWAY_GENESIS;
+        // the configured genesis file (--shelley-genesis-file / --conway-genesis-file) when it is this network's
+        const s = settings();
+        const override = s.network === net ? (era === "shelley" ? s.shelleyGenesisFile : s.conwayGenesisFile) : null;
         const path = override || join(import.meta.dir, "..", "..", "..", "config", net, `${era}-genesis.json`);
         genesisCache.set(key, JSON.parse(readFileSync(path, "utf8")));
     }
@@ -117,15 +120,15 @@ let factsCachePath: string | null | undefined;
 let factsSource: ((hash: string | null, slot: number) => GovFacts | null) | null = null;
 /** Tests: the governance facts (procedures, anchors) without a block store. */
 export function setGovFactsSource(fn: ((hash: string | null, slot: number) => GovFacts | null) | null): void { factsSource = fn; }
-/** The gov index cache: `GEROLAMO_LSQ_GOV_CACHE` ("" keeps it in memory only), default `lsq-gov-index.json` beside the ledger store. */
+/** The gov index cache: `--lsq-gov-cache` ("" keeps it in memory only), default `lsq-gov-index.json` beside the ledger store. */
 export async function govFacts(c: Ctx): Promise<GovFacts | null> {
     if (factsSource) return factsSource(c.view.point?.hash ?? null, Number(c.view.point?.slot ?? 0));
     const bs = primaryBlockStore();
     if (!bs || !c.view.point) return null;
     if (factsCachePath === undefined) {
-        const env = process.env.GEROLAMO_LSQ_GOV_CACHE;
-        if (env != null) factsCachePath = env || null;
-        else { const dir = ledgerStoreSummary()?.dir ?? resolveLedgerDir({ dbPath: process.env.GEROLAMO_DB_PATH ?? "" }); factsCachePath = dir ? join(dir, "..", "lsq-gov-index.json") : null; }
+        const cache = settings().lsqGovCache;
+        if (cache != null) factsCachePath = cache || null;
+        else { const dir = ledgerStoreSummary()?.dir ?? resolveLedgerDir({ dbPath: settings().dbPath }); factsCachePath = dir ? join(dir, "..", "lsq-gov-index.json") : null; }
     }
     const conway = epochStartSlot(c.env.network, CONWAY_START_EPOCH[c.env.network ?? "preview"]);
     return govIndexFor(bs, conway, factsCachePath).at(c.view.point.hash, Number(c.view.point.slot));
@@ -234,7 +237,7 @@ function wCommittee(w: CborWriter, c: Ctx, facts: GovFacts | null): void {
 }
 /**
  * The pulser's frozen snapshot of the epoch (bug 167): what the store's boundary wrote, or what a
- * restart backfilled. `GEROLAMO_LSQ_PULSER_BACKFILL=1` (scripts/lsq-host.ts on a node whose boundary
+ * restart backfilled. `--lsq-pulser-backfill` (scripts/lsq-host.ts on a node whose boundary
  * ran before bug 167) reconstructs it in memory from the node's stores instead. Null: no snapshot —
  * the answers fall back to the live-state derivation below.
  */
@@ -246,7 +249,7 @@ async function pulserOf(c: Ctx): Promise<PulserSnapshot | null> {
         const { completePulserPoolDistr } = await import("../../../consensus/governance/govPulser");
         return completePulserPoolDistr(stored, c.stake, liveProposals(c, c.epoch, c.epoch).map((p) => ({ returnAccount: p.returnAccount, deposit: BigInt(p.deposit) })));
     }
-    if (process.env.GEROLAMO_LSQ_PULSER_BACKFILL !== "1") return null;
+    if (!settings().lsqPulserBackfill) return null;
     const key = `${c.epoch}:${c.view.point?.hash ?? ""}`;
     let p = pulserMemo.get(key);
     if (!p) {

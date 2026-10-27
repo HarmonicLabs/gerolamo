@@ -91,7 +91,7 @@ for (const s of ok) console.log(`  ok    ${s}`);
 for (const s of warn) console.log(`  note  ${s}`);
 for (const s of fail) console.log(`  FAIL  ${s}`);
 if (fail.length === 0) {
-    console.log("\nReady:  NETWORK=preprod bun src/index.ts start-gerolamo   |   bun run ui:dev");
+    console.log("\nReady:  bun src/index.ts start-gerolamo --network preprod   |   bun run ui:dev");
     process.exit(0);
 }
 console.log(`\n${fail.length} blocking issue(s).`);

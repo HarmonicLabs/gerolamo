@@ -5,8 +5,10 @@
  * transaction ends, so nothing points into LMDB memory after it. Write transactions are
  * serialised by a promise chain on our side (LMDB allows one writer per environment).
  *
- * Bun FFI over liblmdb (system `liblmdb.so`, or LMDB_LIB / a Nix store path).
+ * Bun FFI over liblmdb (system `liblmdb.so`, `ldconfig`'s entry, or --lmdb-lib / config lmdbLib). The library is opened
+ * on first use, after the settings are resolved.
  */
+import { settings } from "../config/settings";
 import { CString, dlopen, FFIType, ptr, toArrayBuffer, type Pointer } from "bun:ffi";
 /** Raw pointers travel as numbers; the FFI signatures want `Pointer`. */
 const P = (n: number): Pointer => n as unknown as Pointer;
@@ -23,7 +25,7 @@ const MDB_FIRST = 0, MDB_LAST = 6, MDB_NEXT = 8, MDB_PREV = 12, MDB_SET_RANGE = 
 
 function findLib(): string {
     const candidates = [
-        process.env.LMDB_LIB,
+        settings().lmdbLib,
         "/usr/lib/x86_64-linux-gnu/liblmdb.so",
         "/usr/lib/liblmdb.so",
         "/usr/lib64/liblmdb.so",
@@ -32,10 +34,16 @@ function findLib(): string {
         "/opt/homebrew/lib/liblmdb.dylib",
     ].filter((x): x is string => !!x);
     for (const c of candidates) if (existsSync(c)) return c;
-    throw new Error("liblmdb not found; set LMDB_LIB to the shared library path");
+    // the dynamic linker's cache (Debian and Ubuntu images put it under a multiarch directory)
+    try {
+        const out = Bun.spawnSync(["ldconfig", "-p"]).stdout.toString();
+        const m = /liblmdb\.so(?:\.\d+)*\s.*=>\s*(\S+)/.exec(out);
+        if (m && existsSync(m[1]!)) return m[1]!;
+    } catch { /* no ldconfig */ }
+    throw new Error("liblmdb not found; pass --lmdb-lib <path to liblmdb.so> (or config lmdbLib)");
 }
 
-const lib = dlopen(findLib(), {
+const openLib = () => dlopen(findLib(), {
     mdb_env_create: { args: [FFIType.ptr], returns: FFIType.int },
     mdb_env_set_mapsize: { args: [FFIType.ptr, FFIType.u64], returns: FFIType.int },
     mdb_env_set_maxdbs: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.int },
@@ -56,6 +64,10 @@ const lib = dlopen(findLib(), {
     mdb_stat: { args: [FFIType.ptr, FFIType.u32, FFIType.ptr], returns: FFIType.int },
     mdb_strerror: { args: [FFIType.int], returns: FFIType.ptr },
 });
+let opened: ReturnType<typeof openLib> | null = null;
+/** liblmdb, opened on first use (so --lmdb-lib, resolved at startup, is honoured). */
+const lib = new Proxy({} as ReturnType<typeof openLib>, { get: (_t, p) => (opened ??= openLib())[p as keyof ReturnType<typeof openLib>] });
+
 
 function check(rc: number, what: string): void {
     if (rc !== 0) throw new Error(`${what}: ${new CString(lib.symbols.mdb_strerror(rc) as Pointer).toString()} (${rc})`);

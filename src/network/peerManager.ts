@@ -185,7 +185,7 @@ export interface GerolamoConfig {
     readonly byronGenesisHash?: string;
     readonly enableMinibf?: boolean;
     readonly dbPath: string;
-    /** cardano-node-format block store directory (`immutable/`, `volatile/`); default `<dir of dbPath>/db`. `GEROLAMO_BLOCK_STORE=0` disables. */
+    /** cardano-node-format block store directory (`immutable/`, `volatile/`); default `<dir of dbPath>/db`. `--no-block-store` disables. */
     readonly blockStoreDir?: string;
     /** Which store the N2N chain-sync / block-fetch servers read: "sqlite" (default) or "chunks" (the block store). */
     readonly relayStore?: "sqlite" | "chunks";
@@ -199,7 +199,7 @@ export interface GerolamoConfig {
     /**
      * Ouroboros Node-to-Client Unix socket path (node.socket).
      * Distinct from unixSocket (HTTP-over-unix on peerBlockServer).
-     * Env: GEROLAMO_N2C_SOCKET; disable with GEROLAMO_N2C=0.
+     * Env: --n2c-socket; disable with --no-n2c.
      */
     readonly n2cSocketPath?: string;
     /** Optional inbound Cardano node-to-node TCP relay listener. */
@@ -227,19 +227,19 @@ export interface GerolamoConfig {
     readonly peerGovernor?: PeerGovernorConfig;
     /**
      * Prometheus text exposition with cardano-node metric names on its own address (off when
-     * unset). Env GEROLAMO_PROMETHEUS=host:port overrides, GEROLAMO_PROMETHEUS=0 disables. The JSON
+     * unset). Env --prometheus host:port overrides, --prometheus 0 disables. The JSON
      * /metrics on `port` is unaffected.
      */
     readonly prometheus?: { host?: string; port: number; noSuffix?: boolean; enabled?: boolean };
     /** cardano-node's legacy spelling of `prometheus`: `["127.0.0.1", 12798]`. */
     readonly hasPrometheus?: [string, number];
-    /** UTxO RPC server (src/api/utxorpc): off unless `enabled`; host 127.0.0.1, port 50051 by default. Env GEROLAMO_UTXORPC=host:port | 0. */
+    /** UTxO RPC server (src/api/utxorpc): off unless `enabled`; host 127.0.0.1, port 50051 by default. Env --utxorpc host:port | 0. */
     readonly utxorpc?: { enabled?: boolean; host?: string; port?: number };
     /**
      * Chain selection and consensus mode (consensus/chainsel/ChainSelDriver.ts). `chainSelection`:
      * "legacy" (default: primary + verifier votes) or "praos" (ouroboros-consensus candidate
      * fragments); `mode`: "praos" (default) or "genesis" (GSM + LoE + GDD; implies chainSelection praos).
-     * Env overrides: GEROLAMO_CHAIN_SELECTION, GEROLAMO_CONSENSUS_MODE.
+     * Env overrides: --chain-selection, --consensus-mode.
      */
     readonly consensus?: import("../consensus/chainsel/ChainSelDriver").ConsensusConfigLike["consensus"];
     /** A cardano-node config.json whose `Test*HardForkAtEpoch` overrides the hard-fork history uses (consensus/hfc). */
@@ -1407,7 +1407,7 @@ export async function initPeerManager(config: GerolamoConfig): Promise<void> {
                 const tip = await getChainTip();
                 if (tip) noteSelectedTip(Uint8Array.from(Buffer.from(tip.hashHex, "hex")));
             }
-            if (relayChainStoreOverride()) logger.info("N2N chain-sync / block-fetch will serve from the chunk store (GEROLAMO_RELAY_STORE=chunks)");
+            if (relayChainStoreOverride()) logger.info("N2N chain-sync / block-fetch will serve from the chunk store (--relay-store chunks)");
         }
         // LMDB ledger store (phase 1: UTxO), seeded from SQLite at the selected tip when empty
         const tipNow = await getChainTip();

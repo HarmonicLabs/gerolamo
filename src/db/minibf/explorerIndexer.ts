@@ -4,6 +4,7 @@
  * behind, forwards rollbacks, and hands readers a connection to the explorer file.
  * Inactive unless `startExplorerIndexer` ran (tests and scripts keep the inline writer).
  */
+import { settings, settingsMessage } from "../../config/settings";
 import { SQL } from "bun";
 import { existsSync } from "node:fs";
 import { logger } from "../../utils/logger";
@@ -41,6 +42,7 @@ class ExplorerIndexer {
         if (this.worker) return this.ready!;
         this.path = explorerPath;
         const w = new Worker(new URL("./explorerWorker.ts", import.meta.url).href);
+        w.postMessage(settingsMessage());
         this.worker = w;
         this.ready = new Promise<void>((resolve) => {
             w.onmessage = (ev: MessageEvent<any>) => {
@@ -159,9 +161,9 @@ export function explorerDbPathFor(dbPath: string): string {
     return dbPath.replace(/\.(db|sqlite|sqlite3)$/i, "") + ".explorer.db";
 }
 
-/** Start the worker for the node's database (GEROLAMO_EXPLORER_WORKER=0 keeps the inline writer). */
+/** Start the worker for the node's database (--no-explorer-worker keeps the inline writer). */
 export async function startExplorerIndexer(dbPath: string): Promise<boolean> {
-    if (process.env.GEROLAMO_EXPLORER_WORKER === "0" || dbPath === ":memory:") return false;
+    if (!settings().explorerWorker || dbPath === ":memory:") return false;
     const path = explorerDbPathFor(dbPath);
     await explorerIndexer.start(path, dbPath);
     logger.info(`Explorer indexer: mb_* projection in ${path} (worker; tip ${explorerIndexer.tipSlot}${explorerIndexer.migrating ? ", migrating history in the background" : ""})`);

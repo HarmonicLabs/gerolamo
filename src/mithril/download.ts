@@ -618,14 +618,8 @@ export async function findImmutableDir(root: string): Promise<string | null> {
 
 export function resolveMithrilClientBin(explicit?: string): string | null {
     if (explicit && existsSync(explicit)) return explicit;
-    const envPath = process.env.MITHRIL_CLIENT;
-    if (envPath && existsSync(envPath)) return envPath;
-    const pathEnv = process.env.PATH || "";
-    for (const dir of pathEnv.split(":")) {
-        const candidate = resolve(dir, "mithril-client");
-        if (existsSync(candidate)) return candidate;
-    }
-    return null;
+    // --client, else mithril-client on the system search path
+    return Bun.which("mithril-client");
 }
 
 export async function runMithrilClientBin(opts: {
@@ -637,6 +631,7 @@ export async function runMithrilClientBin(opts: {
     log?: (msg: string) => void;
 }): Promise<void> {
     const log = opts.log ?? console.log;
+    // mithril-client is configured through its own environment variables (its interface, not Gerolamo's)
     const env = {
         ...process.env,
         AGGREGATOR_ENDPOINT: opts.aggregator,

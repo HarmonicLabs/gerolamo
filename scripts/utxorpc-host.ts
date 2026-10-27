@@ -7,6 +7,7 @@
  * `utxo_idx` until the node itself runs this build, so payment / delegation / asset searches
  * answer empty here (exact addresses use the existing `utxo_addr` index).
  *   bun scripts/utxorpc-host.ts --config <node config.json> --port 3250 [--magic 2] [--k 432]
+ *       [--node-db-path <node db> (default <config dir>/preview.db)] [--sqlite <scratch db>]
  */
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -15,11 +16,12 @@ import { tmpdir } from "node:os";
 const arg = (k: string, d?: string) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1]! : d; };
 const cfgPath = arg("config");
 const port = Number(arg("port", "3250"));
-if (!cfgPath) { console.error("usage: bun scripts/utxorpc-host.ts --config <node config.json> --port <port> [--magic 2] [--k 432]"); process.exit(2); }
+if (!cfgPath) { console.error("usage: bun scripts/utxorpc-host.ts --config <node config.json> --port <port> [--magic 2] [--k 432] [--node-db-path <db>] [--sqlite <scratch db>]"); process.exit(2); }
 const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-const dbPath: string = process.env.GEROLAMO_NODE_DB_PATH ?? join(dirname(cfgPath), "preview.db");
-// the SQLite writer connection opens at import: point it at a scratch file, never the node's database
-process.env.GEROLAMO_DB_PATH = arg("sqlite", join(tmpdir(), `utxorpc-host-${process.pid}.db`));
+const dbPath: string = arg("node-db-path", join(dirname(cfgPath), "preview.db"))!;
+// the SQLite writer connection opens on first use: point it at a scratch file, never the node's database
+const { initSettings } = await import("../src/config/settings");
+initSettings({ dbPath: arg("sqlite", join(tmpdir(), `utxorpc-host-${process.pid}.db`)) });
 const magic = Number(arg("magic", "2"));
 const k = Number(arg("k", "432"));
 

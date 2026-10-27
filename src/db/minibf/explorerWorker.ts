@@ -6,6 +6,7 @@
  * background copy migrates the mb_* rows of the ledger database (chunked, interleaved with
  * live messages), then repairs the spent marks of outputs that were spent during the copy.
  */
+import { receiveSettings } from "../../config/settings";
 import { Database } from "bun:sqlite";
 import { applyMbBlock, applyMbTx, rollbackMbToSlot, type MbBlockMsg, type MbTxDelta } from "./writer";
 import { ensureMinibfOutIndexes, ensureMinibfSchema } from "./schema";
@@ -188,6 +189,7 @@ async function loop(): Promise<void> {
 }
 
 self.onmessage = (ev: MessageEvent<Msg>) => {
+    if (receiveSettings(ev.data)) return;
     queue.push(ev.data);
     wake?.();
 };

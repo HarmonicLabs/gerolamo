@@ -24,7 +24,8 @@
  *   3. Pots: `reward_pots` and `pot_snapshots[E]` take Koios `totals` for the current epoch.
  *
  *   bun scripts/repair-reward-balances.ts --db <ledger.db> --network preview --cache <dir> [--apply] [--sample 300] [--concurrency 2]
- *       [--snapshots 1410,1411] [--no-pots] [--blockfrost https://blockfrost-preprod.onchainapps.io [--blockfrost-key <project_id>]]
+ *       [--snapshots 1410,1411] [--no-pots] [--blockfrost https://blockfrost-preprod.onchainapps.io
+ *       [--blockfrost-project-id-file <path>]]
  *   --blockfrost takes the snapshots (`/epochs/{e}/stakes/{pool}`), accounts (`/accounts/{addr}`), pool
  *   list and epoch totals from a Blockfrost-compatible API instead of Koios (whose public tier allows
  *   only a few thousand requests a day); the pots still come from Koios `totals` unless --no-pots.
@@ -44,7 +45,7 @@ const sampleN = Number(args.sample ?? 300);
 const concurrency = Number(args.concurrency ?? 2);
 const bfBase = args.blockfrost ? String(args.blockfrost).replace(/\/$/, "") : null;
 // Official Blockfrost needs a project id (header `project_id`); the onchainapps mirrors do not.
-const bfProjectId = (args["blockfrost-key"] ?? process.env.BLOCKFROST_PROJECT_ID ?? "").trim();
+const bfProjectId = (args["blockfrost-project-id-file"] ? readFileSync(args["blockfrost-project-id-file"], "utf8") : "").trim(); // a secret: never a plain flag (visible in ps)
 mkdirSync(cacheDir, { recursive: true });
 const db = apply ? new Database(args.db!) : new Database(args.db!, { readonly: true });
 db.exec("PRAGMA busy_timeout = 10000");

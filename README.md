@@ -34,14 +34,14 @@ bun install          # installs the node, the desktop app and the dashboard (one
 bun run preflight    # tells you if anything on the machine is missing
 
 # Live preprod node
-NETWORK=preprod bun src/index.ts start-gerolamo
+bun src/index.ts start-gerolamo --network preprod
 
 # Desktop Control Center (Electrobun). First launch downloads the Electrobun
 # Linux runtime (~150 MB) from GitHub; after that it starts offline.
 bun run ui:dev
 
 # Mainnet
-NETWORK=mainnet bun src/index.ts start-gerolamo
+bun src/index.ts start-gerolamo --network mainnet
 ```
 
 Requirements: [Bun](https://bun.sh) ≥ 1.1 and, for the desktop app on Linux,
@@ -53,35 +53,35 @@ checkouts are needed. `bun run test` runs the node and desktop suites.
 | Surface | Default |
 |---------|---------|
 | HTTP API | `http://127.0.0.1:3030` |
-| DB | `./ledger/gerolamo.db` (override with env) |
+| DB | `./.live/test.db` (override with `--db-path` or config `dbPath`) |
 | Entry | `bun src/index.ts start-gerolamo` |
 
-### Env (instance isolation)
+### Flags (instance isolation)
 
-| Variable | Purpose |
-|----------|---------|
-| `NETWORK` | `preprod` (default) \| `mainnet` |
-| `GEROLAMO_DB_PATH` | Absolute SQLite path |
-| `DATABASE_URL` | `sqlite:///abs/path` |
-| `PORT` / `GEROLAMO_PORT` | HTTP port (default **3030**) |
-| `GEROLAMO_N2C_SOCKET` | Ouroboros N2C unix socket path |
-| `GEROLAMO_N2C=0` | Disable N2C |
+Every setting is a flag and a config.json key; Gerolamo reads no environment variables. The full list is in [`docs/CONFIG.md`](./docs/CONFIG.md). A flag beats config.json, which beats the default; `--set key.path=value` sets any config key.
+
+| Flag | config.json | Purpose |
+|------|-------------|---------|
+| `--network` | `networkName` | `preprod` (default) \| `preview` \| `mainnet` |
+| `--config <file>` | - | Instance config.json, merged over the network's bundled one |
+| `--db-path <file>` | `dbPath` | SQLite path |
+| `--port <n>` | `port` | HTTP port (default **3030**) |
+| `--n2c-socket <path>` | `n2cSocketPath` | Ouroboros N2C unix socket path |
+| `--no-n2c` | `n2c.enabled` | Disable N2C |
 
 Config: `src/config/{preprod|mainnet}/config.json`  
 Topology: `src/config/{network}/topology.json`
 
-**Note:** config `unixSocket` = **HTTP** over unix — **not** N2C. Use `GEROLAMO_N2C_SOCKET` for Ouroboros.
+**Note:** config `unixSocket` = **HTTP** over unix — **not** N2C. Use `--n2c-socket` for Ouroboros.
 
 ```bash
 INST="$HOME/.local/share/myapp/gerolamo/preprod-1"
 mkdir -p "$INST"/{data,logs}
 
-NETWORK=preprod \
-GEROLAMO_DB_PATH="$INST/data/gerolamo.db" \
-DATABASE_URL="sqlite://$INST/data/gerolamo.db" \
-GEROLAMO_PORT=3030 \
-GEROLAMO_N2C_SOCKET="$INST/node.socket" \
-bun src/index.ts start-gerolamo
+bun src/index.ts start-gerolamo --network preprod \
+  --db-path "$INST/data/gerolamo.db" \
+  --port 3030 \
+  --n2c-socket "$INST/node.socket"
 ```
 
 One **writer** per DB. Unique **port** per live instance.
@@ -190,7 +190,7 @@ curl -s 'http://127.0.0.1:3041/tail?n=40' | jq .
 
 - Service: `TheLab/src/bun/gerolamoService.ts`
 - Layout: `~/.local/share/thelab/gerolamo/<id>/`
-- Spawn: `bun src/index.ts start-gerolamo` with `GEROLAMO_DB_PATH` + `GEROLAMO_PORT`
+- Spawn: `bun src/index.ts start-gerolamo` with `--db-path` + `--port`
 - Health: `GET /health` · Logs: instance `logs/daemon.log`
 
 Recipe for any host:
@@ -248,20 +248,20 @@ Research: [`docs/mithril-native-client-research.md`](./docs/mithril-native-clien
 
 | Enable when | How |
 |-------------|-----|
-| Env | `GEROLAMO_N2C_SOCKET=./ledger/node.socket` |
+| Flag | `--n2c-socket ./ledger/node.socket` (config `n2cSocketPath`) |
 | Config | `n2c.enabled: true` + `n2c.socketPath` (path alone is not enough) |
-| Disable | `GEROLAMO_N2C=0` (or omit path) |
+| Disable | `--no-n2c` (or omit path) |
 
 ```bash
-GEROLAMO_N2C_SOCKET=./ledger/node.socket \
-NETWORK=preprod bun src/index.ts start-gerolamo
+bun src/index.ts start-gerolamo --network preprod \
+  --n2c-socket ./ledger/node.socket
 ```
 
 Hosts: Handshake, LocalChainSync, LocalTxSubmit, LocalTxMonitor, **minimal** LocalStateQuery.  
 Client pattern (Lab): `TheLab/src/bun/dolos/n2cClient.ts` — Multiplexer `node-to-client`.  
 Plan: [`docs/N2C_IMPLEMENTATION_PLAN.md`](./docs/N2C_IMPLEMENTATION_PLAN.md).
 
-**Note:** config `unixSocket` = **HTTP** over unix — **not** N2C. Use `GEROLAMO_N2C_SOCKET` for Ouroboros.
+**Note:** config `unixSocket` = **HTTP** over unix — **not** N2C. Use `--n2c-socket` for Ouroboros.
 
 ---
 
@@ -285,7 +285,7 @@ bun src/index.ts --help
 ```
 bun src/index.ts start-gerolamo
         │
-        ├─ init SQLite (GEROLAMO_DB_PATH / config)
+        ├─ init SQLite (--db-path / config dbPath)
         ├─ peerBlockServer  :3030  ── HTTP + Mini-BF
         ├─ peerManager      N2N    ── ChainSync / BlockFetch → DB
         └─ N2CServer (opt)  unix   ── LocalChainSync / Tx / LSQ*
@@ -323,9 +323,9 @@ bun src/index.ts start-gerolamo
 
 ```bash
 bunx tsc --noEmit
-NETWORK=preprod bun src/index.ts start-gerolamo
+bun src/index.ts start-gerolamo --network preprod
 # optional inspect
-bun --inspect src/index.ts start-gerolamo
+bun --inspect src/index.ts start-gerolamo --network preprod
 ```
 
 Logs: config `logs.logDirectory` (often `./logs/…`) JSONL when enabled.  

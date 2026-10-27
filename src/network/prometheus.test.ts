@@ -61,14 +61,14 @@ describe("density / GSM", () => {
 });
 
 describe("configuration and server", () => {
-    test("env beats config beats legacy hasPrometheus; off by default", () => {
-        expect(resolvePrometheusConfig({}, {})).toBeNull();
-        expect(resolvePrometheusConfig({ hasPrometheus: ["0.0.0.0", 12798] }, {})).toEqual({ host: "0.0.0.0", port: 12798, noSuffix: false });
-        expect(resolvePrometheusConfig({ prometheus: { port: 12799, noSuffix: true } }, {})).toEqual({ host: "127.0.0.1", port: 12799, noSuffix: true });
-        expect(resolvePrometheusConfig({ prometheus: { port: 12799, enabled: false } }, {})).toBeNull();
-        expect(resolvePrometheusConfig({ prometheus: { port: 1 } }, { GEROLAMO_PROMETHEUS: "127.0.0.1:12800" })).toEqual({ host: "127.0.0.1", port: 12800, noSuffix: false });
-        expect(resolvePrometheusConfig({ prometheus: { port: 1 } }, { GEROLAMO_PROMETHEUS: "0" })).toBeNull();
-        expect(resolvePrometheusConfig({}, { GEROLAMO_PROMETHEUS: "[::1]:9100" })).toEqual({ host: "::1", port: 9100, noSuffix: false });
+    test("the --prometheus flag beats config beats legacy hasPrometheus; off by default", () => {
+        expect(resolvePrometheusConfig({}, null)).toBeNull();
+        expect(resolvePrometheusConfig({ hasPrometheus: ["0.0.0.0", 12798] }, null)).toEqual({ host: "0.0.0.0", port: 12798, noSuffix: false });
+        expect(resolvePrometheusConfig({ prometheus: { port: 12799, noSuffix: true } }, null)).toEqual({ host: "127.0.0.1", port: 12799, noSuffix: true });
+        expect(resolvePrometheusConfig({ prometheus: { port: 12799, enabled: false } }, null)).toBeNull();
+        expect(resolvePrometheusConfig({ prometheus: { port: 1 } }, "127.0.0.1:12800")).toEqual({ host: "127.0.0.1", port: 12800, noSuffix: false });
+        expect(resolvePrometheusConfig({ prometheus: { port: 1 } }, "0")).toBeNull();
+        expect(resolvePrometheusConfig({}, "[::1]:9100")).toEqual({ host: "::1", port: 9100, noSuffix: false });
     });
 
     test("serves /metrics only, with the cardano-node content type", async () => {

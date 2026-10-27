@@ -1,7 +1,8 @@
 import { tmpdir } from "node:os";
 // db.ts opens the shared client lazily from this path; a literal ":memory:" left an empty
 // ":memory:" file in the repository root through a path resolution, so use a real temp file.
-process.env.GEROLAMO_DB_PATH = `${tmpdir()}/gerolamo-extractDelta-${process.pid}.db`;
+import { initSettings } from "../config/settings";
+initSettings({ dbPath: `${tmpdir()}/gerolamo-extractDelta-${process.pid}.db` });
 import { describe, expect, test } from "bun:test";
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { blake2b_256 } from "@harmoniclabs/crypto";

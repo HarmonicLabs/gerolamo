@@ -8,6 +8,7 @@
  *       [--koios-proposals proposals.json] [--koios-totals totals.json]
  *       [--nes <slot>=<state file> ...] [--to-slot N] [--phase pre|conway|all] [--report-every N]
  *       [--koios-dist <cache dir> [--koios-dist-epochs ratified|<e1,e2,…>]]
+ *       [--verbose] (the node's INFO log lines)
  *
  * Phase `pre` scans every block before the Conway era with a raw CBOR walk (no ledger-ts) for the
  * stake registrations, pool delegations, pool registrations and retirements the governance rules
@@ -55,7 +56,7 @@ const nesChecks = opts("nes").map((x) => { const [s, f] = x.split("="); return {
 if (!chunksDir || !refDbPath || !work) { console.error("usage: see the header of scripts/gov-replay.ts"); process.exit(2); }
 mkdirSync(work, { recursive: true });
 setEpochNetwork(network);
-logger.setLogConfig({ logLevel: process.env.GOV_REPLAY_VERBOSE ? LogLevel.INFO : LogLevel.ERROR, logToFile: false, logToConsole: true } as any);
+logger.setLogConfig({ logLevel: argv.includes("--verbose") ? LogLevel.INFO : LogLevel.ERROR, logToFile: false, logToConsole: true } as any);
 
 const ref = new Database(refDbPath, { readonly: true });
 const paramsCache = new Map<number, Record<string, unknown>>();

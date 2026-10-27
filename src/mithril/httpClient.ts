@@ -62,20 +62,7 @@ export async function createTsMithrilClient(opts: {
     if (genesisKey && (genesisKey.startsWith("http") || genesisKey.includes("/") || genesisKey.includes("."))) {
         genesisKey = await fetchGenesisVkey(genesisKey);
     }
-    if (!genesisKey) {
-        const envKey = process.env.GENESIS_VERIFICATION_KEY?.trim();
-        if (envKey && envKey.length > 64 && !envKey.includes("/") && !envKey.startsWith("http")) {
-            genesisKey = envKey;
-        } else if (envKey && (envKey.startsWith("http") || envKey.includes("/"))) {
-            genesisKey = await fetchGenesisVkey(envKey);
-        } else {
-            genesisKey = await fetchGenesisVkey(
-                opts.genesisVkeyUrl ||
-                    process.env.GENESIS_VERIFICATION_KEY_URL ||
-                    cfg.genesisVkeyUrl,
-            );
-        }
-    }
+    if (!genesisKey) genesisKey = await fetchGenesisVkey(opts.genesisVkeyUrl || cfg.genesisVkeyUrl);
 
     const retrieve = aggregatorCertificateRetriever(aggregator);
     const genesisVkeyBytes = decodeGenesisVerificationKey(genesisKey);

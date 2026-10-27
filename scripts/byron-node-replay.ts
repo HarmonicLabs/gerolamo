@@ -16,13 +16,13 @@
  *
  * `--ledger lmdb` starts from an EMPTY LMDB store holding the network's genesis state
  * (ledger/genesisState.ts, bug 304; before it, this mode had to start in dual and rebuild from
- * SQLite) with `GEROLAMO_LEDGER_SQL_WRITES=0` (no SQLite ledger at all; `--sql-writes` keeps them).
+ * SQLite) with `ledgerSqlWrites: false` (no SQLite ledger at all; `--sql-writes` keeps them).
  * `--shelley-epochs N` goes on past the first post-Byron block to the end of the N-th Shelley-based
  * epoch through the same apply path (Byron → Shelley translation, pots, snapshots, rewards, nonces);
  * check the result against Koios with scripts/ledger-koios-check.ts on the kept `ledger/`.
  *
  * Writes only under a fresh temporary directory (removed unless --keep). Never touches a node's
- * database: GEROLAMO_DB_PATH is pointed at the temporary database before anything opens one.
+ * database: the dbPath setting is pointed at the temporary database before anything opens one.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -37,11 +37,9 @@ const toSlot = Number(opt("to-slot") ?? Number.MAX_SAFE_INTEGER);
 const shelleyEpochs = Number(opt("shelley-epochs") ?? 0);
 if (!dir) { console.error("usage: bun scripts/byron-node-replay.ts <immutable dir> --network preprod [--ledger sqlite|dual|lmdb] [--to-slot N] [--shelley-epochs N] [--sql-writes] [--dir <parent>] [--keep]"); process.exit(2); }
 const tmp = mkdtempSync(join(opt("dir") ?? tmpdir(), "gerolamo-byron-node-replay-"));
-process.env.GEROLAMO_DB_PATH = join(tmp, "node.db"); // before src/sql is imported (it opens the default path at import)
-process.env.GEROLAMO_EXPLORER_WORKER = "0";
-delete process.env.GEROLAMO_LEDGER_STORE;
-delete process.env.GEROLAMO_LEDGER_DIR;
-if (ledgerMode === "lmdb" && !argv.includes("--sql-writes")) process.env.GEROLAMO_LEDGER_SQL_WRITES = "0";
+const { initSettings, settings } = await import("../src/config/settings");
+// before anything opens a database (src/sql opens settings().dbPath on first use); ledgerStore / ledgerDir keep their defaults
+initSettings({ dbPath: join(tmp, "node.db"), network, explorerWorker: false, ledgerSqlWrites: !(ledgerMode === "lmdb" && !argv.includes("--sql-writes")) });
 
 const { initSql, sql } = await import("../src/sql");
 const db = await import("../src/db");
@@ -60,7 +58,7 @@ const { pvKey } = await import("../src/consensus/byron/ByronUpdate");
 
 setEpochNetwork(network);
 const config: any = await Bun.file(`./src/config/${network}/config.json`).json();
-Object.assign(config, { dbPath: process.env.GEROLAMO_DB_PATH, ledgerDir: join(tmp, "ledger"), ledgerStore: ledgerMode, syncFromTip: false, syncFromGenesis: true, validation: { workers: 1 }, n2n: undefined, n2c: { enabled: false } });
+Object.assign(config, { dbPath: settings().dbPath, ledgerDir: join(tmp, "ledger"), ledgerStore: ledgerMode, syncFromTip: false, syncFromGenesis: true, validation: { workers: 1 }, n2n: undefined, n2c: { enabled: false } });
 await installHardForkHistory({ ...config, dbPath: config.dbPath }, network);
 initSql(config.dbPath);
 await db.ensureInitialized();
@@ -72,7 +70,7 @@ if (sqlLedgerWrites()) {
     console.log(`genesis UTxOs (SQLite): ${utxos.length} (${r.inserted} inserted)`);
 }
 await openNodeLedgerStore(config, null); // lmdb / dual on an empty chain: the genesis state (bug 304)
-console.log(`ledger store mode ${ledgerStoreMode()}${process.env.GEROLAMO_LEDGER_SQL_WRITES === "0" ? ", no SQLite ledger writes" : ""}; temporary directory ${tmp}`);
+console.log(`ledger store mode ${ledgerStoreMode()}${!settings().ledgerSqlWrites ? ", no SQLite ledger writes" : ""}; temporary directory ${tmp}`);
 
 const peers: any = { getPeer: () => undefined, allPeers: () => [], peers: () => [] };
 const orch: any = new ConsensusOrchestrator(config, peers);

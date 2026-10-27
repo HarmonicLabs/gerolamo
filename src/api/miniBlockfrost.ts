@@ -12,6 +12,7 @@
  * (mb_* tables, src/db/minibf). Errors use Blockfrost's `{status_code, error, message}` bodies.
  * docs/parity/blockfrost.md has the endpoint coverage matrix.
  */
+import { settings } from "../config/settings";
 import { getMaxBlockNo, getMaxSlot, getBlockListRowByHash } from "../db";
 import { normalizeEpochNetwork } from "../utils/epochFromSlotCalculations";
 import { toHex } from "@harmoniclabs/uint8array-utils";
@@ -43,7 +44,7 @@ export async function bfBlockByHash(hashHex: string, network: string | undefined
     const row = await getBlockListRowByHash(hashHex.toLowerCase());
     if (!row) return null;
     const [tipHeight, tipSlot] = await Promise.all([getMaxBlockNo(), getMaxSlot()]);
-    return bfBlock(row, normalizeEpochNetwork(network ?? process.env.NETWORK), { height: tipHeight, slot: Number(tipSlot) });
+    return bfBlock(row, normalizeEpochNetwork(network ?? settings().network), { height: tipHeight, slot: Number(tipSlot) });
 }
 
 /** Local SharedMempool snapshot (Gerolamo extension shape, also the WS `mempool` payload). */
@@ -66,7 +67,7 @@ export async function handleMiniBlockfrost(req: Request, url: URL, ctx: MiniBfCo
     if (path !== "/api/v0" && !path.startsWith("/api/v0/")) return null;
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: { ...CORS_HEADERS, "X-Gerolamo-Api": "mini-blockfrost" } });
     const sub = (path.slice("/api/v0".length) || "/").replace(/\/+$/, "") || "/";
-    const network = String(ctx.network ?? process.env.NETWORK ?? "preview").toLowerCase();
+    const network = String(ctx.network ?? settings().network).toLowerCase();
     const m = blockfrostRouter.match(req.method === "HEAD" ? "GET" : req.method, sub);
     if (!m) return sub === "/governor" ? null : bfError(404, "Not Found", MSG.notFound); // the peer server answers /api/v0/governor
     if ("methodNotAllowed" in m) return new Response(JSON.stringify({ status_code: 405, error: "Method Not Allowed", message: `Use ${m.methodNotAllowed.join(", ")}` }), { status: 405, headers: { "Content-Type": "application/json", Allow: m.methodNotAllowed.join(", "), ...CORS_HEADERS } });

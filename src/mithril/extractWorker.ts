@@ -2,7 +2,8 @@
  * Extractor worker: decodes one immutable chunk into explorer deltas and posts them to the
  * writer on the main thread. Pure CPU (CBOR + address encoding); no database access.
  */
-process.env.GEROLAMO_DB_PATH = ":memory:"; // db.ts opens the shared client at import; keep it off any ledger file
+import { initSettings } from "../config/settings";
+initSettings({ dbPath: ":memory:" }); // nothing here uses the database; if anything did, it would stay off any ledger file
 import { format } from "node:path";
 import { parseChunk } from "../state/legacy";
 import { extractBlock, type ExtractedBlock } from "./extractDelta";

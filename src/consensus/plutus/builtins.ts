@@ -17,6 +17,7 @@
  * Arguments are positional (`a0 … a5`): a partial application is one `VBuiltin` holding them,
  * saturation calls the implementation directly, no array is built per application.
  */
+import { settings } from "../../config/settings";
 import { BnCEK } from "@harmoniclabs/plutus-machine/dist/BnCEK/BnCEK.js";
 import { CEKConst } from "@harmoniclabs/plutus-machine/dist/CEKValue/CEKConst.js";
 import { CEKError } from "@harmoniclabs/plutus-machine/dist/CEKValue/CEKError.js";
@@ -704,14 +705,15 @@ export function newBnCek(ctx: BuiltinCtx, lookup: (tag: number) => any): BnCEK {
     return new BnCEK(lookup as any, shim as any, []);
 }
 
-/** GEROLAMO_PLUTUS_BUILTIN_TRACE=1: one line per saturated builtin call (align with tools/uplc-ref's UPLC_BUILTIN_TRACE). */
-const TRACE = process.env.GEROLAMO_PLUTUS_BUILTIN_TRACE === "1";
+/** --trace-plutus-builtins: one line per saturated builtin call (align with tools/uplc-ref's UPLC_BUILTIN_TRACE). */
+/** --trace-plutus-builtins: one log line per builtin call. */
+const builtinTrace = (): boolean => settings().tracePlutusBuiltins;
 function show(v: any): string {
     if (!(v instanceof VCon)) return v?.constructor?.name ?? String(v);
     const x = v.v;
     switch (v.type.tag) {
         case 0: return String(x);
-        case 1: return "#" + Buffer.from(x).toString("hex").slice(0, process.env.GEROLAMO_PLUTUS_BUILTIN_TRACE_FULL ? undefined : 64);
+        case 1: return "#" + Buffer.from(x).toString("hex").slice(0, settings().tracePlutusBuiltinsFull ? undefined : 64);
         case 2: return JSON.stringify(String(x).slice(0, 40));
         case 4: return String(x);
         case 3: return "()";
@@ -737,7 +739,7 @@ export function callBuiltin(ctx: BuiltinCtx, tag: number, args: Value[]): Value 
     return callSaturated(ctx, tag, a[0]!, a[1]!, a[2]!, a[3]!, a[4]!, a[5]!, a.length);
 }
 function callSaturated(ctx: BuiltinCtx, tag: number, a0: Value, a1: Value, a2: Value, a3: Value, a4: Value, a5: Value, n: number): Value {
-    if (TRACE) {
+    if (builtinTrace()) {
         const args = [a0, a1, a2, a3, a4, a5].slice(0, n);
         let out: Value | string;
         try { out = callInner(ctx, tag, a0, a1, a2, a3, a4, a5, n); } catch (e) { out = `ERROR ${(e as Error).message}`; console.error(`BUILTIN ${tag} ${args.map(show).join(", ")} -> ${out}`); throw e; }
@@ -791,7 +793,7 @@ export function applyBuiltin(ctx: BuiltinCtx, b: VBuiltin, arg: Value): Value {
 export function saturateBuiltin(ctx: BuiltinCtx, b: VBuiltin, arg: Value): Value {
     const fn = b.fn;
     // straight to the dispatch (one call level) unless tracing
-    const call = TRACE ? callSaturated : callInner;
+    const call = builtinTrace() ? callSaturated : callInner;
     switch (b.n) {
         case 0: return call(ctx, fn, arg, UNIT, UNIT, UNIT, UNIT, UNIT, 1);
         case 1: return call(ctx, fn, b.arg!, arg, UNIT, UNIT, UNIT, UNIT, 2);

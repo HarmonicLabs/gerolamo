@@ -12,7 +12,7 @@
  * A difference of a proposal deposit or a pool deposit is a boundary refund (not in the payouts) and
  * is listed separately.
  *
- *   GEROLAMO_DB_PATH=<scratch>.db bun scripts/balance-history-check.ts --node <node dir> [--ledger-dir <dir>] [--from-epoch E]
+ *   bun scripts/balance-history-check.ts --db-path <scratch>.db --node <node dir> [--ledger-dir <dir>] [--from-epoch E]
  *       [--treasury-only] [--network preview]
  * `--treasury-only` checks just the treasury claims (any range whose pot snapshots the store kept).
  */
@@ -25,13 +25,16 @@ import { VolatileStore } from "../src/storage/volatileStore";
 import { epochForSlot, firstSlotOfEpoch, setEpochNetwork } from "../src/utils/epochFromSlotCalculations";
 import { items, scanBlock, uint } from "./lib/cborWalk";
 import { logger, LogLevel } from "../src/utils/logger";
+import { initSettings } from "../src/config/settings";
 
 const argv = process.argv.slice(2);
 const opt = (k: string, d?: string) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1]! : d; };
 const node = opt("node")!;
 const network = opt("network", "preview")!;
-if (!node) { console.error("usage: --node <node dir> [--from-epoch E]"); process.exit(2); }
-if (!process.env.GEROLAMO_DB_PATH) { console.error("set GEROLAMO_DB_PATH to a scratch file: this tool must not open the node's SQLite"); process.exit(2); }
+if (!node) { console.error("usage: --db-path <scratch>.db --node <node dir> [--from-epoch E]"); process.exit(2); }
+const scratchDb = opt("db-path");
+if (!scratchDb) { console.error("pass --db-path <scratch file>: this tool must not open the node's SQLite"); process.exit(2); }
+initSettings({ dbPath: scratchDb });
 setEpochNetwork(network);
 logger.setLogConfig({ logLevel: LogLevel.ERROR, logToFile: false, logToConsole: true } as any);
 

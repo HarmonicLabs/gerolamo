@@ -7,7 +7,7 @@
  * `current_treasury_value`, 273; `StakeKeyHasNonZeroAccountBalanceDELEG`, 274) are what this checks:
  * every failure on a block the chain adopted is a false rejection.
  *
- *   GEROLAMO_DB_PATH=<scratch>.db bun scripts/ledger-rules-shadow.ts --node <node dir> [--ledger-dir <dir>]
+ *   bun scripts/ledger-rules-shadow.ts --db-path <scratch>.db --node <node dir> [--ledger-dir <dir>]
  *       [--blocks 432] [--network preview] [--verify-witnesses]
  *
  * The first block of an epoch is judged after the boundary, as the node does (the parent's state is
@@ -32,6 +32,7 @@ import { blockTxBodies, decodeCbor, decodeGovTx, bodyHasGovernance } from "../sr
 import { checkBlockGovernance } from "../src/consensus/governance/govValidate";
 import { buildGovLedgerView } from "../src/consensus/governance/govLedgerView";
 import { logger, LogLevel } from "../src/utils/logger";
+import { initSettings } from "../src/config/settings";
 import { fromHex, toHex } from "@harmoniclabs/uint8array-utils";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 
@@ -41,8 +42,10 @@ const node = opt("node")!;
 const network = opt("network", "preview")!;
 const want = Number(opt("blocks", "432"));
 const verifyWitnesses = argv.includes("--verify-witnesses");
-if (!node) { console.error("usage: bun scripts/ledger-rules-shadow.ts --node <node dir> [--ledger-dir <dir>] [--blocks N]"); process.exit(2); }
-if (!process.env.GEROLAMO_DB_PATH) { console.error("set GEROLAMO_DB_PATH to a scratch file: this tool must not open the node's SQLite"); process.exit(2); }
+if (!node) { console.error("usage: bun scripts/ledger-rules-shadow.ts --db-path <scratch>.db --node <node dir> [--ledger-dir <dir>] [--blocks N]"); process.exit(2); }
+const scratchDb = opt("db-path");
+if (!scratchDb) { console.error("pass --db-path <scratch file>: this tool must not open the node's SQLite"); process.exit(2); }
+initSettings({ dbPath: scratchDb });
 setEpochNetwork(network);
 logger.setLogConfig({ logLevel: LogLevel.ERROR, logToFile: false, logToConsole: true } as any);
 const genesis = JSON.parse(readFileSync(`${import.meta.dir}/../src/config/${network}/shelley-genesis.json`, "utf8"));

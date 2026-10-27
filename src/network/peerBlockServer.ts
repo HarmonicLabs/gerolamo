@@ -1,3 +1,4 @@
+import { settings } from "../config/settings";
 import { plutusPhase2Totals } from "../consensus/BlockBodyValidator";
 import { equivocationStats } from "../consensus/equivocation";
 import { statsHtmlPage } from "./statsPage";
@@ -29,7 +30,7 @@ import { calculatePreProdCardanoEpoch, epochForSlot, epochLengthSlots, firstSlot
 
 /** The network the node runs on (preprod / preview / mainnet), not the config's generic "testnet". */
 function networkName(config: { network?: string } | undefined): string {
-    const n = String(process.env.NETWORK ?? "").toLowerCase();
+    const n = settings().network;
     if (n === "preprod" || n === "preview" || n === "mainnet") return n;
     return getEpochNetwork() ?? config?.network ?? "unknown";
 }
@@ -162,9 +163,9 @@ async function buildMetricsPayload(
         Number.isFinite(epoch) && epoch >= 0
             ? await getEpochNonce(epoch)
             : null;
-    // A Mithril bootstrap's progress file (GEROLAMO_MITHRIL_PROGRESS): the certified-chain import,
+    // A Mithril bootstrap's progress file (--mithril-progress-file): the certified-chain import,
     // then "replaying certified chain: N %" until the tip passes the snapshot's last slot.
-    const mithrilFile = process.env.GEROLAMO_MITHRIL_PROGRESS?.trim();
+    const mithrilFile = settings().mithrilProgressFile?.trim();
     const mithrilProgress = mithrilFile ? readMithrilProgressCached(mithrilFile) : null;
     const mithril = mithrilProgress ? { ...mithrilProgress, replay: mithrilReplayStatus(mithrilProgress, tipSlot) } : null;
     // The epoch the network is in (best peer tip): "epoch 1255 / 1411" while syncing.
@@ -626,7 +627,7 @@ export async function startPeerBlockServer(
         // The explorer's live list wants the block document, not just the point.
         // Built only when someone listens: three SQLite reads per coalesced tip.
         if (tip.hash && wsSubscriberCount("block") > 0) {
-            void bfBlockByHash(tip.hash, config.network ?? process.env.NETWORK)
+            void bfBlockByHash(tip.hash, config.network ?? settings().network)
                 .then((doc) => { if (doc) wsPublish("block", doc); })
                 .catch(() => {});
         }

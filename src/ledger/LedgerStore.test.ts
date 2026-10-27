@@ -1,3 +1,4 @@
+import { withSettings } from "../config/settings";
 import { afterAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, readdirSync, rmSync, truncateSync, writeFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -421,18 +422,18 @@ describe("LedgerStore batched diff durability (bug 380)", () => {
         re.close();
     });
 
-    test("GEROLAMO_LEDGER_DIFF_FSYNC: 0 and block write final files at once (nothing pending)", async () => {
-        const prev = process.env.GEROLAMO_LEDGER_DIFF_FSYNC;
+    test("--ledger-diff-fsync none and block write final files at once (nothing pending)", async () => {
+        let restore = () => {};
         try {
-            for (const v of ["0", "block"]) {
-                process.env.GEROLAMO_LEDGER_DIFF_FSYNC = v;
+            for (const v of ["none", "block"] as const) {
+                restore(); restore = withSettings({ ledgerDiffFsync: v });
                 const { dir, st } = await batchOf(0, 3);
                 expect(st.pendingDiffs()).toBe(0);
                 expect(files(dir)).toEqual([1, 2, 3].map((i) => hx(i) + ".diff").sort());
                 st.close({ flush: false });
                 expect(open(dir).recoveryTip(blocks(3, 2, 1, 0))).toEqual({ slot: 30, hash: h(3) });
             }
-        } finally { if (prev === undefined) delete process.env.GEROLAMO_LEDGER_DIFF_FSYNC; else process.env.GEROLAMO_LEDGER_DIFF_FSYNC = prev; }
+        } finally { restore(); }
     });
 });
 

@@ -21,28 +21,14 @@ export interface ResolvedN2NConfig {
     handshakeTimeoutMs: number;
     idleTimeoutMs: number;
     publicAddress?: string;
-    /** WebSocket bearer, when enabled (`n2n.ws.enabled` or GEROLAMO_N2N_WS_PORT). */
+    /** WebSocket bearer, when enabled (`n2n.ws.enabled`, --n2n-ws or --n2n-ws-port). */
     ws?: { host: string; port: number };
 }
 
-export function resolveN2NConfig(
-    input: N2NConfigInput | undefined,
-    env: Record<string, string | undefined> = process.env,
-): ResolvedN2NConfig | undefined {
-    const switchValue = env.GEROLAMO_N2N?.trim().toLowerCase();
-    if (switchValue === "0" || switchValue === "false") return undefined;
-
-    const envPort = Number(env.GEROLAMO_N2N_PORT);
-    const hasEnvPort = Number.isInteger(envPort) && envPort > 0 && envPort <= 65_535;
-    const enabled =
-        hasEnvPort ||
-        input?.enabled === true ||
-        switchValue === "1" ||
-        switchValue === "true";
-    if (!enabled) return undefined;
-
-    const configuredPort = Number(input?.port ?? 3001);
-    const port = hasEnvPort ? envPort : configuredPort;
+/** The inbound N2N listener from config (the resolved settings are already merged in by loadConfig); undefined when off. */
+export function resolveN2NConfig(input: N2NConfigInput | undefined): ResolvedN2NConfig | undefined {
+    if (input?.enabled !== true) return undefined;
+    const port = Number(input.port ?? 3001);
     if (!Number.isInteger(port) || port < 1 || port > 65_535) {
         throw new Error(`Invalid inbound N2N port: ${String(port)}`);
     }
@@ -54,22 +40,20 @@ export function resolveN2NConfig(
 
     return {
         enabled: true,
-        host: env.GEROLAMO_N2N_HOST?.trim() || input?.host?.trim() || "0.0.0.0",
+        host: input.host?.trim() || "0.0.0.0",
         port,
-        maxConnections: positiveInt(input?.maxConnections, 64),
-        maxRangeBlocks: positiveInt(input?.maxRangeBlocks, 256),
-        handshakeTimeoutMs: positiveInt(input?.handshakeTimeoutMs, 10_000),
-        idleTimeoutMs: positiveInt(input?.idleTimeoutMs, 120_000),
-        publicAddress: typeof input?.publicAddress === "string" && input.publicAddress.trim() ? input.publicAddress.trim() : undefined,
-        ws: resolveWs(input?.ws, env),
+        maxConnections: positiveInt(input.maxConnections, 64),
+        maxRangeBlocks: positiveInt(input.maxRangeBlocks, 256),
+        handshakeTimeoutMs: positiveInt(input.handshakeTimeoutMs, 10_000),
+        idleTimeoutMs: positiveInt(input.idleTimeoutMs, 120_000),
+        publicAddress: typeof input.publicAddress === "string" && input.publicAddress.trim() ? input.publicAddress.trim() : undefined,
+        ws: resolveWs(input.ws),
     };
 }
 
-function resolveWs(input: N2NConfigInput["ws"], env: Record<string, string | undefined>): { host: string; port: number } | undefined {
-    const envPort = Number(env.GEROLAMO_N2N_WS_PORT);
-    const hasEnvPort = Number.isInteger(envPort) && envPort > 0 && envPort <= 65_535;
-    if (!hasEnvPort && input?.enabled !== true) return undefined;
-    const port = hasEnvPort ? envPort : Number(input?.port ?? 3002);
+function resolveWs(input: N2NConfigInput["ws"]): { host: string; port: number } | undefined {
+    if (input?.enabled !== true) return undefined;
+    const port = Number(input.port ?? 3002);
     if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error(`Invalid N2N WebSocket port: ${String(port)}`);
-    return { host: env.GEROLAMO_N2N_WS_HOST?.trim() || input?.host?.trim() || "0.0.0.0", port };
+    return { host: input.host?.trim() || "0.0.0.0", port };
 }

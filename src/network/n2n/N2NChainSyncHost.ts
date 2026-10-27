@@ -1,3 +1,4 @@
+import { settings } from "../../config/settings";
 import { Cbor, type CborObj } from "@harmoniclabs/cbor";
 import {
     ChainPoint,
@@ -21,8 +22,9 @@ import { noteServed } from "../nodeMetrics";
 
 const log = logger.child("n2n.chainsync");
 
-/** First messages of each session are traced at info level (env GEROLAMO_N2N_TRACE=0 disables). */
-const TRACE_MESSAGES = process.env.GEROLAMO_N2N_TRACE === "0" ? 0 : 12;
+/** First messages of each session are traced at info level (env --no-trace-n2n-chain-sync disables). */
+/** First chain-sync messages traced per inbound peer (--no-trace-n2n-chain-sync: none). */
+const traceMessages = (): number => (settings().traceN2nChainSync ? 12 : 0);
 
 export interface N2NChainSyncHostOptions {
     /** Peer label for the trace lines. */
@@ -98,7 +100,7 @@ export class N2NChainSyncHost {
     }
 
     private trace(direction: "←" | "→", what: string): void {
-        if (this.traced >= TRACE_MESSAGES) return;
+        if (this.traced >= traceMessages()) return;
         this.traced++;
         log.info(`ChainSync host ${this.peer} ${direction} ${what}`);
     }

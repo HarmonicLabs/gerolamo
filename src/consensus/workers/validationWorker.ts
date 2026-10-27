@@ -1,4 +1,5 @@
 /// <reference lib="webworker" />
+import { receiveSettings } from "../../config/settings";
 import {
     fresh,
     isRangeVerifyJob,
@@ -27,6 +28,7 @@ const sharedGenesis = new Map<number, unknown>();
 declare const self: Worker;
 
 self.onmessage = async (ev: MessageEvent<{ id: number; job: PoolJob }>) => {
+    if (receiveSettings(ev.data)) return;
     const { id, job } = ev.data;
     try {
         if ((job as any)?.kind === "memory") {

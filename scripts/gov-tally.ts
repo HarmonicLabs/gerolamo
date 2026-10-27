@@ -1,11 +1,11 @@
 #!/usr/bin/env bun
-/** Recompute one proposal's tally at a boundary: bun scripts/gov-tally.ts --db <ledger.db> --action <txid:ix> --epoch <E> [--taken-at <snapshot epoch>] [--votes-until-epoch <e>] */
+/** Recompute one proposal's tally at a boundary: bun scripts/gov-tally.ts --db <ledger.db> --action <txid:ix> --epoch <E> [--taken-at <snapshot epoch>] [--votes-until-epoch <e>] [--debug] */
 import { initSql, sql, withReadOnlyConnection } from "../src/sql";
 import { tallyProposal } from "../src/consensus/governance/state";
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => a.startsWith("--") ? [a.slice(2), all[i + 1]] : []).filter((x) => x.length));
 initSql(args.db!); // queries below run on the read-only connection (the node may be the writer)
 const epoch = Number(args.epoch);
-if (process.env.GOV_TALLY_DEBUG) console.log("args", args);
+if ("debug" in args) console.log("args", args);
 const takenAt = args["taken-at"] ? Number(args["taken-at"]) : epoch - 1;
 const untilSlot = args["votes-until-epoch"] ? (Number(args["votes-until-epoch"]) + 1) * 86400 - 1 : Number.MAX_SAFE_INTEGER;
 const r = await withReadOnlyConnection(async () => {

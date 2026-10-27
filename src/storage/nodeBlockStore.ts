@@ -3,12 +3,13 @@
  *
  * Layout: `<blockStoreDir>/{immutable,volatile,gerolamo}` where `blockStoreDir` is
  * `config.blockStoreDir`, else `<dir of dbPath>/db` — the same shape as a cardano-node
- * `--database-path`. `GEROLAMO_BLOCK_STORE=0` disables it. While the SQLite `blocks` table is
+ * `--database-path`. `--no-block-store` disables it. While the SQLite `blocks` table is
  * still the primary store, `catchUpFromSqlite` copies every applied block above the chunk
  * store's tip into the volatile set (so a crash between the SQLite commit and the mirror write,
  * or a store created on an existing node, leaves no gap) and `promote` moves blocks more than
  * k deep into the chunks.
  */
+import { settings } from "../config/settings";
 import { dirname, join } from "node:path";
 import { ledgerStoreMode } from "../ledger/nodeLedgerStore";
 import { sql } from "../sql";
@@ -31,8 +32,7 @@ export interface NodeBlockStoreConfig {
 let storeMode: "mirror" | "primary" = "primary";
 
 export function configureBlockStoreMode(mode: string | undefined): void {
-    const env = process.env.GEROLAMO_BLOCK_STORE_MODE?.trim().toLowerCase();
-    const m = env || mode?.trim().toLowerCase();
+    const m = mode?.trim().toLowerCase();
     // Primary is the default (docs/PLAN_CHUNK_STORE.md, 2026-09-14); "mirror" keeps SQLite's blocks table primary for a legacy node.
     storeMode = m === "mirror" ? "mirror" : "primary";
 }
@@ -47,9 +47,7 @@ export function primaryBlockStore(): BlockStore | null {
 }
 
 export function resolveBlockStoreDir(config: NodeBlockStoreConfig): string | null {
-    if (process.env.GEROLAMO_BLOCK_STORE === "0" || process.env.GEROLAMO_BLOCK_STORE === "false") return null;
-    const fromEnv = process.env.GEROLAMO_BLOCK_STORE_DIR?.trim();
-    if (fromEnv) return fromEnv;
+    if (!settings().blockStore) return null;
     if (config.blockStoreDir?.trim()) return config.blockStoreDir.trim();
     if (!config.dbPath || config.dbPath === ":memory:") return null;
     return join(dirname(config.dbPath), "db");
@@ -123,17 +121,17 @@ export function getNodeBlockStore(): BlockStore | null {
 
 /**
  * The RelayChainStore the N2N server and duplex responders should serve from: the chunk-backed
- * one when `GEROLAMO_RELAY_STORE=chunks` and a store is open, otherwise undefined (SQLite default).
+ * one when `--relay-store chunks` and a store is open, otherwise undefined (SQLite default).
  */
 let relayStoreMode: string | null = null;
 
-/** `config.relayStore` ("sqlite" | "chunks"); the environment variable wins when set. */
+/** `config.relayStore` ("sqlite" | "chunks"; --relay-store is written into the config at startup). */
 export function configureRelayStore(mode: string | undefined): void {
     relayStoreMode = mode?.trim().toLowerCase() || null;
 }
 
 export function relayChainStoreOverride(): RelayChainStore | undefined {
-    const want = (process.env.GEROLAMO_RELAY_STORE?.trim().toLowerCase() || relayStoreMode || "");
+    const want = relayStoreMode || "";
     if (want !== "chunks" || !relayStore) return undefined;
     return relayStore;
 }

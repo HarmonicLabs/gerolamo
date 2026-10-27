@@ -1,5 +1,5 @@
 // Dry-build the producer's greeting transaction ("Gerolamo was here!") from the node DB and decode it; nothing is submitted, no key material is printed.
-// Usage: GEROLAMO_DB_PATH=<preview.db> NETWORK=preview bun scripts/greeting-dry-run.ts <node config.json>
+// Usage: bun scripts/greeting-dry-run.ts <node config.json> --db-path <preview.db> --network preview
 import { sql } from "../src/sql";
 import { getChainTip } from "../src/db";
 import { attachReadOnlyBlockStore } from "../src/storage/nodeBlockStore";
@@ -8,7 +8,13 @@ import { epochForSlot } from "../src/utils/epochFromSlotCalculations";
 import * as op from "../src/pool/operator";
 import { Tx } from "@harmoniclabs/cardano-ledger-ts";
 import { Cbor } from "@harmoniclabs/cbor";
-const g = JSON.parse(await Bun.file(process.argv[2] ?? "/media/bakon/data/cardano/gerolamo-preview-mithril/config.json").text()).producer.greeting;
+import { initSettings, SETTINGS } from "../src/config/settings";
+const argv = process.argv.slice(2);
+const flag = (n: string) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : undefined; };
+const positional = argv.filter((a, i) => !a.startsWith("--") && !argv[i - 1]?.startsWith("--"));
+const dbPath = flag("db-path");
+initSettings({ dbPath: dbPath ?? SETTINGS.dbPath.default, network: flag("network") ?? SETTINGS.network.default }); // before the first query
+const g = JSON.parse(await Bun.file(positional[0] ?? "/media/bakon/data/cardano/gerolamo-preview-mithril/config.json").text()).producer.greeting;
 const key = op.loadSigningKey(g.paymentSkeyFile, (op as any).KeyEnvelopeType?.paymentSigning ?? "PaymentSigningKeyShelley_ed25519");
 const address = op.bech32Decode(g.paymentAddress).bytes;
 const rows = (await sql`SELECT utxo_ref, lovelace, tx_out FROM utxo WHERE address = ${g.paymentAddress}`.values()) as unknown[][];
@@ -16,7 +22,7 @@ const usable = rows.map((r) => ({ ref: String(r[0]), lovelace: BigInt(String(r[1
   .filter((u) => { try { const a = JSON.parse(u.txOut)?.assets ?? {}; return Object.keys(a).every((k) => k === "") && u.lovelace >= 2_000_000n; } catch { return false; } })
   .sort((a, b) => (a.lovelace > b.lovelace ? -1 : 1));
 console.log("usable UTxOs:", usable.length, usable[0] ? usable[0].ref + " " + usable[0].lovelace + " lovelace" : "");
-await attachReadOnlyBlockStore({ dbPath: process.env.GEROLAMO_DB_PATH ?? "", blockStoreDir: (g as any).blockStoreDir }, Number((g as any).securityParam ?? 432)); // the chain lives in the block store, not in SQLite
+await attachReadOnlyBlockStore({ dbPath: dbPath ?? "", blockStoreDir: (g as any).blockStoreDir }, Number((g as any).securityParam ?? 432)); // the chain lives in the block store, not in SQLite
 const tip = await getChainTip(); if (!tip) throw new Error("no tip");
 const raw = (await readEpochParamsRaw(Number(epochForSlot(tip.slot, "preview")))) ?? {};
 const [txHash, index] = usable[0]!.ref.split(":");

@@ -1,3 +1,4 @@
+import { settings } from "../config/settings";
 import { fetch } from "bun";
 import { logger } from "./logger";
 import { GerolamoConfig } from "../network/peerManager";
@@ -48,7 +49,7 @@ export async function blockFrostFetchEpochParams(
         );
     }
 
-    const projectId = process.env.BLOCKFROST_PROJECT_ID?.trim();
+    const projectId = settings().blockfrostProjectId?.trim();
     const headers: Record<string, string> = {
         "Content-Type": "application/json",
     };

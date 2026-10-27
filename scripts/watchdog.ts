@@ -34,11 +34,11 @@ import type { ParityConfig } from "./lib/parityProbe";
 interface NodeSpec {
     name: string;              // label in alerts, e.g. "preview producer"
     network: "preview" | "preprod" | "mainnet";
-    port: number;              // GEROLAMO_PORT (HTTP /metrics)
+    port: number;              // the node's --port (HTTP /metrics)
     dir: string;               // node directory (run-supervised.sh <datadir>)
     maxRssGb?: number;         // run-supervised.sh max_rss_gb (default 14)
     logName: string;           // run-supervised.sh logfile name
-    env?: Record<string, string>; // extra environment for the supervisor (e.g. GEROLAMO_LEDGER_SQL_WRITES=0)
+    flags?: string[];          // extra node flags passed through the supervisor (e.g. ["--no-ledger-sql-writes"]); the node reads no environment
     producer?: boolean;        // watch leader-slot outcomes
     relaunch?: boolean;        // relaunch the supervisor when it is missing (default true)
     restartOnHaltMin?: number; // SIGTERM the node after this long halted (default 5; 0 = never)
@@ -62,7 +62,7 @@ interface Config {
     repo: string;              // gerolamo checkout (run-supervised.sh lives in scripts/)
     stateFile: string;         // watchdog memory between passes
     logFile: string;
-    ntfyUrl?: string;          // e.g. https://ntfy.sh/<secret-topic>; also GEROLAMO_WATCHDOG_NTFY
+    ntfyUrl?: string;          // e.g. https://ntfy.sh/<secret-topic>
     behindAlertSec?: number;   // default 300
     unreachableAfterMin?: number; // default 10
     repeatMin?: number;        // default 30
@@ -76,7 +76,7 @@ const cfgPath = process.argv[2];
 if (!cfgPath) { console.error("usage: bun scripts/watchdog.ts <config.json> [--test]"); process.exit(2); }
 const cfg = JSON.parse(readFileSync(cfgPath, "utf8")) as Config;
 const behindAlert = cfg.behindAlertSec ?? 300, unreachableAfter = (cfg.unreachableAfterMin ?? 10) * 60_000, repeat = (cfg.repeatMin ?? 30) * 60_000;
-const ntfy = process.env.GEROLAMO_WATCHDOG_NTFY || cfg.ntfyUrl;
+const ntfy = cfg.ntfyUrl;
 const now = Date.now();
 mkdirSync(dirname(cfg.logFile), { recursive: true });
 const log = (m: string) => appendFileSync(cfg.logFile, `[${new Date().toISOString()}] ${m}\n`);
@@ -110,7 +110,7 @@ function wallSlot(net: NodeSpec["network"]): number {
     return 4492800 + (t - 1596059091);
 }
 
-/** pids of a node's supervisor and node process (by cmdline / GEROLAMO_PORT in the environment). */
+/** pids of a node's supervisor and node process (by cmdline: `start-gerolamo ... --port <port>`; GEROLAMO_PORT in the environment for a node started before 2026-10-26). */
 function findProcs(n: NodeSpec): { supervisor: number | null; node: number | null } {
     let supervisor: number | null = null, node: number | null = null;
     for (const d of readdirSync("/proc")) {
@@ -119,15 +119,16 @@ function findProcs(n: NodeSpec): { supervisor: number | null; node: number | nul
         try { cmd = readFileSync(`/proc/${d}/cmdline`, "utf8").split("\0").join(" "); } catch { continue; }
         if (/^(\S*\/)?bash /.test(cmd) && cmd.includes("run-supervised.sh") && cmd.includes(` ${n.port} `) && cmd.includes(n.dir)) supervisor = Number(d);
         else if (cmd.startsWith("bun ") && cmd.includes("start-gerolamo")) {
-            try { if (readFileSync(`/proc/${d}/environ`, "utf8").split("\0").includes(`GEROLAMO_PORT=${n.port}`)) node = Number(d); } catch { /* not ours */ }
+            if (new RegExp(`--port ${n.port}( |$)`).test(cmd)) node = Number(d);
+            else try { if (readFileSync(`/proc/${d}/environ`, "utf8").split("\0").includes(`GEROLAMO_PORT=${n.port}`)) node = Number(d); } catch { /* not ours */ }
         }
     }
     return { supervisor, node };
 }
 
 function relaunch(n: NodeSpec): void {
-    const env = { ...process.env, PLUTUS_TRACE: "0", ...(n.env ?? {}) };
-    const child = spawn("setsid", ["bash", "scripts/run-supervised.sh", n.network, String(n.port), n.dir, String(n.maxRssGb ?? 14), n.logName], { cwd: cfg.repo, env, detached: true, stdio: "ignore" });
+    const args = ["bash", "scripts/run-supervised.sh", n.network, String(n.port), n.dir, String(n.maxRssGb ?? 14), n.logName, ...(n.flags?.length ? ["--", ...n.flags] : [])];
+    const child = spawn("setsid", args, { cwd: cfg.repo, detached: true, stdio: "ignore" });
     child.unref();
     log(`relaunched supervisor for ${n.name} (pid ${child.pid})`);
 }

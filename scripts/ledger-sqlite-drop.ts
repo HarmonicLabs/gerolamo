@@ -4,8 +4,8 @@
  * sees an empty table instead of an error) and the static tables (schema_migrations, genesis_utxo).
  * Marks the database so the node refuses any mode but lmdb afterwards.
  *
- * Guards: the node's config says ledgerStore "lmdb" and its watchdog entry carries
- * GEROLAMO_LEDGER_SQL_WRITES=0; the node answers /metrics in lmdb mode, at the tip, not halted.
+ * Guards: the node's config says ledgerStore "lmdb" and `ledgerSqlWrites: false` (or its watchdog entry
+ * passes --no-ledger-sql-writes in `flags`); the node answers /metrics in lmdb mode, at the tip, not halted.
  * The tool stops the node's supervisor and node (and holds the watchdog off), works, then relaunches.
  *   bun scripts/ledger-sqlite-drop.ts --port 3036 --dir <nodeDir> [--watchdog-config <path>] [--yes]
  */
@@ -22,7 +22,7 @@ const wd = JSON.parse(readFileSync(wdPath, "utf8"));
 const node = wd.nodes.find((n: any) => n.port === port);
 const fail = (m: string) => { console.error(`refused: ${m}`); process.exit(1); };
 if (cfg.ledgerStore !== "lmdb") fail(`config ledgerStore is ${cfg.ledgerStore}`);
-if (node?.env?.GEROLAMO_LEDGER_SQL_WRITES !== "0") fail("the watchdog entry does not set GEROLAMO_LEDGER_SQL_WRITES=0");
+if (cfg.ledgerSqlWrites !== false && !node?.flags?.includes("--no-ledger-sql-writes")) fail("the node's config.json does not set ledgerSqlWrites: false (nor does its watchdog entry pass --no-ledger-sql-writes)");
 const m = await fetch(`http://127.0.0.1:${port}/metrics`, { signal: AbortSignal.timeout(20_000) }).then((r) => r.json()).catch(() => null) as any;
 if (!m || m.ledgerStore?.mode !== "lmdb" || m.sync?.halted) fail("node not answering in lmdb mode, or halted");
 const next = ((m.producer?.leaderSlots ?? []) as any[]).filter((s) => s.outcome === "upcoming").map((s) => Date.parse(s.time)).sort()[0];
@@ -36,7 +36,7 @@ const before = statSync(dbPath).size;
 console.log(`${dbPath}: ${(before / 1e9).toFixed(2)} GB; emptying ${TABLES.length} ledger tables${process.argv.includes("--yes") ? "" : " (dry run: pass --yes)"}`);
 if (!process.argv.includes("--yes")) process.exit(0);
 
-const procs = () => { let sup: number | null = null, nd: number | null = null; for (const d of readdirSync("/proc")) { if (!/^\d+$/.test(d)) continue; try { const c = readFileSync(`/proc/${d}/cmdline`, "utf8").split("\0").join(" "); if (c.startsWith("bash ") && c.includes("run-supervised.sh") && c.includes(` ${port} `)) sup = Number(d); else if (c.startsWith("bun ") && c.includes("start-gerolamo") && readFileSync(`/proc/${d}/environ`, "utf8").split("\0").includes(`GEROLAMO_PORT=${port}`)) nd = Number(d); } catch { /* gone */ } } return { sup, nd }; };
+const procs = () => { let sup: number | null = null, nd: number | null = null; for (const d of readdirSync("/proc")) { if (!/^\d+$/.test(d)) continue; try { const c = readFileSync(`/proc/${d}/cmdline`, "utf8").split("\0").join(" "); if (c.startsWith("bash ") && c.includes("run-supervised.sh") && c.includes(` ${port} `)) sup = Number(d); else if (c.startsWith("bun ") && c.includes("start-gerolamo") && (new RegExp(`--port ${port}( |$)`).test(c) || readFileSync(`/proc/${d}/environ`, "utf8").split("\0").includes(`GEROLAMO_PORT=${port}`))) nd = Number(d); } catch { /* gone */ } } return { sup, nd }; }; // node by cmdline `--port <port>`; GEROLAMO_PORT in the environment for a node started before 2026-10-26
 node.relaunch = false; writeFileSync(wdPath, JSON.stringify(wd, null, 1)); // hold the watchdog off
 try {
     const p = procs();
@@ -56,7 +56,7 @@ try {
     console.log(`emptied and vacuumed in ${((performance.now() - t0) / 1000).toFixed(0)} s: ${(before / 1e9).toFixed(2)} GB → ${(statSync(dbPath).size / 1e9).toFixed(2)} GB`);
 } finally {
     delete node.relaunch; writeFileSync(wdPath, JSON.stringify(wd, null, 1));
-    const child = spawn("setsid", ["bash", "scripts/run-supervised.sh", node.network, String(port), dir, String(node.maxRssGb ?? 14), node.logName], { cwd: wd.repo, env: { ...process.env, PLUTUS_TRACE: "0", ...node.env }, detached: true, stdio: "ignore" });
+    const child = spawn("setsid", ["bash", "scripts/run-supervised.sh", node.network, String(port), dir, String(node.maxRssGb ?? 14), node.logName, ...(node.flags?.length ? ["--", ...node.flags] : [])], { cwd: wd.repo, detached: true, stdio: "ignore" });
     child.unref();
     console.log(`supervisor relaunched (pid ${child.pid})`);
     spawnSync("true");

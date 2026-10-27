@@ -1,3 +1,4 @@
+import { settingsMessage } from "../../config/settings";
 import os from "node:os";
 import { logger } from "../../utils/logger";
 import {
@@ -86,6 +87,7 @@ export class ValidationPool {
     private spawn(index: number): Worker | null {
         try {
             const w = new Worker(new URL("./validationWorker.ts", import.meta.url).href);
+            w.postMessage(settingsMessage()); // workers do not inherit the resolved settings
             w.onmessage = (ev: MessageEvent<{ id: number; result?: HeaderValidationResult | RangeVerifyResult; error?: string }>) => {
                 const p = this.pending.get(ev.data.id);
                 if (!p) return;

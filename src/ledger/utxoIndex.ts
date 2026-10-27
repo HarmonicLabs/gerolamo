@@ -12,19 +12,20 @@
  * `backfillUtxoIndex` builds them once for a store written before they existed. A hit is always
  * resolved through the `utxo` database, so an index entry whose output is gone reads as nothing.
  */
+import { settings } from "../config/settings";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import type { LedgerStore } from "./LedgerStore";
 
 export const DB_IDX = "utxo_idx";
 
 /**
- * GEROLAMO_UTXO_INDEX=0 stops maintaining the indexes (a safety valve; about 12 µs per output with
+ * --no-utxo-index (config utxoIndex: false) stops maintaining the indexes (a safety valve; about 12 µs per output with
  * an asset, measured in item 482). The marker is then cleared at open, so turning them back on
  * rebuilds what is missing; keys of outputs spent meanwhile stay behind and read as nothing.
  */
-let indexEnabled = process.env.GEROLAMO_UTXO_INDEX !== "0";
-export function utxoIndexEnabled(): boolean { return indexEnabled; }
-export function setUtxoIndexEnabled(on: boolean): void { indexEnabled = on; }
+let indexOverride: boolean | null = null;
+export function utxoIndexEnabled(): boolean { return indexOverride ?? settings().utxoIndex; }
+export function setUtxoIndexEnabled(on: boolean): void { indexOverride = on; }
 export const IDX_PAYMENT = 1, IDX_DELEGATION = 2, IDX_ASSET = 3, IDX_DATUM = 4;
 export const IDX_MARKER = Uint8Array.of(0, 0x76, 0x31); // 0x00 "v1"
 
@@ -113,7 +114,7 @@ export function refKeyOfIndexKey(k: Uint8Array): Uint8Array { return k.subarray(
 
 /** A store whose every output went through `UtxoWrites` (an import into an empty store): its indexes are complete. */
 export function markUtxoIndexBuilt(st: LedgerStore): void {
-    if (indexEnabled) st.env.writeSync((t) => t.put(DB_IDX, IDX_MARKER, new Uint8Array(0)));
+    if (utxoIndexEnabled()) st.env.writeSync((t) => t.put(DB_IDX, IDX_MARKER, new Uint8Array(0)));
 }
 
 /**
@@ -124,7 +125,7 @@ export function markUtxoIndexBuilt(st: LedgerStore): void {
  */
 export function backfillUtxoIndex(st: LedgerStore, decode: (ref: Uint8Array, v: Uint8Array) => { address: string | null; tx_out: string }, opts: { batch?: number; log?: (msg: string) => void } = {}): number | null {
     const marked = st.env.read((t) => t.get(DB_IDX, IDX_MARKER)) !== undefined;
-    if (!indexEnabled) { if (marked) st.env.writeSync((t) => { t.del(DB_IDX, IDX_MARKER); }); return null; }
+    if (!utxoIndexEnabled()) { if (marked) st.env.writeSync((t) => { t.del(DB_IDX, IDX_MARKER); }); return null; }
     if (marked) return null;
     const batch = opts.batch ?? 20_000;
     const t0 = Date.now();

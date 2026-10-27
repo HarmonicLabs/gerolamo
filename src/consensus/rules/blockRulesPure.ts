@@ -438,7 +438,7 @@ export async function evaluateShelleyBlockWithInputs(block: MultiEraBlock, ctx: 
     // 3. rules per transaction
     const params = ruleParams(ctx.params, ctx.genesis, block.era, String(ctx.config?.network ?? "mainnet"));
     // Plutus phase 2 (rules/phase2.ts): enforced in the rules phase, or evaluated report-only in
-    // the detached shadow job, per GEROLAMO_PLUTUS_PHASE2 (enforce | report | off).
+    // the detached shadow job, per --plutus-phase2 (enforce | report | off).
     const p2mode = phase2Mode();
     const phase2Here = p2mode !== "off" && (phase === "shadow" ? p2mode === "report" : phase === "rules" ? p2mode === "enforce" : true);
     const p2enforce = p2mode === "enforce" && phase !== "shadow";

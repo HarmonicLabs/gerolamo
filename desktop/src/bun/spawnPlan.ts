@@ -14,31 +14,17 @@ export type NodeSpawnInput = {
 export type SpawnPlan = {
   argv: string[];
   cwd: string;
+  /** Always empty: Gerolamo reads no environment variables, every setting is a flag (docs/CONFIG.md). */
   env: Record<string, string>;
 };
 
 export function buildNodeSpawn(input: NodeSpawnInput): SpawnPlan {
   const dbPath = assertAbsPath(input.dbPath, "dbPath");
-  const env: Record<string, string> = {
-    NETWORK: input.network,
-    PORT: String(input.port),
-    GEROLAMO_PORT: String(input.port),
-    GEROLAMO_DB_PATH: dbPath,
-    DATABASE_URL: `sqlite://${dbPath}`,
-  };
-  if (input.n2cSocket) {
-    env.GEROLAMO_N2C_SOCKET = assertAbsPath(input.n2cSocket, "n2cSocket");
-  } else {
-    env.GEROLAMO_N2C = "0";
-  }
-  if (input.configPath) {
-    env.GEROLAMO_CONFIG_PATH = assertAbsPath(input.configPath, "configPath");
-  }
-  return {
-    argv: [input.bunPath, "src/index.ts", "start-gerolamo"],
-    cwd: input.repoRoot,
-    env,
-  };
+  const argv = [input.bunPath, "src/index.ts", "start-gerolamo", "--network", input.network, "--port", String(input.port), "--db-path", dbPath];
+  if (input.n2cSocket) argv.push("--n2c-socket", assertAbsPath(input.n2cSocket, "n2cSocket"));
+  else argv.push("--no-n2c");
+  if (input.configPath) argv.push("--config", assertAbsPath(input.configPath, "configPath"));
+  return { argv, cwd: input.repoRoot, env: {} };
 }
 
 export type MithrilSpawnInput = {
@@ -67,5 +53,5 @@ export function buildMithrilSpawn(input: MithrilSpawnInput): SpawnPlan {
     dbPath,
   ];
   if (input.skipApply) argv.push("--skip-apply");
-  return { argv, cwd: input.repoRoot, env: { NETWORK: input.network } };
+  return { argv, cwd: input.repoRoot, env: {} };
 }

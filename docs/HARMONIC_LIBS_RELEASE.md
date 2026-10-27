@@ -64,8 +64,9 @@ drop their tarball. Earlier `+conformance.N` version commits stay in the branch 
 
 ## 3. Publish order
 
-Every branch is pushed to its default branch already (cbor and gerolamino as soon as Mike has write access). What
-is left is publishing, in this order, because plutus-data and cardano-ledger-ts need the new cbor:
+All seven are on their default branch (checked 2026-10-26): cbor 2.1.0, buildooor 0.2.10 and ouroboros-miniprotocols-ts
+0.0.6-dev0 joined on 2026-10-26 (an earlier version of this document said so before it was true; they had only been
+on Mike's machine). What is left is publishing, in this order, because plutus-data and cardano-ledger-ts need the new cbor:
 
 1. **Any order:** cbor 2.1.0, cardano-costmodels-ts 1.7.0, kes 0.1.0, buildooor 0.2.10,
    ouroboros-miniprotocols-ts 0.0.6-dev0.
@@ -83,8 +84,7 @@ is left is publishing, in this order, because plutus-data and cardano-ledger-ts 
    git commit -am "Use new cbor, plutus-data, costmodels" && git push
    ```
 
-Access: Mike has read-only access to `cbor` (and `shared-cardano-mempool-ts`). For cbor, either grant him write access
-or push the branch yourself.
+Access: Mike has write access to `cbor` since 2026-10-26 (still read-only on `shared-cardano-mempool-ts`).
 
 ## 4. Library by library
 
@@ -204,7 +204,7 @@ evaluation, which now matches the chain.
 
 ### 4.7 `@harmoniclabs/ouroboros-miniprotocols-ts` → 0.0.6-dev0 (from the Gravity agent)
 
-Branch `cbor-2x-compat`: the cbor 2.x port of every message class, era-wrapped LocalTxSubmit and TxMonitor replies,
+On `main` since 2026-10-26 (`708bff9`), from branch `cbor-2x-compat`: the cbor 2.x port of every message class, era-wrapped LocalTxSubmit and TxMonitor replies,
 TxMonitor message indices, the peer-sharing IPv6 address decode fix (`e62e65c`, missing from the earlier Gravity
 build), Gerolamo's `HandshakeServer` (version negotiation with a network-magic check; `propose()`
 rejects on a multiplexer error instead of hanging), and the release commit with its changelog. Tests: 38 passed.

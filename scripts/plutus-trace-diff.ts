@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-/** First divergence between our builtin trace (GEROLAMO_PLUTUS_BUILTIN_TRACE=1) and tools/uplc-ref's (UPLC_BUILTIN_TRACE=1): bun scripts/plutus-trace-diff.ts ours.trace aiken.trace */
+/** First divergence between our builtin trace (--trace-plutus-builtins) and tools/uplc-ref's (UPLC_BUILTIN_TRACE=1): bun scripts/plutus-trace-diff.ts ours.trace aiken.trace */
 import { readFileSync } from "node:fs";
 const names: Record<number, string> = {};
 const tags = require("@harmoniclabs/uplc").UPLCBuiltinTag;

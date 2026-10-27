@@ -1,3 +1,4 @@
+import { settings } from "../config/settings";
 import type { BlockWitnessResult, HeaderValidationResult } from "./workers/validationJob";
 import type { TicknResult } from "../utils/nonceEvolver";
 import { nonceFactsOf } from "../utils/nonceReplay";
@@ -94,7 +95,7 @@ import { epochParamsFromGenesis, readEpochParamsRaw, readEpochParamsSource, stor
 import { firstSlotOfEpoch, shelleyStartEpoch } from "../utils/epochFromSlotCalculations";
 import { prevHashToNonce } from "../utils/calcEpochNonce";
 import { mergeCostModels, type RawCostModels } from "./governance/costModelUpdate";
-import { SHADOW_SAMPLE_EVERY } from "./rules/plutusEval";
+import { shadowSampleEvery } from "./rules/plutusEval";
 import { phase2Mode } from "./rules/phase2";
 import type { UtxoRow } from "../db/rulesQueries";
 import { pruneLedgerJournal, setApplyBlock, withJournalingOff } from "../db/ledgerJournal";
@@ -248,9 +249,9 @@ export class ConsensusOrchestrator {
      * Headers of an epoch whose nonce is not derivable yet are accepted with their VRF /
      * leader checks deferred (KES, op-cert and chaining verified now), so bodies keep
      * flowing to the applier instead of the header stream stalling at every boundary
-     * (bug 69: ~30 s per epoch). Opt-out: GEROLAMO_DEFER_VRF=0 falls back to holding.
+     * (bug 69: ~30 s per epoch). Opt-out: --no-defer-vrf (config consensus.deferVrf: false) falls back to holding.
      */
-    private static readonly DEFER_VRF = process.env.GEROLAMO_DEFER_VRF !== "0";
+    private static deferVrf(): boolean { return settings().deferVrf; }
     private readonly deferredVrf = new Map<number, Map<string, DeferredVrfHeader>>(); // epoch → header hash → header
     private readonly deferredVrfRuns = new Map<number, Promise<void>>();
     private readonly deferredVrfFailed = new Set<string>();
@@ -1599,7 +1600,7 @@ export class ConsensusOrchestrator {
                         logger.error(
                             `SYNC HALTED: ${err.message}. The block's header and body hashes verified and peers agree on it, ` +
                                 `so our ledger library cannot decode a real block. Peers are not at fault; the ledger is intact. ` +
-                                `Fix the decoder (the block is in GEROLAMO_FAILED_BLOCK_DIR) and restart; no resync needed.`,
+                                `Fix the decoder (the block is in --failed-block-dir) and restart; no resync needed.`,
                         );
                     } else
                     logger.error(
@@ -1790,7 +1791,7 @@ export class ConsensusOrchestrator {
                 const hi = Math.max(...shelleyEpochs);
                 for (let e = lo; e <= hi; e++) {
                     let eta0 = await this.getEpochNonce(e);
-                    if (!eta0 && ConsensusOrchestrator.DEFER_VRF && await this.localNonceAuthoritative(e)) {
+                    if (!eta0 && ConsensusOrchestrator.deferVrf() && await this.localNonceAuthoritative(e)) {
                         // Not derivable yet (applied tip more than 4k/f slots before the boundary):
                         // validate everything but the VRF now, verify the VRF once the nonce exists.
                         deferEpochs.add(e);
@@ -2359,7 +2360,7 @@ export class ConsensusOrchestrator {
 
     chainSelSnapshot(): ReturnType<ChainSelDriver["snapshot"]> | null { return this.chainSel?.snapshot() ?? null; }
 
-    /** `consensus.chainSelection: "praos"` (or GEROLAMO_CHAIN_SELECTION=praos) → the driver; legacy → null. */
+    /** `consensus.chainSelection: "praos"` (or --chain-selection praos) → the driver; legacy → null. */
     private makeChainSelDriver(): ChainSelDriver | null {
         const sel = resolveChainSelection(this.config as never);
         if (sel.chainSelection === "legacy") return null;
@@ -2701,10 +2702,10 @@ export class ConsensusOrchestrator {
         }
     }
 
-    /** Write a block we could not parse or validate to GEROLAMO_FAILED_BLOCK_DIR for offline replay. */
+    /** Write a block we could not parse or validate to --failed-block-dir for offline replay. */
     private dumpFailedBlock(bytes: Uint8Array, slot: bigint, why: string): void {
         try {
-            const dir = process.env.GEROLAMO_FAILED_BLOCK_DIR ?? "./logs";
+            const dir = settings().failedBlockDir;
             const { mkdirSync, writeFileSync } = require("node:fs") as typeof import("node:fs");
             mkdirSync(dir, { recursive: true });
             writeFileSync(`${dir}/failed-block-${slot}.hex`, toHex(bytes));
@@ -2761,12 +2762,12 @@ export class ConsensusOrchestrator {
     private async scheduleRulesAhead(blocks: BlockFetchBlock[], i: number, current: MultiEraBlock, currentEpoch: number, params: EpochBodyParams): Promise<void> {
         const pool = this.pool;
         if (!pool || pool.workerCount === 0) return;
-        // Opt-in (GEROLAMO_RULES_AHEAD=1). Measured 2026-09-06 on preview (light Babbage
+        // Opt-in (--rules-ahead). Measured 2026-09-06 on preview (light Babbage
         // blocks, rules ≈ 1.9 ms/block): main-thread cost rose from 9.8 to 11.4 ms/block
         // (structured-clone of the resolved inputs + result hand-off outweighed the
         // rules moved out), 76.7 → 65.9 blocks/s. Worth it only once workers resolve
         // inputs themselves through a read-only connection; kept for that step.
-        if (process.env.GEROLAMO_RULES_AHEAD === "0") return; // opt-out: on by default since the 2026-09-06 A/B (37 → 89 blocks/s on preview Conway blocks)
+        if (!settings().rulesAhead) return; // opt-out: on by default since the 2026-09-06 A/B (37 → 89 blocks/s on preview Conway blocks)
         const last = Math.min(i + ConsensusOrchestrator.RULES_AHEAD_DEPTH, blocks.length - 1);
         for (let j = i + 1; j <= last; j++) {
             const msg = blocks[j]!;
@@ -2839,11 +2840,11 @@ export class ConsensusOrchestrator {
                 this.profile.add("blk.rules.prep.post", performance.now() - tPost);
                 // Plutus shadow evaluation is diagnostics nobody waits on: its own job on a general
                 // worker, results folded into the running totals when they arrive.
-                // Sampled here (one block in SHADOW_SAMPLE_EVERY) so unsampled blocks cost no second
+                // Sampled here (one block in shadowSampleEvery()) so unsampled blocks cost no second
                 // structured clone of the inputs; the job then evaluates every redeemer it carries.
                 const hasRedeemers = ((next.block as any).transactionWitnessSets ?? []).some((w: any) => (w?.redeemers?.length ?? 0) > 0);
                 // (phase2Mode "enforce": the rules job above evaluates every script; no shadow job)
-                if (hasRedeemers && Number(next.era) >= 5 && phase2Mode() === "report" && (this.shadowBlockCounter++ % SHADOW_SAMPLE_EVERY) === 0) {
+                if (hasRedeemers && Number(next.era) >= 5 && phase2Mode() === "report" && (this.shadowBlockCounter++ % shadowSampleEvery()) === 0) {
                     pool.evaluateBlockRules({ ...job, preVerified: null, phase: "shadow" })
                         .then((r) => { if (r.outcome) { recordPlutusShadow(r.outcome); for (const rep of r.outcome.reports) if (rep.includes("plutus shadow:")) logger.warn(`Plutus shadow at slot ${nextSlot}: ${rep}`); } })
                         .catch(() => undefined);
@@ -3237,7 +3238,7 @@ export class ConsensusOrchestrator {
             if (!valid && bodyPolicy === "strict") {
                 // Keep the offending block for offline replay (scripts/validate-stored-block.ts).
                 try {
-                    const dir = process.env.GEROLAMO_FAILED_BLOCK_DIR ?? "./logs";
+                    const dir = settings().failedBlockDir;
                     const { mkdirSync, writeFileSync } = await import("node:fs");
                     mkdirSync(dir, { recursive: true });
                     writeFileSync(`${dir}/failed-block-${blockSlot}.hex`, toHex(blockMessage.blockData));

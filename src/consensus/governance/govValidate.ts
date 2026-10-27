@@ -2,11 +2,12 @@
  * Governance rules of one block (govRules.ts) against the ledger state before it (govLedgerView.ts):
  * the entry point of the body validator and of `scripts/gov-replay.ts`.
  *
- * Mode (`GEROLAMO_GOV_RULES` = strict | report): strict rejects the block like any other ledger-rule
+ * Mode (`--gov-rules` = strict | report): strict rejects the block like any other ledger-rule
  * failure (the producer drops the named `tx[i]`); report logs and counts only. The default is set
  * from the replay of preview's governance history (docs/VALIDATION_STATUS.md, bug 150). Tip sync
  * (no ledger behind the tip) is always report-only.
  */
+import { settings } from "../../config/settings";
 import { logger } from "../../utils/logger";
 import { bodyHasGovernance, decodeGovTx, type GovTxModel } from "./govTxDecode";
 import { checkGovTx, GovBlockOverlay, type GovLedgerView, type GovRuleParams } from "./govRules";
@@ -19,7 +20,7 @@ export type GovRulesMode = "strict" | "report";
  */
 const DEFAULT_MODE: GovRulesMode = "strict";
 export function govRulesMode(): GovRulesMode {
-    const e = process.env.GEROLAMO_GOV_RULES?.trim().toLowerCase();
+    const e = settings().govRules;
     return e === "strict" || e === "report" ? e : DEFAULT_MODE;
 }
 

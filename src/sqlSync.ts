@@ -10,7 +10,7 @@
  * the next microtask if nobody consumes it (fire-and-forget statements still run), and hands
  * back already-resolved thenables, so `await` at the call sites stays legal and cheap.
  *
- * The default writer since 2026-09-07 (`GEROLAMO_SYNC_SQL=0` selects Bun.SQL, see sql.ts); the
+ * The default writer since 2026-09-07 (`--no-sync-sql` selects Bun.SQL, see sql.ts); the
  * read-only API connection is unchanged.
  */
 import { Database, type Statement } from "bun:sqlite";

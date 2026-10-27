@@ -11,7 +11,7 @@ below) via `notify-send` and, optionally, an ntfy topic on your phone.
     bun scripts/watchdog.ts /media/bakon/data/cardano/watchdog/config.json --test
 
 Phone alerts: install the ntfy app, subscribe to a hard-to-guess topic, then
-`echo 'GEROLAMO_WATCHDOG_NTFY=https://ntfy.sh/<topic>' > ~/.config/gerolamo/watchdog.env`.
+set `"ntfyUrl": "https://ntfy.sh/<topic>"` in the watchdog config.json.
 Log: `/media/bakon/data/cardano/watchdog/watchdog.log`. Stop: `systemctl --user disable --now gerolamo-watchdog.timer`.
 Node list: `/media/bakon/data/cardano/watchdog/config.json` (add the preprod node there on the new server).
 
@@ -26,7 +26,7 @@ logs `Block producer: credentials reloaded: opcert counter a → b, KES period �
 the new pair (issued by the pool's cold key, certifying this KES key, valid for the current KES
 period, counter equal to the chain's or one above) and keeps the running pair if any check fails
 (`… reload rejected, keeping counter …: <reason>`). No restart, no missed slots. The pid: the
-process whose environment has `GEROLAMO_PORT=<port>` (the watchdog alert prints it); never
+`bun` process whose command line is `start-gerolamo ... --port <port>` (the watchdog alert prints it); never
 `pkill` — other bun processes run on this machine. SIGHUP also re-reads topology.json.
 
 

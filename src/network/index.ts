@@ -37,6 +37,7 @@ import { getBlockProducer } from "../pool/startBlockProducer";
 import { resolveNodeRole } from "./nodeRole";
 import { ignoredValidationKeys, resolveValidationPolicy } from "../consensus/validationPolicy";
 import { getBuildInfo } from "../utils/buildInfo";
+import { SETTINGS, ignoredEnvironment, initSettings, resolveSettings, setPath, settings } from "../config/settings";
 
 async function runSnapShotPopulation(config: GerolamoConfig) {
     console.log(
@@ -101,83 +102,68 @@ function mergeConfigOverlay(
     return out;
 }
 
-async function loadConfig(network: string): Promise<GerolamoConfig> {
-    // Load config using Bun.file from the local config directory
-    const configPath = `./src/config/${network}/config.json`;
-    const configFile = Bun.file(configPath);
-    if (!(await configFile.exists())) {
-        throw new Error(`Config file not found: ${configPath}`);
+/**
+ * The node's configuration: the network's bundled config.json, the instance file (--config) merged over it, any
+ * `--set key=value` flags, then every setting resolved (flag, else config.json, else default; src/config/settings.ts).
+ * No environment variable is read. Resolved settings are written back into the config object the rest of the node
+ * already reads (dbPath, port, n2cSocketPath, n2n), so both views agree.
+ */
+export async function loadConfig(flags: Record<string, unknown> = {}): Promise<GerolamoConfig> {
+    const instancePath = typeof flags.config === "string" && flags.config.trim() ? flags.config.trim() : null;
+    let instance: Record<string, unknown> = {};
+    if (instancePath) {
+        const f = Bun.file(instancePath);
+        if (!(await f.exists())) throw new Error(`Config file not found: ${instancePath} (--config)`);
+        instance = (await f.json()) as Record<string, unknown>;
     }
-    let configData = (await configFile.json()) as GerolamoConfig;
-
-    // Instance overlay from the desktop Control Center (does not edit repo config.json)
-    const overlayPath = process.env.GEROLAMO_CONFIG_PATH?.trim();
-    if (overlayPath) {
-        const overlayFile = Bun.file(overlayPath);
-        if (await overlayFile.exists()) {
-            const overlay = (await overlayFile.json()) as Record<string, unknown>;
-            configData = mergeConfigOverlay(
-                configData as unknown as Record<string, unknown>,
-                overlay,
-            ) as unknown as GerolamoConfig;
-            logger.info(`Merged instance config overlay: ${overlayPath}`);
-        }
+    // the network picks the bundled base file, so it is resolved first: --network, else the instance file's networkName
+    const network = String(flags.network ?? instance.networkName ?? SETTINGS.network.default);
+    const basePath = `./src/config/${network}/config.json`;
+    const baseFile = Bun.file(basePath);
+    if (!(await baseFile.exists())) throw new Error(`Config file not found: ${basePath} (--network ${network})`);
+    let configData = (await baseFile.json()) as Record<string, unknown>;
+    if (instancePath) {
+        configData = mergeConfigOverlay(configData, instance);
+        logger.info(`Merged instance config: ${instancePath}`);
     }
+    configData.networkName = network;
 
-    // Lab / ops env overrides (instance isolation without editing repo config.json)
-    // DATABASE_URL=sqlite:///abs/path  or  GEROLAMO_DB_PATH=/abs/path
-    // PORT=3030
-    let dbPath = configData.dbPath;
-    const databaseUrl = process.env.DATABASE_URL;
-    if (databaseUrl?.startsWith("sqlite://")) {
-        dbPath = databaseUrl.slice("sqlite://".length);
-    } else if (databaseUrl?.startsWith("file:")) {
-        dbPath = databaseUrl.slice("file:".length);
-    } else if (process.env.GEROLAMO_DB_PATH?.trim()) {
-        dbPath = process.env.GEROLAMO_DB_PATH.trim();
+    const { settings: s, sources, config: merged } = resolveSettings({ ...flags, network }, configData);
+    initSettings(s, sources);
+    configData = merged;
+    // a flag beats config.json: write flag values into the config object the rest of the node reads (ledgerStore, relayStore, ...)
+    for (const [id, def] of Object.entries(SETTINGS)) {
+        if (def.key && sources[id as keyof typeof sources] === "flag") setPath(configData, def.key, (s as Record<string, unknown>)[id]);
     }
 
-    const portEnv = process.env.PORT || process.env.GEROLAMO_PORT;
-    const port = portEnv ? Number(portEnv) : (configData.port ?? 3030);
-
-    // N2C node.socket (Ouroboros) — not HTTP unixSocket.
-    // Priority: GEROLAMO_N2C=0 off → GEROLAMO_N2C_SOCKET → config n2cSocketPath
-    // → config.n2c only when n2c.enabled === true (socketPath alone does not enable).
-    const n2cDisabled =
-        process.env.GEROLAMO_N2C === "0" ||
-        process.env.GEROLAMO_N2C === "false";
-    const n2cCfg = (configData as any).n2c as
-        | { enabled?: boolean; socketPath?: string }
-        | undefined;
+    // N2C node.socket (Ouroboros), not the HTTP unixSocket: --no-n2c turns it off; --n2c-socket / n2cSocketPath,
+    // else n2c.socketPath when n2c.enabled is true in config (a socket path alone in n2c does not enable it).
+    const n2cCfg = configData.n2c as { enabled?: boolean; socketPath?: string } | undefined;
     let n2cSocketPath: string | undefined;
-    if (!n2cDisabled) {
-        const fromEnv = process.env.GEROLAMO_N2C_SOCKET?.trim();
-        const fromTop = (configData as any).n2cSocketPath?.trim?.() as
-            | string
-            | undefined;
-        const fromNested =
-            n2cCfg?.enabled === true
-                ? n2cCfg.socketPath?.trim()
-                : undefined;
-        n2cSocketPath = fromEnv || fromTop || fromNested || undefined;
-    }
-    if (n2cSocketPath === "") n2cSocketPath = undefined;
+    if (s.n2c) n2cSocketPath = s.n2cSocket?.trim() || (n2cCfg?.enabled === true ? n2cCfg.socketPath?.trim() : undefined) || undefined;
 
-    // role: "relay" turns the inbound N2N listener on; "data" leaves it to n2n.enabled / env.
-    const n2nInput = { ...((configData as any).n2n ?? {}) };
-    if (["relay", "producer"].includes(String((configData as any).role ?? "").toLowerCase())) n2nInput.enabled = true;
-    const n2n = resolveN2NConfig(n2nInput, process.env);
+    // Inbound N2N: --n2n / n2n.enabled, or role relay or producer; an explicit --n2n-port (or --n2n-ws-port) turns it on too.
+    const role = String(configData.role ?? "").toLowerCase();
+    // a flag beats config: --no-n2n turns it off, --n2n or --n2n-port turns it on, whatever n2n.enabled says
+    const n2nOn = sources.n2n === "flag" ? s.n2n === true : sources.n2nPort === "flag" || s.n2n === true || ["relay", "producer"].includes(role);
+    const wsOn = sources.n2nWs === "flag" ? s.n2nWs : sources.n2nWsPort === "flag" || s.n2nWs;
+    const n2nInput = { ...((configData.n2n as object) ?? {}), enabled: n2nOn, host: s.n2nHost, port: s.n2nPort, ws: { enabled: wsOn, host: s.n2nWsHost, port: s.n2nWsPort } };
+    const n2n = resolveN2NConfig(n2nInput);
 
     // Block producer credentials: key file + opcert file, or a kes-agent socket (never both).
-    if ((configData as any).producer) kesSourceOf((configData as any).producer);
+    if (configData.producer) kesSourceOf(configData.producer as never);
+
+    const ignored = ignoredEnvironment(process.env);
+    if (ignored.length) logger.warn(`Environment variables are not read any more; ignored: ${ignored.map((i) => `${i.name} (use ${i.flag})`).join(", ")}`);
 
     return {
         ...configData,
-        dbPath,
-        port: Number.isFinite(port) && port > 0 ? port : (configData.port ?? 3030),
+        dbPath: s.dbPath,
+        port: s.port,
         n2cSocketPath,
         n2n,
-    } as GerolamoConfig;
+        experimentalHardForksEnabled: s.experimentalHardForks ?? (configData as { experimentalHardForksEnabled?: boolean }).experimentalHardForksEnabled,
+    } as unknown as GerolamoConfig;
 }
 
 /**
@@ -193,7 +179,7 @@ function installCrashGuards(): void {
     process.on("uncaughtException", (err) => {
         logger.error("Uncaught exception (node keeps running):", err);
     });
-    // SIGUSR2 → heap summary (object count + bytes per class) into GEROLAMO_HEAP_DIR
+    // SIGUSR2 → heap summary (object count + bytes per class) into --heap-dir
     // (default: cwd). Cheap way to find what accumulates during a long sync.
     process.on("SIGUSR2", () => {
         try {
@@ -210,7 +196,7 @@ function installCrashGuards(): void {
                 .map(([name, a]) => ({ name, count: a.count, bytes: a.bytes }));
             const mem = process.memoryUsage();
             const out = { at: new Date().toISOString(), rss: mem.rss, heapUsed: mem.heapUsed, external: mem.external, arrayBuffers: mem.arrayBuffers, top: rows };
-            const dir = process.env.GEROLAMO_HEAP_DIR || ".";
+            const dir = settings().heapDir;
             const file = `${dir}/heap-${Date.now()}.json`;
             require("node:fs").writeFileSync(file, JSON.stringify(out, null, 1));
             logger.warn(`Heap summary written to ${file} (rss ${Math.round(mem.rss / 1048576)} MB, heap ${Math.round(mem.heapUsed / 1048576)} MB)`);
@@ -245,18 +231,16 @@ function installSighup(): void {
     });
 }
 
-export async function start() {
-    const network = process.env.NETWORK ?? "preprod";
-    setEpochNetwork(network); // slot→epoch math for every later caller
+/** `gerolamo start-gerolamo [flags]`: `flags` are commander's parsed options (src/config/settings.ts). */
+export async function start(flags: Record<string, unknown> = {}) {
     installCrashGuards();
     installSighup();
+    const config = await loadConfig(flags);
+    const network = settings().network;
+    setEpochNetwork(network); // slot→epoch math for every later caller
     console.log(
         `Gerolamo Network Node ${getBuildInfo().label} starting on ${network} network...`,
     );
-
-    console.log(`Loading config for ${network} network`);
-
-    const config = await loadConfig(network);
     await installHardForkHistory(config as unknown as HfcNodeConfig, network); // era boundaries from the genesis files + ledger (consensus/hfc)
 
     if (config.tuiEnabled) {
@@ -267,7 +251,7 @@ export async function start() {
     }
 
     logger.setLogConfig(config.logs);
-    logger.info(`Log level ${LogLevel[logger.logLevel] ?? logger.logLevel} (config.logs); validation workers log at INFO unless GEROLAMO_HEADER_TRACE=1`);
+    logger.info(`Log level ${LogLevel[logger.logLevel] ?? logger.logLevel} (config.logs); validation workers log at INFO unless --trace-headers`);
     logger.info("Configuration loaded successfully.");
     logger.info(`Database path: ${config.dbPath}`);
     if (config.tuiEnabled) {
@@ -277,13 +261,13 @@ export async function start() {
         );
     }
 
-    // Bun default sql is Postgres — force SQLite from config.dbPath (or DATABASE_URL).
+    // Bun default sql is Postgres — force SQLite from config.dbPath (or --db-path).
     initSql(config.dbPath);
     logger.info(`SQLite client ready: ${getSqlFilename()}`);
 
     logger.info("Initializing database...");
     await ensureInitialized();
-    // Explorer projection (mb_* tables) in its own file, written by a worker (GEROLAMO_EXPLORER_WORKER=0 → inline).
+    // Explorer projection (mb_* tables) in its own file, written by a worker (--no-explorer-worker → inline).
     await startExplorerIndexer(config.dbPath);
     await backfillBlockHeights();
     logger.info("Database initialized and ready.");
@@ -368,7 +352,7 @@ export async function start() {
         }
     }
 
-    // UTxO RPC (gRPC / gRPC-Web / Connect; off unless `utxorpc.enabled` or GEROLAMO_UTXORPC).
+    // UTxO RPC (gRPC / gRPC-Web / Connect; off unless `utxorpc.enabled` or --utxorpc).
     let utxorpcHandle: UtxorpcHandle | undefined;
     const utxorpcCfg = resolveUtxorpcConfig(config);
     if (utxorpcCfg) {
@@ -385,7 +369,7 @@ export async function start() {
         n2nHandle = await startN2NServer({
             store: relayChainStoreOverride(),
             ws: config.n2n.ws,
-            lightQuery: { networkMagic: config.networkMagic, network: process.env.NETWORK, activeSlotsCoeff: Number((await getShelleyGenesisConfig(config) as { activeSlotsCoeff?: number } | null)?.activeSlotsCoeff ?? 0.05) },
+            lightQuery: { networkMagic: config.networkMagic, network: settings().network, activeSlotsCoeff: Number((await getShelleyGenesisConfig(config) as { activeSlotsCoeff?: number } | null)?.activeSlotsCoeff ?? 0.05) },
             host: config.n2n.host,
             port: config.n2n.port,
             networkMagic: config.networkMagic,
@@ -440,7 +424,7 @@ export async function start() {
         }));
     } else {
         logger.info(
-            'Inbound N2N disabled (role "data"; set role "relay", n2n.enabled or GEROLAMO_N2N_PORT to accept peers)',
+            'Inbound N2N disabled (role "data"; set role "relay", n2n.enabled or --n2n-port to accept peers)',
         );
         setInboundN2NStatusProvider(null);
     }
@@ -471,7 +455,7 @@ export async function start() {
         );
     } else {
         logger.info(
-            "N2C server disabled (set GEROLAMO_N2C_SOCKET or config n2c.socketPath)",
+            "N2C server disabled (set --n2c-socket or config n2c.socketPath)",
         );
     }
 

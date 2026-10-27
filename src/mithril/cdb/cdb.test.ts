@@ -84,13 +84,13 @@ describe("cardano-database v2 artifacts", () => {
         ]);
     });
 
-    test("serve config: off by default, config flag, env override", () => {
-        expect(resolveMithrilServeConfig(undefined, {})).toBeNull();
-        expect(resolveMithrilServeConfig({ artifactsDir: "/x" }, {})).toBeNull();
-        expect(resolveMithrilServeConfig({ serveArtifacts: true, artifactsDir: "/x" }, {})?.artifactsDir).toBe("/x");
-        expect(() => resolveMithrilServeConfig({ serveArtifacts: true }, {})).toThrow(/artifactsDir/);
-        expect(resolveMithrilServeConfig(undefined, { GEROLAMO_MITHRIL_ARTIFACTS: "/y" })?.artifactsDir).toBe("/y");
-        expect(resolveMithrilServeConfig({ serveArtifacts: true, artifactsDir: "/x" }, { GEROLAMO_MITHRIL_ARTIFACTS: "0" })).toBeNull();
+    test("serve config: off by default, config, --mithril-artifacts override", () => {
+        expect(resolveMithrilServeConfig(undefined, null)).toBeNull();
+        expect(resolveMithrilServeConfig({ artifactsDir: "/x" }, null)).toBeNull();
+        expect(resolveMithrilServeConfig({ serveArtifacts: true, artifactsDir: "/x" }, null)?.artifactsDir).toBe("/x");
+        expect(() => resolveMithrilServeConfig({ serveArtifacts: true }, null)).toThrow(/artifactsDir/);
+        expect(resolveMithrilServeConfig(undefined, "/y")?.artifactsDir).toBe("/y");
+        expect(resolveMithrilServeConfig({ serveArtifacts: true, artifactsDir: "/x" }, "0")).toBeNull();
     });
 
     test("download verification: extra trio needs its own digests (ancillary manifest)", async () => {

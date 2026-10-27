@@ -6,6 +6,7 @@
  * Usage:
  *   bun scripts/kes-soak-chunks.mjs [--chunks DIR] [--from-chunk N] [--to-chunk N]
  *                                   [--max-blocks N] [--json-out PATH]
+ *                                   [--network preprod|mainnet]
  *
  * Exit 0 iff diverge === 0.
  *
@@ -30,7 +31,7 @@ const toChunkArg = arg("to-chunk");
 const maxBlocks = Number(arg("max-blocks") ?? 2000);
 const jsonOut = arg("json-out");
 
-const network = process.env.NETWORK === "mainnet" ? "mainnet" : "preprod";
+const network = arg("network") === "mainnet" ? "mainnet" : "preprod";
 const genesisPath =
   network === "mainnet"
     ? "src/config/mainnet/shelley-genesis.json"

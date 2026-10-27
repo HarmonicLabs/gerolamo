@@ -4,18 +4,21 @@
  * credential between a Gerolamo node and a cardano-node, at one block: the reward balances the
  * withdrawal-amount and zero-balance rules read (bugs 272/274). The credential list comes from the
  * node's own LMDB store, opened read-only; both sides acquire our tip.
- *   GEROLAMO_DB_PATH=<scratch>.db bun scripts/reward-accounts-compare.ts --node <node dir> --ours <socket> --ref <socket> [--magic 2] [--batch 2000]
+ *   bun scripts/reward-accounts-compare.ts --db-path <scratch>.db --node <node dir> --ours <socket> --ref <socket> [--magic 2] [--batch 2000]
  */
 import { join } from "node:path";
 import { CborArray, CborBytes, CborTag, CborUInt, type CborObj } from "@harmoniclabs/cbor";
 import { openLsq } from "./lib/lsq";
 import { attachReadOnlyLedgerStore, getLedgerStore, ledgerStakeReads } from "../src/ledger/nodeLedgerStore";
 import { logger, LogLevel } from "../src/utils/logger";
+import { initSettings } from "../src/config/settings";
 
 const arg = (k: string, d?: string) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1]! : d; };
 const node = arg("node"), oursSock = arg("ours"), refSock = arg("ref");
-if (!node || !oursSock || !refSock) { console.error("usage: --node <dir> --ours <socket> --ref <socket> [--magic 2] [--batch 2000]"); process.exit(2); }
-if (!process.env.GEROLAMO_DB_PATH) { console.error("set GEROLAMO_DB_PATH to a scratch file: this tool must not open the node's SQLite"); process.exit(2); }
+if (!node || !oursSock || !refSock) { console.error("usage: --db-path <scratch>.db --node <dir> --ours <socket> --ref <socket> [--magic 2] [--batch 2000]"); process.exit(2); }
+const scratchDb = arg("db-path");
+if (!scratchDb) { console.error("pass --db-path <scratch file>: this tool must not open the node's SQLite"); process.exit(2); }
+initSettings({ dbPath: scratchDb });
 logger.setLogConfig({ logLevel: LogLevel.ERROR, logToFile: false, logToConsole: true } as any);
 const magic = Number(arg("magic", "2")), batch = Number(arg("batch", "2000")), era = Number(arg("era", "6"));
 

@@ -5,7 +5,7 @@
  * would change. Read-only: the LMDB environment, the chunk and the volatile stores are opened
  * read-only and the node's SQLite is never opened (a scratch file stands in for it).
  *
- *   bun scripts/gov-votes-repair.ts --node <node dir> --dry-run [--network preview]
+ *   bun scripts/gov-votes-repair.ts --node <node dir> --dry-run [--network preview] [--db-path <scratch db>]
  *
  * The repair itself runs inside the node on restart (govCredMigration → repairLiveProposalVotesOnce).
  */
@@ -15,7 +15,8 @@ const argv = process.argv.slice(2);
 const opt = (k: string, d?: string) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1]! : d; };
 const node = opt("node"), network = opt("network", "preview")!;
 if (!node || !argv.includes("--dry-run")) { console.error("usage: bun scripts/gov-votes-repair.ts --node <node dir> --dry-run [--network preview]"); process.exit(2); }
-process.env.GEROLAMO_DB_PATH ||= `/tmp/gov-votes-repair-${process.pid}.db`; // never the node's SQLite
+const { initSettings } = await import("../src/config/settings");
+initSettings({ dbPath: opt("db-path") || `/tmp/gov-votes-repair-${process.pid}.db` }); // never the node's SQLite
 const { attachReadOnlyLedgerStore, getLedgerStore, ledgerGovReads } = await import("../src/ledger/nodeLedgerStore");
 const { BlockStore } = await import("../src/storage/blockStore");
 const { selectedChain, setSelectedTipHash } = await import("../src/storage/blockReads");

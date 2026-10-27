@@ -1,3 +1,4 @@
+import { settings } from "../config/settings";
 import color from "picocolors";
 import { rotateIfNeeded } from "./logRotate";
 import * as fs from "fs";
@@ -88,7 +89,7 @@ export class Logger {
 
     private updatePaths() {
         if (!this.config.logToFile) return; // no directory or empty files unless file logging is on
-        const network = process.env.NETWORK ?? "preprod";
+        const network = settings().network;
         const dir = this.config.logDirectory || `./src/store/logs/${network}/`;
         fs.mkdirSync(dir, { recursive: true });
         const levels = [
@@ -185,7 +186,7 @@ export class Logger {
     private async flushQueue(level: string): Promise<void> {
         const queue = this.getQueue(level);
         if (queue.length === 0) return;
-        const network = process.env.NETWORK ?? "preprod";
+        const network = settings().network;
         const logDir = this.config.logDirectory ||
             `./src/store/logs/${network}/`;
         const logFilePath = path.join(logDir, `${level.toLowerCase()}.jsonl`);
@@ -261,7 +262,7 @@ export class Logger {
     }
 
     private appendLog(level: string, stuff: any[]) {
-        const network = process.env.NETWORK ?? "preprod";
+        const network = settings().network;
         const logDir = this.config.logDirectory ||
             `./src/store/logs/${network}/`;
         const logFilePath = path.join(logDir, `${level.toLowerCase()}.jsonl`);
@@ -436,7 +437,7 @@ export class Logger {
     }
 
     public getLogPath(level: LogLevelString): string {
-        const network = process.env.NETWORK ?? "preprod";
+        const network = settings().network;
         const logDir = this.config.logDirectory ||
             `./src/store/logs/${network}/`;
         return path.join(logDir, `${level.toLowerCase()}.jsonl`);

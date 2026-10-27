@@ -1,4 +1,5 @@
 import { program } from "commander";
+import { registerSettingFlags, settingsMarkdown } from "./config/settings";
 import { initNewEpochState } from "./state/ledger";
 import { importFromBlockfrost } from "./state";
 import { ensureInitialized } from "./db";
@@ -88,12 +89,18 @@ export function Main() {
             await importFromBlockfrost(blockHash, options);
         });
 
-    program
+    const startCmd = program
         .command("start-gerolamo")
         .description(
-            "Start the gerolamo node based on config.json settings",
-        )
-        .action(start);
+            "Start the node. Every setting is a flag here and a config.json key (flag first, then config.json, then the default); see docs/CONFIG.md",
+        );
+    registerSettingFlags(startCmd);
+    startCmd.action((opts: Record<string, unknown>) => start(opts));
+
+    program
+        .command("settings-doc")
+        .description("Print docs/CONFIG.md: every setting with its flag, config.json key and default")
+        .action(() => { console.log(settingsMarkdown()); });
 
     program
         .command("read-raw-chunks")
@@ -181,7 +188,7 @@ export function Main() {
         .option(
             "--db <path>",
             "SQLite path (default: temp under /tmp — not .live)",
-            process.env.A2_UTXO_DB || "",
+            "",
         )
         .option(
             "--limit <n>",
@@ -227,7 +234,6 @@ export function Main() {
 
                 const dbPath = resolve(
                     options.db?.trim() ||
-                        process.env.A2_UTXO_DB ||
                         `/tmp/a2-utxo-smoke-${Date.now()}.db`,
                 );
                 logger.info(`tables=${tablesPath}`);
@@ -338,7 +344,7 @@ export function Main() {
         .option(
             "--network <name>",
             "preprod | preview | mainnet (selects aggregator + genesis vkey)",
-            process.env.NETWORK || "preprod",
+            "preprod",
         )
         .option(
             "--download-dir <path>",
@@ -426,8 +432,8 @@ export function Main() {
         )
         .option(
             "--db <path>",
-            "SQLite path for apply (default: GEROLAMO_DB_PATH or .live/test.db)",
-            process.env.GEROLAMO_DB_PATH || "./.live/test.db",
+            "SQLite path for apply",
+            "./.live/test.db",
         )
         .action(
             async (options: {
@@ -459,14 +465,8 @@ export function Main() {
                     engineRaw === "bin" ? "bin" : "ts";
 
                 // Apply path needs DB; download-only does not.
-                // Prefer --db / GEROLAMO_DB_PATH / .live/test.db (own Mithril path).
+                const dbPath = resolve(options.db || "./.live/test.db");
                 if (!options.skipApply) {
-                    const dbPath = resolve(
-                        options.db ||
-                            process.env.GEROLAMO_DB_PATH ||
-                            "./.live/test.db",
-                    );
-                    process.env.GEROLAMO_DB_PATH = dbPath; // names the store in the progress file too
                     initSql(dbPath);
                     logger.info(`DB: ${getSqlFilename()}`);
                     await ensureInitialized();
@@ -474,16 +474,15 @@ export function Main() {
 
                 const result = await runMithrilBootstrap(
                     {
-                        network: options.network || process.env.NETWORK || "preprod",
+                        network: options.network || "preprod",
+                        dbPath,
                         downloadDir: resolve(
                             options.downloadDir || "./snapshots/mithril",
                         ),
                         digest: options.digest || "latest",
                         engine,
                         clientBin: options.client,
-                        aggregator:
-                            options.aggregator ||
-                            process.env.AGGREGATOR_ENDPOINT,
+                        aggregator: options.aggregator,
                         genesisVkey: options.genesisVkey,
                         skipDownload: !!options.skipDownload,
                         skipApply: !!options.skipApply,
@@ -531,7 +530,7 @@ export function Main() {
         )
         .requiredOption("--immutable-dir <dir>", "Chunk store immutable directory (Gerolamo <nodeDir>/db/immutable or cardano-node db/immutable); opened read-only")
         .requiredOption("--out <dir>", "Artifact store directory (served by the node when mithril.serveArtifacts is on)")
-        .option("--network <name>", "preprod | preview | mainnet", process.env.NETWORK || "preprod")
+        .option("--network <name>", "preprod | preview | mainnet", "preprod")
         .option("--aggregator <url>", "Aggregator to certify against (default: the network's)")
         .option("--genesis-vkey <key-path-or-url>", "Genesis verification key (default: the network's published key)")
         .option("--immutable <n>", "Certified immutable file number to produce (default: the newest one the store has complete)", (v) => parseInt(v, 10))

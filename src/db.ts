@@ -1,3 +1,4 @@
+import { settings } from "./config/settings";
 import { Cbor, CborArray, CborUInt, LazyCborArray } from "@harmoniclabs/cbor";
 import { getSqlFilename, sql } from "./sql";
 import { ensureLedgerJournal, undoLedgerJournal } from "./db/ledgerJournal";
@@ -59,18 +60,18 @@ export type SqlClient = typeof sql;
 /**
  * Density-prefill knobs (env, process-wide). Default OFF so live/tip apply
  * still writes the rollback diary + MiniBF forward index.
- *   APPLY_SKIP_DELTAS=1 — skip utxo_deltas inserts (no rollback-from-log)
- *   APPLY_SKIP_INDEX=1  — skip tx_index / address_tx / mb_* forward index
+ *   --apply-skip-deltas — skip utxo_deltas inserts (no rollback-from-log)
+ *   --apply-skip-index  — skip tx_index / address_tx / mb_* forward index
  */
 export function applySkipDeltas(): boolean {
-    return process.env.APPLY_SKIP_DELTAS === "1";
+    return settings().applySkipDeltas;
 }
 export function applySkipIndex(): boolean {
-    return bulkSyncSkipIndex || process.env.APPLY_SKIP_INDEX === "1";
+    return bulkSyncSkipIndex || settings().applySkipIndex;
 }
 
 let bulkSyncSkipIndex = false;
-/** Runtime equivalent of APPLY_SKIP_INDEX=1, toggled by the orchestrator while far behind the tip (config sync.skipIndexWhileBehind). */
+/** Runtime equivalent of --apply-skip-index, toggled by the orchestrator while far behind the tip (config sync.skipIndexWhileBehind). */
 export function setBulkSyncIndexSkip(on: boolean): boolean {
     const changed = bulkSyncSkipIndex !== on;
     bulkSyncSkipIndex = on;

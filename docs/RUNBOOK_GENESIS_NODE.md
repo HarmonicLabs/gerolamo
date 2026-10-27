@@ -1,10 +1,10 @@
 # Runbook — node 3037: preview from genesis on the LMDB ledger (2026-10-02)
 
 Target: a preview data node whose LMDB ledger store is built from the genesis files and synced
-block by block from slot 0 (bug 304), with no SQLite ledger at all (`GEROLAMO_LEDGER_SQL_WRITES=0`),
+block by block from slot 0 (bug 304), with no SQLite ledger at all (`--no-ledger-sql-writes`),
 then proven identical to the network at its tip: 64/64 LocalStateQuery answers byte-identical with
 the cardano-node relay, and a key-by-key store comparison with node 3036 (Mithril-imported).
-Only after that is the store declared exact (`GEROLAMO_GENESIS_EXACT=1`, see §6).
+Only after that is the store declared exact (`--genesis-exact`, see §6).
 
 What was proven before this run (docs/VALIDATION_STATUS.md, bugs 304–305 and 316–327): preprod's
 Byron era and its first four Shelley-based epochs through the node's apply path from an empty LMDB
@@ -58,14 +58,15 @@ The base config (`src/config/preview/config.json`) supplies the genesis files an
 Shelley genesis file hashes to it). The hard-fork triggers come from the built-in preview overrides
 (`Test{Shelley,Allegra,Mary,Alonzo}HardForkAtEpoch: 0`): the genesis state is built in Alonzo.
 
-Environment (pass through the supervisor):
+Node flags (the supervisor passes the first four itself; the others go after `--`, or in config.json
+as `"ledgerSqlWrites": false` and `"ledgerKeepEpochs": 100000`):
 
 ```
-NETWORK=preview GEROLAMO_PORT=3037
-GEROLAMO_DB_PATH=$D/preview.db GEROLAMO_CONFIG_PATH=$D/config.json
-GEROLAMO_LEDGER_SQL_WRITES=0          # no SQLite ledger (lmdb mode only)
-GEROLAMO_LEDGER_KEEP_EPOCHS=100000    # keep every epoch's reward / snapshot reports for the Koios check (default 30)
-# GEROLAMO_GENESIS_EXACT unset until §6 passes
+--network preview --port 3037
+--db-path $D/preview.db --config $D/config.json
+--no-ledger-sql-writes             # no SQLite ledger (lmdb mode only)
+--ledger-keep-epochs 100000        # keep every epoch's reward / snapshot reports for the Koios check (default 30)
+# no --genesis-exact until §6 passes
 ```
 
 ## 3. Phase A — history from the local chain server
@@ -75,7 +76,7 @@ serves the chain as of its start, the immutable tip plus the volatile blocks the
 
 ```
 cd <repo>
-GEROLAMO_DB_PATH=/tmp/serve-chain-3037.db nice -n 10 bun scripts/serve-chain.ts \
+nice -n 10 bun scripts/serve-chain.ts \
   --block-store /media/bakon/data/cardano/gerolamo-preview-mithril2/db --network preview --port 3147 \
   >> $D/logs/serve-chain.log 2>&1 &
 ```
@@ -98,8 +99,8 @@ later, the main thread then ~85 % busy with GC); a restart costs seconds (the st
 its anchor and diffs), so frequent supervisor restarts are the cheap remedy:
 
 ```
-cd <repo> && GEROLAMO_LEDGER_SQL_WRITES=0 GEROLAMO_LEDGER_KEEP_EPOCHS=100000 \
-  GEROLAMO_BUN_FLAGS="" nohup nice -n 10 scripts/run-supervised.sh preview 3037 $D 4 >> $D/logs/supervisor.out 2>&1 &
+cd <repo> && nohup nice -n 10 scripts/run-supervised.sh preview 3037 $D 4 \
+  -- --no-ledger-sql-writes --ledger-keep-epochs 100000 >> $D/logs/supervisor.out 2>&1 &
 ```
 
 First lines to see: `Block store is PRIMARY and empty: syncing from genesis`, then
@@ -124,8 +125,8 @@ per epoch against Koios; ~4 requests/s; run it per range of ~50 epochs.)
 ## 4. Phase B — to the tip from the network
 
 When the node reaches the server's tip (the log shows it waiting at slot ≈ 3036's immutable tip at
-server start), stop it (supervisor first, then the node by pid from `GEROLAMO_PORT=3037` in
-`/proc/<pid>/environ`), stop serve-chain by its pid, and switch the topology to the network:
+server start), stop it (supervisor first, then the node by pid: the bun process whose command line has
+`start-gerolamo … --port 3037`), stop serve-chain by its pid, and switch the topology to the network:
 
 ```json
 {
@@ -195,9 +196,9 @@ supervisor. The node resumes from its anchor (diffs reach it) and follows the ne
 
 A store built from genesis records `ledger_source = "genesis"`; the balance-dependent rules
 (bugs 272–277: withdrawal amounts, `current_treasury_value`, zero-balance deregistration, σ leader
-threshold) stay report-only on it. When §5.1–5.3 pass, set `GEROLAMO_GENESIS_EXACT=1` in the
-node's environment and restart: `ledgerStateExact()` then reports the store exact and those rules
-become strict, as on a snapshot import. Unset it again if a later check finds a difference.
+threshold) stay report-only on it. When §5.1–5.3 pass, add `"genesisExact": true` to
+`$D/config.json` (or `--genesis-exact` after the supervisor's `--`) and restart: `ledgerStateExact()` then reports the store exact and those rules
+become strict, as on a snapshot import. Remove it again if a later check finds a difference.
 
 ## 7. Undo
 

@@ -10,6 +10,7 @@
  *
  * Stop the node first (it is the store's only writer).
  *   bun scripts/nonmyopic-seed.ts --config <node config.json> --state <ledger state file> [--yes]
+ *       [--db-path <scratch db> (default <config dir>/nonmyopic-seed-scratch.db)]
  * Without --yes it only reports what it would write.
  */
 import { existsSync, readFileSync } from "node:fs";
@@ -19,7 +20,8 @@ const arg = (k: string) => { const i = process.argv.indexOf(`--${k}`); return i 
 const cfgPath = arg("config"), statePath = arg("state");
 if (!cfgPath || !statePath) { console.error("usage: bun scripts/nonmyopic-seed.ts --config <node config.json> --state <ledger state file> [--yes]"); process.exit(2); }
 const cfg = JSON.parse(readFileSync(cfgPath, "utf8"));
-process.env.GEROLAMO_DB_PATH ??= join(dirname(cfgPath), "nonmyopic-seed-scratch.db"); // the SQLite writer opens at import; never the node's database
+const { initSettings } = await import("../src/config/settings");
+initSettings({ dbPath: arg("db-path") ?? join(dirname(cfgPath), "nonmyopic-seed-scratch.db") }); // the SQLite writer opens on first use; never the node's database
 const { LedgerStore } = await import("../src/ledger/LedgerStore");
 const { StakeReads, StakeWrites } = await import("../src/ledger/stakeStore");
 const { GovReads } = await import("../src/ledger/govStore");

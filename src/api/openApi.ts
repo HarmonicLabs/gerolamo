@@ -12,6 +12,7 @@
  * Local Blockfrost-subset explorer only. No external LLM. No ledger writes.
  */
 
+import { settings } from "../config/settings";
 import { blockfrostRouter } from "./miniBlockfrost";
 import vendored from "./blockfrost/blockfrost-openapi.responses.json";
 
@@ -64,7 +65,7 @@ function blockfrostPaths(okJson: (d: string, s?: Record<string, unknown>) => unk
 
 function buildSpec(ctx: OpenApiCtx = {}): Record<string, unknown> {
     const port = ctx.port ?? 3040;
-    const network = ctx.network ?? process.env.NETWORK ?? "unknown";
+    const network = ctx.network ?? settings().network;
     const serverUrl =
         port > 0 ? `http://localhost:${port}` : "/";
 
@@ -369,7 +370,7 @@ export async function handleOpenApiRoutes(
             path === "/dashboard/api/")
     ) {
         const port = ctx.port ?? 0;
-        const network = ctx.network ?? process.env.NETWORK ?? "unknown";
+        const network = ctx.network ?? settings().network;
         return new Response(openApiDocsHtml(port, String(network)), {
             status: 200,
             headers: {

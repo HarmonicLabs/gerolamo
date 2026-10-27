@@ -1,3 +1,4 @@
+import { settings } from "../config/settings";
 /**
  * Keep-alive reply deadline (bug 395).
  *
@@ -11,8 +12,9 @@
  */
 export const DEFAULT_KEEPALIVE_TIMEOUT_MS = 60_000;
 
-export function keepAliveTimeoutMs(env: Record<string, string | undefined> = process.env): number {
-    const v = Number(env.GEROLAMO_KEEPALIVE_TIMEOUT_MS);
+/** --keepalive-timeout-ms (config keepAliveTimeoutMs). */
+export function keepAliveTimeoutMs(configured: number = settings().keepAliveTimeoutMs): number {
+    const v = Number(configured);
     return Number.isFinite(v) && v > 0 ? v : DEFAULT_KEEPALIVE_TIMEOUT_MS;
 }
 

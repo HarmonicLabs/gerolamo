@@ -28,8 +28,7 @@ while true; do
   # mid-round, and keep a per-round copy so the caught-check uses only
   # THIS round (not the whole accumulated log).
   roundout=$(mktemp /tmp/apply-round-XXXXXX.out)
-  MARGIN=3 GEROLAMO_DB_PATH=./.live/test.db \
-    bun scripts/mithril-apply-gapfill.ts 2>&1 | tee -a "$LOG" > "$roundout"
+  bun scripts/mithril-apply-gapfill.ts --margin 3 --db-path ./.live/test.db 2>&1 | tee -a "$LOG" > "$roundout"
   ec=${PIPESTATUS[0]}
 
   if [ "$ec" -eq 3 ]; then
@@ -76,10 +75,9 @@ while true; do
 
   if [ "$dl_running" -eq 0 ] && [ "$caught_this_round" -eq 1 ]; then
     # Download finished AND this round reached the frontier. Run a final
-    # MARGIN=0 sweep to pick up any tail chunks, then exit.
+    # --margin 0 sweep to pick up any tail chunks, then exit.
     sweep=$(mktemp /tmp/apply-round-XXXXXX.out)
-    MARGIN=0 GEROLAMO_DB_PATH=./.live/test.db \
-      bun scripts/mithril-apply-gapfill.ts 2>&1 | tee -a "$LOG" > "$sweep"
+    bun scripts/mithril-apply-gapfill.ts --margin 0 --db-path ./.live/test.db 2>&1 | tee -a "$LOG" > "$sweep"
     sec=${PIPESTATUS[0]}
     if [ "$sec" -eq 0 ] && grep -q 'APPLY_CAUGHT_UP' "$sweep"; then
       echo "APPLY_RUNNER_COMPLETE $(date -u +%FT%TZ)" | tee -a "$LOG"

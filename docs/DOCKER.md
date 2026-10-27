@@ -18,15 +18,16 @@ On the first start the entrypoint downloads and verifies a Mithril snapshot of t
 ledger state straight into the LMDB store; that takes a while (download size depends on the network). Later
 starts resume from `/data` in seconds. Open `http://localhost:3030/stats` for the node's own status page.
 
-## Data directory and ports (.env)
+## Data directory and ports
 
-Put these in a `.env` file next to docker-compose.yml (or export them):
+Both are literal values in docker-compose.yml. The host data directory is the left side of the volume
+(`./data/preview:/data`); change it to `/srv/gerolamo/preview:/data` to keep the chain there. The host N2N
+port is the left side of `"3001:3001"`; change it if 3001 is taken. The container runs as `UID`/`GID`
+(default 1000); put them in a `.env` file next to docker-compose.yml if yours differ, so the files are yours:
 
 ```
-GEROLAMO_DATA_DIR=/srv/gerolamo/preview   # host directory for the chain data (default ./data/preview)
-UID=1000                                   # the container runs as this user, so the files are yours
+UID=1000
 GID=1000
-GEROLAMO_N2N_HOST_PORT=3001                # host port for node-to-node (change it if 3001 is taken)
 ```
 
 Create the directory first (`mkdir -p /srv/gerolamo/preview`) so it is owned by you. Removing the container
@@ -34,32 +35,44 @@ Create the directory first (`mkdir -p /srv/gerolamo/preview`) so it is owned by 
 resumes from it. `docker stop` / `docker compose down` shut the node down cleanly; a hard kill also recovers,
 stepping back to the newest block both stores hold.
 
-## Settings (environment)
+## Settings (flags)
 
-| Variable | Default | Meaning |
+The container takes flags as its command (`command:` in docker-compose.yml). There are no environment
+variables. The entrypoint's own flags come first; node flags (docs/CONFIG.md) follow after `--`.
+
+| Flag | Default | Meaning |
 |---|---|---|
-| `NETWORK` | `preview` | `preview`, `preprod` or `mainnet` |
-| `GEROLAMO_BOOTSTRAP` | `mithril` | First start only: `mithril` (verified snapshot) or `genesis` (build the whole ledger from block 0, no snapshot trusted) |
-| `GEROLAMO_ROLE` | `relay` | `relay` (serves peers on 3001), `data` (no inbound peers) or `producer` |
-| `GEROLAMO_PORT` | `3030` | HTTP API inside the container |
-| `GEROLAMO_N2N_PORT` | `3001` | Node-to-node port inside the container |
-| `GEROLAMO_MAX_RSS_GB` | `8` | The in-container supervisor restarts the node above this RSS (it resumes in seconds) |
-| `GEROLAMO_MITHRIL_CONCURRENCY` | `8` | Parallel snapshot downloads |
-| `GEROLAMO_KEEP_SNAPSHOT` | `0` | `1` keeps the downloaded snapshot after the import |
+| `--network` | `preview` | `preview`, `preprod` or `mainnet` |
+| `--bootstrap` | `mithril` | First start only: `mithril` (verified snapshot) or `genesis` (build the whole ledger from block 0, no snapshot trusted) |
+| `--role` | `relay` | `relay` (serves peers on 3001), `data` (no inbound peers) or `producer` |
+| `--port` | `3030` | HTTP API inside the container |
+| `--data` | `/data` | Data directory inside the container |
+| `--n2n-port` | `3001` | Node-to-node port inside the container |
+| `--max-rss-gb` | `8` | The in-container supervisor restarts the node above this RSS (it resumes in seconds) |
+| `--mithril-concurrency` | `8` | Parallel snapshot downloads |
+| `--keep-snapshot` | off | Keep the downloaded snapshot after the import |
+| `--bun-flags "<flags>"` | - | Bun's own flags for every launch |
 
-The entrypoint writes `/data/config.json` on the first start; edit it to change peers, role or other node
-settings (it overlays `src/config/<network>/config.json`). Delete it to regenerate it.
+For example, to add a node flag:
+
+```yaml
+    command: ["--network", "preview", "--port", "3030", "--role", "relay", "--", "--n2n-ws-port", "3004"]
+```
+
+The entrypoint writes `/data/config.json` on the first start (with `--role` and `--n2n-port`, and
+`"ledgerSqlWrites": false`); edit it to change peers, role or other node settings (it overlays
+`src/config/<network>/config.json`). Delete it to regenerate it.
 
 ## Syncing from genesis
 
-Set `GEROLAMO_BOOTSTRAP: genesis` before the first start. The node builds the genesis ledger state and
+Put `--bootstrap genesis` in `command:` before the first start. The node builds the genesis ledger state and
 validates every block itself. Preview takes about a day on public peers; give it CPUs (`--cpus` or no limit).
 
 ## Block producer
 
 1. Put `cold.vkey`, `kes.skey`, `vrf.skey` and `node.cert` in a host directory readable only by you and mount
    it read-only (`./pool-keys:/keys:ro` in docker-compose.yml).
-2. Set `GEROLAMO_ROLE: producer`, start once so `/data/config.json` exists, then add
+2. Put `--role producer` in `command:`, start once so `/data/config.json` exists, then add
    `"producer": { "coldVkeyFile": "/keys/cold.vkey", "kesSkeyFile": "/keys/kes.skey", "vrfSkeyFile": "/keys/vrf.skey", "opcertFile": "/keys/node.cert", "stateFile": "/data/producer-state.json" }`
    to it and restart. Keep the cold signing key off this machine.
 3. After a KES rotation, copy the new `kes.skey` and `node.cert` in and `docker kill -s HUP <container>`
@@ -91,10 +104,10 @@ the node logs to the container's stdout, so use `docker compose logs`.
 (role relay, N2N published on 3001, the address registered for the pool) and `gerolamo-producer` (role producer,
 keys mounted read-only, N2N on 3002 for the LAN only). Each container's topology names the other as a local root
 (compose DNS: `gerolamo-relay`, `gerolamo-producer`) plus the public roots from `src/config/preview/topology.json`.
-Resource caps per container: `mem_limit: 5g`, `GEROLAMO_MAX_RSS_GB=4` (the in-container supervisor restarts the node
+Resource caps per container: `mem_limit: 5g`, `--max-rss-gb 4` (the in-container supervisor restarts the node
 before the cgroup limit kills it) and `cpus: 6`, so other work on the host keeps its share.
 
-Bootstrap without copying stores: the relay bootstraps from Mithril with `GEROLAMO_KEEP_SNAPSHOT=1`; the producer's
+Bootstrap without copying stores: the relay bootstraps from Mithril with `--keep-snapshot`; the producer's
 data dir then gets `cp -a data/relay/snapshots data/producer/snapshots` and bootstraps from the same chunks
 (verified again, no second download).
 

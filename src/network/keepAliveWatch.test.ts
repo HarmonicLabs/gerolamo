@@ -22,9 +22,9 @@ describe("keep-alive reply deadline (bug 395)", () => {
         expect(keepAliveVerdict({ ...base, now, lastReplyAt: 0, lastTickAt: now - 10_000 })).toBe("overdue");
     });
 
-    test("timeout comes from GEROLAMO_KEEPALIVE_TIMEOUT_MS, default 60 s", () => {
-        expect(keepAliveTimeoutMs({})).toBe(DEFAULT_KEEPALIVE_TIMEOUT_MS);
-        expect(keepAliveTimeoutMs({ GEROLAMO_KEEPALIVE_TIMEOUT_MS: "90000" })).toBe(90_000);
-        expect(keepAliveTimeoutMs({ GEROLAMO_KEEPALIVE_TIMEOUT_MS: "nope" })).toBe(DEFAULT_KEEPALIVE_TIMEOUT_MS);
+    test("timeout from --keepalive-timeout-ms; invalid values fall back to 60 s", () => {
+        expect(keepAliveTimeoutMs(Number.NaN)).toBe(DEFAULT_KEEPALIVE_TIMEOUT_MS);
+        expect(keepAliveTimeoutMs(90_000)).toBe(90_000);
+        expect(keepAliveTimeoutMs(-1)).toBe(DEFAULT_KEEPALIVE_TIMEOUT_MS);
     });
 });

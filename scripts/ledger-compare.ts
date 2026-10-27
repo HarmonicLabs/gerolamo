@@ -3,7 +3,8 @@
  * Both are opened read-only beside a running node; the LMDB state is the anchor plus the persisted
  * diffs up to the store's selected tip (db/gerolamo/selected-tip.hex).
  *
- * Usage: bun scripts/ledger-compare.ts <nodeDir> [--utxo-sample N] [--all-utxo]
+ * Usage: bun scripts/ledger-compare.ts <nodeDir> [--utxo-sample N] [--all-utxo] [--ledger-keep-epochs N]
+ * (--ledger-keep-epochs defaults to the node's config.json ledgerKeepEpochs, else 30.)
  * Exit code 1 when any table differs. A node applying a block while this runs can show a handful
  * of transient differences: rerun when the tips agree.
  */
@@ -17,7 +18,7 @@ import { UtxoReads } from "../src/ledger/utxoStore";
 
 const args = process.argv.slice(2);
 const nodeDir = args.find((a) => !a.startsWith("--"));
-if (!nodeDir) { console.error("usage: bun scripts/ledger-compare.ts <nodeDir> [--utxo-sample N] [--all-utxo]"); process.exit(2); }
+if (!nodeDir) { console.error("usage: bun scripts/ledger-compare.ts <nodeDir> [--utxo-sample N] [--all-utxo] [--ledger-keep-epochs N]"); process.exit(2); }
 const allUtxo = args.includes("--all-utxo");
 const sampleN = Number(args[args.indexOf("--utxo-sample") + 1] || 200000);
 const cfg = JSON.parse(readFileSync(join(nodeDir, "config.json"), "utf8"));
@@ -81,8 +82,9 @@ cmpMaps("stake_pointers", new Map(rows("SELECT slot, tx_ix, cert_ix, stake_key F
 cmpMaps("pool_params", new Map(rows("SELECT pool_id, vrf_key_hash, registered_slot, retiring_epoch, params_json FROM pool_params").map((r) => [String(r[0]), { vrf: String(r[1]), registeredSlot: Number(r[2]), retiringEpoch: r[3] == null ? null : Number(r[3]), params: r[4] == null ? null : JSON.parse(String(r[4])) }])), sr.pools() as Map<string, any>);
 cmpMaps("pool_params_pending", new Map(rows("SELECT pool_id, vrf_key_hash, registered_slot, params_json FROM pool_params_pending").map((r) => [String(r[0]), { vrf: String(r[1]), registeredSlot: Number(r[2]), params: r[3] == null ? null : JSON.parse(String(r[3])) }])), sr.pendingPools() as Map<string, any>);
 cmpMaps("opcert_counters", new Map(rows("SELECT pool_id, counter, slot FROM opcert_counters").map((r) => [String(r[0]), { counter: Number(r[1]), slot: Number(r[2]) }])), new Map([...st.range("opcert", new Uint8Array(0))].map(([k]) => { const id = Buffer.from(k).toString("hex"); return [id, sr.opcert(id)!]; })));
-// report history below the store's retention window (GEROLAMO_LEDGER_KEEP_EPOCHS, default 30) is not in LMDB
-const keepEpochs = Number(process.env.GEROLAMO_LEDGER_KEEP_EPOCHS) >= 4 ? Number(process.env.GEROLAMO_LEDGER_KEEP_EPOCHS) : 30;
+// report history below the store's retention window (--ledger-keep-epochs, else the node's config ledgerKeepEpochs, default 30) is not in LMDB
+const keepArg = args.includes("--ledger-keep-epochs") ? Number(args[args.indexOf("--ledger-keep-epochs") + 1]) : Number(cfg.ledgerKeepEpochs);
+const keepEpochs = keepArg >= 4 ? keepArg : 30;
 const curEpoch = Number((sq.query("SELECT MAX(taken_at) m FROM epoch_stake_totals").get() as any)?.m ?? 0);
 const minEpoch = curEpoch - keepEpochs;
 console.log(`history tables compared from epoch ${minEpoch} (retention ${keepEpochs} epochs)`);

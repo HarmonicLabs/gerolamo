@@ -3,6 +3,7 @@
  * Before/after timing of phase-2 evaluation on dumped replay jobs: the previous shadow evaluator
  * (plutus-machine + buildooor contexts) against rules/phase2.ts, same transactions.
  *   bun scripts/plutus-bench.ts <job.json>... [--runs 3] [--no-old]
+ *       [--plutus-shadow-ms 600000] [--plutus-shadow-max-cpu 100000000000] [--plutus-shadow-step-cpu 100000000000]
  */
 import { readFileSync } from "node:fs";
 import { TxOut } from "@harmoniclabs/cardano-ledger-ts";
@@ -11,10 +12,10 @@ import { epochParamsFromRecord } from "../src/consensus/epochParams";
 import { setEpochNetwork } from "../src/utils/epochFromSlotCalculations";
 import { evaluatePhase2Sync } from "../src/consensus/rules/phase2";
 import type { ResolvedUtxo } from "../src/consensus/rules/resolvedUtxo";
+import { initSettings } from "../src/config/settings";
 
-process.env.GEROLAMO_PLUTUS_SHADOW_MS ??= "600000";
-process.env.GEROLAMO_PLUTUS_SHADOW_MAX_CPU ??= "100000000000";
-process.env.GEROLAMO_PLUTUS_SHADOW_STEP_CPU ??= "100000000000";
+const flag = (n: string, d: string) => { const i = process.argv.indexOf(`--${n}`); return i >= 0 && process.argv[i + 1] !== undefined ? process.argv[i + 1]! : d; };
+initSettings({ plutusShadowMs: Number(flag("plutus-shadow-ms", "600000")), plutusShadowMaxCpu: flag("plutus-shadow-max-cpu", "100000000000"), plutusShadowStepCpu: flag("plutus-shadow-step-cpu", "100000000000") });
 const { shadowEvaluateTxLegacy: shadowEvaluateTx } = await import("../src/consensus/rules/plutusEval");
 const files = process.argv.slice(2).filter((a) => !a.startsWith("--") && a.endsWith(".json"));
 const runs = Number(process.argv[process.argv.indexOf("--runs") + 1] ?? 3) || 3;

@@ -5,7 +5,7 @@
  * stake keys, assets, pools, DReps, proposals), requests each path from both, and reports field
  * differences. Read-only on both sides; paced to stay under Blockfrost's free-tier rate.
  *
- *   BLOCKFROST_PROJECT_ID=preview... bun scripts/blockfrost-compare.ts --node http://127.0.0.1:3035 [--network preview]
+ *   bun scripts/blockfrost-compare.ts --blockfrost-project-id-file <path> --node http://127.0.0.1:3035 [--network preview]
  *        [--depth 20] [--paths extra.txt] [--json report.json] [--max 200]
  *
  * Fields Blockfrost leaves to off-chain sources (pool / token registry metadata, DRep metadata) and
@@ -14,8 +14,8 @@
 import { readFileSync, writeFileSync } from "node:fs";
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => a.startsWith("--") ? [a.slice(2), all[i + 1]?.startsWith("--") || all[i + 1] === undefined ? "1" : all[i + 1]] : []).filter((x) => x.length));
-const project = process.env.BLOCKFROST_PROJECT_ID;
-if (!project) throw new Error("set BLOCKFROST_PROJECT_ID (a project id for the node's network)");
+const project = args["blockfrost-project-id-file"] ? readFileSync(String(args["blockfrost-project-id-file"]), "utf8").trim() : "";
+if (!project) throw new Error("pass --blockfrost-project-id-file <path> (a file holding a project id for the node's network)");
 const network = String(args.network ?? "preview");
 const node = String(args.node ?? "http://127.0.0.1:3035").replace(/\/$/, "") + "/api/v0";
 const bf = `https://cardano-${network}.blockfrost.io/api/v0`;

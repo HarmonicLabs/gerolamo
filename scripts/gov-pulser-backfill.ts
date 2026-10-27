@@ -6,6 +6,7 @@
  * stores opened read-only, the node's SQLite never opened.
  *
  *   bun scripts/gov-pulser-backfill.ts --node <node dir> --dry-run [--network preview] [--epoch E] [--out <json file>]
+ *       [--db-path <scratch db> (default /tmp/gov-pulser-backfill-<pid>.db)]
  */
 import { join } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
@@ -13,7 +14,8 @@ const argv = process.argv.slice(2);
 const opt = (k: string, d?: string) => { const i = argv.indexOf(`--${k}`); return i >= 0 ? argv[i + 1]! : d; };
 const node = opt("node"), network = opt("network", "preview")!;
 if (!node || !argv.includes("--dry-run")) { console.error("usage: bun scripts/gov-pulser-backfill.ts --node <node dir> --dry-run [--network preview] [--epoch E] [--out file]"); process.exit(2); }
-process.env.GEROLAMO_DB_PATH ||= `/tmp/gov-pulser-backfill-${process.pid}.db`; // never the node's SQLite
+const { initSettings } = await import("../src/config/settings");
+initSettings({ dbPath: opt("db-path") || `/tmp/gov-pulser-backfill-${process.pid}.db` }); // never the node's SQLite
 const { attachReadOnlyLedgerStore, getLedgerStore, ledgerGovReads, ledgerStakeReads } = await import("../src/ledger/nodeLedgerStore");
 const { BlockStore } = await import("../src/storage/blockStore");
 const { selectedChain, selectedTip, setSelectedTipHash } = await import("../src/storage/blockReads");

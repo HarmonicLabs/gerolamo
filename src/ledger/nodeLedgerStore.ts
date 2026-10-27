@@ -2,7 +2,7 @@
  * The node's LMDB ledger store (docs/PLAN_LMDB_LEDGER.md §7): mode, open/seed, the block hooks the
  * orchestrator calls, the dual-run verifier, and the process-wide registry the `db.ts` helpers use.
  *
- * Modes (`ledgerStore` in config, `GEROLAMO_LEDGER_STORE` wins):
+ * Modes (`ledgerStore` in config, `--ledger-store` wins):
  *   sqlite  — today's path, LMDB untouched
  *   dual    — SQLite stays primary; every UTxO write also goes to the LMDB diffs, and after each
  *             block the touched references are compared between the two (any difference halts)
@@ -11,6 +11,7 @@
  *
  * Phase 1 scope: the UTxO group. Directory: `<dir of dbPath>/ledger`.
  */
+import { settings } from "../config/settings";
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { epochForSlot } from "../utils/epochFromSlotCalculations";
@@ -50,17 +51,16 @@ const dualTotals = { checked: 0, differences: 0, blocks: 0 };
 let lastDualLog = 0;
 
 export function configureLedgerStore(m: string | undefined): void {
-    const env = process.env.GEROLAMO_LEDGER_STORE?.trim().toLowerCase();
-    const v = env || m?.trim().toLowerCase();
+    const v = m?.trim().toLowerCase();
     mode = v === "dual" || v === "lmdb" ? v : "sqlite";
 }
 export function ledgerStoreMode(): LedgerStoreMode { return mode; }
 /**
  * Phase 4 cut-over switch: in `lmdb` mode the SQLite ledger tables stop being written when
- * `GEROLAMO_LEDGER_SQL_WRITES=0` (default: still written, so `ledgerStore` can be switched back).
+ * `--no-ledger-sql-writes` (config ledgerSqlWrites: false) (default: still written, so `ledgerStore` can be switched back).
  * Never off in `sqlite` or `dual` mode.
  */
-export function sqlLedgerWrites(): boolean { return mode !== "lmdb" || process.env.GEROLAMO_LEDGER_SQL_WRITES !== "0"; }
+export function sqlLedgerWrites(): boolean { return mode !== "lmdb" || settings().ledgerSqlWrites; }
 export function ledgerStoreActive(): boolean { return mode !== "sqlite" && store !== null; }
 /** The store when it answers reads (lmdb mode). */
 export function primaryLedgerStore(): LedgerStore | null { return mode === "lmdb" ? store : null; }
@@ -80,7 +80,7 @@ export function ledgerGovReads(): GovReads | null { return mode === "lmdb" && go
  * with cardano-node; "sqlite" — seeded from the SQLite ledger, whose reward balances drift (bug 246,
  * the 2026-10-01 producer store); "genesis" — built from the genesis files and synced from the origin
  * (ledger/genesisState.ts, bug 304): exact only once a full run has been proven identical to the
- * network, which the operator states with `GEROLAMO_GENESIS_EXACT=1` (report-only until then).
+ * network, which the operator states with `--genesis-exact` (report-only until then).
  * A store written before the marker counts as a snapshot import when
  * the pots' initialized epoch and the governance seed epoch are both the snapshot's epoch (what the
  * importer writes; a SQLite seed copies SQLite's: the Shelley and the Conway start on a node synced
@@ -104,8 +104,8 @@ export function ledgerStateExact(): { exact: boolean; why: string } {
         const p = stake.reads.pots(), g = gov.reads.state();
         source = p && g && p.initializedEpoch > 0 && p.initializedEpoch === g.seededEpoch ? "snapshot" : "unknown";
     }
-    const genesisExact = source === "genesis" && process.env.GEROLAMO_GENESIS_EXACT === "1";
-    const v = source === "snapshot" || genesisExact ? { exact: true, why: "" } : { exact: false, why: source === "sqlite" ? "ledger store seeded from SQLite" : source === "genesis" ? "ledger store synced from genesis, not yet proven identical to the network (GEROLAMO_GENESIS_EXACT=1 after the acceptance checks)" : "ledger store not imported from a snapshot" };
+    const genesisExact = source === "genesis" && settings().genesisExact;
+    const v = source === "snapshot" || genesisExact ? { exact: true, why: "" } : { exact: false, why: source === "sqlite" ? "ledger store seeded from SQLite" : source === "genesis" ? "ledger store synced from genesis, not yet proven identical to the network (--genesis-exact after the acceptance checks)" : "ledger store not imported from a snapshot" };
     exactMemo = { store, v };
     return v;
 }
@@ -123,8 +123,6 @@ export async function ledgerGovDirect(fn: (g: GovWrites) => void): Promise<void>
 export function getLedgerStore(): LedgerStore | null { return store; }
 
 export function resolveLedgerDir(config: { dbPath: string; ledgerDir?: string }): string | null {
-    const fromEnv = process.env.GEROLAMO_LEDGER_DIR?.trim();
-    if (fromEnv) return fromEnv;
     if (config.ledgerDir?.trim()) return config.ledgerDir.trim();
     if (!config.dbPath || config.dbPath === ":memory:") return null;
     return join(dirname(config.dbPath), "ledger");
@@ -199,7 +197,7 @@ async function openNodeLedgerStoreInner(config: { dbPath: string; ledgerDir?: st
     // SQLite cannot be the reference again (dual) or the ledger (sqlite).
     try {
         const dropped = (await sql`SELECT 1 FROM schema_migrations WHERE name = 'ledger_sqlite_dropped'`.values()) as unknown[][];
-        if (dropped.length && (mode !== "lmdb" || process.env.GEROLAMO_LEDGER_SQL_WRITES !== "0")) throw new Error(`the SQLite ledger tables of ${config.dbPath} were emptied (ledger-sqlite-drop): this node must run ledgerStore "lmdb" with GEROLAMO_LEDGER_SQL_WRITES=0`);
+        if (dropped.length && (mode !== "lmdb" || settings().ledgerSqlWrites)) throw new Error(`the SQLite ledger tables of ${config.dbPath} were emptied (ledger-sqlite-drop): this node must run ledgerStore "lmdb" with --no-ledger-sql-writes`);
     } catch (err) { if ((err as Error).message.includes("ledger-sqlite-drop")) throw err; }
     if (mode === "sqlite") return null;
     const dir = resolveLedgerDir(config);
@@ -273,7 +271,7 @@ async function openNodeLedgerStoreInner(config: { dbPath: string; ledgerDir?: st
 /**
  * Tools beside a running node (forge dry run, probes): open its LMDB store read-only, load the
  * persisted diffs and pin the view to the block store's selected tip. Reads route through the store
- * when `GEROLAMO_LEDGER_STORE=lmdb` (or the config says so); nothing is ever written.
+ * when `--ledger-store lmdb` (or the config says so); nothing is ever written.
  */
 export function attachReadOnlyLedgerStore(config: { dbPath: string; ledgerDir?: string; ledgerStore?: string; blockStoreDir?: string }): LedgerStore | null {
     configureLedgerStore(config.ledgerStore);
@@ -290,8 +288,8 @@ export function attachReadOnlyLedgerStore(config: { dbPath: string; ledgerDir?: 
     return store;
 }
 
-/** Epochs of report history kept in the store (`GEROLAMO_LEDGER_KEEP_EPOCHS`, default 30: a month on preview, 150 days on mainnet). */
-export function ledgerKeepEpochs(): number { const n = Number(process.env.GEROLAMO_LEDGER_KEEP_EPOCHS); return Number.isFinite(n) && n >= 4 ? Math.floor(n) : 30; }
+/** Epochs of report history kept in the store (`--ledger-keep-epochs`, default 30: a month on preview, 150 days on mainnet). */
+export function ledgerKeepEpochs(): number { const n = settings().ledgerKeepEpochs; return Number.isFinite(n) && n >= 4 ? Math.floor(n) : 30; }
 
 /**
  * Drop report history older than the retention window: reward payouts, per-pool reward reports,

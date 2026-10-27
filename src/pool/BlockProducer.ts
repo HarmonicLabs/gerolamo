@@ -11,6 +11,7 @@
  * enforced across restarts through `stateFile`; the KES key only evolves
  * forward; nothing about keys is logged.
  */
+import { settingsMessage } from "../config/settings";
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { ledgerUtxoReads } from "../ledger/nodeLedgerStore";
 import { blockAtSlot, getChainTipFromHeader } from "../db";
@@ -563,7 +564,7 @@ export class BlockProducer {
             if (!s || !this.node.carriers) continue;
             const c = this.node.carriers();
             const n = c.inbound.length + c.duplex.length;
-            const msg = `Block producer: leader slot ${s.slot} in ${ahead / 60n} min — ${n} carrier(s) attached (${c.inbound.length} inbound pulling, ${c.duplex.length} duplex)${c.publicReachable === false ? "; PUBLIC PORT UNREACHABLE" : ""}`;
+            const msg = `Block producer: leader slot ${s.slot} in ${ahead / 60n} min — ${n} carrier(s) attached (${c.inbound.length} inbound pulling, ${c.duplex.length} duplex)${c.publicReachable === false ? "; PUBLIC --port UNREACHABLE" : ""}`;
             if (n === 0 || c.publicReachable === false) logger.warn(msg + ": a block forged now would not leave this node"); else logger.info(msg);
         }
         noteForgeEvent("about-to-lead");
@@ -874,6 +875,7 @@ const pending = new Map<number, { resolve: (s: LeaderSlot[]) => void; reject: (e
 export function scheduleInWorker(input: { epoch: number; nonceHex: string; sigma: { num: bigint; den: bigint }; vrf: VrfKey; network?: EpochNetwork; activeSlotsCoeff?: number }): Promise<LeaderSlot[]> {
     if (!worker) {
         worker = new Worker(new URL("./scheduleWorker.ts", import.meta.url).href);
+        worker.postMessage(settingsMessage());
         worker.onmessage = (ev: MessageEvent) => {
             const { id, slots, error } = ev.data as { id: number; slots?: any[]; error?: string };
             const p = pending.get(id); pending.delete(id);

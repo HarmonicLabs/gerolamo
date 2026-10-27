@@ -54,8 +54,7 @@ cardano-node if one runs on the box (it is used as an always-on verifier and lig
 ## 3. Bootstrap from Mithril (chunks + ledger state)
 
 ```
-NETWORK=preprod GEROLAMO_DB_PATH=$D/preprod.db GEROLAMO_CONFIG_PATH=$D/config.json \
-  bun src/index.ts mithril-bootstrap --network preprod --download-dir $D/snapshots \
+bun src/index.ts mithril-bootstrap --network preprod --db $D/preprod.db --download-dir $D/snapshots \
   --block-store $D/db --ledger-state --ledger $D/ledger --include-ancillary --download-concurrency 8
 ```
 
@@ -65,23 +64,25 @@ digest-checks every immutable chunk (never delete a downloaded chunk directory �
 snapshot's ledger slot and pins the selected tip, then imports the UTxO set and the
 NewEpochState **straight into the LMDB store** (`--ledger`), anchored at the snapshot's block.
 Expect 30–60 min on a good link. No SQLite ledger tables are created; use
-`"ledgerStore": "lmdb"` in config.json and launch the supervisor with
-`GEROLAMO_LEDGER_SQL_WRITES=0` (step 4) so they never are. Without `--ledger` the importer
+`"ledgerStore": "lmdb"` and `"ledgerSqlWrites": false` in config.json (or launch the supervisor
+with `-- --no-ledger-sql-writes`, step 4) so they never are. Without `--ledger` the importer
 writes SQLite as before and a `dual`-mode node seeds its store from it at first start.
 
 ## 4. Run under the supervisor
 
 ```
-PLUTUS_TRACE=0 GEROLAMO_LEDGER_SQL_WRITES=0 setsid bash scripts/run-supervised.sh preprod 3040 $D 14 preprod.log > /dev/null 2>&1 < /dev/null &
+setsid bash scripts/run-supervised.sh preprod 3040 $D 14 preprod.log -- --no-ledger-sql-writes > /dev/null 2>&1 < /dev/null &
 ```
 
-The supervisor relaunches the node on exit and restarts it above 14 GB RSS. The first start logs
+The supervisor relaunches the node on exit and restarts it above 14 GB RSS. It passes
+`--network preprod --port 3040 --db-path $D/preprod.db --config $D/config.json` itself; node flags
+go after `--` (docs/CONFIG.md). The first start logs
 `ledger store … (lmdb): anchor slot <snapshot slot>, 0 volatile diff(s)`, then `Block store is
 PRIMARY`, then ranges; the node should reach the network tip within minutes (the snapshot is at
 most a few hours old). (A `dual`-mode node seeded from SQLite logs `seeded … rows from SQLite` first.)
 
-Stop a node by pid only (never `pkill bun`): find it with `GEROLAMO_PORT=3040` in
-`/proc/<pid>/environ`, `kill <pid>`; the supervisor relaunches it. Stop the supervisor first
+Stop a node by pid only (never `pkill bun`): find it by its command line
+(`start-gerolamo … --port 3040`, e.g. `pgrep -af 'start-gerolamo.*--port 3040'`), `kill <pid>`; the supervisor relaunches it. Stop the supervisor first
 (its cmdline is `bash scripts/run-supervised.sh preprod 3040 …`) when you want it down.
 
 ## 5. Verify
@@ -97,8 +98,8 @@ Stop a node by pid only (never `pkill bun`): find it with `GEROLAMO_PORT=3040` i
 ## 6. Cut over to LMDB
 
 After a clean boundary: set `"ledgerStore": "lmdb"`, restart the node (diffs reload in
-< 1 s, no reseed). After a day, relaunch the supervisor with `GEROLAMO_LEDGER_SQL_WRITES=0` in
-its environment to stop the SQLite ledger writes; the SQLite file then holds only the frozen
+< 1 s, no reseed). After a day, set `"ledgerSqlWrites": false` in config.json (or relaunch the
+supervisor with `-- --no-ledger-sql-writes`) to stop the SQLite ledger writes; the SQLite file then holds only the frozen
 tables and the mini-Blockfrost projection.
 
 ## 7. Producer
@@ -112,7 +113,8 @@ tables and the mini-Blockfrost projection.
    `"n2n.publicAddress": "<public ip>:3001"` matching the pool's registered relay.
 3. Restart; check the log for the opcert counter/period line and the epoch schedule
    (`Block producer: epoch N schedule: k leader slot(s)`), then
-   `GEROLAMO_LEDGER_STORE=lmdb GEROLAMO_DB_PATH=$D/preprod.db NETWORK=preprod bun scripts/forge-dry-run.ts $D/config.json`
+   `bun scripts/forge-dry-run.ts $D/config.json --db-path $D/preprod.db --network preprod`
+   (it reads `"ledgerStore": "lmdb"` from that config.json)
    must print `validateHeader (VRF / leader / KES / opcert): PASS`.
 4. Set `"dryRun": false` and restart before the first scheduled slot. Confirm the forged block on
    a public explorer and on the node's own `/metrics` (`producer.leaderSlots` outcomes).

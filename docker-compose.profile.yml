@@ -8,15 +8,9 @@ services:
     restart: unless-stopped
     stop_grace_period: 60s
     user: "${UID:-1000}:${GID:-1000}"
-    environment:
-      NETWORK: preview
-      GEROLAMO_PORT: "3030"
-      GEROLAMO_BOOTSTRAP: genesis
-      GEROLAMO_ROLE: data
-      GEROLAMO_MAX_RSS_GB: "8"
-      GEROLAMO_LEDGER_SQL_WRITES: "0"
+    command: ["--network", "preview", "--port", "3030", "--bootstrap", "genesis", "--role", "data", "--max-rss-gb", "8"]
     volumes:
-      - ${GEROLAMO_PROFILE_DIR:-./data/profile}:/data
+      - ./data/profile:/data
     ports:
       - "127.0.0.1:3031:3030"
     mem_limit: 9g          # hard cap: the kernel kills this container, never the host's other work

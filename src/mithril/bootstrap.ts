@@ -74,7 +74,7 @@ async function applyChunkRange(
  * UTxO table from `tables` and every other ledger table from `state` (docs/PLAN_SNAPSHOT_BOOTSTRAP.md
  * phases B–D). The chunk store must already hold the blocks up to the snapshot slot.
  */
-async function importLedgerStateFromAncillary(a: { ledger?: string; downloadDir: string; ancillaryDir: string; network: string; vkey?: string; logger: Logger; prog: (p: Partial<MithrilProgress>) => void; trimSqliteBlocks?: boolean }): Promise<{ slot: number; blockHash: string; blockNo: number; epoch: number }> {
+async function importLedgerStateFromAncillary(a: { ledger?: string; dbPath?: string; downloadDir: string; ancillaryDir: string; network: string; vkey?: string; logger: Logger; prog: (p: Partial<MithrilProgress>) => void; trimSqliteBlocks?: boolean }): Promise<{ slot: number; blockHash: string; blockNo: number; epoch: number }> {
     const { logger } = a;
     const vkeyRaw = await resolveAncillaryVkey(a.vkey, a.network);
     if (!vkeyRaw) throw new Error(`--ledger-state: no ancillary verification key known for network ${a.network} (pass --ancillary-vkey)`);
@@ -102,8 +102,8 @@ async function importLedgerStateFromAncillary(a: { ledger?: string; downloadDir:
         logInfo(logger, `Ledger state imported into ${a.ledger}: anchor slot ${snapshot.slot} block ${snapshot.blockHash.slice(0, 16)}… (${r.seconds.toFixed(1)}s); start the node with ledgerStore "lmdb"`);
         return { slot: snapshot.slot, blockHash: snapshot.blockHash, blockNo: snapshot.blockNo, epoch: snapshot.epoch };
     }
-    const dbPath = process.env.GEROLAMO_DB_PATH;
-    if (!dbPath) throw new Error("--ledger-state: GEROLAMO_DB_PATH unset");
+    const dbPath = a.dbPath;
+    if (!dbPath) throw new Error("--ledger-state needs --db (or --ledger for the LMDB store)");
     const { closeSql } = await import("../sql");
     await closeSql(); // the importers write through their own bun:sqlite connection
     const { importUtxoFromTables } = await import("./importUtxo");
@@ -213,7 +213,7 @@ async function runTsBootstrap(
     // Progress file for the dashboard (scripts/dashboard-server.ts --mithril-progress).
     const progressFile = opts.progressFile ?? join(resolve(opts.downloadDir), "progress.json");
     const startedAt = new Date().toISOString();
-    let progressBase: Partial<MithrilProgress> = { network: opts.network, blocksOnly: !!opts.blocksOnly, db: process.env.GEROLAMO_DB_PATH };
+    let progressBase: Partial<MithrilProgress> = { network: opts.network, blocksOnly: !!opts.blocksOnly, db: opts.dbPath };
     const prog = (p: Partial<MithrilProgress>): void => {
         progressBase = { ...progressBase, ...p };
         writeMithrilProgress(progressFile, { phase: "certificate", network: opts.network, startedAt, updatedAt: startedAt, ...progressBase } as MithrilProgress);
@@ -427,7 +427,7 @@ async function runTsBootstrapInner(
         let state: { slot: number; blockHash: string } | null = null;
         if (opts.ledgerState) {
             if (!ancillaryDir) throw new Error(`--ledger-state: no ancillary ledger directory under ${downloadDir}`);
-            state = await importLedgerStateFromAncillary({ ledger: opts.ledger, downloadDir, ancillaryDir, network: opts.network, vkey: opts.ancillaryVkey, logger, prog, trimSqliteBlocks: false });
+            state = await importLedgerStateFromAncillary({ ledger: opts.ledger, dbPath: opts.dbPath, downloadDir, ancillaryDir, network: opts.network, vkey: opts.ancillaryVkey, logger, prog, trimSqliteBlocks: false });
         }
         await finishBlockStore({ blockStore: resolve(opts.blockStore), immutableDir, logger, prog, state });
         return { engine, snapshotHash: selected.hash, certificateHash: selected.certificate_hash, immutableDir, ancillaryDir, downloadedChunks: downloaded, appliedChunks: [], verified: true };
@@ -468,7 +468,7 @@ async function runTsBootstrapInner(
     if (opts.ledgerState) {
         if (opts.skipApply) throw new Error("--ledger-state needs the apply step (drop --skip-apply)");
         if (!ancillaryDir) throw new Error(`--ledger-state: no ancillary ledger directory under ${downloadDir}`);
-        await importLedgerStateFromAncillary({ ledger: opts.ledger, downloadDir, ancillaryDir, network: opts.network, vkey: opts.ancillaryVkey, logger, prog });
+        await importLedgerStateFromAncillary({ ledger: opts.ledger, dbPath: opts.dbPath, downloadDir, ancillaryDir, network: opts.network, vkey: opts.ancillaryVkey, logger, prog });
     }
 
     return {
@@ -508,9 +508,6 @@ async function runBinBootstrap(
     }
 
     let genesisKey = opts.genesisVkey?.trim() || "";
-    if (!genesisKey && process.env.GENESIS_VERIFICATION_KEY?.trim()) {
-        genesisKey = process.env.GENESIS_VERIFICATION_KEY.trim();
-    }
     if (!genesisKey) {
         genesisKey = await fetchGenesisVkey(cfg.genesisVkeyUrl);
     }

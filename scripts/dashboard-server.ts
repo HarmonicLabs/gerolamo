@@ -11,7 +11,7 @@ const { values: args } = parseArgs({
     port: { type: "string", default: "3050" },
     db: { type: "string", default: "./ledger/gerolamo.db" },
     "node-url": { type: "string", default: "http://localhost:3030" },
-    "network": { type: "string", default: process.env.NETWORK ?? "preprod" },
+    "network": { type: "string", default: "preprod" },
     "static-dir": { type: "string", default: "" },
     "mithril-progress": { type: "string", default: "" },
     help: { type: "boolean", default: false },
@@ -27,6 +27,7 @@ Options:
   --port <n>         Server port (default: 3050)
   --db <path>        SQLite database path (default: ./ledger/gerolamo.db)
   --node-url <url>   Gerolamo node URL (default: http://localhost:3030)
+  --network <n>      preprod, preview or mainnet (default: preprod)
   --static-dir <dir> Serve built dashboard from this directory
   --mithril-progress <file>  Progress JSON written by mithril-bootstrap (shown as a Mithril card)
   --help             Show this help
@@ -97,7 +98,7 @@ function broadcastSSE(channel: string, data: unknown) {
 
 // Network tip estimation for sync progress: the slot the network clock is at now, with the
 // per-network geometry shared with the desktop app (Byron short epochs, Shelley start slot).
-const NET: GerolamoNetwork = (["preprod", "preview", "mainnet"].includes(String(args.network ?? "")) ? String(args.network) : "preprod") as GerolamoNetwork; // --network, else $NETWORK, else preprod
+const NET: GerolamoNetwork = (["preprod", "preview", "mainnet"].includes(String(args.network ?? "")) ? String(args.network) : "preprod") as GerolamoNetwork; // --network, else preprod
 function estimateNetworkTipSlot(): number {
   return Number(networkTipSlotNow(NET));
 }

@@ -244,13 +244,13 @@ describe("UTxO RPC v1alpha over gRPC with the official SDK", () => {
     let txEvents: Promise<CardanoTxEvent[]>;
     let payTxEvents: Promise<CardanoTxEvent[]>;
 
-    test("config: off by default, enabled / env forms", () => {
-        expect(resolveUtxorpcConfig({}, {})).toBeNull();
-        expect(resolveUtxorpcConfig({ utxorpc: { port: 1 } }, {})).toBeNull();
-        expect(resolveUtxorpcConfig({ utxorpc: { enabled: true } }, {})).toEqual({ host: "127.0.0.1", port: 50051 });
-        expect(resolveUtxorpcConfig({ utxorpc: { enabled: true, host: "0.0.0.0", port: 50052 } }, {})).toEqual({ host: "0.0.0.0", port: 50052 });
-        expect(resolveUtxorpcConfig({ utxorpc: { enabled: true } }, { GEROLAMO_UTXORPC: "0" })).toBeNull();
-        expect(resolveUtxorpcConfig({}, { GEROLAMO_UTXORPC: "127.0.0.1:50077" })).toEqual({ host: "127.0.0.1", port: 50077 });
+    test("config: off by default, enabled / flag forms", () => {
+        expect(resolveUtxorpcConfig({}, null)).toBeNull();
+        expect(resolveUtxorpcConfig({ utxorpc: { port: 1 } }, null)).toBeNull();
+        expect(resolveUtxorpcConfig({ utxorpc: { enabled: true } }, null)).toEqual({ host: "127.0.0.1", port: 50051 });
+        expect(resolveUtxorpcConfig({ utxorpc: { enabled: true, host: "0.0.0.0", port: 50052 } }, null)).toEqual({ host: "0.0.0.0", port: 50052 });
+        expect(resolveUtxorpcConfig({ utxorpc: { enabled: true } }, "0")).toBeNull();
+        expect(resolveUtxorpcConfig({}, "127.0.0.1:50077")).toEqual({ host: "127.0.0.1", port: 50077 });
     });
 
     test("FollowTip and WatchTx stream the chain as it is applied, rolled back and switched", async () => {

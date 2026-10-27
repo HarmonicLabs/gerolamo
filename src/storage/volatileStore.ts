@@ -9,6 +9,7 @@
  * once every block in them is at or below the immutable slot, as the node does. A cardano-node
  * started on the directory picks these blocks up like its own.
  */
+import { settings } from "../config/settings";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { existsSync } from "node:fs";
 import { mkdir, open as openFile, readdir, rm, stat } from "node:fs/promises";
@@ -29,14 +30,14 @@ export interface VolatileBlock {
 }
 
 /**
- * When block files are fsynced (GEROLAMO_BLOCK_FSYNC). `batch` (default): `put` writes to the page cache and
+ * When block files are fsynced (--block-fsync). `batch` (default): `put` writes to the page cache and
  * `flush()` fdatasyncs every file touched since, once per applied range, before the range's commit (the way
  * the ledger diffs are flushed, bug 380) — 4 serial fsyncs per block were most of a sync's wall time on a
  * busy disk (bug 384). `block`: fsync inside every `put` (the old behaviour). `0`: never (tests, scratch).
  */
 export type BlockSyncPolicy = "batch" | "block" | "none";
 export function blockSyncPolicy(): BlockSyncPolicy {
-    const v = (process.env.GEROLAMO_BLOCK_FSYNC ?? "").trim().toLowerCase();
+    const v = settings().blockFsync;
     if (v === "block") return "block";
     if (v === "0" || v === "none" || v === "off") return "none";
     return "batch";
@@ -44,7 +45,7 @@ export function blockSyncPolicy(): BlockSyncPolicy {
 
 export interface VolatileStoreOptions {
     blocksPerFile?: number;
-    /** Default: `blockSyncPolicy()` (GEROLAMO_BLOCK_FSYNC). */
+    /** Default: `blockSyncPolicy()` (--block-fsync). */
     syncPolicy?: BlockSyncPolicy;
     /** Never modify the directory (no torn-tail truncation, `put`/`gc` refused): for a running node's files. */
     readOnly?: boolean;

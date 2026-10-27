@@ -9,8 +9,9 @@
  * `emit("connection")`, so it listens on a loopback port of its own).
  *
  * Config: `utxorpc: { enabled, host, port }` (default off; host 127.0.0.1, port 50051), or env
- * GEROLAMO_UTXORPC=host:port | port | 0.
+ * --utxorpc host:port | port | 0.
  */
+import { settings } from "../../config/settings";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as net from "node:net";
@@ -29,20 +30,20 @@ const log = logger.child("utxorpc");
 export interface UtxorpcConfig { host: string; port: number }
 export const DEFAULT_UTXORPC_PORT = 50051;
 
-/** `utxorpc: { enabled, host, port }` / GEROLAMO_UTXORPC; null when off (the default). */
-export function resolveUtxorpcConfig(config: { utxorpc?: unknown } | undefined, env: Record<string, string | undefined> = process.env): UtxorpcConfig | null {
+/** `utxorpc: { enabled, host, port }`, or the --utxorpc flag (on, off, host:port or a port); null when off (the default). */
+export function resolveUtxorpcConfig(config: { utxorpc?: unknown } | undefined, override: string | null = settings().utxorpc): UtxorpcConfig | null {
     const parse = (host: unknown, port: unknown): UtxorpcConfig | null => {
         const p = port == null || port === "" ? DEFAULT_UTXORPC_PORT : Number(port);
         if (!Number.isInteger(p) || p < 0 || p > 65535) return null;
         return { host: typeof host === "string" && host.trim() ? host.trim() : "127.0.0.1", port: p };
     };
-    const e = env.GEROLAMO_UTXORPC?.trim();
+    const e = override?.trim().toLowerCase();
     if (e === "0" || e === "off" || e === "false") return null;
     if (e) {
         if (e === "1" || e === "on" || e === "true") return parse(null, null);
         const i = e.lastIndexOf(":");
         const r = i > 0 ? parse(e.slice(0, i).replace(/^\[|\]$/g, ""), e.slice(i + 1)) : parse(null, e);
-        if (!r) log.warn(`GEROLAMO_UTXORPC=${e} is not host:port; UTxO RPC off`);
+        if (!r) log.warn(`--utxorpc ${e} is not host:port; UTxO RPC off`);
         return r;
     }
     const c = config?.utxorpc;

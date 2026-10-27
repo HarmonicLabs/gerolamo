@@ -1,6 +1,6 @@
 // Forge an EMPTY block at the current DB tip with the pool keys and run it through the same
 // header parse adoptLocalBlock uses; nothing is published or stored, no key material is printed.
-// Usage: GEROLAMO_DB_PATH=<db> NETWORK=preview bun scripts/forge-dry-run.ts <node config.json>
+// Usage: bun scripts/forge-dry-run.ts <node config.json> [era] --db-path <db> --network preview
 import { getChainTipFromHeader } from "../src/db";
 import { attachReadOnlyBlockStore } from "../src/storage/nodeBlockStore";
 import { attachReadOnlyLedgerStore } from "../src/ledger/nodeLedgerStore";
@@ -11,15 +11,21 @@ import { EMPTY_BODY, forgeBlock } from "../src/pool/forge";
 import { loadColdVerificationKey, loadKesSigningKey, loadVrfSigningKey, readOperationalCert } from "../src/pool/keystore";
 import { blockFetchHeaderIdentity as headerIdentityOfBlock } from "../src/consensus/blockHeaderParser";
 import { Cbor, CborArray, CborBytes, CborTag, CborUInt } from "@harmoniclabs/cbor";
-const cfgPath = process.argv[2] ?? "/media/bakon/data/cardano/gerolamo-preview-mithril/config.json";
+import { initSettings, SETTINGS } from "../src/config/settings";
+const argv = process.argv.slice(2);
+const flag = (n: string) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : undefined; };
+const positional = argv.filter((a, i) => !a.startsWith("--") && !argv[i - 1]?.startsWith("--"));
+const dbPath = flag("db-path");
+initSettings({ dbPath: dbPath ?? SETTINGS.dbPath.default, network: flag("network") ?? SETTINGS.network.default }); // before the first query
+const cfgPath = positional[0] ?? "/media/bakon/data/cardano/gerolamo-preview-mithril/config.json";
 const cfg = JSON.parse(await Bun.file(cfgPath).text());
 const pc = cfg.producer;
 const genesis = await Bun.file(cfg.shelleyGenesisFile ?? "./src/config/preview/shelley-genesis.json").json();
-await attachReadOnlyBlockStore({ dbPath: process.env.GEROLAMO_DB_PATH ?? "", blockStoreDir: cfg.blockStoreDir }, Number(genesis.securityParam ?? 432));
-attachReadOnlyLedgerStore({ dbPath: process.env.GEROLAMO_DB_PATH ?? "", ledgerDir: cfg.ledgerDir, ledgerStore: cfg.ledgerStore, blockStoreDir: cfg.blockStoreDir }); // GEROLAMO_LEDGER_STORE=lmdb routes the ledger reads through LMDB // the chain lives in the block store, not in SQLite
+await attachReadOnlyBlockStore({ dbPath: dbPath ?? "", blockStoreDir: cfg.blockStoreDir }, Number(genesis.securityParam ?? 432));
+attachReadOnlyLedgerStore({ dbPath: dbPath ?? "", ledgerDir: cfg.ledgerDir, ledgerStore: cfg.ledgerStore, blockStoreDir: cfg.blockStoreDir }); // ledgerStore lmdb routes the ledger reads through LMDB // the chain lives in the block store, not in SQLite
 const tip = await getChainTipFromHeader(); if (!tip) throw new Error("no tip");
 console.log("tip slot", String(tip.slot), "header block number", String(tip.blockNumber), "db block_no", String(tip.dbBlockNumber), tip.blockNumber !== tip.dbBlockNumber ? "(DRIFT: forging from the header)" : "(match)");
-const era = Number(process.argv[3] ?? 7);
+const era = Number(positional[1] ?? 7);
 const slot = tip.slot + 5n;
 const epoch = Number(epochForSlot(slot, "preview"));
 const nonceHex = await getEpochNonce(epoch); if (!nonceHex) throw new Error("no nonce");

@@ -11,6 +11,7 @@
  * `PrometheusSimple nosuffix`). GHC RTS metrics have Bun equivalents only in part: heap and RSS
  * figures, CPU time; there is no GC count or allocation counter in Bun, so those are absent.
  */
+import { settings } from "../config/settings";
 import { readFileSync } from "node:fs";
 import { logger } from "../utils/logger";
 
@@ -103,11 +104,11 @@ export function processMetrics(startedAtMs: number): Metric[] {
 export interface PrometheusConfig { host: string; port: number; noSuffix?: boolean }
 
 /**
- * Where to serve, from (in order) GEROLAMO_PROMETHEUS=host:port, config `prometheus: {host, port,
+ * Where to serve, from (in order) the --prometheus flag (host:port, a port, or off), config `prometheus: {host, port,
  * noSuffix}`, or the cardano-node legacy key `hasPrometheus: [host, port]`. null = off.
  */
-export function resolvePrometheusConfig(config: { prometheus?: unknown; hasPrometheus?: unknown } | undefined, env: Record<string, string | undefined> = process.env): PrometheusConfig | null {
-    const e = env.GEROLAMO_PROMETHEUS?.trim();
+export function resolvePrometheusConfig(config: { prometheus?: unknown; hasPrometheus?: unknown } | undefined, override: string | null = settings().prometheus): PrometheusConfig | null {
+    const e = override?.trim();
     if (e === "0" || e === "off") return null;
     const parse = (host: unknown, port: unknown, noSuffix?: unknown): PrometheusConfig | null => {
         const p = Number(port);
@@ -119,7 +120,7 @@ export function resolvePrometheusConfig(config: { prometheus?: unknown; hasProme
         const i = e.lastIndexOf(":");
         const r = i > 0 ? parse(e.slice(0, i).replace(/^\[|\]$/g, ""), e.slice(i + 1)) : parse("127.0.0.1", e);
         if (r) return r;
-        logger.warn(`GEROLAMO_PROMETHEUS=${e} is not host:port; Prometheus endpoint off`);
+        logger.warn(`--prometheus ${e} is not host:port; Prometheus endpoint off`);
         return null;
     }
     const pc = config?.prometheus;

@@ -72,6 +72,8 @@ export type MithrilNetworkConfig = {
 
 export type MithrilBootstrapOptions = {
     network: string;
+    /** SQLite database the apply and --ledger-state steps write (mithril-bootstrap --db). */
+    dbPath?: string;
     downloadDir: string;
     /** Snapshot hash or "latest". */
     digest?: string;

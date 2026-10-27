@@ -2,6 +2,7 @@
  * Bug 304: the genesis ledger state of each network (what cardano-node's initial ExtLedgerState
  * holds) and an LMDB store that starts empty, anchored at the origin.
  */
+import { withSettings } from "../config/settings";
 import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -19,7 +20,7 @@ import { configureLedgerStore, getLedgerStore, ledgerAfterRange, ledgerBeginBloc
 import { initSql } from "../sql";
 
 const root = mkdtempSync(join(tmpdir(), "gerolamo-genesis-state-"));
-afterAll(() => { getLedgerStore()?.close(); configureLedgerStore("sqlite"); delete process.env.GEROLAMO_GENESIS_EXACT; rmSync(root, { recursive: true, force: true }); });
+afterAll(() => { getLedgerStore()?.close(); configureLedgerStore("sqlite"); rmSync(root, { recursive: true, force: true }); });
 const cfgDir = (n: string) => join(import.meta.dir, "..", "config", n);
 const json = (n: string, f: string) => JSON.parse(readFileSync(join(cfgDir(n), f), "utf8"));
 const config = (n: string) => json(n, "config.json");
@@ -169,11 +170,11 @@ describe("a node store from genesis (lmdb mode)", () => {
         const st = getLedgerStore()!;
         expect(readGenesisMeta(st)?.firstPrevHash).toBe(c.byronGenesisHash);
         expect(ledgerStateExact()).toEqual({ exact: false, why: expect.stringContaining("synced from genesis") });
-        process.env.GEROLAMO_GENESIS_EXACT = "1";
+        const restoreExact = withSettings({ genesisExact: true }); // --genesis-exact
         const { markLedgerSource } = await import("./nodeLedgerStore");
         await markLedgerSource(st, "genesis"); // drops the memo
         expect(ledgerStateExact().exact).toBe(true);
-        delete process.env.GEROLAMO_GENESIS_EXACT;
+        restoreExact();
         await markLedgerSource(st, "genesis");
         const h = (n: number) => { const x = new Uint8Array(32); x[0] = n; x[1] = 0x9e; return x; };
         // block 0's parent is the genesis hash (bug 304: this marked the store broken)

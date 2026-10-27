@@ -1,3 +1,4 @@
+import { settings } from "../config/settings";
 import {
     AllegraHeader,
     AlonzoHeader,
@@ -89,8 +90,8 @@ function isGenesisDelegateIssuer(
     return false;
 }
 
-/** GEROLAMO_HEADER_TRACE=1: log every passed header (nine lines per header, from every hot peer — 22 000 lines a minute on a fast sync). */
-const HEADER_TRACE = process.env.GEROLAMO_HEADER_TRACE === "1";
+/** --trace-headers: log every passed header (nine lines per header, from every hot peer — 22 000 lines a minute on a fast sync). */
+const headerTrace = (): boolean => settings().traceHeaders;
 
 const CERTIFIED_NATURAL_MAX = BigDecimal.fromString(
     "1157920892373161954235709850086879078532699846656405640394575840079131296399360000000000000000000000000000000000",
@@ -305,7 +306,7 @@ export class ValidatePostBabbageHeader {
             verifyOpCertValidity && verifyKES;
         // Per-header result at debug: at info it was half of a 4 GB log (10 lines per header,
         // every verifier re-delivers every header). Failures are reported by the caller.
-        if (!passed || HEADER_TRACE) (passed ? logger.debug : logger.info).call(logger,
+        if (!passed || headerTrace()) (passed ? logger.debug : logger.info).call(logger,
             `Header validation ${
                 passed ? "PASSED" : "FAILED"
             } era=${h.era} slot=${header.body.slot}`,
@@ -532,7 +533,7 @@ export class ValidatePreBabbageHeader {
             verifyOpCertValidity && verifyKES;
         // Per-header result at debug: at info it was half of a 4 GB log (10 lines per header,
         // every verifier re-delivers every header). Failures are reported by the caller.
-        if (!passed || HEADER_TRACE) (passed ? logger.debug : logger.info).call(logger,
+        if (!passed || headerTrace()) (passed ? logger.debug : logger.info).call(logger,
             `Header validation ${
                 passed ? "PASSED" : "FAILED"
             } era=${h.era} slot=${header.body.slot}`,

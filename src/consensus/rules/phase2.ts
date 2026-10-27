@@ -16,6 +16,7 @@
  * script or datum, an unresolvable input — phase-1 matters — or an evaluator limitation), which
  * callers must treat as "no verdict", never as a script failure.
  */
+import { settings } from "../../config/settings";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { parseCbor } from "../plutus/cbor";
 import { ContextError, TxContext, type Purpose } from "../plutus/context";
@@ -239,7 +240,7 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
 // ── rules ──
 
 /**
- * How phase 2 runs (`GEROLAMO_PLUTUS_PHASE2`): `enforce` — every Plutus transaction is evaluated
+ * How phase 2 runs (`--plutus-phase2`): `enforce` — every Plutus transaction is evaluated
  * in the block rules and a verdict mismatch fails the block; `report` — evaluated in the
  * detached shadow job, mismatches only logged and counted; `off`. "No verdict" cases are
  * reported in every mode, never failed.
@@ -247,7 +248,7 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
 export type Phase2Mode = "enforce" | "report" | "off";
 export const PHASE2_DEFAULT_MODE: Phase2Mode = "enforce"; // zero mismatches over the whole preview history (bug 214); `report` for a preprod/mainnet proving run
 export function phase2Mode(): Phase2Mode {
-    const v = String(process.env.GEROLAMO_PLUTUS_PHASE2 ?? "").toLowerCase();
+    const v = settings().plutusPhase2;
     return v === "enforce" || v === "report" || v === "off" ? v : PHASE2_DEFAULT_MODE;
 }
 

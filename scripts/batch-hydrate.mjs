@@ -35,8 +35,8 @@ const wipe = hasFlag("wipe");
 const PROGRESS_EVERY = Number(arg("progress", "1"));
 
 process.chdir(WORKDIR);
-process.env.GEROLAMO_DB_PATH = DB_PATH;
-process.env.DATABASE_URL = `sqlite://${DB_PATH}`;
+const { initSettings } = await import(resolve(WORKDIR, "src/config/settings.ts"));
+initSettings({ dbPath: DB_PATH });
 
 if (wipe && existsSync(DB_PATH)) {
   for (const p of [DB_PATH, `${DB_PATH}-wal`, `${DB_PATH}-shm`]) {

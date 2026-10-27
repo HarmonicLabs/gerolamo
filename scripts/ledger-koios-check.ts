@@ -14,6 +14,7 @@
  *   accounts  `reward_payouts[e]` for the --accounts N largest           ↔ POST /account_rewards (earned epoch e)
  *
  *   bun scripts/ledger-koios-check.ts <ledgerDir> --network preview --from 1 --to 30 [--pools 5] [--accounts 5] [--only pots,nonce,…]
+ *       [--bulk] [--koios-api-key-file <path>]
  *
  * Koios: public tier, ~4 requests/s with backoff on 429; every list call is one epoch (no pagination
  * needed below 1000 rows). Exit 1 on any difference.
@@ -22,14 +23,15 @@
  * once (paginated), /pool_history once per pool that is among the --pools largest in any epoch of
  * the range, /account_rewards once per 50 of the --accounts largest accounts — instead of 14
  * requests per epoch: the public tier's daily quota (≈ 5 000 requests) covers a few hundred epochs
- * per epoch-by-epoch run, a whole preview history in bulk. `KOIOS_API_KEY` (environment only) is sent
- * as a bearer token for a registered tier's larger quota.
+ * per epoch-by-epoch run, a whole preview history in bulk. `--koios-api-key-file <path>` (the key, read
+ * from that file, never a plain flag) is sent as a bearer token for a registered tier's larger quota.
  */
 import { LedgerStore } from "../src/ledger/LedgerStore";
 import { StakeReads } from "../src/ledger/stakeStore";
 import { GovReads } from "../src/ledger/govStore";
 import { setEpochNetwork } from "../src/utils/epochFromSlotCalculations";
 import { pin, type Pinned } from "../src/ledger/storeCompare";
+import { readFileSync } from "node:fs";
 
 const argv = process.argv.slice(2);
 const opt = (n: string) => { const i = argv.indexOf(`--${n}`); return i >= 0 ? argv[i + 1] : undefined; };
@@ -42,6 +44,8 @@ const from = Number(opt("from") ?? 1), to = Number(opt("to") ?? from);
 const nPools = Number(opt("pools") ?? 5), nAccounts = Number(opt("accounts") ?? 5);
 const only = opt("only")?.split(",");
 const want = (k: string) => !only || only.includes(k);
+const koiosKeyFile = opt("koios-api-key-file");
+const koiosKey = koiosKeyFile ? readFileSync(koiosKeyFile, "utf8").trim() : "";
 
 let last = 0;
 async function koios(path: string, body?: unknown): Promise<any[]> {
@@ -49,7 +53,7 @@ async function koios(path: string, body?: unknown): Promise<any[]> {
         const wait = last + 260 - Date.now();
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
         last = Date.now();
-        const auth: Record<string, string> = process.env.KOIOS_API_KEY ? { authorization: `Bearer ${process.env.KOIOS_API_KEY}` } : {}; // a registered tier's quota (env only, never logged)
+        const auth: Record<string, string> = koiosKey ? { authorization: `Bearer ${koiosKey}` } : {}; // a registered tier's quota (from a file, never logged)
         const res = await fetch(`${base}${path}`, body ? { method: "POST", headers: { accept: "application/json", "content-type": "application/json", ...auth }, body: JSON.stringify(body) } : { headers: { accept: "application/json", ...auth } });
         // 429 "Exceeded Tier Limit" is the rolling 24 h quota (bug 357): requests age out, so wait it out (≤ 90 min)
         if (res.status === 429 && attempt < 90 && /Tier Limit/.test(await res.clone().text().catch(() => ""))) { if (attempt % 10 === 0) console.error(`Koios quota exhausted; waiting (${path.slice(0, 60)})`); await new Promise((r) => setTimeout(r, 60_000)); continue; }

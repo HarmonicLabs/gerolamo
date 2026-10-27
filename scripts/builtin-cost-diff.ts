@@ -3,7 +3,8 @@
  * Differential costing of every Plutus builtin: one small program per builtin (and argument
  * size), evaluated by our machine (plutus-machine + the named cost model) and by aiken's
  * `uplc` crate (tools/uplc-ref eval-text). Prints the builtins whose budgets differ.
- *   bun scripts/builtin-cost-diff.ts <costs.json> [v1|v2|v3] [--all] [--new]
+ *   bun scripts/builtin-cost-diff.ts <costs.json> [v1|v2|v3] [--all] [--new] [--uplc-ref <binary>]
+ * --uplc-ref: the tools/uplc-ref binary (default tools/uplc-ref/target/release/uplc-ref).
  * --new: evaluate with Gerolamo's validation evaluator (src/consensus/plutus/cek.ts, the program
  * compiled to flat and decoded as a script would be) instead of plutus-machine.
  * costs.json: {"PlutusV2":[…]} as tools/uplc-ref expects (epoch_params cost_models).
@@ -19,14 +20,14 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const [costsPath, langArg = "v2"] = process.argv.slice(2).filter((a) => !a.startsWith("--"));
+const [costsPath, langArg = "v2"] = process.argv.slice(2).filter((a, i, all) => !a.startsWith("--") && all[i - 1] !== "--uplc-ref");
 const showAll = process.argv.includes("--all");
 const costs = JSON.parse(await Bun.file(costsPath!).text());
 const arr = costs[{ v1: "PlutusV1", v2: "PlutusV2", v3: "PlutusV3" }[langArg]!];
 const model: any = langArg === "v1" ? toCostModelV1(arr) : langArg === "v2" ? toCostModelV2(arr) : arr;
 const machine = new Machine(model);
 const dir = mkdtempSync(join(tmpdir(), "bcd-"));
-const B = process.env.UPLC_REF ?? "tools/uplc-ref/target/release/uplc-ref";
+const B = process.argv.includes("--uplc-ref") ? process.argv[process.argv.indexOf("--uplc-ref") + 1]! : "tools/uplc-ref/target/release/uplc-ref";
 
 const bs = (n: number, b = 0xab) => "#" + Buffer.alloc(n, b).toString("hex");
 const bigInt = (words: number) => (1n << BigInt(64 * words - 3)).toString();

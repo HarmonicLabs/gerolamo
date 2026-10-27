@@ -1,11 +1,11 @@
 /**
- * The shadow evaluator's builtin cost trace (GEROLAMO_PLUTUS_TRACE=1) records every
+ * The shadow evaluator's builtin cost trace (--trace-plutus 1) records every
  * builtin charge of the last evaluation; the fixture block's transactions evaluate
  * within their declared budgets offline.
  */
-process.env.GEROLAMO_PLUTUS_TRACE = "1";
-process.env.GEROLAMO_PLUTUS_SHADOW_MS = "120000";
-process.env.GEROLAMO_PLUTUS_LEGACY_SHADOW = "1"; // this test pins the legacy evaluator's builtin trace
+import { initSettings } from "../../config/settings";
+// this test pins the legacy evaluator's builtin trace
+initSettings({ tracePlutus: 1, plutusShadowMs: 120_000, plutusLegacyShadow: true });
 import { describe, expect, test } from "bun:test";
 import { MultiEraBlock } from "@harmoniclabs/cardano-ledger-ts";
 import { resolvedFromRow, type ResolvedUtxo } from "./resolvedUtxo";

@@ -6,7 +6,7 @@
  *   bun scripts/utxorpc-smoke.ts [--uri http://127.0.0.1:50051] [--address addr_test1…] [--follow 3] [--wait 60] [--submit tx.cbor.hex]
  *
  * Enable the server on the node with `utxorpc: { enabled: true, port: 50051 }` in its config (or
- * GEROLAMO_UTXORPC=127.0.0.1:50051). Exit code 1 when a call fails.
+ * --utxorpc 127.0.0.1:50051). Exit code 1 when a call fails.
  */
 import { readFileSync } from "node:fs";
 import { createPromiseClient } from "@connectrpc/connect";

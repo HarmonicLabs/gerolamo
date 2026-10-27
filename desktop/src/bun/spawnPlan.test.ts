@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { buildMithrilSpawn, buildNodeSpawn } from "./spawnPlan";
 
 describe("buildNodeSpawn", () => {
-  test("argv/cwd/env match agent.md contract", () => {
+  test("every setting is a flag; no environment", () => {
     const plan = buildNodeSpawn({
       bunPath: "/opt/bun/bin/bun",
       repoRoot: "/opt/gerolamo",
@@ -10,16 +10,9 @@ describe("buildNodeSpawn", () => {
       port: 3040,
       dbPath: "/tmp/g.db",
     });
-    expect(plan.argv).toEqual(["/opt/bun/bin/bun", "src/index.ts", "start-gerolamo"]);
+    expect(plan.argv).toEqual(["/opt/bun/bin/bun", "src/index.ts", "start-gerolamo", "--network", "preprod", "--port", "3040", "--db-path", "/tmp/g.db", "--no-n2c"]);
     expect(plan.cwd).toBe("/opt/gerolamo");
-    expect(plan.env.NETWORK).toBe("preprod");
-    expect(plan.env.PORT).toBe("3040");
-    expect(plan.env.GEROLAMO_PORT).toBe("3040");
-    expect(plan.env.GEROLAMO_DB_PATH).toBe("/tmp/g.db");
-    expect(plan.env.DATABASE_URL).toBe("sqlite:///tmp/g.db");
-    expect(plan.env.GEROLAMO_N2C).toBe("0");
-    expect(plan.env.GEROLAMO_N2C_SOCKET).toBeUndefined();
-    expect(plan.env.GEROLAMO_CONFIG_PATH).toBeUndefined();
+    expect(plan.env).toEqual({});
   });
 
   test("rejects relative dbPath", () => {
@@ -34,7 +27,7 @@ describe("buildNodeSpawn", () => {
     ).toThrow(/absolute/);
   });
 
-  test("sets N2C socket and omits GEROLAMO_N2C=0 when enabled", () => {
+  test("N2C socket and instance config as flags", () => {
     const plan = buildNodeSpawn({
       bunPath: "/usr/bin/bun",
       repoRoot: "/tmp/repo",
@@ -42,24 +35,12 @@ describe("buildNodeSpawn", () => {
       port: 3030,
       dbPath: "/tmp/g.db",
       n2cSocket: "/tmp/node.socket",
-    });
-    expect(plan.env.GEROLAMO_N2C_SOCKET).toBe("/tmp/node.socket");
-    expect(plan.env.GEROLAMO_N2C).toBeUndefined();
-  });
-
-  test("sets GEROLAMO_CONFIG_PATH for instance overlay", () => {
-    const plan = buildNodeSpawn({
-      bunPath: "/usr/bin/bun",
-      repoRoot: "/tmp/repo",
-      network: "preprod",
-      port: 3030,
-      dbPath: "/tmp/g.db",
       configPath: "/tmp/inst/config.json",
     });
-    expect(plan.env.GEROLAMO_CONFIG_PATH).toBe("/tmp/inst/config.json");
+    expect(plan.argv.slice(3)).toEqual(["--network", "preprod", "--port", "3030", "--db-path", "/tmp/g.db", "--n2c-socket", "/tmp/node.socket", "--config", "/tmp/inst/config.json"]);
+    expect(plan.argv).not.toContain("--no-n2c");
   });
 });
-
 describe("buildMithrilSpawn", () => {
   test("uses --engine ts and chosen dirs", () => {
     const plan = buildMithrilSpawn({

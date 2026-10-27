@@ -1,9 +1,11 @@
 /** Worker: compute the leader schedule off the main thread (≈100 s per preview epoch). */
+import { receiveSettings } from "../config/settings";
 import { leaderSlotsForEpoch, type ScheduleInput } from "./leaderSchedule";
 
 declare var self: Worker;
 
 self.onmessage = (ev: MessageEvent) => {
+    if (receiveSettings(ev.data)) return;
     const { id, input } = ev.data as { id: number; input: Omit<ScheduleInput, "vrf" | "onProgress"> & { vrfSkey: Uint8Array; vrfVkey: Uint8Array } };
     try {
         const slots = leaderSlotsForEpoch({

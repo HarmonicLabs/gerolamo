@@ -19,8 +19,12 @@
  *
  * Usage:
  *   bun scripts/mithril-apply-gapfill.ts                 # apply to frontier-margin
- *   APPLY_LIMIT=2 bun scripts/mithril-apply-gapfill.ts   # smoke: 2 chunks max
- *   GEROLAMO_DB_PATH=./.live/test.db bun scripts/mithril-apply-gapfill.ts
+ *   bun scripts/mithril-apply-gapfill.ts --apply-limit 2 # smoke: 2 chunks max
+ *   bun scripts/mithril-apply-gapfill.ts --db-path ./.live/test.db
+ * Flags: --network preprod|mainnet (default preprod), --immutable-dir <dir>
+ * (default ./snapshots/mithril/immutable), --snapshot-dir <dir> (default
+ * ./snapshots/mithril), --db-path <file> (default ./.live/test.db),
+ * --margin <n> (default 3), --apply-limit <n> (default: no limit).
  *
  * Exit codes: 0 ok (limit or frontier reached), 2 halted on all-error chunk,
  *             3 locked by another live applier.
@@ -38,13 +42,20 @@ import { dirname, join, resolve } from "node:path";
 import { ensureInitialized } from "../src/db";
 import { processChunk } from "../src/state/legacy";
 import { initSql, getSqlFilename, sql } from "../src/sql";
+import { initSettings } from "../src/config/settings";
 import { Logger, LogLevel, logger as globalLogger } from "../src/utils/logger";
 import {
     calculateCardanoEpoch,
     calculatePreProdCardanoEpoch,
 } from "../src/utils/epochFromSlotCalculations";
 
-const NETWORK = process.env.NETWORK === "mainnet" ? "mainnet" : "preprod";
+/** `--name <value>` from the command line, else the default. */
+function arg(name: string, dflt: string | null): string | null {
+    const i = process.argv.indexOf(`--${name}`);
+    return i >= 0 && process.argv[i + 1] !== undefined ? process.argv[i + 1]! : dflt;
+}
+
+const NETWORK = arg("network", "preprod") === "mainnet" ? "mainnet" : "preprod";
 
 /** Absolute slot → network epoch using the existing per-network helpers. */
 function slotToEpoch(slot: string | null): number | null {
@@ -72,23 +83,24 @@ function fmtEta(sec: number): string {
 const ETA_WINDOW = 10;
 
 const IMM_DIR = resolve(
-    process.env.IMMUTABLE_DIR || "./snapshots/mithril/immutable",
+    arg("immutable-dir", null) || "./snapshots/mithril/immutable",
 );
-const SNAP_ROOT = resolve(process.env.SNAPSHOT_DIR || "./snapshots/mithril");
+const SNAP_ROOT = resolve(arg("snapshot-dir", null) || "./snapshots/mithril");
 const DB_PATH = resolve(
-    process.env.GEROLAMO_DB_PATH || "./.live/test.db",
+    arg("db-path", null) || "./.live/test.db",
 );
+initSettings({ dbPath: DB_PATH, network: NETWORK });
 const STATE_PATH = join(SNAP_ROOT, ".apply-state.json");
 const LOCK_PATH = join(SNAP_ROOT, ".apply.lock");
 /**
  * Chunks closer than MARGIN to the download frontier are not applied yet
- * (never read a chunk mid-extract). MARGIN=0 is valid and means "apply up
+ * (never read a chunk mid-extract). --margin 0 is valid and means "apply up
  * to and including the frontier" — used by the runner's final sweep after
  * the download has exited. Default 3.
  */
-const MARGIN = Math.max(0, parseInt(process.env.MARGIN ?? "3", 10));
-const APPLY_LIMIT = process.env.APPLY_LIMIT
-    ? parseInt(process.env.APPLY_LIMIT, 10)
+const MARGIN = Math.max(0, parseInt(arg("margin", "3")!, 10));
+const APPLY_LIMIT = arg("apply-limit", null)
+    ? parseInt(arg("apply-limit", null)!, 10)
     : null;
 
 function pad(n: number): string {

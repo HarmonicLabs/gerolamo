@@ -3,21 +3,22 @@
  * Genesis mode, to the Genesis State Machine, the Limit on Eagerness and the Genesis Density
  * Disconnector (genesis/).
  *
- * Switch (config `consensus.chainSelection` or GEROLAMO_CHAIN_SELECTION):
+ * Switch (config `consensus.chainSelection` or --chain-selection):
  *   "legacy" (default): primary peer + verifier votes, Praos tie-break on equal-length outvotes;
  *   "shadow": the ouroboros-consensus selection runs beside legacy and only logs/counts what it would do;
  *   "praos": every hot peer's validated headers form its candidate fragment; the node follows the
  *            best candidate that forks at most k blocks back (longest, then the Praos tie-break,
  *            restricted VRF from Conway); invalid blocks are remembered and the peers that serve
  *            them, or a fork deeper than k, are disconnected.
- * Consensus mode (`consensus.mode` or GEROLAMO_CONSENSUS_MODE, cardano-node's ConsensusMode):
+ * Consensus mode (`consensus.mode` or --consensus-mode, cardano-node's ConsensusMode):
  *   "praos" (default) or "genesis" (requires chainSelection "praos"): GSM + LoE + GDD + ChainSync
- *   Jumping (genesis/csj.ts; `consensus.csj: false` or GEROLAMO_CSJ=0 turns CSJ off, every peer then
+ *   Jumping (genesis/csj.ts; `consensus.csj: false` or --no-csj turns CSJ off, every peer then
  *   streams its full chain).
  *
  * Our chain inside ChainSel is reconciled with the database tip before each decision (walking back
  * by prev-hash), so applies, rollbacks and aborted ranges need no hooks.
  */
+import { settings, settingSources } from "../../config/settings";
 import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { logger } from "../../utils/logger";
@@ -60,8 +61,10 @@ export interface ConsensusConfigLike {
 }
 
 export function resolveChainSelection(cfg: ConsensusConfigLike): { chainSelection: ChainSelectionMode; mode: ConsensusMode } {
-    const envSel = process.env.GEROLAMO_CHAIN_SELECTION?.trim().toLowerCase();
-    const envMode = process.env.GEROLAMO_CONSENSUS_MODE?.trim().toLowerCase();
+    // a --chain-selection / --consensus-mode flag beats config (src/config/settings.ts)
+    const src = settingSources();
+    const envSel = src.chainSelection === "flag" ? settings().chainSelection : undefined;
+    const envMode = src.consensusMode === "flag" ? settings().consensusMode : undefined;
     const valid = (x: unknown): x is ChainSelectionMode => x === "legacy" || x === "shadow" || x === "praos";
     let chainSelection: ChainSelectionMode = valid(envSel) ? envSel : valid(cfg.consensus?.chainSelection) ? cfg.consensus!.chainSelection! : "legacy";
     const mode: ConsensusMode = envMode === "genesis" || envMode === "praos" ? envMode : cfg.consensus?.mode === "genesis" ? "genesis" : "praos";
@@ -122,7 +125,7 @@ export class ChainSelDriver {
 
     constructor(readonly mode: ConsensusMode, private readonly deps: ChainSelDriverDeps, private readonly cfg: ConsensusConfigLike = {}) {
         this.markerPath = cfg.dbPath && cfg.dbPath !== ":memory:" ? join(dirname(cfg.dbPath), "caught-up") : null;
-        const csjOn = mode === "genesis" && cfg.consensus?.csj !== false && process.env.GEROLAMO_CSJ !== "0";
+        const csjOn = mode === "genesis" && cfg.consensus?.csj !== false && settings().csj;
         const size = Number(cfg.consensus?.csjJumpSize);
         this.csj = csjOn ? new ChainSyncJumping(Number.isFinite(size) && size > 0 ? BigInt(Math.trunc(size)) : DEFAULT_CSJ_JUMP_SIZE, {
             candidate: (p) => this.candidateInfo(p),

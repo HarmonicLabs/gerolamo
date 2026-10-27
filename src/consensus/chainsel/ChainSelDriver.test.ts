@@ -1,3 +1,4 @@
+import { initSettings } from "../../config/settings";
 import { describe, expect, test } from "bun:test";
 import { ChainSelDriver, resolveChainSelection, type ChainSelDriverDeps } from "./ChainSelDriver";
 import type { ChainHeader } from "./ChainSel";
@@ -32,16 +33,14 @@ class FakeDb {
 const vrf = (b: number) => new Uint8Array(64).fill(b);
 
 describe("chain-selection switch (config)", () => {
-    test("legacy by default; praos and genesis by config or env", () => {
-        const env = { ...process.env };
-        delete process.env.GEROLAMO_CHAIN_SELECTION; delete process.env.GEROLAMO_CONSENSUS_MODE;
+    test("legacy by default; praos and genesis by config or flag", () => {
         expect(resolveChainSelection({})).toEqual({ chainSelection: "legacy", mode: "praos" });
         expect(resolveChainSelection({ consensus: { chainSelection: "praos" } })).toEqual({ chainSelection: "praos", mode: "praos" });
         expect(resolveChainSelection({ consensus: { mode: "genesis" } })).toEqual({ chainSelection: "praos", mode: "genesis" });
         expect(resolveChainSelection({ consensus: { chainSelection: "shadow", mode: "genesis" } })).toEqual({ chainSelection: "shadow", mode: "genesis" });
-        process.env.GEROLAMO_CHAIN_SELECTION = "praos";
-        expect(resolveChainSelection({}).chainSelection).toBe("praos");
-        process.env = env;
+        initSettings({ chainSelection: "praos" }, { chainSelection: "flag" }); // --chain-selection praos
+        expect(resolveChainSelection({ consensus: { chainSelection: "shadow" } }).chainSelection).toBe("praos");
+        initSettings({}, { chainSelection: "default" });
     });
 });
 

@@ -22,7 +22,8 @@ if (!src || !dst || !db) {
     console.error("usage: bun scripts/blockstore-seed.ts --src <immutable dir> --dst <block store dir> --db <sqlite file> [--k 432]");
     process.exit(2);
 }
-process.env.GEROLAMO_DB_PATH = db;
+const { initSettings } = await import("../src/config/settings");
+initSettings({ dbPath: db }); // src/sql opens settings().dbPath on first use
 const { closeSql, withReadOnlyConnection } = await import("../src/sql");
 const { catchUpFromSqlite } = await import("../src/storage/nodeBlockStore");
 

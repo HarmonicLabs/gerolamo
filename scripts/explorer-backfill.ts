@@ -15,9 +15,8 @@
  *
  * Slots are exclusive bounds (from < slot < to). Dry run unless --apply. Stop the node first when
  * applying: the explorer file has one writer (the node's worker); the script refuses while a node
- * with GEROLAMO_PORT=<port> runs. The block store is opened read-only.
+ * started with `--port <port>` runs. The block store is opened read-only.
  */
-process.env.GEROLAMO_DB_PATH = ":memory:"; // db.ts opens the shared client at import; keep it off the ledger file
 import { Database } from "bun:sqlite";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { applyMbBlock, applyMbTx } from "../src/db/minibf/writer";
@@ -30,17 +29,25 @@ import { credentialsOfAddress } from "../src/db/minibf/cardanoIds";
 import { attachReadOnlyBlockStore } from "../src/storage/nodeBlockStore";
 import { selectedChain } from "../src/storage/blockReads";
 import { epochForSlot, normalizeEpochNetwork, setEpochNetwork, slotInEpoch } from "../src/utils/epochFromSlotCalculations";
+import { initSettings } from "../src/config/settings";
+
+initSettings({ dbPath: ":memory:" }); // db.ts opens the shared client on first use; keep it off the ledger file
 
 const args = Object.fromEntries(process.argv.slice(2).map((a, i, all) => a.startsWith("--") ? [a.slice(2), all[i + 1]?.startsWith("--") || all[i + 1] === undefined ? "1" : all[i + 1]] : []).filter((x) => x.length));
 const dbPath = String(args.db ?? ""), from = Number(args.from ?? -1), to = Number(args.to ?? Number.MAX_SAFE_INTEGER), apply = args.apply === "1";
 const extrasOnly = args.extras === "1", creds = args.creds === "1";
 if (!dbPath) throw new Error("usage: --db <ledger.db> [--from <slot>] [--to <slot>] [--blocks <dir>] [--k 432] [--explorer <path>] [--extras] [--creds] [--apply]");
-setEpochNetwork(normalizeEpochNetwork(String(args.network ?? process.env.NETWORK ?? "preview")));
+setEpochNetwork(normalizeEpochNetwork(String(args.network ?? "preview")));
 const explorerPath = String(args.explorer ?? explorerDbPathFor(dbPath));
 if (apply) {
     const port = String(args.port ?? "3035");
     for (const pid of readdirSync("/proc").filter((d) => /^\d+$/.test(d))) {
-        try { if (readFileSync(`/proc/${pid}/environ`, "utf8").includes(`GEROLAMO_PORT=${port}\0`)) throw new Error(`a node with GEROLAMO_PORT=${port} is running (pid ${pid}); stop it first`); } catch (e) { if (e instanceof Error && e.message.includes("running")) throw e; }
+        try {
+            const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ");
+            // by cmdline (`start-gerolamo ... --port <port>`); GEROLAMO_PORT in the environment for a node started before 2026-10-26
+            const ours = (cmd.startsWith("bun ") && cmd.includes("start-gerolamo") && new RegExp(`--port ${port}( |$)`).test(cmd)) || readFileSync(`/proc/${pid}/environ`, "utf8").includes(`GEROLAMO_PORT=${port}\0`);
+            if (ours) throw new Error(`a node on port ${port} is running (pid ${pid}); stop it first`);
+        } catch (e) { if (e instanceof Error && e.message.includes("running")) throw e; }
     }
 }
 const explorer = apply ? new Database(explorerPath) : existsSync(explorerPath) ? new Database(explorerPath, { readonly: true }) : null;

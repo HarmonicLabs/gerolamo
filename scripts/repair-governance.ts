@@ -24,8 +24,11 @@ if (!args.db || !Number.isFinite(target)) throw new Error("usage: --db <path> --
 const port = args.port ?? (net === "preview" ? "3035" : net === "preprod" ? "3034" : "3033");
 for (const pid of apply ? readdirSync("/proc").filter((d) => /^\d+$/.test(d)) : []) {
     try {
-        const env = readFileSync(`/proc/${pid}/environ`, "utf8");
-        if (env.includes(`\0GEROLAMO_PORT=${port}\0`) || env.startsWith(`GEROLAMO_PORT=${port}\0`)) throw new Error(`a node with GEROLAMO_PORT=${port} is running (pid ${pid}); stop it first`);
+        // by cmdline (`start-gerolamo ... --port <port>`); GEROLAMO_PORT in the environment for a node started before 2026-10-26
+        const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").join(" ");
+        const byCmd = cmd.startsWith("bun ") && cmd.includes("start-gerolamo") && new RegExp(`--port ${port}( |$)`).test(cmd);
+        const env = byCmd ? "" : readFileSync(`/proc/${pid}/environ`, "utf8");
+        if (byCmd || env.includes(`\0GEROLAMO_PORT=${port}\0`) || env.startsWith(`GEROLAMO_PORT=${port}\0`)) throw new Error(`a node on port ${port} is running (pid ${pid}); stop it first`);
     } catch (e) { if (e instanceof Error && e.message.includes("running")) throw e; }
 }
 

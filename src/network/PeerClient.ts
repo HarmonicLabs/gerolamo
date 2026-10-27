@@ -1,3 +1,4 @@
+import { settings } from "../config/settings";
 import {
     BlockFetchBlock,
     BlockFetchClient,
@@ -789,7 +790,7 @@ export class PeerClient implements IPeerClient {
     }
 
     private onTxSubmissionChunk(chunk: Uint8Array): void {
-        if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission ← ${this.peerId}: ${Buffer.from(chunk).toString("hex").slice(0, 120)}`);
+        if (settings().traceTxSubmission) logger.mempool(`tx-submission ← ${this.peerId}: ${Buffer.from(chunk).toString("hex").slice(0, 120)}`);
         for (const m of parseTxSubmissionMessages(chunk)) {
             if (m.kind === "requestTxIds") void this.answerTxIdRequest({ blocking: m.blocking, knownTxCount: m.ack, requestedTxCount: m.req });
             else if (m.kind === "requestTxs") void this.answerTxRequest(m.ids);
@@ -801,7 +802,7 @@ export class PeerClient implements IPeerClient {
     private async answerTxIdRequest(req: { blocking: boolean; knownTxCount: number | bigint; requestedTxCount: number | bigint }): Promise<void> {
         if (!this.txIdsRequestedLogged) { this.txIdsRequestedLogged = true; logger.mempool(`Peer ${this.peerId} pulls transaction ids from our mempool`); }
         const ack = Number(req.knownTxCount), wanted = Number(req.requestedTxCount);
-        if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission request from ${this.peerId}: blocking=${req.blocking} ack=${ack} req=${wanted}`);
+        if (settings().traceTxSubmission) logger.mempool(`tx-submission request from ${this.peerId}: blocking=${req.blocking} ack=${ack} req=${wanted}`);
         this.announced.acknowledge(ack);
         const fresh = async () => {
             const list = await this.sharedMempool.getTxHashesAndSizes();
@@ -819,7 +820,7 @@ export class PeerClient implements IPeerClient {
         this.announced.announce(response.map((e) => Buffer.from(e.hash).toString("hex")));
         try {
             const bytes = encodeReplyTxIds(hfcEraIndexNow(), response);
-            if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission → ${this.peerId}: ${Buffer.from(bytes).toString("hex").slice(0, 120)} (${response.length} id(s))`);
+            if (settings().traceTxSubmission) logger.mempool(`tx-submission → ${this.peerId}: ${Buffer.from(bytes).toString("hex").slice(0, 120)} (${response.length} id(s))`);
             this.mplexer.send(bytes, { hasAgency: true, protocol: MiniProtocol.TxSubmission });
         } catch (err) {
             logger.warn(`tx-submission reply failed for ${this.peerId}: ${err instanceof Error ? err.message : String(err)}`);
@@ -829,12 +830,12 @@ export class PeerClient implements IPeerClient {
     /** MsgRequestTxs → MsgReplyTxs = [3, [[eraIndex, #6.24(txBytes)]…]] from the shared mempool. */
     private async answerTxRequest(ids: Uint8Array[]): Promise<void> {
         if (this.terminated) return;
-        if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission request for ${ids.length} tx(s) from ${this.peerId}`);
+        if (settings().traceTxSubmission) logger.mempool(`tx-submission request for ${ids.length} tx(s) from ${this.peerId}`);
         let txs: Array<{ hash: any; bytes: Uint8Array }> = [];
         try { txs = (await this.sharedMempool.getTxs(ids as any)) as any; } catch (err) { logger.warn(`tx-submission: mempool lookup failed for ${this.peerId}: ${err instanceof Error ? err.message : String(err)}`); }
         try {
             const bytes = encodeReplyTxs(hfcEraIndexNow(), txs.map((t) => t.bytes));
-            if (process.env.GEROLAMO_TXSUB_TRACE === "1") logger.mempool(`tx-submission → ${this.peerId}: ${txs.length} tx(s), ${bytes.length} bytes`);
+            if (settings().traceTxSubmission) logger.mempool(`tx-submission → ${this.peerId}: ${txs.length} tx(s), ${bytes.length} bytes`);
             this.mplexer.send(bytes, { hasAgency: true, protocol: MiniProtocol.TxSubmission });
         } catch (err) {
             logger.warn(`tx-submission tx reply failed for ${this.peerId}: ${err instanceof Error ? err.message : String(err)}`);

@@ -10,16 +10,12 @@
         "explorer": "bun scripts/gerolamo-explorer.ts",
         "stream-server": "bun scripts/mithril-stream-server.ts",
         "ui:dev": "bash desktop/scripts/dev-wait.sh",
-        "browser:dev": "bun run --cwd browser dev",
-        "browser:build": "bun run --cwd browser build",
-        "browser:probe": "bun browser/scripts/probe.ts",
-        "browser:test": "bun test --cwd browser src",
         "ui:typecheck": "bun run --cwd desktop typecheck",
         "ui:test": "bun test --cwd desktop src",
         "postinstall": "bun install --cwd desktop && bun install --cwd dashboard",
         "preflight": "bun scripts/preflight.ts",
         "setup": "bun install && bun run preflight",
-        "test": "bun test ./src && bun test --cwd desktop src && bun test --cwd browser src"
+        "test": "bun test ./src && bun test --cwd desktop src"
     },
     "devDependencies": {
         "@harmoniclabs/cddl-tools": "^0.0.4",

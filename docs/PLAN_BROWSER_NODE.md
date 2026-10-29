@@ -233,3 +233,6 @@ The browser node in `browser/` was the prototype. Its successor is **Gerolamino*
 extension node that does not import Gerolamo. It lives on the `ts-rebuild` branch of HarmonicLabs/gerolamino
 (`../gerolamino-ts`). It is pure TypeScript on `@harmoniclabs/*` only, stores the chain in OPFS, and has its own
 Mithril verifier. Gerolamo stays its server. See `docs/GEROLAMINO.md`.
+
+**Removed 2026-10-29.** The prototype directory `browser/` was deleted from Gerolamo (it lived only in git
+history now); Gerolamino, the MV3 extension, is the browser node. The commands above are historical.

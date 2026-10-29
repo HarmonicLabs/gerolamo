@@ -41,6 +41,7 @@
         "@harmoniclabs/crypto": "^0.3.1",
         "@harmoniclabs/kes": "file:vendor/harmoniclabs-kes-0.1.0.tgz",
         "@harmoniclabs/obj-utils": "^1.0.0",
+        "@harmoniclabs/mithril-ts": "file:vendor/harmoniclabs-mithril-ts-0.1.1.tgz",
         "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.5-dev7",
         "@harmoniclabs/shared-cardano-mempool-ts": "file:vendor/harmoniclabs-shared-cardano-mempool-ts-0.0.0.tgz",
         "@harmoniclabs/uint8array-utils": "^1.0.4",

@@ -376,7 +376,8 @@ async function runTsBootstrapInner(
         if (!detail) detail = await client.getCardanoDatabaseV2(selected.hash);
         prog({ phase: "download", message: "verifying the immutable files against the certified digests" });
         const { fetchVerifiedDigests, verifyImmutableFiles, describeVerification } = await import("./cdb/verifyDownload");
-        const verified = await fetchVerifiedDigests(detail, certificate, { log: (m) => logInfo(logger, m) });
+        // The library's snapshot message requires the network field; the aggregator list item carries it.
+        const verified = await fetchVerifiedDigests({ ...detail, network: detail.network ?? opts.network }, certificate, { log: (m) => logInfo(logger, m) });
         // The ancillary archive adds the snapshot's last (unsigned) immutable trio; its signed manifest covers it.
         const ancillaryDigests = new Map<string, string>();
         if (ancillaryDir) {

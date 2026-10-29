@@ -20,6 +20,10 @@
         "alwaysStrict": false,
         "resolveJsonModule": true,
         "moduleResolution": "node",
+        "baseUrl": ".",
+        "paths": {
+            "@harmoniclabs/mithril-ts/node": ["node_modules/@harmoniclabs/mithril-ts/dist/node/index.d.ts"]
+        },
         "allowSyntheticDefaultImports": true,
         "esModuleInterop": true,
         "forceConsistentCasingInFileNames": true,

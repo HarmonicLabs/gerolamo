@@ -1,14 +1,15 @@
 /**
- * Gerolamo Mithril client — pure-TS verify + download, external bin optional.
+ * Gerolamo Mithril client — verification core is @harmoniclabs/mithril-ts; Gerolamo keeps
+ * bootstrap into its own stores, the ledger-state import and the artifact/serve glue.
  *
  * Spec role: https://mithril.network/doc/mithril/advanced/mithril-network/client
  * Research: docs/mithril-native-client-research.md
  *
  * Honesty:
- *   - Production cert verify = HTTP aggregator + pure-TS Stages 1–5d (`--engine ts`)
+ *   - Production cert verify = HTTP aggregator + the library's chain walk
  *   - `--engine bin` shells out to the external mithril-client (bulk restore)
  *   - Download/extract = TS HTTP + fzstd + tar-stream
- *   - No WASM dependency: the IOG client was removed after pure-TS dual-run soaks
+ *   - No WASM dependency
  */
 
 export type {
@@ -35,12 +36,49 @@ export {
     type TsMithrilClient,
 } from "./httpClient";
 
-// Certificate chain verification (port of mithril-common / mithril-stm).
-export { parseCertificate, computeCertificateHash, protocolMessageHash, type Certificate } from "./verify/certificate";
-export { verifyCertificateChain, verifyStandardCertificate, verifyGenesisCertificate as verifyGenesisCertificateStrict, aggregatorCertificateRetriever, decodeGenesisVerificationKey, type ChainVerifyResult } from "./verify/verifier";
-export { verifyConcatenationProof } from "./verify/stm";
+// Certificate model, hashes and chain verification (was src/mithril/verify + pureTs).
+export {
+    cardanoDatabaseMessageMatches,
+    CertificateError,
+    computeCertificateHash,
+    decodeKeyBytes,
+    metadataHash,
+    parseCertificate,
+    phiFFixed,
+    protocolMessageHash,
+    protocolParametersHash,
+    PROTOCOL_MESSAGE_PART_KEY_ORDER,
+    rfc3339Nanos,
+    type Certificate,
+    type CertificateMetadata,
+    type ProtocolMessage,
+    type SignedEntityType,
+} from "./verify/certificate";
+export {
+    aggregatorCertificateRetriever,
+    decodeGenesisVerificationKey,
+    ed25519VerifyStrict,
+    verifyCertificateChain,
+    verifyGenesisCertificate,
+    verifyGenesisCertificate as verifyGenesisCertificateStrict,
+    verifyStandardCertificate,
+    verifyStandardCertificateIntegrity,
+    type CertificateRetriever,
+    type ChainHop,
+    type ChainVerifyOptions,
+    type ChainVerifyResult,
+} from "./verify/verifier";
+export {
+    verifyConcatenationProof,
+    type AggregateVerificationKey,
+    type ConcatenationProof,
+    type StmParameters,
+    type StmVerifyStats,
+} from "./verify/stm";
+export { isLotteryWon } from "./verify/lottery";
+export { ANCILLARY_VKEYS } from "./ancillaryManifest";
 
-// cardano-database v2 artifacts: produce, certify, serve.
+// cardano-database v2 artifacts: produce, certify, serve (Gerolamo glue over the library node part).
 export { produceCardanoDatabaseSnapshot } from "./cdb/produce";
 export { produceCertifiedSnapshot } from "./cdb/certify";
 export { createMithrilArtifactHandler } from "./cdb/server";
@@ -73,124 +111,6 @@ export {
     type PureTsVerifyResult,
     type PureTsVerifyOptions,
 } from "./dualRun";
-
-export {
-    parseAndValidateCertificate,
-    validateAgainstGoldenVector,
-    hexJsonDecode,
-    numberArrayToBytes,
-    prepareStmCrypto,
-    tryDecodeCurvePoint,
-    validateStmCryptoPrep,
-    evaluateDenseMapping,
-    isLotteryWon,
-    buildStmMessagePrime,
-    extractStmParameters,
-    preliminaryVerifyStm,
-    preliminaryVerifyFromParsed,
-    BLS_MIN_SIG_DST,
-    blake2b128ToScalarLe,
-    hashMsgToG1,
-    blsMinSigVerify,
-    aggregateBlsSignatures,
-    verifyBlsAggregate,
-    verifyStmAggregate,
-    verifyStmAggregateFromParsed,
-    expectedMerklePathLen,
-    validateBatchProofStructural,
-    validateMerkleStructuralGolden,
-    verifyBatchProofWithRoot,
-    verifyMerkleBatchRoot,
-    blake2b256,
-    concatenationLeafBytes,
-    concatenationLeafHash,
-    extractConcatenationLeafFromMsEntry,
-    leafHashesFromMultiSignature,
-    merkleParent,
-    merkleSibling,
-    PROTOCOL_MESSAGE_PART_KEY_ORDER,
-    normalizeProtocolMessageParts,
-    computeProtocolMessageHash,
-    verifySignedMessageMatchesProtocolMessage,
-    certificateMatchMessage,
-    certificateMatchOwnProtocolMessage,
-    computeCardanoDatabaseMessage,
-    verifyCardanoDatabaseMessageMatch,
-    decodeGenesisVkey,
-    decodeGenesisSignature,
-    isGenesisCertificate,
-    isStandardCertificate,
-    verifyEpochChaining,
-    verifyAvkChaining,
-    verifyParamsChaining,
-    verifyStructuralLink,
-    verifyStandardCertificateIntegrity,
-    verifyGenesisCertificate,
-    createAggregatorCertificateFetcher,
-    walkCertificateChain,
-    walkTipWithPredecessor,
-    DEFAULT_CHAIN_MAX_DEPTH,
-    type PureTsCertParseResult,
-    type PureTsParsedCertificate,
-    type PureTsStmCryptoPrepResult,
-    type PureTsStmEntryPrep,
-    type PureTsStmPreliminaryResult,
-    type PureTsStmAggregateResult,
-    type StmParameters,
-    type PureTsMerkleValidateResult,
-    type MerkleBatchRootVerifyResult,
-    type ProtocolMessageParts,
-    type CertificateMatchMessageResult,
-    type ProtocolMessageJson,
-    type ComputeCardanoDatabaseMessageResult,
-    type VerifyCardanoDatabaseMessageMatchResult,
-    type StructuralLinkResult,
-    type StandardCertIntegrityResult,
-    type GenesisCertVerifyResult,
-    type CertificateFetcher,
-    type ChainStepResult,
-    type PureTsChainWalkResult,
-    tryComputeCertificateHash,
-    verifyCertificateContentHash,
-    computeCertificateMetadataHash,
-    computeProtocolParametersHash,
-    parseRfc3339Nanos,
-    feedSignedEntityType,
-    ENTITY_TYPE_MITHRIL_STAKE_DISTRIBUTION,
-    ENTITY_TYPE_CARDANO_STAKE_DISTRIBUTION,
-    ENTITY_TYPE_CARDANO_TRANSACTIONS,
-    ENTITY_TYPE_CARDANO_DATABASE,
-    ENTITY_TYPE_CARDANO_BLOCKS_TRANSACTIONS,
-    type TryComputeCertificateHashResult,
-    type CertificateMetadataHashInput,
-    MKTREE_GOLDEN_ROOT_HEX,
-    MKTREE_GOLDEN_LEAVES,
-    blake2s256,
-    mkTreeLeafFromHexDigestString,
-    mkTreeLeafFromUtf8,
-    getPeakMap,
-    getPeaks,
-    bagRhsPeaks,
-    MkTreeMmr,
-    computeMkTreeRootFromLeaves,
-    verifyMkTreeGoldenRoot,
-    immutableFileNumberFromName,
-    filterImmutableDigests,
-    computeCardanoDatabaseMerkleRootFromDigests,
-    verifyCardanoDatabaseMerkleRootFromDigests,
-    type ImmutableFileDigest,
-    type ComputeMkTreeRootResult,
-    type VerifyCardanoDatabaseMerkleRootResult,
-    sha256FileHex,
-    listLocalImmutableFileNames,
-    resolveImmutableDir,
-    maxLocalImmutableNumber,
-    listCompletedLocalImmutableNames,
-    computeLocalImmutableDigests,
-    verifyLocalDigestsAgainstPublished,
-    type LocalDigestEntry,
-    type VerifyLocalDigestsAgainstPublishedResult,
-} from "./pureTs";
 
 export { runMithrilBootstrap } from "./bootstrap";
 

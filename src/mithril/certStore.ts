@@ -9,8 +9,17 @@
  */
 import { sql } from "../sql";
 import { stringifyJsonLossless } from "./verify/json";
-import { isGenesisCertificate } from "./pureTs";
 import type { MithrilCertificate } from "./types";
+
+/** Genesis certificate from the raw aggregator JSON (was pureTs/chain's helper). */
+function isGenesisCertificate(cert: MithrilCertificate | Record<string, unknown>): boolean {
+    const gs = cert.genesis_signature;
+    const ms = cert.multi_signature;
+    const hasGs = typeof gs === "string" && gs.length > 0;
+    const hasMs = typeof ms === "string" && ms.length > 0;
+    if (hasGs && !hasMs) return true;
+    return hasGs && cert.previous_hash === cert.hash;
+}
 
 export type MithrilCertVerdict = {
     network?: string;

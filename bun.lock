@@ -15,6 +15,7 @@
         "@harmoniclabs/cbor": "^1.6.6",
         "@harmoniclabs/crypto": "^0.3.1",
         "@harmoniclabs/kes": "file:vendor/harmoniclabs-kes-0.1.0.tgz",
+        "@harmoniclabs/mithril-ts": "file:vendor/harmoniclabs-mithril-ts-0.1.1.tgz",
         "@harmoniclabs/obj-utils": "^1.0.0",
         "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.5-dev7",
         "@harmoniclabs/shared-cardano-mempool-ts": "file:vendor/harmoniclabs-shared-cardano-mempool-ts-0.0.0.tgz",
@@ -103,6 +104,8 @@
     "@harmoniclabs/crypto": ["@harmoniclabs/crypto@0.3.1", "", { "dependencies": { "@harmoniclabs/bitstream": "^1.0.0", "@harmoniclabs/uint8array-utils": "^1.0.3" } }, "sha512-KA9KgI+2c+9KddAU0A5mTAC/O94J25IwvU6z6wzvgIZMYY5f4VxWLvPWA6aRpAe9pO7hOC9s5hu1FzZWxJkZ5A=="],
 
     "@harmoniclabs/kes": ["@harmoniclabs/kes@vendor/harmoniclabs-kes-0.1.0.tgz", { "dependencies": { "@harmoniclabs/crypto": "^0.3.1" } }, "sha512-Nxc4j2HnqVO3uJpfDmINwDlkg8E1TeaufJDoBhICLlZCyN5XylriWPwzoVSrLhUg66t/O0NuH4JzssL3urRCOA=="],
+
+    "@harmoniclabs/mithril-ts": ["@harmoniclabs/mithril-ts@vendor/harmoniclabs-mithril-ts-0.1.1.tgz", { "dependencies": { "@harmoniclabs/crypto": "^0.3.1" } }, "sha512-xqOwaopRIDei0dnxhBJ0sZBAL54ql5d1jXOaMUG42Sa1xcBoKJB6miWJhkzT07HObpEQM18pSxTDqiTt2Iompg=="],
 
     "@harmoniclabs/obj-utils": ["@harmoniclabs/obj-utils@1.0.0", "", {}, "sha512-EO1bQBZAORrutcP+leP5YNDwNd/9TOE23VEvs3ktniXg6w0knUrLjUIl2Pkcbs/D1VQxqmsNpXho+vaMj00qxA=="],
 

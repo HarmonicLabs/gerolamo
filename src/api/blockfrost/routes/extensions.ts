@@ -2,7 +2,10 @@
 import { getBlockListRowByHash, getBlockListRowBySlot, getEpochNonce, getMaxSlot, getNetworkSnapshot, getTxByHash, getUtxoByRef, listBlocksDesc } from "../../../db";
 import { epochForSlot } from "../../../utils/epochFromSlotCalculations";
 import { parseStoredTxOut } from "../../../db/minibf/txOutMetadata";
-import { badRequest, notFound } from "../http";
+import { settings } from "../../../config/settings";
+import { resolveLedgerDir } from "../../../ledger/nodeLedgerStore";
+import { join } from "node:path";
+import { badRequest, notFound, CORS_HEADERS } from "../http";
 import { route, type Route } from "../router";
 import { amountOf, assetsOfJson, bfBlock, blockByHeight, tipInfo } from "../chain";
 
@@ -64,6 +67,25 @@ export const extensionRoutes: Route[] = [
         const raw = Array.isArray(utxo) ? (typeof utxo[1] === "string" ? utxo[1] : JSON.stringify(utxo[1] ?? {})) : String((utxo as any).tx_out ?? "");
         const parsed = parseStoredTxOut(raw);
         return { address: parsed.address, tx_hash: c.params.hash!.toLowerCase(), output_index: Number(c.params.index), amount: amountOf(parsed.amount, assetsOfJson(parsed.assets)) };
+    }),
+    // Gerolamino P1 peer source: raw Mithril ancillary files from this node's ledger directory.
+    // `/gerolamo/ledger/{slot}/tables` and `/gerolamo/ledger/{slot}/meta`; a browser fetches these
+    // instead of a .tar.zst archive (no zstd decompressor needed).
+    route("GET", "/gerolamo/ledger/{slot}/tables", async (c) => {
+        const dir = resolveLedgerDir({ dbPath: settings().dbPath, ledgerDir: settings().ledgerDir ?? undefined });
+        if (!dir) throw notFound("this node has no ledger directory configured");
+        if (!/^\d+$/.test(c.params.slot!)) throw badRequest("slot must be a number");
+        const file = Bun.file(join(dir, c.params.slot!, "tables"));
+        if (!await file.exists()) throw notFound("no tables file for this slot");
+        return new Response(await file.bytes(), { status: 200, headers: { "Content-Type": "application/octet-stream", "X-Gerolamo-Api": "ledger-tables", ...CORS_HEADERS } });
+    }),
+    route("GET", "/gerolamo/ledger/{slot}/meta", async (c) => {
+        const dir = resolveLedgerDir({ dbPath: settings().dbPath, ledgerDir: settings().ledgerDir ?? undefined });
+        if (!dir) throw notFound("this node has no ledger directory configured");
+        if (!/^\d+$/.test(c.params.slot!)) throw badRequest("slot must be a number");
+        const file = Bun.file(join(dir, c.params.slot!, "meta"));
+        if (!await file.exists()) throw notFound("no meta file for this slot");
+        return new Response(await file.bytes(), { status: 200, headers: { "Content-Type": "application/json", "X-Gerolamo-Api": "ledger-meta", ...CORS_HEADERS } });
     }),
     // node / index status
     route("GET", "/gerolamo/status", async (c) => {

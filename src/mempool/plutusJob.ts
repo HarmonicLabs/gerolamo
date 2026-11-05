@@ -16,6 +16,8 @@ import { setEpochNetwork } from "../utils/epochFromSlotCalculations";
 
 export interface MempoolPlutusJob {
     kind: "mempoolPlutus";
+    /** Ledger era of the transaction (7 Conway, 8 Dijkstra). */
+    era: number;
     tx: Uint8Array;
     bodyBytes: Uint8Array;
     witnessSetBytes: Uint8Array;
@@ -52,7 +54,7 @@ export async function runMempoolPlutusJob(job: MempoolPlutusJob): Promise<Mempoo
     try {
         setEpochNetwork(job.epochNetwork);
         const { failure } = checkMempoolTxPhase2({
-            era: 7, bodyBytes: job.bodyBytes, witnessSetBytes: job.witnessSetBytes, resolved: job.resolved, params: job.params,
+            era: job.era, bodyBytes: job.bodyBytes, witnessSetBytes: job.witnessSetBytes, resolved: job.resolved, params: job.params,
             markedInvalid: job.markedInvalid === true, network: job.epochNetwork,
         });
         const ms = performance.now() - t0;

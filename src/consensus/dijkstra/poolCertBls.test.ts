@@ -18,7 +18,7 @@ const cert = (blsSlot: any[]) => new CborArray([
 const body = (c: CborArray) => Cbor.encode(new CborMap([
     { k: new CborUInt(0), v: new CborArray([]) }, { k: new CborUInt(1), v: new CborArray([]) }, { k: new CborUInt(2), v: new CborUInt(0) },
     { k: new CborUInt(4), v: new CborArray([c]) },
-])).toBuffer();
+]));
 
 describe("pool registration with a BLS key (bug 424)", () => {
     for (const [name, slot] of [["no key", []], ["a key", [bls]], ["nil", [new CborSimple(null)]]] as const) {

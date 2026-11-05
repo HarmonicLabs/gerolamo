@@ -115,7 +115,7 @@ function collateralReturnBytes(body: any): Uint8Array | null {
         if (!bb) return null;
         const root: any = Cbor.parse(bb, { keepRef: true } as any);
         if (!(root instanceof CborMap)) return null;
-        for (const { k, v } of root.map) if (k instanceof CborUInt && Number(k.num) === 16) { const ref: any = (v as any).subCborRef ?? (v as any).cborRef; return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v).toBuffer(); }
+        for (const { k, v } of root.map) if (k instanceof CborUInt && Number(k.num) === 16) { const ref: any = (v as any).subCborRef ?? (v as any).cborRef; return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v); }
     } catch { /* */ }
     try { return body.collateralReturn?.toCborBytes?.() ?? null; } catch { return null; }
 }

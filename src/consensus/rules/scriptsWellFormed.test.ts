@@ -8,7 +8,7 @@ import { checkScriptsWellFormed, outputPlutusRefScript } from "./scriptsWellForm
 import type { WitnessScript } from "./scriptDataHash";
 
 /** A Plutus script as the ledger carries it: the flat program inside one CBOR bytestring. */
-const wrap = (flat: Uint8Array) => Cbor.encode(new CborBytes(flat)).toBuffer();
+const wrap = (flat: Uint8Array) => Cbor.encode(new CborBytes(flat));
 const script = (src: string) => wrap(encodeProgramFlat(parseProgram(src)));
 const hashOf = (lang: number, bytes: Uint8Array) => { const p = new Uint8Array(1 + bytes.length); p[0] = lang; p.set(bytes, 1); return toHex(blake2b_224(p)); };
 /** cardano-ledger's ImpSpec `malformedPlutus`: `PlutusBinary "invalid"`. */
@@ -16,12 +16,12 @@ const MALFORMED = new TextEncoder().encode("invalid");
 
 /** A Babbage output map carrying `script` as its reference script. */
 function outputWithRef(lang: number, bytes: Uint8Array): Uint8Array {
-    const ref = Cbor.encode(new CborArray([new CborUInt(BigInt(lang)), new CborBytes(bytes)])).toBuffer();
+    const ref = Cbor.encode(new CborArray([new CborUInt(BigInt(lang)), new CborBytes(bytes)]));
     return Cbor.encode(new CborMap([
         { k: new CborUInt(0), v: new CborBytes(new Uint8Array(29).fill(0x60)) },
         { k: new CborUInt(1), v: new CborUInt(2_000_000) },
         { k: new CborUInt(3), v: new CborTag(24, new CborBytes(ref)) },
-    ])).toBuffer();
+    ]));
 }
 
 describe("Babbage UTXOW validateScriptsWellFormed (bug 400)", () => {

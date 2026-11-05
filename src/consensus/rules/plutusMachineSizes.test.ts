@@ -10,7 +10,7 @@ import { ByteString } from "@harmoniclabs/bytestring";
 // declared CPU budget. The vendored patch fixes the measures; this pins them.
 const machine = new Machine(defaultV2Costs as any);
 const cpu = (term: any) => BigInt(machine.eval(term).budgetSpent.cpu);
-const eqBs = (n: number) => new Application(new Application(new Builtin(UPLCBuiltinTag.equalsByteString), UPLCConst.byteString(new ByteString(new Uint8Array(n).fill(1)))), UPLCConst.byteString(new ByteString(new Uint8Array(n).fill(1))));
+const eqBs = (n: number) => new Application(new Application(new Builtin(UPLCBuiltinTag.equalsByteString), UPLCConst.byteString(new Uint8Array(n).fill(1))), UPLCConst.byteString(new Uint8Array(n).fill(1)));
 const eqInt = (v: bigint) => new Application(new Application(new Builtin(UPLCBuiltinTag.equalsInteger), UPLCConst.int(v)), UPLCConst.int(v));
 
 describe("plutus-machine size measures", () => {

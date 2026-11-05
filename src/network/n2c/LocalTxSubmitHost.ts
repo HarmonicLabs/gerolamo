@@ -92,8 +92,9 @@ export class LocalTxSubmitHost {
             this.sendBytes(rejectMessageBytes([LedgerF.mempoolFailure("MsgSubmitTx without a transaction")]));
             return;
         }
-        if (tx.era != null && tx.era !== CONWAY_ERA_INDEX) {
-            this.sendBytes(rejectMessageBytes([LedgerF.mempoolFailure(`transactions of era ${tx.era} are not accepted in the current era`)]));
+        const submittedEra = tx.era == null ? CONWAY_ERA_INDEX : tx.era;
+        if (tx.era != null && tx.era !== CONWAY_ERA_INDEX && tx.era !== 7) {
+            this.sendBytes(rejectMessageBytes([LedgerF.mempoolFailure(`transactions of era ${tx.era} are not accepted in the current era`)], submittedEra));
             return;
         }
         const mempool = getMempool();
@@ -103,10 +104,10 @@ export class LocalTxSubmitHost {
         }
         try {
             const r = await mempool.addTx(tx.bytes, "n2c");
-            this.sendBytes(r.ok ? ACCEPT_MESSAGE : rejectMessageBytes(r.failures));
+            this.sendBytes(r.ok ? ACCEPT_MESSAGE : rejectMessageBytes(r.failures, submittedEra));
         } catch (err) {
             log.error("LocalTxSubmit validation failed:", err);
-            this.sendBytes(rejectMessageBytes([LedgerF.mempoolFailure(`validation error: ${err instanceof Error ? err.message : String(err)}`)]));
+            this.sendBytes(rejectMessageBytes([LedgerF.mempoolFailure(`validation error: ${err instanceof Error ? err.message : String(err)}`)], submittedEra));
         }
     }
 }

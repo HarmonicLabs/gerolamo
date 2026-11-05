@@ -21,7 +21,8 @@ import { settings } from "../../config/settings";
 import { BnCEK } from "@harmoniclabs/plutus-machine/dist/BnCEK/BnCEK.js";
 import { CEKConst } from "@harmoniclabs/plutus-machine/dist/CEKValue/CEKConst.js";
 import { CEKError } from "@harmoniclabs/plutus-machine/dist/CEKValue/CEKError.js";
-import { costModelV3ToBuiltinCosts, legacyIntegerCosts } from "@harmoniclabs/plutus-machine/dist/Machine/BuiltinCosts/BuiltinCosts.js";
+import * as BuiltinCostsModule from "@harmoniclabs/plutus-machine/dist/Machine/BuiltinCosts/BuiltinCosts.js";
+import { Linear2InBothMult, Linear2InBothSub, XGtEqOrConst } from "@harmoniclabs/plutus-machine/dist/Machine/BuiltinCosts/costFunctions.js";
 import { defaultV3Costs } from "@harmoniclabs/cardano-costmodels-ts";
 import { ByteString } from "@harmoniclabs/bytestring";
 import { Pair } from "@harmoniclabs/pair";
@@ -53,14 +54,34 @@ export class EvalUnsupported extends Error {}
 export class BudgetExceeded extends Error { constructor(readonly cpu: number, readonly mem: number) { super("execution budget exceeded"); } }
 const fail = (msg: string): never => { throw new EvalFailure(msg); };
 
-/** BigInt cost lookup for the builtins delegated to plutus-machine (same named parameters). */
+/**
+ * Plutus V1/V2 integer division costs (the patch was applied to plutus-machine 2.x; the
+ * migration to 3.x dropped the export). Keep the ledger's four division builtins on their own
+ * named parameters: constant above the diagonal, otherwise intercept + slope * x * y; memory
+ * max(minimum, x - y). Deferred to the V3 lookup for every other builtin.
+ */
+function legacyIntegerCosts(named: Record<string, number>, base: (tag: number) => any): (tag: number) => any {
+    const overrides: Record<number, any> = {};
+    const ro = (costs: { mem: any; cpu: any }) => ({ mem: costs.mem, cpu: costs.cpu });
+    const divs: Array<[string, number]> = [["divideInteger", 3], ["quotientInteger", 4], ["remainderInteger", 5], ["modInteger", 6]];
+    for (const [name, tag] of divs) {
+        if (named[`${name}-cpu-arguments-model-arguments-intercept`] == null) continue;
+        overrides[tag] = ro({
+            cpu: new XGtEqOrConst(BigInt(named[`${name}-cpu-arguments-constant`]!), new Linear2InBothMult(BigInt(named[`${name}-cpu-arguments-model-arguments-intercept`]!), BigInt(named[`${name}-cpu-arguments-model-arguments-slope`]!))),
+            mem: new Linear2InBothSub(BigInt(named[`${name}-memory-arguments-intercept`]!), BigInt(named[`${name}-memory-arguments-slope`]!), BigInt(named[`${name}-memory-arguments-minimum`]!)),
+        } as any);
+    }
+    return (tag: number) => (tag in overrides ? overrides[tag] : base(tag));
+}
+const costModelV3ToBuiltinCosts: any = (BuiltinCostsModule as any).costModelV3ToBuiltinCosts;
+const legacyIntegerCostsUpstream: any = (BuiltinCostsModule as any).legacyIntegerCosts ?? legacyIntegerCosts;
 function bigLookup(costs: CostTable): (tag: number) => any {
     const anyCosts = costs as any;
     if (anyCosts._big) return anyCosts._big;
     const v3: Record<string, number> = { ...(defaultV3Costs as any) };
     for (const [k, v] of costs.named) if (k in v3) v3[k] = clampNum(v);
     let lookup: (tag: number) => any = costModelV3ToBuiltinCosts(v3 as any);
-    if (costs.lang < 3) { const legacy: Record<string, number> = {}; for (const [k, v] of costs.named) legacy[k] = clampNum(v); lookup = legacyIntegerCosts(legacy, lookup); }
+    if (costs.lang < 3) { const legacy: Record<string, number> = {}; for (const [k, v] of costs.named) legacy[k] = clampNum(v); lookup = legacyIntegerCostsUpstream(legacy, lookup); }
     Object.defineProperty(anyCosts, "_big", { value: lookup, enumerable: false });
     return lookup;
 }
@@ -655,12 +676,13 @@ function toLibData(d: Data): any {
         case DK.Map: return new DataMap(d.entries.map((e) => new DataPair(toLibData(e.fst), toLibData(e.snd))));
         case DK.List: return new DataList(d.items.map(toLibData));
         case DK.Int: return new DataI(d.v);
-        case DK.Bytes: return new DataB(new ByteString(d.v));
+        case DK.Bytes: return new DataB(Uint8Array.from((d as any).v as any));
     }
 }
 function toUplcValue(t: ConstType, v: any): any {
     switch (t.tag) {
-        case 1: return new ByteString(Uint8Array.from(v)); // a copy: the delegate may mutate its buffers
+        // uplc 2.x constants carry raw bytes, not a `ByteString` wrapper (a copy: the delegate may mutate its buffers)
+        case 1: return Uint8Array.from(v instanceof Uint8Array ? v : (v?._bytes ?? v?.toBuffer?.() ?? v));
         case 3: return undefined;
         case 8: return toLibData(v);
         case 5: return listToArray(v).map((x) => toUplcValue(t.a!, x));
@@ -670,7 +692,8 @@ function toUplcValue(t: ConstType, v: any): any {
 }
 function fromUplcValue(t: ConstType, v: any): any {
     switch (t.tag) {
-        case 1: return Uint8Array.from(v?._bytes instanceof Uint8Array ? v._bytes : v.toBuffer());
+        // BnCEK 3.x hands back raw bytes; older/patched builds a `ByteString`
+        case 1: return Uint8Array.from(v instanceof Uint8Array ? v : (v?._bytes ?? v?.toBuffer?.() ?? v));
         case 3: return null;
         case 8: return fromLibData(v);
         case 5: return mkListFromArray((v as any[]).map((x) => fromUplcValue(t.a!, x)));
@@ -695,13 +718,17 @@ function delegated(ctx: BuiltinCtx, tag: number, args: Value[]): Value {
         return new CEKConst(toUplcType((a as VCon).type) as any, toUplcValue((a as VCon).type, (a as VCon).v));
     });
     const out = (ctx.bnCek as any)[name!](...cargs);
-    if (out instanceof CEKError || !(out instanceof CEKConst)) fail(`${name}: ${out?.message ?? "failed"}`);
+    if (out instanceof CEKError || !(out instanceof CEKConst)) fail(`${name}: ${out?.msg ?? out?.message ?? "failed"}`);
     const t = fromUplcType((out as any).type);
     return new VCon(t, fromUplcValue(t, (out as any).value));
 }
 
 export function newBnCek(ctx: BuiltinCtx, lookup: (tag: number) => any): BnCEK {
-    const shim = { add: (b: { cpu: bigint | number; mem: bigint | number }) => ctx.spend(Number(b.cpu), Number(b.mem)) };
+    // BnCEK 3.x subtracts its builtin charges from the machine budget (`sub`); keep `add` for older builds.
+    const shim = {
+        sub: (b: { cpu: bigint | number; mem: bigint | number }) => ctx.spend(Number(b.cpu), Number(b.mem)),
+        add: (b: { cpu: bigint | number; mem: bigint | number }) => ctx.spend(Number(b.cpu), Number(b.mem)),
+    };
     return new BnCEK(lookup as any, shim as any, []);
 }
 

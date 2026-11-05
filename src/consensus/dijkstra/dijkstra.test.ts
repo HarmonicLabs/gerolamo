@@ -125,7 +125,7 @@ describe("forging a Dijkstra block (bug 425)", () => {
         expect(await validateHeader(meh, new Uint8Array(32), config)).toBe(false); // wrong nonce: VRF fails
     });
     test("segments → block_body: each tx as [body, wits, aux / nil, is_valid]", () => {
-        const body = Cbor.encode(new CborMap([{ k: new CborUInt(0), v: new CborArray([]) }, { k: new CborUInt(1), v: new CborArray([]) }, { k: new CborUInt(2), v: new CborUInt(0) }])).toBuffer();
+        const body = Cbor.encode(new CborMap([{ k: new CborUInt(0), v: new CborArray([]) }, { k: new CborUInt(1), v: new CborArray([]) }, { k: new CborUInt(2), v: new CborUInt(0) }]));
         const seg = { txBodies: new Uint8Array([0x82, ...body, ...body]), witnessSets: new Uint8Array([0x82, 0xa0, 0xa0]), auxiliaryData: new Uint8Array([0xa1, 0x01, 0xa0]), invalidTransactions: new Uint8Array([0x81, 0x00]) };
         const bb = dijkstraBlockBodyFromSegments(seg);
         const parsed = Cbor.parse(bb) as CborArray;
@@ -280,7 +280,7 @@ describe("Dijkstra protocol parameters (bug 430)", () => {
 
 describe("Plutus V4 in the ledger rules (bug 433)", () => {
     const v4 = new CborBytes(new Uint8Array([0x43, 1, 2, 3]));
-    const ws = Cbor.encode(new CborMap([{ k: new CborUInt(8), v: new CborArray([v4]) }])).toBuffer();
+    const ws = Cbor.encode(new CborMap([{ k: new CborUInt(8), v: new CborArray([v4]) }]));
     test("witness key 8 and script tag 4 only from Dijkstra", () => {
         expect(witnessScriptHashes(ws).size).toBe(0);
         const h = witnessScriptHashes(ws, 4);
@@ -288,7 +288,7 @@ describe("Plutus V4 in the ledger rules (bug 433)", () => {
         const [hash, w] = [...h][0]!;
         expect(w.language).toBe(4);
         expect(hash).toBe(toHex(require("@harmoniclabs/crypto").blake2b_224(new Uint8Array([4, 0x43, 1, 2, 3]))));
-        const ref = Cbor.encode(new CborArray([new CborUInt(4), v4])).toBuffer();
+        const ref = Cbor.encode(new CborArray([new CborUInt(4), v4]));
         expect(scriptLanguageOfCbor(ref)).toBeNull();
         expect(scriptLanguageOfCbor(ref, 4)).toBe(4);
     });

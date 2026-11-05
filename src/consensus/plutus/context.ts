@@ -48,6 +48,32 @@ function credOf(n: CNode): Cred {
 }
 /** Reward account bytes (header + 28-byte hash) → credential. */
 function rewardCred(b: Uint8Array): Cred { return { script: (b[0]! & 0x10) !== 0, hash: b.subarray(1, 29) }; }
+/** Dijkstra guard item: a bare 28-byte key hash or a `[type, hash]` credential. */
+function guardCred(n: CNode): Cred {
+    if (n.t === "b" && n.v.length === 28) return { script: false, hash: n.v };
+    return credOf(n);
+}
+function guardsOf(n: CNode | undefined): Cred[] {
+    const out = arr(n).map(guardCred).sort(cmpCred);
+    return out.filter((x, i) => i === 0 || cmpCred(x, out[i - 1]!) !== 0);
+}
+function datumMaybe(n: CNode | undefined): Data { return n === undefined || isNull(n) ? NOTHING : Just(decodeData(bytesOf(n))); }
+/** `account_balance_interval` (Dijkstra CDDL): coin / [lower/nil, upper/nil], never both nil. */
+function accountInterval(n: CNode): Data {
+    if (n.t === "u" || n.t === "n") return C(3, [I(intOf(n))]);
+    const [lo, hi] = arr(n);
+    if (isNull(lo)) return C(1, [I(uintOf(hi))]);
+    if (isNull(hi)) return C(0, [I(uintOf(lo))]);
+    return C(2, [I(uintOf(lo)), I(uintOf(hi))]);
+}
+function accountIntervalMap(n: CNode | undefined): Array<[Data, Data]> {
+    return map(n).map(([k, v]) => ({ cred: rewardCred(bytesOf(k)), v })).sort((a, b) => cmpCred(a.cred, b.cred))
+        .map(({ cred, v }) => [credData(cred), accountInterval(v)] as [Data, Data]);
+}
+function requiredGuardMap(n: CNode | undefined): Array<[Data, Uint8Array | null]> {
+    return map(n).map(([k, v]) => [guardCred(k), v === undefined || isNull(v) ? null : bytesOf(v)] as [Cred, Uint8Array | null])
+        .sort((a, b) => cmpCred(a[0]!, b[0]!)).map(([c, d]) => [credData(c), d] as [Data, Uint8Array | null]);
+}
 
 function gcd(a: bigint, b: bigint): bigint { a = a < 0n ? -a : a; b = b < 0n ? -b : b; while (b) [a, b] = [b, a % b]; return a; }
 /** A CBOR rational (tag 30 [n, d]) reduced, as Haskell's `%` does. */
@@ -67,6 +93,20 @@ function bech32Bytes(s: string): Uint8Array {
     const out: number[] = []; let acc = 0, bits = 0;
     for (const ch of data) { acc = ((acc << 5) | BECH.indexOf(ch)) & 0xffffff; bits += 5; if (bits >= 8) { bits -= 8; out.push((acc >> bits) & 0xff); } }
     return Uint8Array.from(out);
+}
+/** Plutus V4 `Address`: constructor `[payment credential, maybe account id]`. */
+function addressDataV4(raw: Uint8Array): Data | null {
+    const type = raw[0]! >> 4;
+    if (type > 7) return null;
+    const pay: Cred = { script: (type & 1) === 1, hash: raw.subarray(1, 29) };
+    let acc: Data = NOTHING;
+    if (type <= 3) acc = Just(credData({ script: (type & 2) === 2, hash: raw.subarray(29, 57) }));
+    else if (type <= 5) {
+        // pointer addresses: Plutus V4 replaced the pointer by an AccountId; ledger-ts resolves none here
+        const p = { i: 29 }; const s = varNat(raw, p), t = varNat(raw, p), c = varNat(raw, p);
+        void s; void t; void c;
+    }
+    return C(0, [credData(pay), acc]);
 }
 /** Raw address bytes of a stored address string; null for Byron (base58) addresses. */
 export function rawAddress(address: string): Uint8Array | null {
@@ -187,8 +227,8 @@ export type Purpose =
     | { tag: 2; ix: number; cert: CNode }
     | { tag: 3; cred: Cred }
     | { tag: 4; voterTag: number; cred: Cred }
-    | { tag: 5; ix: number; proposal: CNode };
-
+    | { tag: 5; ix: number; proposal: CNode }
+    | { tag: 6; ix: number; cred: Cred };
 export interface Redeemer { tag: number; index: number; data: Data; mem: bigint; cpu: bigint }
 
 export interface ContextInput {
@@ -215,6 +255,10 @@ export class TxContext {
     readonly withdrawals: Array<{ cred: Cred; amount: bigint }>;
     readonly voters: Array<{ voterTag: number; cred: Cred; votes: Array<{ id: [Uint8Array, bigint]; vote: number }> }>;
     readonly proposals: CNode[];
+    /** Dijkstra key 14: guards in the ledger's credential order (key hashes are key credentials). */
+    readonly guards: Cred[];
+    /** Dijkstra key 24: credential -> datum (nil absent). */
+    readonly requiredGuards: Array<[Data, Uint8Array | null]>;
     readonly datums: Map<string, { hash: Uint8Array; data: Data }>;
     /** Witness-set Plutus scripts by hash (hex): language and the script bytes (CBOR-wrapped flat). */
     readonly witnessScripts = new Map<string, { lang: 1 | 2 | 3 | 4; bytes: Uint8Array }>();
@@ -249,6 +293,8 @@ export class TxContext {
             return { voterTag, cred: { script: kt === 1 || kt === 3, hash: bytesOf(h) }, votes };
         }).sort((a, b) => (a.voterTag - b.voterTag) || cmpCred(a.cred, b.cred));
         this.proposals = arr(field(this.body, 20));
+        this.guards = guardsOf(field(this.body, 14));
+        this.requiredGuards = requiredGuardMap(field(this.body, 24));
         // witness datums by hash (hashed over their bytes as carried)
         this.datums = new Map();
         for (const d of arr(field(this.wits, 4))) {
@@ -292,6 +338,7 @@ export class TxContext {
             case 3: { const w = this.withdrawals[r.index]; return w ? { tag: 3, cred: w.cred } : null; }
             case 4: { const v = this.voters[r.index]; return v ? { tag: 4, voterTag: v.voterTag, cred: v.cred } : null; }
             case 5: { const p = this.proposals[r.index]; return p ? { tag: 5, ix: r.index, proposal: p } : null; }
+            case 6: { const c = this.guards[r.index]; return c ? { tag: 6, ix: r.index, cred: c } : null; }
         }
         return null;
     }
@@ -305,6 +352,7 @@ export class TxContext {
             case 3: return p.cred.script ? toHex(p.cred.hash) : null;
             case 4: return p.cred.script && p.voterTag !== 2 ? toHex(p.cred.hash) : null;
             case 5: { const g = proposalPolicy(p.proposal); return g ? toHex(g) : null; }
+            case 6: return p.cred.script ? toHex(p.cred.hash) : null;
         }
     }
 
@@ -319,7 +367,7 @@ export class TxContext {
     }
 
     // ── translation ──
-    private txOutRef(ref: [Uint8Array, bigint], lang: number): Data { return lang === 3 ? C(0, [B(ref[0]), I(ref[1])]) : C(0, [C(0, [B(ref[0])]), I(ref[1])]); }
+    private txOutRef(ref: [Uint8Array, bigint], lang: number): Data { return lang === 3 || lang === 4 ? C(0, [B(ref[0]), I(ref[1])]) : C(0, [C(0, [B(ref[0])]), I(ref[1])]); }
     private txOut(o: OutView, lang: number, source: string): Data | null {
         if (!o.raw) { if (this.era === 5 && lang === 1) return null; cerr(`ByronTxOutInContext (${source})`); }
         const addr = addressData(o.raw!)!;
@@ -335,8 +383,20 @@ export class TxContext {
     private txInInfo(ref: [Uint8Array, bigint], lang: number): Data | null {
         const u = this.resolvedOf(ref);
         if (!u) cerr(`TranslationLogicMissingInput ${toHex(ref[0])}#${ref[1]}`);
+        if (lang === 4) {
+            const out = this.txOutV4(outOfResolved(u!), `input ${toHex(ref[0]).slice(0, 12)}#${ref[1]}`);
+            return L([this.txOutRef(ref, 4), out]);
+        }
         const out = this.txOut(outOfResolved(u!), lang, `input ${toHex(ref[0]).slice(0, 12)}#${ref[1]}`);
         return out ? C(0, [this.txOutRef(ref, lang), out]) : null;
+    }
+    /** Plutus V4 `TxOut`: list `[address, value, datum, maybe reference script]`. */
+    private txOutV4(o: OutView, source: string): Data {
+        if (!o.raw) cerr(`ByronTxOutInContext (${source})`);
+        const addr = addressDataV4(o.raw!);
+        if (!addr) cerr(`ByronTxOutInContext (${source})`);
+        const datum = o.inlineDatum ? C(2, [decodeData(o.inlineDatum)]) : o.datumHash ? C(1, [B(o.datumHash)]) : C(0);
+        return L([addr!, valueData(o.coin, o.assets), datum, o.refScriptHash ? Just(B(o.refScriptHash)) : NOTHING]);
     }
     private posix(slot: bigint): bigint { return this.input.slotToPosixMs(slot); }
     private validRange(): Data {
@@ -390,14 +450,53 @@ export class TxContext {
         }
         return cerr(`CertificateNotSupported (certificate type ${k})`);
     }
+    /** V4 `TxCert` (PlutusLedgerApi.V4.Contexts tags 0–10). */
+    private txCertV4(c: CNode): Data {
+        const f = arr(c), k = Number(uintOf(f[0]));
+        const acct = (n: CNode) => credData(credOf(n));
+        const pool = (n: CNode) => B(bytesOf(n));
+        const delegatee = (n: CNode) => { const d = arr(n); return C(Number(uintOf(d[0])), d[1] === undefined ? [] : d[1].t === "b" ? [pool(d[1])] : [drep(d[1])]); };
+        switch (k) {
+            case 0: return C(0, [acct(f[1]!), I(0)]); // reg account, no deposit
+            case 1: return C(1, [acct(f[1]!), I(0)]);
+            case 2: return C(2, [acct(f[1]!), delegatee(f[2]!)]);
+            case 3: return C(7, [pool(f[1]!), pool(f[2]!)]); // pool register: operator, VRF key hash
+            case 4: return C(8, [pool(f[1]!), I(uintOf(f[2]!))]);
+            case 7: return C(0, [acct(f[1]!), I(uintOf(f[2]!))]);
+            case 8: return C(1, [acct(f[1]!), I(uintOf(f[2]!))]);
+            case 9: return C(2, [acct(f[1]!), delegatee(f[2]!)]);
+            case 10: return C(3, [acct(f[1]!), delegatee(f[2]!), I(uintOf(f[3]!))]);
+            case 11: return C(3, [acct(f[1]!), delegatee(f[2]!), I(uintOf(f[3]!))]);
+            case 12: return C(3, [acct(f[1]!), delegatee(f[2]!), I(uintOf(f[3]!))]);
+            case 13: return C(3, [acct(f[1]!), delegatee(f[2]!), I(uintOf(f[4]!))]);
+            case 14: return C(9, [acct(f[1]!), acct(f[2]!)]);
+            case 15: return C(10, [acct(f[1]!)]);
+            case 16: return C(4, [acct(f[1]!), I(uintOf(f[2]!))]);
+            case 17: return C(6, [acct(f[1]!), I(uintOf(f[2]!))]);
+            case 18: return C(5, [acct(f[1]!)]);
+        }
+        return cerr(`CertificateNotSupported (certificate type ${k}) in Plutus V4`);
+    }
     private voterData(v: { voterTag: number; cred: Cred }): Data { return v.voterTag === 2 ? C(2, [B(v.cred.hash)]) : C(v.voterTag, [credData(v.cred)]); }
     private proposalData(p: CNode): Data {
         const [dep, ra, ga] = arr(p);
         return C(0, [I(uintOf(dep)), credData(rewardCred(bytesOf(ra))), govActionData(ga!)]);
     }
 
-    /** V3 `ScriptPurpose` / V1–V2 `ScriptPurpose` of a redeemer's item. */
-    purposeData(p: Purpose, lang: number): Data {
+    /** V4 `ScriptPurpose` / V3 / V1–V2 of a redeemer's item. */
+    purposeData(p: Purpose, lang: number, scriptHash?: string | null): Data {
+        if (lang === 4) {
+            const sh = scriptHash ? B(hx(scriptHash)) : cerr("ScriptHashNotFoundForPurpose");
+            switch (p.tag) {
+                case 0: return C(1, [sh, this.txOutRef(p.ref, 4)]);        // Spending
+                case 1: return C(0, [sh, B(p.policy)]);                     // Minting
+                case 2: return C(3, [sh, I(p.ix), this.txCertV4(p.cert)]);  // Certifying
+                case 3: return C(2, [sh, credData(p.cred)]);                // Withdrawing
+                case 4: return C(4, [sh, this.voterData(p)]);
+                case 5: return C(5, [sh, I(p.ix), this.proposalData(p.proposal)]);
+                case 6: return C(6, [sh, I(p.ix)]);
+            }
+        }
         if (lang === 3) {
             switch (p.tag) {
                 case 0: return C(1, [this.txOutRef(p.ref, 3)]);
@@ -416,8 +515,20 @@ export class TxContext {
         }
         return cerr(`PlutusPurposeNotSupported (tag ${p.tag}) in Plutus V${lang}`);
     }
-    /** V3 `ScriptInfo`. */
-    scriptInfoData(p: Purpose): Data {
+    /** V4 `ScriptInfo` (tag 6 keeps the top-level aggregate absent for now); V3 keeps the V3 shape. */
+    scriptInfoData(p: Purpose, lang: number = 3): Data {
+        if (lang === 4) {
+            switch (p.tag) {
+                case 0: { const d = this.spendingDatum(p); return C(1, [this.txOutRef(p.ref, 4), d ? Just(d) : NOTHING]); } // SpendingScript
+                case 1: return C(0, [B(p.policy)]);                                                                      // MintingScript
+                case 2: return C(3, [I(p.ix), this.txCertV4(p.cert)]);                                                    // CertifyingScript
+                case 3: return C(2, [credData(p.cred)]);                                                                  // WithdrawingScript
+                case 4: return C(4, [this.voterData(p)]);
+                case 5: return C(5, [I(p.ix), this.proposalData(p.proposal)]);
+                case 6: return C(6, [I(p.ix), NOTHING]); // TopTxInfo for guards is not built yet (bug 435)
+            }
+            return cerr("PlutusPurposeNotSupported in Plutus V4");
+        }
         const sp = this.purposeData(p, 3) as DConstr;
         if (p.tag !== 0) return sp; // same constructors and fields as ScriptPurpose
         const d = this.spendingDatum(p);
@@ -425,12 +536,12 @@ export class TxContext {
     }
 
     /** TxInfo for a language; throws ContextError when the transaction cannot be translated. */
-    txInfo(lang: 1 | 2 | 3): Data {
+    txInfo(lang: 1 | 2 | 3 | 4): Data {
         const hit = this.infoCache.get(lang);
         if (hit instanceof ContextError) throw hit;
         if (hit) return hit;
         try {
-            const d = this.buildTxInfo(lang);
+            const d = lang === 4 ? this.buildTxInfoV4() : this.buildTxInfo(lang as 1 | 2 | 3);
             this.infoCache.set(lang, d);
             return d;
         } catch (e) {
@@ -438,6 +549,41 @@ export class TxContext {
             throw e;
         }
     }
+
+    /** Plutus V4 `TxInfo` (PlutusLedgerApi.V4.Contexts, list-encoded fields in record order). */
+    private buildTxInfoV4(): Data {
+        if (this.era < 8) cerr("PlutusV4NotSupported");
+        const range = this.validRange();
+        const inputs = this.inputs.map((r) => this.txInInfo(r, 4)).filter((x): x is Data => x !== null);
+        const refIns = this.refInputs.map((r) => this.txInInfo(r, 4)).filter((x): x is Data => x !== null);
+        const outputs = arr(field(this.body, 1)).map((o, i) => this.txOutV4(outOfCbor(o, scriptHashOf), `output ${i}`));
+        const certs = this.certs.map((c) => this.txCertV4(c));
+        const mintAssets = multiAssetOf(field(this.body, 9));
+        const datums = [...this.datums.values()].sort((a, b) => cmpBytes(a.hash, b.hash));
+        const withdrawals = this.withdrawals.map((w) => [credData(w.cred), I(w.amount)] as [Data, Data]);
+        const deposits = map(field(this.body, 25)).map(([k, v]) => ({ cred: rewardCred(bytesOf(k)), amount: uintOf(v) }))
+            .sort((a, b) => cmpCred(a.cred, b.cred)).map(({ cred, amount }) => [credData(cred), I(amount)] as [Data, Data]);
+        const intervals = accountIntervalMap(field(this.body, 26));
+        const redeemers = M(this.redeemers.map((r) => {
+            const p = this.purposeOf(r);
+            if (!p) cerr(`RedeemerPointerPointsToNothing ${r.tag}:${r.index}`);
+            const hash = this.scriptHashOf(p!);
+            if (!hash) cerr(`ScriptHashNotFoundForPurpose ${r.tag}:${r.index}`);
+            return [this.purposeData(p!, 4, hash), r.data];
+        }));
+        const treasury = field(this.body, 21), donation = field(this.body, 22);
+        return L([
+            B(this.txId), NOTHING, L(inputs), L(refIns), L(outputs), valueData(null, mintAssets), L(certs),
+            M(withdrawals), M(deposits), M(intervals), range, L(this.guards.map(credData)),
+            M(this.requiredGuards.map(([c, d]) => [c, d === null ? NOTHING : Just(decodeData(d))] as [Data, Data])),
+            redeemers, M(datums.map((d) => [B(d.hash), d.data])), 
+            M(this.voters.map((v) => [this.voterData(v), M(v.votes.map((b) => [C(0, [B(b.id[0]), I(b.id[1])]), C(b.vote)]))])),
+            L(this.proposals.map((p) => this.proposalData(p))),
+            treasury ? Just(I(uintOf(treasury))) : NOTHING,
+            I(donation ? uintOf(donation) : 0n),
+        ]);
+    }
+
 
     private buildTxInfo(lang: 1 | 2 | 3): Data {
         const conway = this.era >= 7;

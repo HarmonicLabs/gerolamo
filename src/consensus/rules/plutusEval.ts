@@ -76,7 +76,10 @@ let traceBuf: Array<{ tag: number; args: string; cpu: bigint; mem: bigint }> | n
  * works in worker realms too (patching the CJS module did not reach the workers).
  */
 function tracedMachine(machine: Machine): Machine {
-    const lookup: any = (machine as any).getBuiltinCostFuction;
+    // plutus-machine 3.x keeps the cost lookup inside `builtinEvaluator`; older builds had
+    // `getBuiltinCostFuction` on the machine. Wrap whichever this install exposes.
+    const bn: any = (machine as any).builtinEvaluator;
+    const lookup: any = bn?.getBuiltinCostFunc ?? (machine as any).getBuiltinCostFuction;
     const wrapped = (tag: number) => {
         const f = lookup(tag);
         return {
@@ -85,11 +88,18 @@ function tracedMachine(machine: Machine): Machine {
         };
     };
     // The instance's properties are non-configurable, which a Proxy may not shadow: build a
-    // sibling object on the same prototype with the wrapped lookup and the original costs
-    // (`eval` reads only `getBuiltinCostFuction`, `machineCosts` and `maxBudget` off `this`).
-    const t = Object.create(Object.getPrototypeOf(machine));
-    Object.defineProperty(t, "getBuiltinCostFuction", { value: wrapped });
-    Object.defineProperty(t, "machineCosts", { value: (machine as any).machineCosts });
+    // sibling object on the same prototype with all machine state copied, and a builtinEvaluator
+    // clone whose lookup records every charge.
+    const t: any = Object.create(Object.getPrototypeOf(machine));
+    Object.defineProperties(t, Object.getOwnPropertyDescriptors(machine));
+    if (bn) {
+        const eb: any = Object.create(Object.getPrototypeOf(bn));
+        Object.defineProperties(eb, Object.getOwnPropertyDescriptors(bn));
+        Object.defineProperty(eb, "getBuiltinCostFunc", { value: wrapped, configurable: true });
+        Object.defineProperty(t, "builtinEvaluator", { value: eb, configurable: true, writable: true });
+    } else {
+        Object.defineProperty(t, "getBuiltinCostFuction", { value: wrapped });
+    }
     return t as Machine;
 }
 /** Per-builtin totals of the last traced evaluation, for the mismatch note. */
@@ -405,11 +415,11 @@ export async function shadowEvaluateTxLegacy(input: ShadowEvalInput): Promise<Sh
                 const bDatum = datumCbor ? bDataFromCbor(toHex(datumCbor)) : undefined;
                 const info = getScriptInfoData(r, bodyLike, version, bDatum);
                 const ctx = new DataConstr(0, [toRootData(txInfo), redeemerData, toRootData(info)]);
-                if (dumpDir()) writeFileSync(`${dumpDir()}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx).toBuffer()));
+                if (dumpDir()) writeFileSync(`${dumpDir()}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx)));
                 term = new Application(program, UPLCConst.data(ctx));
             } else {
                 const ctx = new DataConstr(0, [toRootData(txInfo), toRootData(purpose)]);
-                if (dumpDir()) writeFileSync(`${dumpDir()}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx).toBuffer()));
+                if (dumpDir()) writeFileSync(`${dumpDir()}/${tag}-${idx}.ctx.hex`, toHex(dataToCbor(ctx)));
                 let t: any = program;
                 if (tag === 0) {
                     if (!datumCbor) {
@@ -429,8 +439,8 @@ export async function shadowEvaluateTxLegacy(input: ShadowEvalInput): Promise<Sh
         }
         if (dumpDir()) {
             try {
-                const flat = compileUPLC(new UPLCProgram(progVersion, term)).toBuffer().buffer;
-                writeFileSync(`${dumpDir()}/${tag}-${idx}.hex`, toHex(Cbor.encode(new CborBytes(flat)).toBuffer()));
+                const flat = new Uint8Array(compileUPLC(new UPLCProgram(progVersion, term)) as any);
+                writeFileSync(`${dumpDir()}/${tag}-${idx}.hex`, toHex(Cbor.encode(new CborBytes(flat))));
             } catch (err) { logger.warn(`plutus dump ${tag}:${idx} failed: ${err instanceof Error ? err.message : String(err)}`); }
         }
         const declared = r.execUnits as ExBudget | undefined;

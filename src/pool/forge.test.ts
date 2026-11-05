@@ -40,7 +40,7 @@ describe("forging a Praos block", () => {
         expect((hdr.array[0] as CborArray).array.length).toBe(10);
         expect((hdr.array[1] as CborBytes).bytes.length).toBe(448);
         // KES signature verifies at the evolution the slot requires, not at 0
-        const bodyBytes = Cbor.encode(hdr.array[0]!).toBuffer();
+        const bodyBytes = Cbor.encode(hdr.array[0]!);
         expect(kesVerifyAt((hdr.array[1] as CborBytes).bytes, 2, kes.vkey, bodyBytes)).toBe(true);
         expect(kesVerifyAt((hdr.array[1] as CborBytes).bytes, 0, kes.vkey, bodyBytes)).toBe(false);
 

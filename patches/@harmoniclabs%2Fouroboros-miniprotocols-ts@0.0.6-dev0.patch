@@ -1,0 +1,57 @@
+diff --git a/dist/multiplexer/Multiplexer.js b/dist/multiplexer/Multiplexer.js
+index e2b2693407eeafc35d7901f72eb5495ab483d103..53417151e138a0a85401548d527fe86f9fc29db3 100644
+--- a/dist/multiplexer/Multiplexer.js
++++ b/dist/multiplexer/Multiplexer.js
+@@ -161,7 +161,13 @@ var Multiplexer = /** @class */ (function () {
+             else
+                 messages = [];
+             // finally add any other message if present
+-            messages = messages.concat((0, multiplexerMessage_1.unwrapMultiplexerMessages)(chunk));
++            var unwrapped = (0, multiplexerMessage_1.unwrapMultiplexerMessagesRest)(chunk);
++            messages = messages.concat(unwrapped.messages);
++            // Fewer than 8 bytes left over: a segment header split across TCP chunks.
++            // Keep them for the next chunk instead of dropping them (framing would be lost).
++            if (unwrapped.rest.length > 0) {
++                prevBytes = Uint8Array.prototype.slice.call(unwrapped.rest);
++            }
+             try {
+                 for (var messages_1 = __values(messages), messages_1_1 = messages_1.next(); !messages_1_1.done; messages_1_1 = messages_1.next()) {
+                     var _b = messages_1_1.value, header = _b.header, payload = _b.payload;
+diff --git a/dist/multiplexer/multiplexerMessage.js b/dist/multiplexer/multiplexerMessage.js
+index ecf0ddf7b0dd2fee4b7c6fc7e515662633e00aeb..e421a1ccc4a122eef650bb8e346913006d94fc17 100644
+--- a/dist/multiplexer/multiplexerMessage.js
++++ b/dist/multiplexer/multiplexerMessage.js
+@@ -60,9 +60,19 @@ function unwrapMultiplexerMessage(message) {
+     };
+ }
+ function unwrapMultiplexerMessages(message) {
++    return unwrapMultiplexerMessagesRest(message).messages;
++}
++/**
++ * Like `unwrapMultiplexerMessages`, but also returns the trailing bytes that are
++ * too short to be a segment header (< 8). A TCP chunk can end in the middle of a
++ * header; dropping those bytes made the next chunk be parsed from mid-header
++ * ("unwrapped Multiplexer header was not a mini protocol").
++ */
++function unwrapMultiplexerMessagesRest(message) {
+     var messages = [];
+     while (message.length >= 8) {
+-        var view = new DataView(message.buffer);
++        // honour byteOffset: `message` may be a subarray of a larger buffer
++        var view = new DataView(message.buffer, message.byteOffset, message.byteLength);
+         // bitwise opeartor (or and shift) implicitly convert to signed int32
+         // but these are 2 bytes long numbers, hence always positive
+         var agencyAndProtocol = message[4] << 8 | message[5];
+@@ -76,7 +86,10 @@ function unwrapMultiplexerMessages(message) {
+             },
+             payload: Uint8Array.prototype.slice.call(message, 8, 8 + payloadLen)
+         });
+-        message = Uint8Array.prototype.slice.call(message, 8 + payloadLen);
++        // A view, not a copy: copying the remainder per segment was quadratic in segments per
++        // TCP chunk. The caller copies `rest` if it keeps it.
++        message = Uint8Array.prototype.subarray.call(message, 8 + payloadLen);
+     }
+-    return messages;
++    return { messages: messages, rest: message };
+ }
++exports.unwrapMultiplexerMessagesRest = unwrapMultiplexerMessagesRest;

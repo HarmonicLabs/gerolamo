@@ -60,7 +60,7 @@ export async function openLsq(sockPath: string, magic: number, opts: { versions?
     return p;
   };
   const versions = opts.versions ?? [19, 20, 21, 22, 23];
-  send(0, Cbor.encode(new CborArray([new CborUInt(0), new CborMap(versions.map((v) => ({ k: new CborUInt(0x8000 | v), v: new CborArray([new CborUInt(magic), new CborSimple(false)]) })))])).toBuffer());
+  send(0, Cbor.encode(new CborArray([new CborUInt(0), new CborMap(versions.map((v) => ({ k: new CborUInt(0x8000 | v), v: new CborArray([new CborUInt(magic), new CborSimple(false)]) })))])));
   const hs = Cbor.parse(await recv(0)) as CborArray;
   const version = hs.array[0] instanceof CborUInt && Number(hs.array[0].num) === 1 && hs.array[1] instanceof CborUInt ? Number(hs.array[1].num) & 0x7fff : -1;
   let acquired = false;
@@ -68,7 +68,7 @@ export async function openLsq(sockPath: string, magic: number, opts: { versions?
     const again = acquired;
     const msg = target === "tip" ? [new CborUInt(again ? 9 : 8)] : target === "immutable" ? [new CborUInt(again ? 11 : 10)] : target === "origin" ? [new CborUInt(again ? 6 : 0), new CborArray([])]
       : [new CborUInt(again ? 6 : 0), new CborArray([new CborUInt(BigInt(target.slot)), new CborBytes(Uint8Array.from(Buffer.from(target.hash, "hex")))])];
-    send(7, Cbor.encode(new CborArray(msg)).toBuffer());
+    send(7, Cbor.encode(new CborArray(msg)));
     const r = Cbor.parse(await recv(7)) as CborArray;
     const tag = Number((r.array[0] as CborUInt).num);
     if (tag === 1) { acquired = true; return { ok: true }; }
@@ -79,7 +79,7 @@ export async function openLsq(sockPath: string, magic: number, opts: { versions?
   if (opts.acquire !== false) { const a = await acquire("tip"); if (!a.ok) throw new Error(`acquire failed: ${a.failure}`); }
   /** The raw bytes of the answer inside MsgResult [4, result], for byte comparison. */
   const queryRaw = async (q: CborObj, ms?: number): Promise<Uint8Array> => {
-    send(7, Cbor.encode(new CborArray([new CborUInt(3), q])).toBuffer());
+    send(7, Cbor.encode(new CborArray([new CborUInt(3), q])));
     const bytes = await recv(7, ms);
     if (bytes[0] !== 0x82 || bytes[1] !== 0x04) throw new Error(`unexpected reply ${Buffer.from(bytes.subarray(0, 16)).toString("hex")}`);
     return bytes.subarray(2);
@@ -90,9 +90,9 @@ export async function openLsq(sockPath: string, magic: number, opts: { versions?
     isClosed: () => closed,
     queryRaw,
     query: async (q: CborObj, ms?: number) => Cbor.parse(await queryRaw(q, ms)),
-    release: () => { send(7, Cbor.encode(new CborArray([new CborUInt(5)])).toBuffer()); acquired = false; },
+    release: () => { send(7, Cbor.encode(new CborArray([new CborUInt(5)]))); acquired = false; },
     // MsgDone is valid only in StIdle: an acquired client releases first (a cardano-node logs a DecoderFailure otherwise)
-    close: () => { if (!closed) { try { if (acquired) send(7, Cbor.encode(new CborArray([new CborUInt(5)])).toBuffer()); send(7, Cbor.encode(new CborArray([new CborUInt(7)])).toBuffer()); } catch { /* gone */ } sock.end(); } },
+    close: () => { if (!closed) { try { if (acquired) send(7, Cbor.encode(new CborArray([new CborUInt(5)]))); send(7, Cbor.encode(new CborArray([new CborUInt(7)]))); } catch { /* gone */ } sock.end(); } },
   };
 }
 export type LsqClient = Awaited<ReturnType<typeof openLsq>>;

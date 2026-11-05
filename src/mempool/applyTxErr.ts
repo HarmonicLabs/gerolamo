@@ -238,14 +238,14 @@ export class RuleRun {
     get failures(): readonly CborObj[] { return this.stored; }
 }
 
-/** `[listLen 1, [6, [failure…]]]` — the HFC-wrapped Conway ApplyTxErr. */
-export function applyTxErrCbor(failures: readonly CborObj[]): CborArray {
-    return new CborArray([new CborArray([U(CONWAY_ERA_INDEX), new CborArray([...failures])])]);
+/** `[listLen 1, [eraIndex, [failure…]]]` — the HFC-wrapped ApplyTxErr. */
+export function applyTxErrCbor(failures: readonly CborObj[], eraIndex: number = CONWAY_ERA_INDEX): CborArray {
+    return new CborArray([new CborArray([U(eraIndex), new CborArray([...failures])])]);
 }
 
-/** MsgRejectTx bytes. */
-export function rejectMessageBytes(failures: readonly CborObj[]): Uint8Array {
-    return Cbor.encode(new CborArray([U(2), applyTxErrCbor(failures)])).toBuffer();
+/** MsgRejectTx bytes, carrying the era index the submission was judged under. */
+export function rejectMessageBytes(failures: readonly CborObj[], eraIndex: number = CONWAY_ERA_INDEX): Uint8Array {
+    return Cbor.encode(new CborArray([U(2), applyTxErrCbor(failures, eraIndex)]));
 }
 
 export const ACCEPT_MESSAGE = new Uint8Array([0x81, 0x01]);

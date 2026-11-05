@@ -55,7 +55,7 @@ export function costModelArrays(raw: Record<string, any> | null | undefined): Pa
 
 /** Canonical language-views map for the given languages, or null when a cost model is missing. */
 export function languageViews(models: Partial<Record<PlutusLanguage, (number | bigint)[]>>, langs: Set<PlutusLanguage>): Uint8Array | null {
-    if (langs.size === 0) return Cbor.encode(new CborMap([])).toBuffer();
+    if (langs.size === 0) return Cbor.encode(new CborMap([]));
     for (const l of langs) if (!models[l]) return null;
     // One entry per language from the library, then the map in canonical CBOR key order
     // (shorter encoded key first, then bytewise): V2's key `01` sorts before V1's `4100`,
@@ -69,7 +69,7 @@ export function languageViews(models: Partial<Record<PlutusLanguage, (number | b
             // encoded as bytes, indefinite length) — the library reproduces it exactly.
             const single = costModelsToLanguageViewCbor({ PlutusScriptV1: models[1] as any }, { mustHaveV1: true });
             const parsed = Cbor.parse(single) as CborMap;
-            for (const e of parsed.map) entries.push({ k: e.k, v: e.v, keyBytes: Cbor.encode(e.k).toBuffer() });
+            for (const e of parsed.map) entries.push({ k: e.k, v: e.v, keyBytes: Cbor.encode(e.k) });
             continue;
         }
         // V2/V3: key = language int, value = the cost model list exactly as the protocol
@@ -78,10 +78,10 @@ export function languageViews(models: Partial<Record<PlutusLanguage, (number | b
         // differently (bug 54); the ledger hashes the list as-is, so encode it directly.
         const list = (models[l] as (number | bigint)[]).map((x) => { const n = BigInt(x); return n < 0n ? new CborNegInt(n) : new CborUInt(n); });
         const k = new CborUInt(BigInt(l - 1));
-        entries.push({ k, v: new CborArray(list), keyBytes: Cbor.encode(k).toBuffer() });
+        entries.push({ k, v: new CborArray(list), keyBytes: Cbor.encode(k) });
     }
     entries.sort((a, b) => a.keyBytes.length - b.keyBytes.length || Buffer.compare(Buffer.from(a.keyBytes), Buffer.from(b.keyBytes)));
-    return Cbor.encode(new CborMap(entries.map(({ k, v }) => ({ k, v })))).toBuffer();
+    return Cbor.encode(new CborMap(entries.map(({ k, v }) => ({ k, v }))));
 }
 
 /** The witness-set map entries for redeemers (key 5) and datums (key 4), as original bytes. */
@@ -94,7 +94,7 @@ export function witnessSlices(witnessSetBytes: Uint8Array): { redeemers: Uint8Ar
         const key = Number(k.num);
         if (key !== 4 && key !== 5) continue;
         const ref: any = (v as any).subCborRef ?? (v as any).cborRef;
-        const bytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v).toBuffer();
+        const bytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v);
         if (key === 5) redeemers = bytes;
         else datums = bytes;
     }
@@ -176,7 +176,7 @@ export function witnessDatumBytes(witnessSetBytes: Uint8Array): Uint8Array[] | n
             const items: any[] = setItems(v);
             return items.map((el) => {
                 const ref: any = el.subCborRef ?? el.cborRef;
-                return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(el).toBuffer();
+                return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(el);
             });
         }
         return [];
@@ -199,7 +199,7 @@ export function bodyOutputBytes(bodyBytes: Uint8Array): Uint8Array[] | null {
             const items: any[] = setItems(v);
             return items.map((el) => {
                 const ref: any = el.subCborRef ?? el.cborRef;
-                return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(el).toBuffer();
+                return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(el);
             });
         }
         return [];
@@ -223,7 +223,7 @@ export function blockAuxDataBytes(blockBytes: Uint8Array): Map<number, Uint8Arra
         for (const { k, v } of set.map) {
             if (!(k instanceof CborUInt)) continue;
             const ref: any = (v as any).subCborRef ?? (v as any).cborRef;
-            out.set(Number(k.num), ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v).toBuffer());
+            out.set(Number(k.num), ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v));
         }
         return out;
     } catch {
@@ -244,7 +244,7 @@ export function bodyFieldBytes(body: any, key: number): Uint8Array | null {
     try {
         const root: any = Cbor.parse(bytes, { keepRef: true } as any);
         if (!(root instanceof CborMap)) return null;
-        for (const { k, v } of root.map) if (k instanceof CborUInt && Number(k.num) === key) { const ref: any = (v as any).subCborRef ?? (v as any).cborRef; return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v).toBuffer(); }
+        for (const { k, v } of root.map) if (k instanceof CborUInt && Number(k.num) === key) { const ref: any = (v as any).subCborRef ?? (v as any).cborRef; return ref?.toBuffer ? ref.toBuffer() : Cbor.encode(v); }
     } catch {
         /* */
     }
@@ -305,7 +305,7 @@ export function witnessScriptHashes(witnessSetBytes: Uint8Array, maxLanguage: Pl
             let bytes: Uint8Array;
             if (spec.kind === "native") {
                 const ref: any = el.subCborRef ?? el.cborRef;
-                bytes = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(el).toBuffer();
+                bytes = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(el);
             } else {
                 if (!(el instanceof CborBytes)) continue;
                 bytes = el.bytes;

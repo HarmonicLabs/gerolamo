@@ -51,6 +51,6 @@ describe("Conway ApplyTxErr (relay captures)", () => {
 
     test("ledger TxOut re-encoding: map-form output without datum becomes [addr, value]", () => {
         const out = txOutCbor({ address: Uint8Array.from(Buffer.from(ADDR, "hex")), value: new Map([["lovelace", 100000n]]) });
-        expect(hex(Cbor.encode(out).toBuffer())).toBe("82583900" + ADDR.slice(2) + "1a000186a0");
+        expect(hex(Cbor.encode(out))).toBe("82583900" + ADDR.slice(2) + "1a000186a0");
     });
 });

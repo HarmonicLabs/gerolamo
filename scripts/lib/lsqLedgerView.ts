@@ -39,14 +39,14 @@ export function pparamsRecord(pp: CborArray): Record<string, unknown> {
 
 /** A TxOut as the ledger returns it → Gerolamo's ResolvedUtxo. */
 export function resolvedFromTxOut(ref: string, out: CborObj): ResolvedUtxo {
-    const parts = txOutPartsFromBytes(Cbor.encode(out).toBuffer());
+    const parts = txOutPartsFromBytes(Cbor.encode(out));
     let address = "";
     try { address = Address.fromBytes(parts.address).toString(); } catch { address = ""; }
     let referenceScriptHash: string | null = null;
     if (parts.scriptRefCbor) {
         const s = Cbor.parse(parts.scriptRefCbor) as CborArray;
         const lang = Number((s.array[0] as CborUInt).num);
-        const payload = lang === 0 ? Cbor.encode(s.array[1]!).toBuffer() : (s.array[1] as CborBytes).bytes;
+        const payload = lang === 0 ? Cbor.encode(s.array[1]!) : (s.array[1] as CborBytes).bytes;
         const pre = new Uint8Array(1 + payload.length); pre[0] = lang; pre.set(payload, 1);
         referenceScriptHash = toHex(blake2b_224(pre));
     }
@@ -61,12 +61,12 @@ export function resolvedFromTxOut(ref: string, out: CborObj): ResolvedUtxo {
 export async function lsqLedgerView(c: N2cConn, network: "mainnet" | "testnet", epochNetwork: string): Promise<MempoolLedgerView & { reacquire(): Promise<void> }> {
     let acquired = false;
     const query = async (q: CborObj): Promise<CborObj> => {
-        c.send(7, Cbor.encode(new CborArray([U(3), q])).toBuffer());
+        c.send(7, Cbor.encode(new CborArray([U(3), q])));
         const r = Cbor.parse(await c.recv(7)) as CborArray;
         return r.array[1]!;
     };
     const reacquire = async () => {
-        c.send(7, Cbor.encode(new CborArray([U(acquired ? 9 : 8)])).toBuffer());
+        c.send(7, Cbor.encode(new CborArray([U(acquired ? 9 : 8)])));
         await c.recv(7);
         acquired = true;
     };

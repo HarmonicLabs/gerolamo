@@ -79,7 +79,7 @@ export function envelopeBytes(env: TextEnvelope, expectedLength?: number): Uint8
 }
 
 export function envelopeOfBytes(type: string, description: string, bytes: Uint8Array): TextEnvelope {
-    return { type, description, cborHex: hex(Cbor.encode(new CborBytes(bytes)).toBuffer()) };
+    return { type, description, cborHex: hex(Cbor.encode(new CborBytes(bytes))) };
 }
 
 export function writeTextEnvelope(path: string, env: TextEnvelope): void {
@@ -125,7 +125,7 @@ export function decodeIssueCounter(env: TextEnvelope): IssueCounter {
 }
 
 export function encodeIssueCounter(counter: IssueCounter): TextEnvelope {
-    const cbor = Cbor.encode(new CborArray([new CborUInt(counter.next), new CborBytes(counter.coldVkey)])).toBuffer();
+    const cbor = Cbor.encode(new CborArray([new CborUInt(counter.next), new CborBytes(counter.coldVkey)]));
     return { type: EnvelopeType.counter, description: `Next certificate issue number: ${counter.next}`, cborHex: hex(cbor) };
 }
 
@@ -288,7 +288,7 @@ function opcertFromCborObj(o: unknown): OpcertFields {
 
 /** Header-side representation (ledger-ts), constructed from bytes so no CborObj crosses library copies. */
 export function toLedgerOpcert(c: OpcertFields): PoolOperationalCert {
-    return PoolOperationalCert.fromCbor(Cbor.encode(opcertToCborObj(c)).toBuffer());
+    return PoolOperationalCert.fromCbor(Cbor.encode(opcertToCborObj(c)));
 }
 
 /** `node.cert`: `[[kes_vkey, counter, kes_period, cold_signature], cold_vkey]`. */
@@ -299,7 +299,7 @@ export function decodeOperationalCert(env: TextEnvelope): OperationalCert {
 }
 
 export function encodeOperationalCert(oc: OperationalCert): TextEnvelope {
-    const cbor = Cbor.encode(new CborArray([opcertToCborObj(oc.cert), new CborBytes(oc.coldVkey)])).toBuffer();
+    const cbor = Cbor.encode(new CborArray([opcertToCborObj(oc.cert), new CborBytes(oc.coldVkey)]));
     return { type: EnvelopeType.operationalCert, description: "", cborHex: hex(cbor) };
 }
 

@@ -51,6 +51,21 @@ describe("pool parameters as the ledger re-encodes them", () => {
         e.null();
         expect(hex(out)).toBe(hex(e.finish()));
     });
+    test("a Dijkstra BLS key slot (10 fields) is preserved and the relay list still normalised", () => {
+        const BLS = "aa".repeat(96), POP = "bb".repeat(48);
+        const w = new CborWriter();
+        w.array(10).hex("11".repeat(28)).hex("22".repeat(32)).uint(5_000_000_000).uint(170_000_000).rational(0n, 1_000_000n).hex("e0" + "33".repeat(28)).tag(258).array(1).hex("33".repeat(28));
+        w.arrayIndef().array(4).uint(0).uint(3001).hex("3f2d2150").null().brk();
+        w.null();
+        w.array(2).bytes(Uint8Array.from(Buffer.from(BLS, "hex"))).bytes(Uint8Array.from(Buffer.from(POP, "hex")));
+        const out = normalizePoolParams(w.finish());
+        const e = new CborWriter();
+        e.array(10).hex("11".repeat(28)).hex("22".repeat(32)).uint(5_000_000_000).uint(170_000_000).rational(0n, 1n).hex("e0" + "33".repeat(28)).tag(258).array(1).hex("33".repeat(28));
+        e.array(1).array(4).uint(0).uint(3001).hex("3f2d2150").null();
+        e.null();
+        e.array(2).bytes(Uint8Array.from(Buffer.from(BLS, "hex"))).bytes(Uint8Array.from(Buffer.from(POP, "hex")));
+        expect(hex(out)).toBe(hex(e.finish()));
+    });
 });
 
 describe("TxOut in the ledger's compact forms", () => {

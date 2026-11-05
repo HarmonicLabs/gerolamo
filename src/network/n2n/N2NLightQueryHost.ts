@@ -110,7 +110,7 @@ export class N2NLightQueryHost {
 
     private reply(msg: CborObj): void {
         if (this.disposed) return;
-        sendN2NResponder(this.mplexer, LIGHT_QUERY_PROTOCOL as any, Cbor.encode(msg).toBuffer());
+        sendN2NResponder(this.mplexer, LIGHT_QUERY_PROTOCOL as any, Cbor.encode(msg));
     }
 
     private async handle(payload: Uint8Array): Promise<void> {

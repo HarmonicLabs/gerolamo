@@ -1,0 +1,87 @@
+diff --git a/dist/Data.js b/dist/Data.js
+index 69df05fba3a0deb9b2a4a0f92ed718dd9f52cc95..3c947a51118cfaaeb97bab3debfde1b90f7e26cf 100644
+--- a/dist/Data.js
++++ b/dist/Data.js
+@@ -47,7 +47,9 @@ function eqData(a, b) {
+     if (a instanceof DataList_1.DataList) {
+         if (!(b instanceof DataList_1.DataList))
+             return false;
+-        return (a.list.every(function (elem, idx) { return eqData(elem, b.list[idx]); }));
++        // lengths first: `every` over the shorter list called a prefix equal (gerolamo patch)
++        return (a.list.length === b.list.length &&
++            a.list.every(function (elem, idx) { return eqData(elem, b.list[idx]); }));
+     }
+     if (a instanceof DataI_1.DataI) {
+         if (!(b instanceof DataI_1.DataI))
+diff --git a/dist/toCbor.js b/dist/toCbor.js
+index 5b93f87892406d424ac585f40f0dd4b8c14bd076..b4273dc888b87824f88d85725b6fcddf9cdf929c 100644
+--- a/dist/toCbor.js
++++ b/dist/toCbor.js
+@@ -71,7 +71,8 @@ function dataToCborObj(data) {
+                 v: dataToCborObj(pair.snd)
+             };
+         }), {
+-            indefinite: data.map.length > 0
++            // Plutus `encodeData (Map es)` writes a definite-length map (gerolamo patch; was indefinite)
++            indefinite: false
+         });
+     }
+     if (data instanceof DataList_1.DataList) {
+@@ -81,34 +82,36 @@ function dataToCborObj(data) {
+     }
+     if (data instanceof DataI_1.DataI) {
+         var n = data.int;
+-        return (n < 0 ?
+-            new cbor_1.CborNegInt(n) :
+-            new cbor_1.CborUInt(n));
++        // beyond 64 bits: CBOR bignum (tag 2 / tag 3 with the magnitude bytes), as the ledger encodes them (gerolamo patch)
++        var LIMIT = BigInt("18446744073709551616");
++        if (n >= BigInt(0))
++            return n < LIMIT ? new cbor_1.CborUInt(n) : new cbor_1.CborUInt(n, undefined, chunkedBytes(positiveIntegerToBytes(n)));
++        return n >= -LIMIT ? new cbor_1.CborNegInt(n) : new cbor_1.CborNegInt(n, undefined, chunkedBytes(positiveIntegerToBytes(-BigInt(1) - n)));
+     }
+     if (data instanceof DataB_1.DataB) {
+         var bytes = data.bytes;
+-        // definite length only if length <= 64
+-        if (bytes.length <= 64)
+-            return new cbor_1.CborBytes(bytes);
+-        var ptr = 64;
+-        var fst = Uint8Array.prototype.slice.call(bytes, 0, ptr);
+-        var chunks = [];
+-        var chunkSize = 0;
+-        var chunkEnd = 0;
+-        while (ptr < bytes.length) {
+-            chunkSize = Math.min(64, bytes.length - ptr);
+-            chunkEnd = ptr + chunkSize;
+-            chunks.push(Uint8Array.prototype.slice.call(bytes, ptr, chunkEnd));
+-            ptr = chunkEnd;
+-        }
+-        // indefinite length bytes
+-        return Array.isArray(chunks) && chunks.length > 0 ?
+-            new cbor_1.CborBytes(__spreadArray([fst], __read(chunks), false).map(function (chunk) { return new cbor_1.CborBytes(chunk); })) :
+-            new cbor_1.CborBytes(fst);
++        // definite up to 64 bytes, else indefinite-length 64-byte chunks (`5f 5840 … ff`), as Plutus encodes them.
++        return chunkedBytes(bytes);
+     }
+     throw new Error("'dataToCborObj' did not match any possible Data constructor");
+ }
+ exports.dataToCborObj = dataToCborObj;
++/** Bytes as Plutus serialises them: definite up to 64 bytes, else indefinite-length 64-byte chunks (also for bignum magnitudes). */
++function chunkedBytes(bytes) {
++    if (bytes.length <= 64)
++        return new cbor_1.CborBytes(bytes);
++    var chunks = [];
++    for (var ptr = 0; ptr < bytes.length; ptr += 64) {
++        chunks.push(new cbor_1.CborBytes(Uint8Array.prototype.slice.call(bytes, ptr, Math.min(bytes.length, ptr + 64))));
++    }
++    return new cbor_1.CborBytes(chunks);
++}
++function positiveIntegerToBytes(n) {
++    var hex = n.toString(16);
++    if ((hex.length % 2) === 1)
++        hex = "0" + hex;
++    return (0, require("@harmoniclabs/uint8array-utils").fromHex)(hex);
++}
+ /**
+  * CBOR of `data`: the exact bytes it was decoded from when it came from
+  * `dataFromCbor` / `dataFromCborObj` (see `cborRef`), the canonical

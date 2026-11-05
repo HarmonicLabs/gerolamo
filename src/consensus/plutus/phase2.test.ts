@@ -117,7 +117,7 @@ describe("Plutus Data codec", () => {
     test("serialiseData equals plutus-data's (patched to the ledger's encoding) and round-trips", () => {
         for (const d of samples) {
             const ours = encodeData(fromLibData(d));
-            expect(Buffer.from(ours).toString("hex")).toBe(Buffer.from(dataToCbor(d).toBuffer()).toString("hex"));
+            expect(Buffer.from(ours).toString("hex")).toBe(Buffer.from(dataToCbor(d)).toString("hex"));
             expect(Buffer.from(encodeData(decodeData(ours))).toString("hex")).toBe(Buffer.from(ours).toString("hex"));
         }
     });
@@ -146,7 +146,7 @@ describe("script contexts for Conway governance and the V1/V2 translation limits
     ]);
     const wits = new CborMap([{ k: u(5), v: new CborMap([{ k: new CborArray([u(4), u(0)]), v: new CborArray([u(0), new CborArray([u(1000), u(1000)])]) }, { k: new CborArray([u(5), u(0)]), v: new CborArray([u(0), new CborArray([u(1000), u(1000)])]) }]) }]);
     const resolved = new Map([[`${"01".repeat(32)}:0`, { ref: "", address: "addr_test1vr6lx0dk534vvv93js4n0qnqs0y9mkxtursdwc7ed7szeqgur3u54", value: new Map([["lovelace", 5_000_000n]]), referenceScriptHash: null, hasDatum: false }]]) as any;
-    const ctx = new TxContext({ era: 7, pv: 10, bodyBytes: Cbor.encode(body).toBuffer(), witnessSetBytes: Cbor.encode(wits).toBuffer(), resolved, slotToPosixMs: (s: bigint) => s * 1000n });
+    const ctx = new TxContext({ era: 7, pv: 10, bodyBytes: Cbor.encode(body), witnessSetBytes: Cbor.encode(wits), resolved, slotToPosixMs: (s: bigint) => s * 1000n });
 
     test("voting and proposing redeemers resolve to the DRep script and the guardrail policy", () => {
         const vote = ctx.purposeOf({ tag: 4, index: 0 })!;
@@ -183,8 +183,8 @@ describe("script contexts for Conway governance and the V1/V2 translation limits
         expect(() => ctx.purposeData(ctx.purposeOf({ tag: 4, index: 0 })!, 2)).toThrow(/PlutusPurposeNotSupported/);
     });
     test("V1/V2 contexts reject Conway certificates but keep the deposit forms of (un)registration", () => {
-        const certBody = (cert: any) => Cbor.encode(new CborMap([{ k: u(0), v: new CborArray([]) }, { k: u(1), v: new CborArray([]) }, { k: u(2), v: u(1) }, { k: u(4), v: new CborArray([cert]) }])).toBuffer();
-        const w0 = Cbor.encode(new CborMap([])).toBuffer();
+        const certBody = (cert: any) => Cbor.encode(new CborMap([{ k: u(0), v: new CborArray([]) }, { k: u(1), v: new CborArray([]) }, { k: u(2), v: u(1) }, { k: u(4), v: new CborArray([cert]) }]));
+        const w0 = Cbor.encode(new CborMap([]));
         const regDeposit = new CborArray([u(7), new CborArray([u(1), h(28, 5)]), u(2000000)]);
         const voteDeleg = new CborArray([u(9), new CborArray([u(1), h(28, 5)]), new CborArray([u(2)])]);
         const c1 = new TxContext({ era: 7, pv: 10, bodyBytes: certBody(regDeposit), witnessSetBytes: w0, resolved: new Map(), slotToPosixMs: (s: bigint) => s });
@@ -202,8 +202,8 @@ describe("script contexts for Conway governance and the V1/V2 translation limits
         const b = Cbor.encode(new CborMap([{ k: u(0), v: new CborArray([]) }, { k: u(1), v: new CborArray([]) }, { k: u(2), v: u(1) }, { k: u(5), v: new CborMap([
             { k: new CborBytes(Uint8Array.from([0xe0, ...new Uint8Array(28).fill(0x01)])), v: u(1) },
             { k: new CborBytes(Uint8Array.from([0xf0, ...new Uint8Array(28).fill(0x09)])), v: u(2) },
-        ]) }])).toBuffer();
-        const c = new TxContext({ era: 7, pv: 10, bodyBytes: b, witnessSetBytes: Cbor.encode(new CborMap([])).toBuffer(), resolved: new Map(), slotToPosixMs: (s: bigint) => s });
+        ]) }]));
+        const c = new TxContext({ era: 7, pv: 10, bodyBytes: b, witnessSetBytes: Cbor.encode(new CborMap([])), resolved: new Map(), slotToPosixMs: (s: bigint) => s });
         const w = c.purposeOf({ tag: 3, index: 0 })!;
         expect(c.scriptHashOf(w)).toBe("09".repeat(28)); // redeemer 3:0 points at the script credential
     });

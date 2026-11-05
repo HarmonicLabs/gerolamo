@@ -9,7 +9,7 @@ import vector from "../conformance/__vectors__/consensus/intersect_origin_one_ro
 const rollForward = (header: Uint8Array) => Cbor.encode(new CborArray([
     new CborUInt(2), new CborArray([new CborUInt(6), new CborTag(24, new CborBytes(header))]),
     new CborArray([new CborArray([new CborUInt(3), new CborBytes(new Uint8Array(32))]), new CborUInt(1)]),
-])).toBuffer();
+]));
 
 describe("headerParser: Conway header with a null prev_hash (bug 402)", () => {
     // block 0 of the captured devnet (ouroboros-mock intersect_origin_one_rollforward): the first

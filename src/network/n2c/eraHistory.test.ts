@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Cbor } from "@harmoniclabs/cbor";
 import { encodeUtcTime, eraSummaries, networkFromMagic } from "./eraHistory";
 
-const hex = (o: any) => Buffer.from(Cbor.encode(o).toBuffer()).toString("hex");
+const hex = (o: any) => Buffer.from(Cbor.encode(o)).toString("hex");
 
 describe("node-to-client era history", () => {
     test("system start matches the reference node's encoding", () => {
@@ -23,7 +23,7 @@ describe("node-to-client era history", () => {
 });
 
 test("preview: Conway starts at epoch 646 and the last era ends at the horizon after the tip's epoch (relay capture 2026-09-14)", () => {
-    const hex = Buffer.from(Cbor.encode(eraSummaries("preview", 6, 1420)).toBuffer()).toString("hex");
+    const hex = Buffer.from(Cbor.encode(eraSummaries("preview", 6, 1420))).toString("hex");
     // Conway start bound: [55814400 s in picos, slot 55814400, epoch 646]; end bound epoch 1421 at slot 122774400
     expect(hex).toContain("190286"); // epoch 646
     expect(hex).toContain("19058d"); // epoch 1421

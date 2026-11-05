@@ -10,7 +10,7 @@
 import type { ResolvedUtxo } from "./resolvedUtxo";
 import { effectiveRedeemers } from "./alonzoRules";
 import { ledgerInputs, utxoRefOf } from "./resolvedUtxo";
-import { isDijkstraEra, dijkstraBatchValue, checkDijkstraTx, plutusLegacyMode, dijkstraRefScriptParams } from "./dijkstraRules";
+import { isDijkstraEra, dijkstraBatchValue, checkDijkstraTx, checkDijkstraGuarding, plutusLegacyMode, dijkstraRefScriptParams } from "./dijkstraRules";
 import { addAll, addUnit, alonzoMinUtxo, diffUnits, maryMinUtxo, unitsEqual, unitsOf, type UnitMap } from "./value";
 import { evalNativeScript, nativeScriptTreeOf } from "./nativeScript";
 import { parseStoredAddress, requiredWitnesses } from "./requiredSigners";
@@ -398,6 +398,8 @@ export function evaluateTxRules(tx: TxRuleInput): TxRuleOutcome {
         }
         // Plutus scripts: phase-2 execution is Phase 3 of the plan; presence is enforced here.
     }
+    // Dijkstra: guarding redeemers (tag 6) must point at a script guard; script guards need a redeemer.
+    if (isDijkstraEra(era)) checkDijkstraGuarding(sink, { body, redeemers: effectiveRedeemers((ws?.redeemers ?? []) as any[], era), providedScripts: provided });
 
     // 8a. Babbage UTXOW: Plutus witness scripts and output reference scripts deserialise (bug 400)
     checkScriptsWellFormed(sink, era, pv, witnessScripts, outs.map(({ bytes }) => bytes));

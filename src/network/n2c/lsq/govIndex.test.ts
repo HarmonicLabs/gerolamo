@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Cbor, CborArray, CborBytes, CborMap, CborText, CborUInt } from "@harmoniclabs/cbor";
+import { Cbor, CborArray, CborBytes, CborMap, CborSimple, CborText, CborUInt } from "@harmoniclabs/cbor";
 import { GovIndex, credKey } from "./govIndex";
 import { setEpochNetwork } from "../../../utils/epochFromSlotCalculations";
 
@@ -17,7 +17,7 @@ const cred = () => new CborArray([new CborUInt(0), new CborBytes(Buffer.from(DRE
 function block(cert: CborArray): Uint8Array {
     const body = new CborMap([{ k: new CborUInt(4), v: new CborArray([cert]) }]);
     const blk = new CborArray([new CborArray([]), new CborArray([body]), new CborArray([]), new CborMap([]), new CborArray([])]);
-    return Cbor.encode(new CborArray([new CborUInt(7), blk])).toBuffer();
+    return Cbor.encode(new CborArray([new CborUInt(7), blk]));
 }
 const reg = (url: string) => block(new CborArray([new CborUInt(16), cred(), new CborUInt(500_000_000), anchor(url)]));
 const upd = (url: string) => block(new CborArray([new CborUInt(18), cred(), anchor(url)]));
@@ -40,7 +40,30 @@ const dir = mkdtempSync(join(tmpdir(), "gov-index-"));
 beforeAll(() => { setEpochNetwork("preview"); });
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
+/** `[eraTag, [header, [block_tx, nil, nil]]]` with a top-level and a sub-transaction proposal. */
+function dijkstraBlock(eraTag: number, body: CborMap, extra: Uint8Array[] = []): Uint8Array {
+    const tx = new CborArray([body, new CborMap([]), new CborSimple(null), new CborSimple(true)]);
+    const blk = new CborArray([new CborArray([]), new CborArray([new CborArray([tx, ...extra.map((x) => Cbor.parse(x))]), new CborSimple(null), new CborSimple(null)])]);
+    return Cbor.encode(new CborArray([new CborUInt(eraTag), blk]));
+}
+function propBody(): CborMap {
+    return new CborMap([{ k: new CborUInt(20), v: new CborArray([new CborArray([new CborUInt(1), cred(), new CborArray([new CborUInt(6)])])]) }]);
+}
+function subTxBody(): CborMap {
+    return new CborMap([{ k: new CborUInt(20), v: new CborArray([new CborArray([new CborUInt(2), cred(), new CborArray([new CborUInt(6)])])]) }]);
+}
+
 describe("GovIndex facts at an immutable epoch boundary (bug 389)", () => {
+    test("a Dijkstra block records the top-level and sub-transaction proposals (bug 429)", async () => {
+        const top = propBody();
+        const sub = new CborArray([subTxBody(), new CborMap([]), new CborSimple(null)]);
+        const withSub = new CborMap([...((top as CborMap).map ?? []), { k: new CborUInt(23), v: new CborArray([sub]) }]);
+        const D = { slot: 1445 * 86400 + 100, hash: hashOf(4), bytes: dijkstraBlock(8, withSub) };
+        const ix = new GovIndex(fakeStore([D]), 0, join(dir, "cache3.json"));
+        const facts = await ix.at(Buffer.from(D.hash).toString("hex"), D.slot);
+        expect(facts.proposal.size).toBeGreaterThanOrEqual(2);
+    });
+
     test("the boundary block answers with the anchor as of the boundary, not the tip's", async () => {
         const ix = new GovIndex(fakeStore([A, B, C]), 0, join(dir, "cache.json"));
         const key = credKey(0, DREP);

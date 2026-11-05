@@ -36,9 +36,11 @@ import { effectiveRedeemers } from "../consensus/rules/alonzoRules";
 import { evalNativeScript, nativeScriptTreeOf } from "../consensus/rules/nativeScript";
 import { parseStoredAddress, requiredWitnesses } from "../consensus/rules/requiredSigners";
 import type { ResolvedUtxo } from "../consensus/rules/resolvedUtxo";
+import { utxoRefOf } from "../consensus/rules/resolvedUtxo";
 import { costModelArrays, languageViews, scriptLanguageOfCbor, witnessDatumBytes, witnessScriptHashes, witnessSlices, type PlutusLanguage } from "../consensus/rules/scriptDataHash";
 import { evaluateTxRules, tierRefScriptFee, type TxRuleParams } from "../consensus/rules/txRules";
 import { addAll, addUnit, unitsEqual, unitsOf, type UnitMap } from "../consensus/rules/value";
+import { subBodiesOf, subTransactionsOf, rewardMapEntries, dijkstraRefScriptParams } from "../consensus/rules/dijkstraRules";
 import { toFraction } from "../network/n2c/pparamsCbor";
 import { EPOCH_GEOMETRY, getEpochNetwork, type EpochGeometry } from "../utils/epochFromSlotCalculations";
 import {
@@ -79,6 +81,8 @@ export function forecastHorizonSlot(nextSlot: bigint, g: EpochGeometry): bigint 
 export interface MempoolLedgerState {
     /** Tip slot + 1: cardano-node ticks the mempool's ledger state to the successor slot. */
     slot: bigint;
+    /** Ledger era at the tip (7 Conway, 8 Dijkstra); the rules and the wire era index follow it. */
+    era?: number;
     params: EpochBodyParams;
     genesis: any;
     network: "mainnet" | "testnet";
@@ -209,7 +213,7 @@ export function refScriptSize(scriptCborHex: string): number {
         const lang = arr.array[0] instanceof CborUInt ? Number((arr.array[0] as CborUInt).num) : -1;
         const payload = arr.array[1];
         if (lang >= 1 && payload instanceof CborBytes) return payload.bytes.length;
-        if (lang === 0 && payload) return Cbor.encode(payload).toBuffer().length;
+        if (lang === 0 && payload) return Cbor.encode(payload).length;
         return bytes.length;
     } catch {
         return scriptCborHex.length / 2;
@@ -219,7 +223,7 @@ export function refScriptSize(scriptCborHex: string): number {
 /** Non-distinct reference-script bytes over inputs ∪ reference inputs (a TxIn in both counts once). */
 export function txRefScriptBytes(tx: MempoolTx, resolved: Map<string, ResolvedUtxo>): number {
     let total = 0;
-    for (const r of new Set([...tx.refInputs, ...tx.inputs])) {
+    for (const r of new Set([...(tx.refInputs ?? []), ...(tx.inputs ?? [])])) {
         const u = resolved.get(r);
         if (u?.referenceScriptCbor) total += refScriptSize(u.referenceScriptCbor);
     }
@@ -291,7 +295,7 @@ function scriptsProvided(tx: MempoolTx, resolved: Map<string, ResolvedUtxo>): Sc
     const witness: ScriptsProvided["witness"] = new Map();
     for (const [h, w] of witnessScriptHashes(tx.witnessSetBytes)) {
         let native: any = null;
-        if (w.kind === "native") native = ((tx.witnessSet?.nativeScripts ?? []) as any[]).find((n) => hexOf(n.hash) === h) ?? (() => { try { return Script.fromCbor(Cbor.encode(new CborArray([new CborUInt(0), Cbor.parse(w.bytes)])).toBuffer()); } catch { return null; } })();
+        if (w.kind === "native") native = ((tx.witnessSet?.nativeScripts ?? []) as any[]).find((n) => hexOf(n.hash) === h) ?? (() => { try { return Script.fromCbor(Cbor.encode(new CborArray([new CborUInt(0), Cbor.parse(w.bytes)]))); } catch { return null; } })();
         witness.set(h, { kind: w.kind, language: w.language, native });
     }
     const refs: ScriptsProvided["refs"] = new Map();
@@ -388,6 +392,7 @@ function metadataValid(aux: Uint8Array): boolean {
 export function evaluateMempoolPhase1(tx: MempoolTx, state: MempoolLedgerState, look: MempoolLookups, wits: WitnessVerdict): MempoolRuleOutcome {
     const reasons: string[] = [];
     const out: MempoolRuleOutcome = { failures: [], reasons, reports: [], runsPlutus: false, unmodelled: [], structuredOnly: 0 };
+    if ((state.era ?? 7) >= 8) return evaluateDijkstraMempoolPhase1(tx, state, look, wits);
     const { resolved } = look;
     const raw = state.params.raw ?? {};
     const p = ruleParams(state.params, state.genesis, 7, state.network);
@@ -622,7 +627,7 @@ export function evaluateMempoolPhase1(tx: MempoolTx, state: MempoolLedgerState, 
         const tooBig: Array<{ size: number; max: number; out: TxOutParts }> = [];
         for (const s of sized) {
             const parts = txOutPartsFromBytes(s);
-            const vs = Cbor.encode(valueCborLite(parts.value)).toBuffer().length;
+            const vs = Cbor.encode(valueCborLite(parts.value)).length;
             if (vs > maxVal) tooBig.push({ size: vs, max: maxVal, out: parts });
         }
         if (tooBig.length) { utxo.fail(UtxoF.outputTooBig(tooBig)); reasons.push("output value too big"); }
@@ -665,6 +670,59 @@ export function evaluateMempoolPhase1(tx: MempoolTx, state: MempoolLedgerState, 
     // is_valid = false too: the ledger then requires the scripts to fail, and with no script at all
     // the (vacuous) evaluation passes, `ValidationTagMismatch PassedUnexpectedly` (bug 403)
     out.runsPlutus = !mempool.failing && (redeemers.length > 0 || !tx.isValid);
+    return out;
+}
+
+/**
+ * Dijkstra (era 8) mempool phase 1: the block rules (`evaluateTxRules`, era 8) judge the whole
+ * batch with the sub-transactions; the mempool measure is the same as Conway's. A block-rule
+ * failure is carried as a MEMPOOL text, as in the Conway cross-check. SUBLEDGER scripts of the
+ * sub-transactions and the guard redeemer pointers are the block rules' reports (bug 428/432).
+ */
+export function evaluateDijkstraMempoolPhase1(tx: MempoolTx, state: MempoolLedgerState, look: MempoolLookups, wits: WitnessVerdict): MempoolRuleOutcome {
+    const reasons: string[] = [];
+    const out: MempoolRuleOutcome = { failures: [], reasons, reports: [], runsPlutus: false, unmodelled: [], structuredOnly: 0 };
+    const resolved = look.resolved;
+    const raw = state.params.raw ?? {};
+    const era = 8;
+    const body = tx.body;
+    const subs = subBodiesOf(body);
+
+    const measure = mempoolMeasureFailure(tx, resolved, state.params);
+    if (measure) { out.failures = [measure.failure]; reasons.push(measure.reason); return out; }
+
+    // MEMPOOL: the whole batch's inputs (top-level and sub-transactions)
+    const allInputs = [...new Set([...(tx.inputs ?? []), ...subs.flatMap((sb) => (((sb?.inputs ?? []) as any[]).map((i) => utxoRefOf(i))).filter((r): r is string => !!r))])];
+    if (!allInputs.some((r) => resolved.has(r))) {
+        out.failures = [LedgerF.mempoolFailure(ALL_INPUTS_SPENT)];
+        reasons.push("all inputs are spent (already included?)");
+        return out;
+    }
+
+    // The block rules (rules/txRules.ts, era 8): Dijkstra UTXO batch value, guards, direct
+    // deposits, balance intervals, partial withdrawals, reference-script parameters.
+    const p = ruleParams(state.params, state.genesis, era, state.network);
+    const rules = evaluateTxRules({
+        era, body, witnessSet: tx.witnessSet, slot: state.slot, resolved,
+        provenKeys: wits.provenKeys, provenRoots: wits.provenRoots,
+        isPoolRegistered: (h) => look.pools.has(h.toLowerCase()), params: p,
+        txSizeBytes: tx.size, auxDataBytes: tx.auxBytes,
+        rewardBalances: look.rewardBalances, exactness: look.exactness,
+        stakeRegistered: (k) => (look.stake ? look.stake.registered.has(k) : null),
+        refScriptBytes: txRefScriptBytes(tx, resolved),
+        isValid: true,
+    });
+    out.reports.push(...rules.reports);
+    if (rules.failures.length) {
+        out.unmodelled = rules.failures.slice();
+        out.failures = [LedgerF.mempoolFailure(`Gerolamo Dijkstra rules: ${rules.failures.join("; ")}`)];
+        reasons.push(...rules.failures);
+    }
+    if (tx.subTransactions.length) out.reports.push(`${tx.subTransactions.length} sub-transaction(s): SUBLEDGER script and guard redeemer rules not enforced in the mempool (bug 428)`);
+    out.runsPlutus = !rules.failures.length && (
+        effectiveRedeemers((tx.witnessSet?.redeemers ?? []) as any[], era).length > 0 ||
+        subs.some((sb) => (((sb?.redeemers ?? []) as any[]).length > 0))
+    );
     return out;
 }
 

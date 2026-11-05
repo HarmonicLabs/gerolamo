@@ -90,7 +90,7 @@ function resolveRef(ref: string): ResolvedUtxo | null {
     if (parts.scriptRefCbor) {
         const sc = Cbor.parse(parts.scriptRefCbor) as CborArray;
         const lang = Number((sc.array[0] as CborUInt).num);
-        const payload = lang === 0 ? Cbor.encode(sc.array[1]!).toBuffer() : (sc.array[1] as any).bytes as Uint8Array;
+        const payload = lang === 0 ? Cbor.encode(sc.array[1]!) : (sc.array[1] as any).bytes as Uint8Array;
         const pre = new Uint8Array(1 + payload.length); pre[0] = lang; pre.set(payload, 1);
         referenceScriptHash = toHex(blake2b_224(pre));
     }

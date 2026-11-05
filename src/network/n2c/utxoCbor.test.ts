@@ -25,7 +25,7 @@ describe("utxoCbor", () => {
             assets: { "": { "": "1176630" }, "4f751c2d1a0b470f01d58d13c64fce0d6ac4a7b879f90897841763ba": { "5354414b494e475f4d414e414745525f4e4654": "1" } },
             inline_datum: "d8799f00d8799fd8799f00ffffff", reference_script_cbor: "82025820" + "00".repeat(32),
         })!;
-        const back = Cbor.parse(Cbor.encode(out).toBuffer()) as CborMap;
+        const back = Cbor.parse(Cbor.encode(out)) as CborMap;
         expect(back.map.length).toBe(4);
         const value = back.map[1]!.v as CborArray;
         expect((value.array[0] as CborUInt).num).toBe(1176630n);

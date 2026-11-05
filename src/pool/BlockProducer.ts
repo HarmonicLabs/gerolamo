@@ -22,6 +22,7 @@ import { readEpochParamsRaw } from "../consensus/epochParams";
 import { epochForSlot, epochLengthSlots, firstSlotOfEpoch, type EpochNetwork } from "../utils/epochFromSlotCalculations";
 import { logger } from "../utils/logger";
 import { assembleBody, splitTx, type TxParts } from "./bodyAssembly";
+import { parseDijkstraMempoolTx } from "../mempool/mempoolTx";
 import { EMPTY_BODY, forgeBlock, type BodySegments } from "./forge";
 import {
     checkOperationalCert, evolveKesTo, kesEvolution, kesKeyFromAgent, kesPeriodOfSlot, kesProbe, loadColdVerificationKey, loadKesSigningKey, loadVrfSigningKey, poolIdOf, readOperationalCert, vrfKeyHashOf, zeroise,
@@ -628,9 +629,10 @@ export class BlockProducer {
         // what cannot be in this block (expired, spent inputs; at 08:44 UTC 2026-09-12 an
         // unvalidated mempool held 69 transactions of which most were stale).
         const validated = !!this.node.mempoolSnapshot;
-        // Dijkstra (era 8): the mempool still validates Conway transactions only, so a Dijkstra block is
-        // forged empty until the mempool learns the era (bug 432, open)
-        const candidates = this.node.era >= 8 ? [] : validated ? await this.node.mempoolSnapshot!(slot) : await this.node.mempoolTxs();
+        // Dijkstra (era 8): the mempool now validates the era-8 form (bug 432); a snapshot entry is
+        // the canonical block transaction. The unvalidated shared mempool holds mempool-form bytes,
+        // so those are converted before splitTx.
+        const candidates = validated ? await this.node.mempoolSnapshot!(slot) : await this.node.mempoolTxs();
         const stale = new Set<string>();
         if (!validated && this.node.txSanity && candidates.length) {
             try { for (const h of await this.node.txSanity(candidates, slot)) stale.add(Buffer.from(h).toString("hex")); }
@@ -638,7 +640,14 @@ export class BlockProducer {
         }
         for (const t of candidates) {
             if (stale.has(Buffer.from(t.hash).toString("hex"))) continue;
-            try { txs.push(splitTx(t.hash, t.bytes)); } catch { /* malformed: leave it, the mempool owner drops it */ }
+            try {
+                let bytes = t.bytes, hash = t.hash;
+                if (!validated && this.node.era >= 8) {
+                    const parsed = parseDijkstraMempoolTx(bytes);
+                    bytes = parsed.blockBytes; hash = parsed.blockTxIdBytes;
+                }
+                txs.push(splitTx(hash, bytes, this.node.era));
+            } catch { /* malformed: leave it, the mempool owner drops it */ }
         }
         if (stale.size) { logger.warn(`Block producer: ${stale.size} stale transaction(s) left out of slot ${slot} (${txs.length} candidates left)`); this.node.dropFromMempool(candidates.filter((t) => stale.has(Buffer.from(t.hash).toString("hex"))).map((t) => t.hash)).catch(() => undefined); }
         // Our rules name the transactions they reject ("tx[i]: …"): drop those and retry within a

@@ -15,7 +15,7 @@ describe("witness datums wrapped in the Conway set tag", () => {
         if (root.array[0] instanceof CborUInt) root = root.array[1];
         const ws = root.array[2].array[1];
         const ref: any = ws.subCborRef ?? ws.cborRef;
-        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws).toBuffer();
+        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws);
         expect(wsBytes.length).toBeGreaterThan(0);
         const datums = witnessDatumBytes(wsBytes);
         expect(datums).not.toBeNull();
@@ -31,7 +31,7 @@ describe("witness datums wrapped in the Conway set tag", () => {
         if (root.array[0] instanceof CborUInt) root = root.array[1];
         const ws = root.array[2].array[1];
         const ref: any = ws.subCborRef ?? ws.cborRef;
-        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws).toBuffer();
+        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws);
         const scripts = witnessScriptHashes(wsBytes);
         const v3 = scripts.get("fbf4d12e6d5a0c1382276b6fe3be09217c5652e9cec2d28be51ff2ef");
         expect(v3?.kind).toBe("plutus");

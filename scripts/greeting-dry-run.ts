@@ -45,7 +45,7 @@ const md = aux?.metadata ?? aux?.metadatum ?? aux;
 const cbor = Cbor.parse(bytes) as any;
 const auxRaw = cbor.array?.[3];
 const { blake2b_256 } = await import("@harmoniclabs/crypto");
-const auxBytes = auxRaw ? Cbor.encode(auxRaw).toBuffer() : null;
+const auxBytes = auxRaw ? Cbor.encode(auxRaw) : null;
 const auxHash = auxBytes ? Buffer.from(blake2b_256(auxBytes)).toString("hex") : null;
 const bodyHashHex = body.auxDataHash ? Buffer.from(body.auxDataHash.toBuffer ? body.auxDataHash.toBuffer() : body.auxDataHash).toString("hex") : null;
 console.log("aux data hash matches body:", auxHash && bodyHashHex ? (auxHash === bodyHashHex ? "YES" : "NO " + auxHash.slice(0, 16)) : "n/a");

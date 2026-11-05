@@ -58,10 +58,10 @@ export async function openN2c(sockPath: string, magic: number, versions: number[
         const done = (b: Uint8Array) => { clearTimeout(timer); resolve(b); };
         waiters.push({ proto, resolve: done });
     });
-    send(0, Cbor.encode(new CborArray([new CborUInt(0), new CborMap(versions.map((v) => ({ k: new CborUInt(0x8000 | v), v: new CborArray([new CborUInt(magic), new CborSimple(false)]) })))])).toBuffer());
+    send(0, Cbor.encode(new CborArray([new CborUInt(0), new CborMap(versions.map((v) => ({ k: new CborUInt(0x8000 | v), v: new CborArray([new CborUInt(magic), new CborSimple(false)]) })))])));
     const hs = Cbor.parse(await recv(0)) as CborArray;
     const tag = Number((hs.array[0] as CborUInt).num);
-    if (tag !== 1) throw new Error(`handshake refused: ${Buffer.from(Cbor.encode(hs).toBuffer()).toString("hex")}`);
+    if (tag !== 1) throw new Error(`handshake refused: ${Buffer.from(Cbor.encode(hs)).toString("hex")}`);
     const version = Number((hs.array[1] as CborUInt).num) & 0x7fff;
     return { version, send, recv, close: () => { try { sock.end(); } catch { /* */ } } };
 }

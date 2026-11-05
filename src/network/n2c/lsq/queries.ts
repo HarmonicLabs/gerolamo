@@ -70,7 +70,7 @@ const wCred = (w: CborWriter, c: Cred) => { w.array(2).uint(c.type).hex(c.hash);
 const wDRep = (w: CborWriter, d: DRepId) => { if (d.type === 2 || d.type === 3) w.array(1).uint(d.type); else w.array(2).uint(d.type).hex(d.hash!); };
 const wActionId = (w: CborWriter, id: string) => { const i = id.indexOf(":"); w.array(2).hex(id.slice(0, i)).uint(Number(id.slice(i + 1))); };
 const actionIdSortKey = (id: string) => { const i = id.indexOf(":"); return id.slice(0, i) + Number(id.slice(i + 1)).toString(16).padStart(4, "0"); };
-const toBytes = (o: CborObj) => Cbor.encode(o).toBuffer();
+const toBytes = (o: CborObj) => Cbor.encode(o);
 
 // ---------------------------------------------------------------- context
 
@@ -430,13 +430,15 @@ const REWARD_PROVENANCE_CONWAY = Uint8Array.from(Buffer.from("9000a0000000000000
  */
 export function normalizePoolParams(raw: Uint8Array): Uint8Array {
     try {
-        if (raw[0] !== 0x89) return raw; // array(9)
+        // 9 fields in Conway, 10 in Dijkstra (the optional `bls_key / nil` after the VRF key hash).
+        const nFields = raw[0] === 0x89 ? 9 : raw[0] === 0x8a ? 10 : -1;
+        if (nFields < 0) return raw;
         const starts: number[] = [];
         let p = 1;
-        for (let i = 0; i < 9; i++) { starts.push(p); p += cborItemLength(raw, p); }
-        const item = (i: number) => raw.subarray(starts[i]!, i < 8 ? starts[i + 1]! : p);
-        const w = new CborWriter(raw.length + 16).array(9);
-        for (let i = 0; i < 9; i++) {
+        for (let i = 0; i < nFields; i++) { starts.push(p); p += cborItemLength(raw, p); }
+        const item = (i: number) => raw.subarray(starts[i]!, i < nFields - 1 ? starts[i + 1]! : p);
+        const w = new CborWriter(raw.length + 16).array(nFields);
+        for (let i = 0; i < nFields; i++) {
             if (i === 4) {
                 const m = Cbor.parse(item(4));
                 const nd = m instanceof CborTag && m.data instanceof CborArray ? m.data.array.map((x) => (x instanceof CborUInt ? BigInt(x.num) : -1n)) : [];

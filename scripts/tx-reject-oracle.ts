@@ -35,7 +35,7 @@ const c = await openN2c(SOCK, magic);
 const view = await lsqLedgerView(c, magic === 764824073 ? "mainnet" : "testnet", magic === 2 ? "preview" : magic === 1 ? "preprod" : "mainnet");
 
 async function utxosAt(address: string): Promise<Array<{ ref: string; lovelace: bigint; adaOnly: boolean; inline: boolean }>> {
-    c.send(7, Cbor.encode(new CborArray([U(3), new CborArray([U(0), new CborArray([U(0), new CborArray([U(6), new CborArray([U(6), new CborTag(258, new CborArray([addrBytes(address)]))])])])])])).toBuffer());
+    c.send(7, Cbor.encode(new CborArray([U(3), new CborArray([U(0), new CborArray([U(0), new CborArray([U(6), new CborArray([U(6), new CborTag(258, new CborArray([addrBytes(address)]))])])])])])));
     const r = Cbor.parse(await c.recv(7)) as CborArray;
     const m = (r.array[1] as CborArray).array[0] as CborMap;
     return m.map.map(({ k, v }) => {
@@ -66,10 +66,10 @@ function body(o: { ins: Array<[string, number]>; outs: Array<[string, bigint]>; 
     m.sort((a, b) => Number(a.k.num - b.k.num));
     return new CborMap(m);
 }
-const txOf = (b: CborMap, wits: CborObj = new CborMap([]), aux: CborObj = new CborSimple(null)) => Cbor.encode(new CborArray([b, wits, new CborSimple(true), aux])).toBuffer();
+const txOf = (b: CborMap, wits: CborObj = new CborMap([]), aux: CborObj = new CborSimple(null)) => Cbor.encode(new CborArray([b, wits, new CborSimple(true), aux]));
 
 async function submitRef(tx: Uint8Array): Promise<Uint8Array> {
-    c.send(6, Cbor.encode(new CborArray([U(0), wrapHfcTx(6, tx)])).toBuffer());
+    c.send(6, Cbor.encode(new CborArray([U(0), wrapHfcTx(6, tx)])));
     return c.recv(6);
 }
 
@@ -102,7 +102,7 @@ const refScriptUtxo = byRef.get(REFSCRIPT_UTXO)?.referenceScriptCbor ? { ref: RE
 if (!tokenUtxo) console.log(`token UTxO ${TOKEN_UTXO} is spent or has no tokens: case skipped (pass --token-utxo)`);
 if (!refScriptUtxo) console.log(`reference-script UTxO ${REFSCRIPT_UTXO} is spent or has no script: case skipped (pass --refscript-utxo)`);
 const stakeKey = Buffer.from(Address.fromString(KEY_ADDR).toBuffer()).subarray(29, 57).toString("hex");
-const nativeSig = Cbor.encode(new CborArray([U(0), B("cd".repeat(28))])).toBuffer(); // sig <key nobody holds>
+const nativeSig = Cbor.encode(new CborArray([U(0), B("cd".repeat(28))])); // sig <key nobody holds>
 const nativePolicy = (() => { const pre = new Uint8Array(1 + nativeSig.length); pre[0] = 0; pre.set(nativeSig, 1); return hex(blake2b_224(pre)); })();
 const randomVkeyWitness = new CborMap([{ k: U(0), v: new CborTag(258, new CborArray([new CborArray([B("5a".repeat(32)), B("a5".repeat(64))])])) }]);
 cases.push(

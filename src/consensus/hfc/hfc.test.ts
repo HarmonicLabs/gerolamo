@@ -8,7 +8,7 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const hex = (o: any) => Buffer.from(Cbor.encode(o).toBuffer()).toString("hex");
+const hex = (o: any) => Buffer.from(Cbor.encode(o)).toString("hex");
 const PREVIEW = geometryFromGenesis("src/config/preview/shelley-genesis.json", "src/config/preview/byron-genesis.json");
 const MAINNET = geometryFromGenesis("src/config/mainnet/shelley-genesis.json", "src/config/mainnet/byron-genesis.json");
 // captured from the cardano-node 11.0.1 preview relay on 2026-09-29 (scripts/hfc-compare.ts --print): GetInterpreter at tip slot 123 992 605 (epoch 1435)

@@ -64,14 +64,14 @@ export function encodeHeaderBody(f: HeaderBodyFields): Uint8Array {
         new CborArray([new CborUInt(BigInt(f.protocolVersion.major)), new CborUInt(BigInt(f.protocolVersion.minor))]),
         ...(f.dijkstra ? [new CborSimple(false), new CborSimple(null)] : []),
     ]);
-    return Cbor.encode(body).toBuffer();
+    return Cbor.encode(body);
 }
 
 /** `[header_body, kes_signature]` with the body signed at the evolution the slot requires. */
 export function signHeader(bodyBytes: Uint8Array, kes: KesKey, evolution: number): Uint8Array {
     evolveKesTo(kes, evolution);
     const sig = kesSignAt(kes, bodyBytes);
-    return Cbor.encode(new CborArray([Cbor.parse(bodyBytes), new CborBytes(sig)])).toBuffer();
+    return Cbor.encode(new CborArray([Cbor.parse(bodyBytes), new CborBytes(sig)]));
 }
 
 /** Header hash as ChainSync / BlockFetch identify the block. */
@@ -187,9 +187,9 @@ export function forgeBlock(input: ForgeInput): ForgedBlock {
     const header = Cbor.parse(headerBytes);
     const blockFetchBytes = dijkstraBody
         // `[8, [header, block_body]]` built from raw bytes so the body hashes exactly as committed
-        ? rawConcat([new Uint8Array([0x82]), Cbor.encode(new CborUInt(BigInt(input.era))).toBuffer(), new Uint8Array([0x82]), headerBytes, dijkstraBody])
-        : Cbor.encode(new CborArray([new CborUInt(BigInt(input.era)), new CborArray([header, Cbor.parse(body.txBodies), Cbor.parse(body.witnessSets), Cbor.parse(body.auxiliaryData), Cbor.parse(body.invalidTransactions)])])).toBuffer();
-    const rollForwardData = Cbor.encode(new CborArray([new CborUInt(BigInt(input.era - 1)), new CborTag(24, new CborBytes(headerBytes))])).toBuffer();
+        ? rawConcat([new Uint8Array([0x82]), Cbor.encode(new CborUInt(BigInt(input.era))), new Uint8Array([0x82]), headerBytes, dijkstraBody])
+        : Cbor.encode(new CborArray([new CborUInt(BigInt(input.era)), new CborArray([header, Cbor.parse(body.txBodies), Cbor.parse(body.witnessSets), Cbor.parse(body.auxiliaryData), Cbor.parse(body.invalidTransactions)])]));
+    const rollForwardData = Cbor.encode(new CborArray([new CborUInt(BigInt(input.era - 1)), new CborTag(24, new CborBytes(headerBytes))]));
     return { headerBytes, headerHash: headerHash(headerBytes), blockFetchBytes, rollForwardData, vrf, kesEvolution: evolution };
 }
 

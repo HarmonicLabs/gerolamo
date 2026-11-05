@@ -25,10 +25,10 @@ async function fixtureTxs(): Promise<Uint8Array[]> {
     const wits = (Cbor.parseLazy(witsRaw!) as LazyCborArray).array;
     const aux = Cbor.parse(auxRaw!) as any;
     const auxByIx = new Map<number, Uint8Array>();
-    for (const e of aux.map) auxByIx.set(Number(e.k.num), Cbor.encode(e.v).toBuffer());
+    for (const e of aux.map) auxByIx.set(Number(e.k.num), Cbor.encode(e.v));
     const invalid = new Set(((Cbor.parse(invalidRaw!) as CborArray).array as any[]).map((x) => Number(x.num)));
     return bodies.map((b, i) => {
-        const parts = [b, wits[i]!, Cbor.encode(new CborSimple(!invalid.has(i))).toBuffer(), auxByIx.get(i) ?? new Uint8Array([0xf6])];
+        const parts = [b, wits[i]!, Cbor.encode(new CborSimple(!invalid.has(i))), auxByIx.get(i) ?? new Uint8Array([0xf6])];
         const out = new Uint8Array(1 + parts.reduce((n, p) => n + p.length, 0)); out[0] = 0x84;
         let o = 1; for (const p of parts) { out.set(p, o); o += p.length; }
         return out;

@@ -22,7 +22,7 @@ describe("Gerolamo ledger peer routes", () => {
                 expect(res!.headers.get("access-control-allow-origin")).toBe("*");
                 expect(res!.headers.get("X-Gerolamo-Api")).toBe(path === "tables" ? "ledger-tables" : "ledger-meta");
                 const bytes = new Uint8Array(await res!.arrayBuffer());
-                if (path === "tables") expect([...bytes]).toEqual(expected);
+                if (path === "tables") expect([...bytes]).toEqual([...expected]);
                 else expect(bytes.length).toBeGreaterThan(0);
             }
         } finally { restore(); }

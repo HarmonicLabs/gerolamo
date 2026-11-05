@@ -24,7 +24,9 @@ import { collectShelleyWitnesses } from "../consensus/rules/witnesses";
 import { runWitnessVerifyJob } from "../consensus/workers/witnessJob";
 import type { ValidationPool } from "../consensus/workers/ValidationPool";
 import { outputLike, advanceResolved } from "../consensus/rules/blockRulesPure";
+import { utxoRefOf } from "../consensus/rules/resolvedUtxo";
 import { rewardAccountKey } from "../consensus/rules/ledgerChecks";
+import { subBodiesOf, rewardMapEntries, rewardBytesKey } from "../consensus/rules/dijkstraRules";
 import { certStakeEffect, credKey, stakeCredentialsTouched, type CertView } from "../consensus/certificateRules";
 import { LedgerF, RuleRun, UtxoF, UtxosF, UtxowF } from "./applyTxErr";
 import { checkBlockGovernance, govRulesMode } from "../consensus/governance/govValidate";
@@ -89,7 +91,7 @@ export interface MempoolMeasures {
 export interface MempoolSnapshot {
     /** Slot the snapshot validates at (cardano-node `snapshotSlotNo`: tip + 1). */
     slot: bigint;
-    txs: Array<{ txId: string; txIdBytes: Uint8Array; bytes: Uint8Array; measureBytes: number; ticket: number }>;
+    txs: Array<{ txId: string; txIdBytes: Uint8Array; bytes: Uint8Array; era: number; measureBytes: number; ticket: number }>;
     measures: MempoolMeasures;
     /** Changes whenever the transaction list or the slot changes (LocalTxMonitor MsgAwaitAcquire). */
     version: number;
@@ -179,7 +181,7 @@ export class ValidatingMempool {
         if (this.tipSlot == null) { const t = await this.opts.view.tip().catch(() => null); if (t) this.tipSlot = t.slot; }
         return {
             slot: (this.tipSlot ?? -1n) + 1n,
-            txs: this.entries.map((e) => ({ txId: e.tx.txId, txIdBytes: e.tx.txIdBytes, bytes: e.tx.bytes, measureBytes: e.bytes, ticket: e.ticket })),
+            txs: this.entries.map((e) => ({ txId: e.tx.txId, txIdBytes: e.tx.txIdBytes, bytes: e.tx.bytes, era: e.tx.era, measureBytes: e.bytes, ticket: e.ticket })),
             measures: this.measures(),
             version: this.version,
         };
@@ -220,15 +222,15 @@ export class ValidatingMempool {
         // one long run of microtasks in front of the sync loop's I/O.
         await yieldNow();
         const t0 = performance.now();
-        let tx: MempoolTx;
-        try { tx = parseMempoolTx(bytes); }
-        catch (err) { return this.reject(null, [LedgerF.mempoolFailure(`transaction does not decode: ${err instanceof Error ? err.message : String(err)}`)], ["undecodable"], t0, source); }
         await this.ensureSynced();
         const tip = await this.opts.view.tip();
-        if (!tip) return this.reject(tx.txId, [LedgerF.mempoolFailure("node has no ledger tip yet")], ["no tip"], t0, source);
+        if (!tip) return this.reject(null, [LedgerF.mempoolFailure("node has no ledger tip yet")], ["no tip"], t0, source);
         const slot = tip.slot + 1n;
         const state = await this.opts.view.state(slot);
-        if (!state) return this.reject(tx.txId, [LedgerF.mempoolFailure("protocol parameters for the current epoch are not available")], ["no parameters"], t0, source);
+        if (!state) return this.reject(null, [LedgerF.mempoolFailure("protocol parameters for the current epoch are not available")], ["no parameters"], t0, source);
+        let tx: MempoolTx;
+        try { tx = parseMempoolTx(bytes, state.era); }
+        catch (err) { return this.reject(null, [LedgerF.mempoolFailure(`transaction does not decode: ${err instanceof Error ? err.message : String(err)}`)], ["undecodable"], t0, source); }
         this.lastState = state;
         const overlay = this.overlay();
         const look = await this.lookups(tx, overlay, this.entries);
@@ -307,6 +309,19 @@ export class ValidatingMempool {
     }
 
     private applyToOverlay(tx: MempoolTx, spent: Set<string>, created: Map<string, ResolvedUtxo>): void {
+        if ((tx.era ?? 7) >= 8) {
+            // Dijkstra: sub-transactions take effect first (BlockApplication order); their
+            // outputs are keyed by the sub body hash, the top-level ones by `hashTx`.
+            for (const st of tx.subTransactions) {
+                const sb = st?.body ?? st;
+                const subHash = String(sb?.hash?.toString?.() ?? "").toLowerCase();
+                for (const inp of ((sb?.inputs ?? []) as any[])) { const r = utxoRefOf(inp); if (r) { spent.add(r); created.delete(r); } }
+                if (subHash && subHash !== "undefined") advanceResolved(created, subHash, [], ((sb?.outputs ?? []) as any[]).map(outputLike));
+            }
+            for (const r of tx.inputs) { spent.add(r); created.delete(r); }
+            advanceResolved(created, tx.txId, [], ((tx.body.outputs ?? []) as any[]).map(outputLike));
+            return;
+        }
         if (!tx.isValid) {
             // A transaction marked invalid spends its collateral and creates only the collateral return,
             // at index |outputs| (Babbage `collOuts`); its inputs stay unspent (bug 531).
@@ -321,7 +336,13 @@ export class ValidatingMempool {
     }
 
     private async lookups(tx: MempoolTx, overlay: { spent: Set<string>; created: Map<string, ResolvedUtxo> }, before: readonly Entry[]): Promise<MempoolLookups> {
-        const refs = [...new Set([...tx.inputs, ...tx.collateral, ...tx.refInputs])];
+        const body = tx.body;
+        const subs = subBodiesOf(body);
+        const allBodies = [body, ...subs];
+        const subInputs = subs.flatMap((sb) => (((sb?.inputs ?? []) as any[]).map((i) => utxoRefOf(i)))).filter((r): r is string => !!r);
+        const subColl = subs.flatMap((sb) => (((sb?.collateralInputs ?? []) as any[]).map((i) => utxoRefOf(i)))).filter((r): r is string => !!r);
+        const subRefs = subs.flatMap((sb) => (((sb?.refInputs ?? []) as any[]).map((i) => utxoRefOf(i)))).filter((r): r is string => !!r);
+        const refs = [...new Set([...tx.inputs, ...tx.collateral, ...tx.refInputs, ...subInputs, ...subColl, ...subRefs])];
         const fromLedger = await this.opts.view.resolve(refs.filter((r) => !overlay.created.has(r)));
         const resolved = new Map<string, ResolvedUtxo>();
         for (const r of refs) {
@@ -329,36 +350,45 @@ export class ValidatingMempool {
             const u = overlay.created.get(r) ?? fromLedger.get(r);
             if (u) resolved.set(r, u);
         }
-        const body = tx.body;
-        const poolIds = ((body.certs ?? []) as any[]).filter((c) => Number(c.certType) === 3).map((c) => String(c.poolParams?.operator?.toString?.() ?? "").toLowerCase());
+        const poolIds = allBodies.flatMap((b) => (((b?.certs ?? []) as any[]).filter((c) => Number(c.certType) === 3).map((c) => String(c.poolParams?.operator?.toString?.() ?? "").toLowerCase()))).filter((p) => !!p);
         // typed keys ("01" + hash for a script account), as the block rules read them (bug 404: the bare
         // hash read a script account's balance from the key account of the same hash)
-        const wdCreds = ((body.withdrawals?.map ?? []) as any[]).map((w) => rewardAccountKey(w.rewardAccount)).filter(Boolean);
-        const certs: CertView[] = ((body.certs ?? []) as any[]).map((c) => ({
+        const wdCreds = allBodies.flatMap((b) => (((b?.withdrawals?.map ?? []) as any[]).map((w) => rewardAccountKey(w.rewardAccount)))).filter(Boolean);
+        // Dijkstra direct deposits and account balance intervals touch the same reward accounts.
+        for (const b of allBodies) for (const e of rewardMapEntries(b?.directDeposits)) if (e.key) wdCreds.push(e.key);
+        for (const b of allBodies) for (const list of [b?.accountBalanceIntervals, b?.startingAccountBalanceIntervals] as any[][]) for (const e of list ?? []) if (e?.rewardAccount instanceof Uint8Array) wdCreds.push(rewardBytesKey(e.rewardAccount));
+        const certs: CertView[] = allBodies.flatMap((b) => (((b?.certs ?? []) as any[]).map((c) => ({
             certType: Number(c.certType),
             credHex: c.stakeCredential ? String(c.stakeCredential.hash?.toString?.() ?? "").toLowerCase() || null : null,
             credType: c.stakeCredential ? (Number(c.stakeCredential.type) === 1 || c.stakeCredential.type === "script" ? 1 : 0) : null,
             poolHex: c.poolKeyHash ? String(c.poolKeyHash.toString()).toLowerCase() : null,
-        }));
+        }))));
         const stakeCreds = new Map<string, { hex: string; type: number }>();
         for (const c of stakeCredentialsTouched(certs)) stakeCreds.set(credKey(c.type, c.hex), c);
         for (const w of tx.withdrawals) stakeCreds.set(credKey(w.credType, w.credHex), { hex: w.credHex, type: w.credType });
         const [pools, rewardBalances, stake] = await Promise.all([
             this.opts.view.pools(poolIds),
-            this.opts.view.rewardBalances(wdCreds),
+            this.opts.view.rewardBalances([...new Set(wdCreds)]),
             stakeCreds.size ? this.opts.view.stake([...stakeCreds.values()]) : Promise.resolve(null),
         ]);
         // earlier mempool transactions' certificates change the registration state too
         if (stake) for (const e of before) if (e.tx.isValid) applyCertsToStake(e.tx, stake);
         // ... and their withdrawals drain the accounts (a later transaction must withdraw 0), as the
-        // block rules carry it from one transaction to the next (blockRulesPure `applyOverlay`)
+        // block rules carry it from one transaction to the next (blockRulesPure `applyOverlay`);
+        // Dijkstra withdrawals may be partial and direct deposits credit the account.
         const balances = rewardBalances ? new Map(rewardBalances) : undefined;
-        if (balances) for (const e of before) if (e.tx.isValid) for (const w of (e.tx.body.withdrawals?.map ?? []) as any[]) { const k = rewardAccountKey(w.rewardAccount); if (balances.has(k)) balances.set(k, 0n); }
+        if (balances) for (const e of before) if (e.tx.isValid) {
+            if ((e.tx.era ?? 7) >= 8) for (const b of [...subBodiesOf(e.tx.body), e.tx.body]) {
+                for (const w of rewardMapEntries(b?.withdrawals)) if (balances.has(w.key)) balances.set(w.key, balances.get(w.key)! - w.amount);
+                for (const d of rewardMapEntries(b?.directDeposits)) if (balances.has(d.key)) balances.set(d.key, balances.get(d.key)! + d.amount);
+            }
+            else for (const w of (e.tx.body.withdrawals?.map ?? []) as any[]) { const k = rewardAccountKey(w.rewardAccount); if (balances.has(k)) balances.set(k, 0n); }
+        }
         return { resolved, pools, rewardBalances: balances, stake, exactness: this.opts.view.exactness?.() };
     }
 
     private async verifyWitnesses(tx: MempoolTx): Promise<WitnessVerdict> {
-        const c = collectShelleyWitnesses(tx.txIdBytes, tx.witnessSet);
+        const c = collectShelleyWitnesses(tx.bodyHashBytes, tx.witnessSet);
         const ok = c.items.length === 0 ? [] : this.opts.pool ? (await this.opts.pool.verifyWitnesses({ kind: "witnesses", items: c.items })).ok : runWitnessVerifyJob({ kind: "witnesses", items: c.items }).ok;
         const v: WitnessVerdict = { provenKeys: new Set(), provenRoots: new Set(), allKeyHashes: new Set(), invalidVkeys: [] };
         // Shelley UTXOW `validateVerifiedWits`: the vkeys of failing vkey witnesses, then those of failing
@@ -377,7 +407,7 @@ export class ValidatingMempool {
 
     private async runPlutus(tx: MempoolTx, resolved: Map<string, ResolvedUtxo>, state: MempoolLedgerState): Promise<MempoolPlutusResult> {
         const job: MempoolPlutusJob = {
-            kind: "mempoolPlutus", tx: tx.bytes, bodyBytes: tx.bodyBytes, witnessSetBytes: tx.witnessSetBytes, markedInvalid: !tx.isValid,
+            kind: "mempoolPlutus", era: tx.era, tx: tx.bytes, bodyBytes: tx.bodyBytes, witnessSetBytes: tx.witnessSetBytes, markedInvalid: !tx.isValid,
             resolved, params: state.params, genesis: state.genesis, network: state.network, epochNetwork: this.opts.view.epochNetwork(),
         };
         try { return this.opts.pool ? await this.opts.pool.evaluateMempoolPlutus(job) : await runMempoolPlutusJob(job); }
@@ -479,7 +509,10 @@ export class ValidatingMempool {
                 if (e.phase2 === "failed" || e.phase2 === "unchecked" || [...e.tx.inputs, ...e.tx.refInputs].some((r) => skipped.has(r.slice(0, r.lastIndexOf(":"))))) { skipped.add(e.tx.txId); continue; }
                 if (bytes + e.bytes > maxBytes || mem + e.mem > maxMem || steps + e.steps > maxSteps || ref + e.refBytes > MAX_REF_SCRIPT_SIZE_PER_BLOCK) break;
                 bytes += e.bytes; mem += e.mem; steps += e.steps; ref += e.refBytes;
-                out.push({ hash: e.tx.txIdBytes, bytes: e.tx.bytes });
+                // Dijkstra forges the canonical block transaction; Conway submits the 4-element form as is.
+                out.push((e.tx.era ?? 7) >= 8
+                    ? { hash: e.tx.blockTxIdBytes, bytes: e.tx.blockBytes }
+                    : { hash: e.tx.txIdBytes, bytes: e.tx.bytes });
             }
             return out;
         });
@@ -507,7 +540,7 @@ export class ValidatingMempool {
 
 /** Registration effects of a transaction's certificates on a (registered, delegated) state. */
 function applyCertsToStake(tx: MempoolTx, stake: { registered: Set<string>; delegated: Map<string, string> }): void {
-    for (const c of (tx.body.certs ?? []) as any[]) {
+    for (const b of [...subBodiesOf(tx.body), tx.body]) for (const c of (b.certs ?? []) as any[]) {
         const cred = c.stakeCredential;
         if (!cred) continue;
         const fx = certStakeEffect(Number(c.certType));

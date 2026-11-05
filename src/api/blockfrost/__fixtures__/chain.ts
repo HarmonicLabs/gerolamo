@@ -36,7 +36,7 @@ export const a = (...xs: CborObj[]) => new CborArray(xs);
 export const m = (...kv: Array<[CborObj, CborObj]>) => new CborMap(kv.map(([k, v]) => ({ k, v })));
 export const tag = (n: number, d: CborObj) => new CborTag(n, d);
 export const nul = () => CborSimple.null;
-export const enc = (o: CborObj): Uint8Array => Cbor.encode(o).toBuffer();
+export const enc = (o: CborObj): Uint8Array => Cbor.encode(o);
 const fill = (byte: number, n: number) => new Uint8Array(n).fill(byte);
 const h28 = (byte: number) => hex(fill(byte, 28));
 

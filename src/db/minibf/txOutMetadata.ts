@@ -79,7 +79,7 @@ export function extractLedgerTxOutMetadata(output: unknown): MiniBfTxOutMetadata
         if (/^[0-9a-f]{64}$/i.test(asHex)) datumHash = asHex.toLowerCase();
         else {
             try {
-                inlineDatumCbor = toHex(typeof d.toCbor === "function" ? d.toCbor().toBuffer() : dataToCbor(d).toBuffer());
+                inlineDatumCbor = toHex(typeof d.toCbor === "function" ? d.toCbor().toBuffer() : dataToCbor(d));
             } catch {
                 inlineDatumCbor = null;
             }
@@ -143,7 +143,7 @@ export function scriptHashOfWrapped(wrapped: Uint8Array): string | null {
         const lang = Number((arr.array[0] as CborUInt).num);
         const body = arr.array[1];
         if (!body) return null;
-        const scriptBytes = lang === 0 ? Cbor.encode(body).toBuffer() : body instanceof CborBytes ? body.bytes : null;
+        const scriptBytes = lang === 0 ? Cbor.encode(body) : body instanceof CborBytes ? body.bytes : null;
         if (!scriptBytes) return null;
         const pre = new Uint8Array(1 + scriptBytes.length);
         pre[0] = lang;

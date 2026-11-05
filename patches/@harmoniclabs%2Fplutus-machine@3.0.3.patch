@@ -1,0 +1,219 @@
+diff --git a/node_modules/@harmoniclabs/plutus-machine/.bun-tag-dc78ef929c3d18b7 b/.bun-tag-dc78ef929c3d18b7
+new file mode 100644
+index 0000000000000000000000000000000000000000..e69de29bb2d1d6434b8b29ae775ad8c2e48c5391
+diff --git a/dist/BnCEK/BnCEK.js b/dist/BnCEK/BnCEK.js
+index 92765fe59b65c54bf7bf49f86a8ec395e771f0cf..6ef04cc42309b63760994913873e9469e6a58870 100644
+--- a/dist/BnCEK/BnCEK.js
++++ b/dist/BnCEK/BnCEK.js
+@@ -18,23 +18,29 @@ const readBit_1 = require("./impl/readBit.js");
+ const writeBit_1 = require("./impl/writeBit.js");
+ const bls12_381_1 = require("@noble/curves/bls12-381");
+ function intToSize(n) {
++    // Plutus `ExMemoryUsage Integer`: 0 → 1; otherwise integerLog2(|n|) `quot` 64 + 1 (64-bit words).
+     n = BigInt(n);
+     if (n === _0n)
+         return BigInt(1);
+-    // same as `intToSize( -n - BigInt( 1 ) )` but inlined
+     if (n < _0n)
+-        return ((0, bigint_utils_1.log2)((-n - BigInt(1)) << BigInt(1)) / BigInt(8)) + BigInt(1);
+-    return ((0, bigint_utils_1.log2)(n << BigInt(1)) / BigInt(8)) + BigInt(1);
++        n = -n;
++    return ((0, bigint_utils_1.log2)(n) / BigInt(64)) + BigInt(1);
+ }
+ function bsToSize(bs) {
+-    const len = bs.length;
+-    return len === 0 ?
+-        // TODO: Bug in cardano-node; to fix next hard fork
+-        BigInt(1) :
+-        BigInt(len);
++    // Plutus `ExMemoryUsage ByteString`: ((n - 1) `quot` 8) + 1 in 8-byte words; the empty
++    // string counts as 1 (quot truncates toward zero).
++    const len = ((bs instanceof Uint8Array) ? bs : bs.toBuffer()).length;
++    if (len === 0)
++        return BigInt(1);
++    return BigInt(Math.floor((len - 1) / 8) + 1);
+ }
+ function strToSize(str) {
+-    return bsToSize((0, uint8array_utils_1.fromUtf8)(str));
++    // Plutus `ExMemoryUsage Text`: memoryUsage (T.unpack text) — one unit per character (code
++    // point), not the byte/8 words of a bytestring (gerolamo patch: appendString / equalsString /
++    // encodeUtf8 were charged 1/8 per character; preview slot 15 926 694 ran 20 M cpu under).
++    let n = 0;
++    for (const _ of str) n++;
++    return BigInt(n);
+ }
+ ;
+ const BLS_G1_SIZE = BigInt(48);
+diff --git a/dist/Machine/BuiltinCosts/BuiltinCosts.js b/dist/Machine/BuiltinCosts/BuiltinCosts.js
+index 4f06ba2dbc6859793644a333c7d8dee3ea9264a3..731fdd3df767f65cd333c7a69ebc9a15789d9196 100644
+--- a/dist/Machine/BuiltinCosts/BuiltinCosts.js
++++ b/dist/Machine/BuiltinCosts/BuiltinCosts.js
+@@ -7,11 +7,11 @@ const cardano_costmodels_ts_1 = require("@harmoniclabs/cardano-costmodels-ts");
+ const obj_utils_1 = require("@harmoniclabs/obj-utils");
+ const assert_1 = require("../../utils/assert.js");
+ function costModelV1ToBuiltinCosts(costmdls) {
+-    return costModelV3ToBuiltinCosts((0, cardano_costmodels_ts_1.costModelV1ToFakeV3)({ ...costmdls }));
++    return legacyIntegerCosts((0, cardano_costmodels_ts_1.toCostModelV1)(costmdls), costModelV3ToBuiltinCosts((0, cardano_costmodels_ts_1.costModelV1ToFakeV3)({ ...costmdls })));
+ }
+ exports.costModelV1ToBuiltinCosts = costModelV1ToBuiltinCosts;
+ function costModelV2ToBuiltinCosts(costmdls) {
+-    return costModelV3ToBuiltinCosts((0, cardano_costmodels_ts_1.costModelV2ToFakeV3)({ ...costmdls }));
++    return legacyIntegerCosts((0, cardano_costmodels_ts_1.toCostModelV2)(costmdls), costModelV3ToBuiltinCosts((0, cardano_costmodels_ts_1.costModelV2ToFakeV3)({ ...costmdls })));
+ }
+ exports.costModelV2ToBuiltinCosts = costModelV2ToBuiltinCosts;
+ function costModelV3ToBuiltinCosts(costmdls) {
+@@ -44,7 +44,9 @@ function costModelV3ToBuiltinCosts(costmdls) {
+                 break;
+             case uplc_1.UPLCBuiltinTag.multiplyInteger:
+                 return readonly({
+-                    cpu: new costFunctions_1.Linear2InBothAdd(BigInt(costs["multiplyInteger-cpu-arguments-intercept"]), BigInt(costs["multiplyInteger-cpu-arguments-slope"])),
++                    // Plutus V3 (cost model C) costs the product of sizes; V1/V2 use added sizes,
++                    // see legacyIntegerCosts (gerolamo patch).
++                    cpu: new costFunctions_1.Linear2InBothMult(BigInt(costs["multiplyInteger-cpu-arguments-intercept"]), BigInt(costs["multiplyInteger-cpu-arguments-slope"])),
+                     mem: new costFunctions_1.Linear2InBothAdd(BigInt(costs["multiplyInteger-memory-arguments-intercept"]), BigInt(costs["multiplyInteger-memory-arguments-slope"]))
+                 });
+                 break;
+@@ -158,7 +160,8 @@ function costModelV3ToBuiltinCosts(costmdls) {
+                 break;
+             case uplc_1.UPLCBuiltinTag.verifyEd25519Signature:
+                 return readonly({
+-                    cpu: new costFunctions_1.Linear3InZ(BigInt(costs["verifyEd25519Signature-cpu-arguments-intercept"]), BigInt(costs["verifyEd25519Signature-cpu-arguments-slope"])),
++                    // linear in the message (second argument), every language (gerolamo patch: was the signature)
++                    cpu: new costFunctions_1.Linear3InY(BigInt(costs["verifyEd25519Signature-cpu-arguments-intercept"]), BigInt(costs["verifyEd25519Signature-cpu-arguments-slope"])),
+                     mem: new costFunctions_1.FixedCost(BigInt(costs["verifyEd25519Signature-memory-arguments"]))
+                 });
+                 break;
+@@ -584,6 +587,31 @@ function costModelV3ToBuiltinCosts(costmdls) {
+     });
+ }
+ exports.costModelV3ToBuiltinCosts = costModelV3ToBuiltinCosts;
++/**
++ * Plutus V1/V2 cost the integer builtins with older models than V3 (cost model C), and the
++ * fake-V3 conversion drops their division parameters in favour of V3 defaults. Given the
++ * language's own named parameters, return a lookup that serves the V1/V2 models for the
++ * four division builtins (constant above the diagonal, otherwise intercept + slope * x * y;
++ * memory max(minimum, x - y)) and defers to `base` for everything else.
++ */
++function legacyIntegerCosts(named, base) {
++    const overrides = {};
++    function ro(cpu, mem) {
++        const result = {};
++        (0, obj_utils_1.defineReadOnlyProperty)(result, "mem", mem);
++        (0, obj_utils_1.defineReadOnlyProperty)(result, "cpu", cpu);
++        return result;
++    }
++    const divs = [[ "divideInteger", uplc_1.UPLCBuiltinTag.divideInteger ], [ "quotientInteger", uplc_1.UPLCBuiltinTag.quotientInteger ], [ "remainderInteger", uplc_1.UPLCBuiltinTag.remainderInteger ], [ "modInteger", uplc_1.UPLCBuiltinTag.modInteger ]];
++    for (const [name, tag] of divs) {
++        if (named[name + "-cpu-arguments-model-arguments-intercept"] == null) continue;
++        overrides[tag] = ro(new costFunctions_1.XGtEqOrConst(BigInt(named[name + "-cpu-arguments-constant"]), new costFunctions_1.Linear2InBothMult(BigInt(named[name + "-cpu-arguments-model-arguments-intercept"]), BigInt(named[name + "-cpu-arguments-model-arguments-slope"]))), new costFunctions_1.Linear2InBothSub(BigInt(named[name + "-memory-arguments-intercept"]), BigInt(named[name + "-memory-arguments-slope"]), BigInt(named[name + "-memory-arguments-minimum"])));
++    }
++    return function (tag) {
++        return (0, obj_utils_1.hasOwn)(overrides, tag) ? overrides[tag] : base(tag);
++    };
++}
++exports.legacyIntegerCosts = legacyIntegerCosts;
+ function costModelV4ToBuiltinCosts(costmdls) {
+     const costs = { ...(0, cardano_costmodels_ts_1.toCostModelV4)(costmdls) };
+     (0, assert_1.assert)((0, cardano_costmodels_ts_1.isCostModelsV4)(costs), "invalid cost models passed");
+diff --git a/dist/Machine/BuiltinCosts/costFunctions.js b/dist/Machine/BuiltinCosts/costFunctions.js
+index 71fffb027727985fc1f5f5408ad5e452e4d06396..330b5c05aaa127ed84ba876e844c84e2c364c10d 100644
+--- a/dist/Machine/BuiltinCosts/costFunctions.js
++++ b/dist/Machine/BuiltinCosts/costFunctions.js
+@@ -206,7 +206,7 @@ class ConstMinOrQuadratic2InXY extends BaseDoubleQuadratic {
+         if (x < y)
+             return this.constant;
+         const { c00, c01, c02, c10, c11, c20, minimum } = this;
+-        const real = c00 + c10 * x + c01 * y + c20 * x * x + c11 * x * y + c02 * y;
++        const real = c00 + c10 * x + c01 * y + c20 * x * x + c11 * x * y + c02 * y * y;
+         return real < minimum ? minimum : real;
+     }
+     ;
+diff --git a/dist/Machine/Machine.js b/dist/Machine/Machine.js
+index ffb2222685a62d55f767e089aadff8863c896f8d..0f709e4ef4e3b76eb355c3d0258510cf7a8096ca 100644
+--- a/dist/Machine/Machine.js
++++ b/dist/Machine/Machine.js
+@@ -49,9 +49,18 @@ class Machine {
+             isV3 ? (0, cardano_costmodels_ts_1.costModelV3ToFakeV4)(costmodel) :
+                 isV2 ? (0, cardano_costmodels_ts_1.costModelV3ToFakeV4)((0, cardano_costmodels_ts_1.costModelV2ToFakeV3)(costmodel)) :
+                     (0, cardano_costmodels_ts_1.costModelV3ToFakeV4)((0, cardano_costmodels_ts_1.costModelV1ToFakeV3)(costmodel));
+-        this.machineCosts = (0, MachineCosts_1.costModelToMachineCosts)(this.builtinCosts);
++        // GEROLAMO PATCH: the legacy V1/V2 machine steps are the current protocol's 16000/100
++        // (the package's 23000/100 defaults are pre-protocol-9; the fake-V4 path would instead
++        // fill V3-only keys with `a_lot`). The shadow evaluator runs current networks.
++        this.machineCosts = isV4 || isV3 ?
++            (0, MachineCosts_1.costModelToMachineCosts)(this.builtinCosts) :
++            MachineCosts_1.defaultV3MachineCosts;
+         this.logs = [];
+-        this.builtinEvaluator = new BnCEK_1.BnCEK((0, BuiltinCosts_1.costModelV4ToBuiltinCosts)(this.builtinCosts), this.budget, this.logs);
++        this.builtinEvaluator = new BnCEK_1.BnCEK(
++            isV4 || isV3 ? (0, BuiltinCosts_1.costModelV4ToBuiltinCosts)(this.builtinCosts) :
++                isV2 ? (0, BuiltinCosts_1.costModelV2ToBuiltinCosts)(costmodel) :
++                    (0, BuiltinCosts_1.costModelV1ToBuiltinCosts)(costmodel),
++            this.budget, this.logs);
+         this.strictV3 = false;
+     }
+     resetBudget(newBudget = this.initialBudget) {
+@@ -81,9 +90,60 @@ class Machine {
+     eval(term) {
+         this.resetLogs();
+         const budgetBefore = this.budget.clone();
+-        const result = this.run(term);
+-        const budgetSpent = ExBudget_1.ExBudget.sub(budgetBefore, this.budget);
+-        return { result, budgetSpent, logs: this.logs };
++        // GEROLAMO PATCH: optional hard caps on the machine budget.
++        // `machine.maxBudget = { cpu, mem, deadlineMs, maxStepCpu }` makes evaluation stop as
++        // soon as a charge is applied (or before one that costs more than maxStepCpu).
++        const maxBudget = this.maxBudget;
++        const originalSub = this.budget.sub.bind(this.budget);
++        let inBuiltin = false;
++        const builtinEvaluator = this.builtinEvaluator;
++        const originalBuiltinBudget = builtinEvaluator?.machineBudget;
++        if (maxBudget) {
++            const maxCpu = BigInt(maxBudget.cpu);
++            const maxMem = BigInt(maxBudget.mem);
++            const deadline = typeof maxBudget.deadlineMs === "number" ? maxBudget.deadlineMs : 0;
++            const maxStep = maxBudget.maxStepCpu != null ? BigInt(maxBudget.maxStepCpu) : 0n;
++            this.budget.sub = function patchedSub(other) {
++                const stepCpu = BigInt(other.cpu || 0);
++                if (maxStep && inBuiltin && stepCpu > maxStep) {
++                    const err = new Error("single builtin step cost " + stepCpu.toString() + " exceeds the per-step limit " + maxStep.toString());
++                    err.timedOut = true;
++                    err.stepTooLarge = true;
++                    throw err;
++                }
++                originalSub(other);
++                if (deadline && Date.now() > deadline) {
++                    const err = new Error("evaluation wall-clock limit reached");
++                    err.timedOut = true;
++                    throw err;
++                }
++                if (this.cpu < maxCpu || this.mem < maxMem) {
++                    const err = new Error("execution budget exceeded");
++                    err.budgetExceeded = true;
++                    err.budgetSpent = { cpu: maxCpu - this.cpu, mem: maxMem - this.mem };
++                    throw err;
++                }
++            };
++            if (builtinEvaluator) {
++                // Only builtin charges go through the per-step cap; the machine's batched step
++                // charges (`spendUnbudgetedSteps`) are legitimately larger than maxStepCpu.
++                builtinEvaluator.machineBudget = {
++                    get cpu() { return this.budget.cpu; },
++                    get mem() { return this.budget.mem; },
++                    sub: (x) => { inBuiltin = true; try { this.budget.sub(x); } finally { inBuiltin = false; } },
++                    add: (x) => { inBuiltin = true; try { this.budget.add(x); } finally { inBuiltin = false; } },
++                };
++                builtinEvaluator.machineBudget.budget = this.budget;
++            }
++        }
++        try {
++            const result = this.run(term);
++            const budgetSpent = ExBudget_1.ExBudget.sub(budgetBefore, this.budget);
++            return { result, budgetSpent, logs: this.logs };
++        } finally {
++            this.budget.sub = originalSub;
++            if (builtinEvaluator && maxBudget) builtinEvaluator.machineBudget = originalBuiltinBudget;
++        }
+     }
+     run(term) {
+         this.spendBudget({ cpu: 100, mem: 100 }); // startup cost

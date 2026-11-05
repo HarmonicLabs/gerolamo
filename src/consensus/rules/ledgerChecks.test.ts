@@ -12,7 +12,7 @@ const TX = "ab".repeat(32);
 const inp = (i: number, id = TX) => ({ utxoRef: { id, index: i } });
 const KEY = "11".repeat(28), SCRIPT = "22".repeat(28);
 /** `[2, h'<n bytes>']` wrapper as the UTxO stores a PlutusV2 reference script. */
-const plutusWrapper = (n: number) => Buffer.from(Cbor.encode(new CborArray([new CborUInt(2), new CborBytes(new Uint8Array(n))])).toBuffer()).toString("hex");
+const plutusWrapper = (n: number) => Buffer.from(Cbor.encode(new CborArray([new CborUInt(2), new CborBytes(new Uint8Array(n))]))).toString("hex");
 
 describe("exact rationals and fees (bug 175)", () => {
     test("float prices read back as the chain's decimals", () => {
@@ -56,7 +56,7 @@ describe("reference-script sizes (bugs 170, 171, 172)", () => {
         expect(refScriptOriginalSize(plutusWrapper(300))).toBe(300);
         expect(refScriptOriginalSize(plutusWrapper(70000))).toBe(70000);
         // native: `[0, script]`, the script's own CBOR
-        const native = Buffer.from(Cbor.encode(new CborArray([new CborUInt(0), new CborArray([new CborUInt(0), new CborBytes(new Uint8Array(28))])])).toBuffer());
+        const native = Buffer.from(Cbor.encode(new CborArray([new CborUInt(0), new CborArray([new CborUInt(0), new CborBytes(new Uint8Array(28))])])));
         expect(refScriptOriginalSize(native)).toBe(native.length - 2);
         expect(refScriptOriginalSize(null)).toBe(0);
     });
@@ -131,11 +131,11 @@ describe("outputs (bugs 177, 178)", () => {
     });
     test("bootstrap address attributes: derivation-path payload + unknown attributes, magic excluded", () => {
         const byron = (attrs: CborMap) => {
-            const payload = Cbor.encode(new CborArray([new CborBytes(new Uint8Array(28)), attrs, new CborUInt(0)])).toBuffer();
-            return Cbor.encode(new CborArray([new CborTag(24, new CborBytes(payload)), new CborUInt(0)])).toBuffer();
+            const payload = Cbor.encode(new CborArray([new CborBytes(new Uint8Array(28)), attrs, new CborUInt(0)]));
+            return Cbor.encode(new CborArray([new CborTag(24, new CborBytes(payload)), new CborUInt(0)]));
         };
-        const path = (n: number) => new CborBytes(Cbor.encode(new CborBytes(new Uint8Array(n))).toBuffer());
-        const magic = new CborBytes(Cbor.encode(new CborUInt(2)).toBuffer());
+        const path = (n: number) => new CborBytes(Cbor.encode(new CborBytes(new Uint8Array(n))));
+        const magic = new CborBytes(Cbor.encode(new CborUInt(2)));
         expect(bootstrapAddressAttrsSize(byron(new CborMap([])))).toBe(0);
         expect(bootstrapAddressAttrsSize(byron(new CborMap([{ k: new CborUInt(1), v: path(28) }, { k: new CborUInt(2), v: magic }])))).toBe(28);
         expect(bootstrapAddressAttrsSize(byron(new CborMap([{ k: new CborUInt(1), v: path(60) }, { k: new CborUInt(7), v: new CborBytes(new Uint8Array(5)) }])))).toBe(65);
@@ -221,7 +221,7 @@ describe("UTXOW scripts, datums, metadata (bugs 181, 183)", () => {
         expect(s.failures[0]).toContain("1 witness datum");
     });
     test("auxiliary data hash binding and 64-byte metadata", () => {
-        const md = (text: string) => Cbor.encode(new CborMap([{ k: new CborUInt(674), v: new CborText(text) }])).toBuffer();
+        const md = (text: string) => Cbor.encode(new CborMap([{ k: new CborUInt(674), v: new CborText(text) }]));
         const good = md("hello");
         const h = toHex(blake2b_256(good));
         const ok = newSink(); checkAuxiliaryData(ok, { auxDataHash: h }, good, 10); expect(ok.failures).toEqual([]);
@@ -232,7 +232,7 @@ describe("UTXOW scripts, datums, metadata (bugs 181, 183)", () => {
         const inv = newSink(); checkAuxiliaryData(inv, { auxDataHash: toHex(blake2b_256(long)) }, long, 10); expect(inv.failures[0]).toStartWith("InvalidMetadata");
         expect(invalidMetadatum(md("x".repeat(64)))).toBeNull();
         // Alonzo form: #6.259({0: metadata})
-        const alonzo = Cbor.encode(new CborTag(259, new CborMap([{ k: new CborUInt(0), v: new CborMap([{ k: new CborUInt(1), v: new CborBytes(new Uint8Array(65)) }]) }]))).toBuffer();
+        const alonzo = Cbor.encode(new CborTag(259, new CborMap([{ k: new CborUInt(0), v: new CborMap([{ k: new CborUInt(1), v: new CborBytes(new Uint8Array(65)) }]) }])));
         expect(invalidMetadatum(alonzo)).toContain("65");
         const unknown = newSink(); checkAuxiliaryData(unknown, { auxDataHash: h }, undefined, 10); expect(unknown.failures).toEqual([]);
     });

@@ -15,7 +15,7 @@ describe("script data hash with a PlutusV3 script", () => {
         if (root.array[0] instanceof CborUInt) root = root.array[1];
         const ws = root.array[2].array[0];
         const ref: any = ws.subCborRef ?? ws.cborRef;
-        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws).toBuffer();
+        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws);
         const models = costModelArrays(raw);
         expect(models[3]!.length).toBe(251);
         const lv = languageViews(models, new Set([3] as any))!;

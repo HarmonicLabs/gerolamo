@@ -25,7 +25,7 @@ afterAll(() => { for (const s of servers) s.close(); rmSync(dir, { recursive: tr
 const U = (n: number | bigint) => new CborUInt(n);
 const A = (xs: CborObj[]) => new CborArray(xs);
 const B = (h: string) => new CborBytes(Uint8Array.from(Buffer.from(h, "hex")));
-const enc = (o: CborObj) => Buffer.from(Cbor.encode(o).toBuffer());
+const enc = (o: CborObj) => Buffer.from(Cbor.encode(o));
 const num = (o: CborObj) => Number((o as CborUInt).num);
 const hex = (o: CborObj) => Buffer.from((o as CborBytes).bytes).toString("hex");
 const h32 = (c: string) => c.repeat(64).slice(0, 64);

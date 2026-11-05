@@ -68,7 +68,7 @@ describe("ValidatingMempool", () => {
         const r = await mp.addTx(t1);
         expect(r.ok).toBe(true);
         const bodyBytes = (Cbor.parse(t1) as CborArray).array[0]!;
-        expect(r.txId).toBe(hex(txId(Cbor.encode(bodyBytes).toBuffer())));
+        expect(r.txId).toBe(hex(txId(Cbor.encode(bodyBytes))));
         expect([...stored.keys()]).toEqual([r.txId!]);
         const unsigned = await mp.addTx(tx([{ id: genesisId, ix: 1 }], [50_000_000n - FEE], { sign: false }));
         expect(unsigned.ok).toBe(false);

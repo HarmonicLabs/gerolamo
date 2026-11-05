@@ -137,7 +137,7 @@ describe("N2NChainSyncHost: our chain switches branches under a client (bug 287)
         expect(String(back.point.blockHeader?.slotNumber)).toBe("14");
         await send(new ChainSyncRequestNext());
         await send(new ChainSyncRequestNext());
-        const enc = (o: any) => Buffer.from(Cbor.encode(o).toBuffer()).toString("hex");
+        const enc = (o: any) => Buffer.from(Cbor.encode(o)).toString("hex");
         expect(enc((decode(mux.sent[5]!) as ChainSyncRollForward).data)).toBe(enc(new CborArray([new CborUInt(2104)])));
         expect(enc((decode(mux.sent[6]!) as ChainSyncRollForward).data)).toBe(enc(new CborArray([new CborUInt(26)])));
     });

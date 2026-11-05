@@ -13,7 +13,7 @@ describe("cost models of a ParameterChange action", () => {
         if (root.array[0] instanceof CborUInt) root = root.array[1];
         const body = root.array[1].array[0];
         const ref: any = body.subCborRef ?? body.cborRef;
-        const bodyBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(body).toBuffer();
+        const bodyBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(body);
         const cm = costModelsOfProposal(bodyBytes, 0);
         expect(cm).not.toBeNull();
         expect(Object.keys(cm!)).toEqual(["PlutusV3"]);
@@ -38,7 +38,7 @@ import { paramChangesOfProposal } from "./costModelUpdate";
 
 const bodyBytesOfTx = (name: string) => {
     const tx = Cbor.parse(readFileSync(new URL(`../__fixtures__/${name}`, import.meta.url), "utf8").trim()) as CborArray;
-    return Cbor.encode(tx.array[0]!).toBuffer();
+    return Cbor.encode(tx.array[0]!);
 };
 
 describe("paramChangesOfProposal (bug 66: every Conway parameter change is read from the bytes)", () => {

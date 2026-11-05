@@ -26,7 +26,10 @@ export function dbLedgerView(config: any): MempoolLedgerView {
             const params = await getEpochBodyParams(config, Number(epochForSlot(slot)));
             if (!params) return null;
             if (genesis === undefined) { try { genesis = await getShelleyGenesisConfig(config); } catch { genesis = null; } }
-            return { slot, params, genesis, network: String(config?.network ?? "") === "mainnet" ? "mainnet" : "testnet" };
+            // Protocol 12 is the Dijkstra era (no earlier era carries it); the switch keeps the network
+            // below 12, so this follows the tip without reading the HFC history here.
+            const era = Number(params.protocolMajor ?? params.raw?.protocol_major_ver ?? 0) >= 12 ? 8 : 7;
+            return { slot, era, params, genesis, network: String(config?.network ?? "") === "mainnet" ? "mainnet" : "testnet" };
         },
         // Keyed reads go through the read-only connection (SQLite mode): a committed snapshot that
         // neither waits for nor runs inside the applier's open write transaction.

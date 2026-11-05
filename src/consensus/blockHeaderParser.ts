@@ -253,7 +253,7 @@ export function localRollForwardMessage(blockFetchBytes: Uint8Array): { bytes: U
         new CborUInt(2n),
         new CborArray([new CborUInt(BigInt(id.era - 1)), new CborTag(24, new CborBytes(id.rawHeaderBytes))]),
         new CborArray([new CborArray([new CborUInt(slot), new CborBytes(id.hash)]), new CborUInt(blockNo)]),
-    ])).toBuffer();
+    ]));
     return { bytes, slot, blockNo, hashHex: Buffer.from(id.hash).toString("hex"), era: id.era };
 }
 
@@ -311,7 +311,7 @@ export async function headerParser(
         throw new Error("invalid CBOR for header");
     }
 
-    const blockHeaderData: Uint8Array = Cbor.encode(data.data).toBuffer();
+    const blockHeaderData: Uint8Array = Cbor.encode(data.data);
     // logger.debug("blockHeaderData", toHex(blockHeaderData));
     const lazyHeader = Cbor.parseLazy(blockHeaderData);
     // logger.debug("Lazy Header: ", lazyHeader);

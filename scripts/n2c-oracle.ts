@@ -49,11 +49,11 @@ function show(o: any): any {
 }
 // handshake (N2C v15+: versionData = [magic, query]); propose 16..19
 const table = new CborMap([19, 20, 21, 22, 23].map((v) => ({ k: new CborUInt(0x8000 | v), v: new CborArray([new CborUInt(magic), new CborSimple(false)]) })));
-send(0, Cbor.encode(new CborArray([new CborUInt(0), table])).toBuffer());
+send(0, Cbor.encode(new CborArray([new CborUInt(0), table])));
 const hs = Cbor.parse(await recv(0)) as CborArray;
 console.log("handshake:", JSON.stringify(show(hs)));
 // LSQ (protocol 7): acquire the volatile tip [8]
-send(7, Cbor.encode(new CborArray([new CborUInt(8)])).toBuffer());
+send(7, Cbor.encode(new CborArray([new CborUInt(8)])));
 console.log("acquire →", JSON.stringify(show(Cbor.parse(await recv(7)))));
 const queries: Array<[string, any]> = [
     ["GetSystemStart [1]", [1]],
@@ -83,7 +83,7 @@ if (outDir) await import("node:fs/promises").then((fs) => fs.mkdir(outDir, { rec
 let qIndex = 0;
 const toCbor = (v: any): any => Array.isArray(v) ? new CborArray(v.map(toCbor)) : typeof v === "number" ? new CborUInt(v) : v; // CborObj instances pass through
 for (const [name, q] of queries) {
-    send(7, Cbor.encode(new CborArray([new CborUInt(3), toCbor(q)])).toBuffer());
+    send(7, Cbor.encode(new CborArray([new CborUInt(3), toCbor(q)])));
     const raw = await recv(7);
     const parsed = Cbor.parse(raw);
     const s = JSON.stringify(show(parsed));
@@ -94,6 +94,6 @@ for (const [name, q] of queries) {
         await Bun.write(`${base}.json`, JSON.stringify(show(parsed), null, 1));
     }
 }
-send(7, Cbor.encode(new CborArray([new CborUInt(5)])).toBuffer()); // release
-send(7, Cbor.encode(new CborArray([new CborUInt(7)])).toBuffer()); // done
+send(7, Cbor.encode(new CborArray([new CborUInt(5)]))); // release
+send(7, Cbor.encode(new CborArray([new CborUInt(7)]))); // done
 sock.end(); process.exit(0);

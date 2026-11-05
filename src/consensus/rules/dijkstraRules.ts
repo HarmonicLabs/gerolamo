@@ -138,6 +138,25 @@ export interface DijkstraTxCheckInput {
     why?: string;
 }
 
+/** Guarding redeemers (tag 6) and the BLS / pledge-leverage gaps the POOL rule reports (bug 428). */
+export function checkDijkstraGuarding(sink: RuleSink, t: { body: any; redeemers: readonly any[]; providedScripts: ReadonlyMap<string, { kind: "native" | "plutus" }> }): void {
+    const guards = (t.body?.guards ?? []) as any[];
+    const scriptGuards: Array<{ index: number; hash: string }> = [];
+    guards.forEach((g, i) => { if (Number(g?.type) === 1) scriptGuards.push({ index: i, hash: hex(g?.hash) }); });
+    const guarding = t.redeemers.filter((r) => Number(r?.tag) === 6);
+    for (const r of guarding) {
+        const g = guards[Number(r.index)];
+        if (!g || Number(g?.type) !== 1) sink.failures.push(`ScriptHashNotFoundForPurpose: guarding redeemer ${r.index} does not point at a script guard`);
+        else if (!t.providedScripts.has(hex(g.hash))) sink.failures.push(`MissingScriptWitnesses: script guard ${hex(g.hash).slice(0, 12)}… needs its script`);
+    }
+    const pointed = new Set(guarding.map((r) => Number(r.index)));
+    for (const sg of scriptGuards) if (!pointed.has(sg.index)) sink.failures.push(`MissingGuardingRedeemer: script guard ${sg.hash.slice(0, 12)}… (index ${sg.index}) has no redeemer`);
+    for (const b of [t.body, ...subBodiesOf(t.body)]) for (const c of (b?.certs ?? []) as any[]) {
+        if (c?.blsKey != null || c?.bls_key != null) sink.reports.push("POOL BLS proof-of-possession not verified yet (bug 428)");
+    }
+    sink.reports.push("POOL max pledge leverage / min pool margin not enforced yet (bug 428)");
+}
+
 /** Keys (typed hex) of the credentials of a key-hash or credential guard list. */
 function guardKeys(guards: any[] | undefined): Set<string> {
     const out = new Set<string>();

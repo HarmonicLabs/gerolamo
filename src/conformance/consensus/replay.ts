@@ -69,7 +69,7 @@ function rollForwardMessage(era: number, header: Uint8Array, tip: Tip): Uint8Arr
         new CborUInt(2n),
         new CborArray([new CborUInt(BigInt(era - 1)), new CborTag(24, new CborBytes(header))]),
         new CborArray([point, new CborUInt(BigInt(tip.block_number))]),
-    ])).toBuffer();
+    ]));
 }
 
 /** Block number and slot from a Shelley-era header `[[block_no, slot, …], sig]`. */
@@ -191,7 +191,7 @@ export class ConsensusReplay {
             const store = await BlockStore.open(dir, { k: this.k });
             for (const h of this.chain) {
                 if (!h.raw.length) { await store.put(standInBlock(h, this.chain[1]), hexBytes(h.hash)); continue; }
-                await store.put(Cbor.encode(new CborArray([new CborUInt(BigInt(h.era)), new CborArray([Cbor.parse(h.raw)])])).toBuffer(), hexBytes(h.hash));
+                await store.put(Cbor.encode(new CborArray([new CborUInt(BigInt(h.era)), new CborArray([Cbor.parse(h.raw)])])), hexBytes(h.hash));
             }
             const relay = new ChunkRelayChainStore(store);
             const tip = this.chain[this.chain.length - 1];
@@ -236,7 +236,7 @@ function standInBlock(anchor: KnownHeader, next: KnownHeader | undefined): Uint8
     body.array[0] = new CborUInt(BigInt(anchor.blockNo));
     body.array[1] = new CborUInt(anchor.slot);
     body.array[2] = new CborSimple(null);
-    return Cbor.encode(new CborArray([new CborUInt(BigInt(next.era)), new CborArray([h])])).toBuffer();
+    return Cbor.encode(new CborArray([new CborUInt(BigInt(next.era)), new CborArray([h])]));
 }
 
 function pointOfWire(p: ChainPoint): Point {

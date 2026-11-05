@@ -20,11 +20,11 @@ function txsOfBlock(blockFetch: Uint8Array): { txs: Uint8Array[]; segments: Uint
     const wits = (Cbor.parseLazy(witsRaw!) as LazyCborArray).array;
     const aux = Cbor.parse(auxRaw!) as any; // map index → aux
     const auxByIx = new Map<number, Uint8Array>();
-    for (const e of aux.map) auxByIx.set(Number(e.k.num), Cbor.encode(e.v).toBuffer());
+    for (const e of aux.map) auxByIx.set(Number(e.k.num), Cbor.encode(e.v));
     const invalid = new Set(((Cbor.parse(invalidRaw!) as CborArray).array as any[]).map((x) => Number(x.num)));
     const txs = bodies.map((b, i) => {
         const auxBytes = auxByIx.get(i) ?? new Uint8Array([0xf6]);
-        const valid = Cbor.encode(new CborSimple(!invalid.has(i))).toBuffer();
+        const valid = Cbor.encode(new CborSimple(!invalid.has(i)));
         const parts = [b, wits[i]!, valid, auxBytes];
         const out = new Uint8Array(1 + parts.reduce((n, p) => n + p.length, 0)); out[0] = 0x84;
         let o = 1; for (const p of parts) { out.set(p, o); o += p.length; }

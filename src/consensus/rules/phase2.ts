@@ -177,7 +177,7 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
     for (const r of ctx.redeemers) {
         const out: RedeemerOutcome = { tag: r.tag, index: r.index, scriptHash: null, language: null, declared: { mem: r.mem, cpu: r.cpu }, ok: false };
         outcomes.push(out);
-        if (ctx.era >= 8 && r.tag > 5) return { ok: false, error: `redeemer tag ${r.tag} (guarding) is not supported yet (bug 435)`, redeemers: outcomes };
+        if (ctx.era >= 8 && r.tag > 6) return { ok: false, error: `redeemer tag ${r.tag} is not supported yet (bug 435)`, redeemers: outcomes };
         const p: Purpose | null = ctx.purposeOf(r);
         if (!p) return { ok: false, error: `redeemer ${r.tag}:${r.index} points to nothing`, redeemers: outcomes };
         const hash = ctx.scriptHashOf(p);
@@ -186,10 +186,10 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
         const script = scripts.get(hash);
         if (!script) return { ok: false, error: `script ${hash.slice(0, 12)}… for redeemer ${r.tag}:${r.index} not found (or not Plutus)`, redeemers: outcomes };
         out.language = script.lang;
-        // Dijkstra (bug 435): the Plutus V4 script context and the V1..V3 contexts of transactions
-        // using Dijkstra-only fields are not built yet: no verdict (reported, never a failure)
-        if (ctx.era >= 8 && script.lang === 4) return { ok: false, error: "Plutus V4 script context is not implemented yet (bug 435)", redeemers: outcomes };
-        if (ctx.era >= 8 && dijkstraOnlyBodyKeys(ctx).length) return { ok: false, error: `Plutus V${script.lang} context of a Dijkstra transaction with body keys ${dijkstraOnlyBodyKeys(ctx).join(", ")} is not built yet (bug 435)`, redeemers: outcomes };
+        // Dijkstra (bug 435): V1..V3 contexts of transactions using Dijkstra-only fields are still
+        // built only for Plutus V4 (its TxInfo handles the top-level Dijkstra fields; sub-transaction
+        // script contexts and the guard TopTxInfo remain open).
+        if (ctx.era >= 8 && script.lang < 4 && dijkstraOnlyBodyKeys(ctx).length) return { ok: false, error: `Plutus V${script.lang} context of a Dijkstra transaction with body keys ${dijkstraOnlyBodyKeys(ctx).join(", ")} is not built yet (bug 435)`, redeemers: outcomes };
         const arr = models[script.lang];
         if (!arr) return { ok: false, error: `no cost model for Plutus V${script.lang}`, collect: true, redeemers: outcomes };
         let prog: Program;
@@ -197,19 +197,24 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
         catch (e) { return { ok: false, error: `script ${hash.slice(0, 12)}… does not decode: ${(e as Error).message}`, redeemers: outcomes }; }
         let term: Program;
         try {
-            const info = ctx.txInfo(script.lang as 1 | 2 | 3); // V4 returned "no verdict" above
-            if (script.lang === 3) {
-                term = applyData(prog, [new DConstr(0n, [info, r.data, ctx.scriptInfoData(p)])]);
+            if (script.lang === 4) {
+                const info = ctx.txInfo(4);
+                term = applyData(prog, [new DConstr(0n, [info, r.data, ctx.scriptInfoData(p, 4)])]);
             } else {
-                const sc = new DConstr(0n, [info, ctx.purposeData(p, script.lang)]);
-                const args: Data[] = [];
-                if (p.tag === 0) {
-                    const d = ctx.spendingDatum(p);
-                    if (!d) return { ok: false, error: `no datum for spend redeemer ${r.index}`, redeemers: outcomes };
-                    args.push(d);
+                const info = ctx.txInfo(script.lang as 1 | 2 | 3);
+                if (script.lang === 3) {
+                    term = applyData(prog, [new DConstr(0n, [info, r.data, ctx.scriptInfoData(p)])]);
+                } else {
+                    const sc = new DConstr(0n, [info, ctx.purposeData(p, script.lang)]);
+                    const args: Data[] = [];
+                    if (p.tag === 0) {
+                        const d = ctx.spendingDatum(p);
+                        if (!d) return { ok: false, error: `no datum for spend redeemer ${r.index}`, redeemers: outcomes };
+                        args.push(d);
+                    }
+                    args.push(r.data, sc);
+                    term = applyData(prog, args);
                 }
-                args.push(r.data, sc);
-                term = applyData(prog, args);
             }
         } catch (e) {
             if (e instanceof ContextError) return { ok: false, error: `script context: ${e.message}`, collect: true, redeemers: outcomes };

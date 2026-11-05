@@ -11,7 +11,7 @@ function fakeMux() {
         off: () => { handler = null; },
         send: (payload: Uint8Array) => { sent.push(Uint8Array.from(payload)); },
     };
-    return { mux, sent, deliver: (msg: CborArray) => handler!(Cbor.encode(msg).toBuffer()) };
+    return { mux, sent, deliver: (msg: CborArray) => handler!(Cbor.encode(msg)) };
 }
 
 const until = async (cond: () => boolean) => { for (let i = 0; i < 100 && !cond(); i++) await new Promise((r) => setTimeout(r, 5)); };

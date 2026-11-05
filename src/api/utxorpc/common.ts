@@ -73,7 +73,7 @@ export function txoRefKey(r: { hash: Uint8Array; index: number }): string {
 /** A stored output's CBOR: the record's output as a Babbage/Conway map (the store keeps its fields, not its bytes). */
 export function utxoNativeBytes(r: UtxoRecord): Uint8Array | null {
     const out = txOutCbor(JSON.parse(r.tx_out));
-    return out ? Cbor.encode(out).toBuffer() : null;
+    return out ? Cbor.encode(out) : null;
 }
 
 export function utxoToAny(r: UtxoRecord): query.AnyUtxoData | null {

@@ -132,12 +132,12 @@ export function txOutWireCbor(t: TxOutDecoded): Uint8Array {
             const script = t.script.kind === "native"
                 ? new CborArray([new CborUInt(0), Cbor.parse(t.script.bytes)])
                 : new CborArray([new CborUInt(t.script.language + 1), new CborBytes(t.script.bytes)]);
-            put(3, new CborTag(24, new CborBytes(Cbor.encode(script).toBuffer())));
+            put(3, new CborTag(24, new CborBytes(Cbor.encode(script))));
             break;
         }
         default: throw new Error(`unknown TxOut tag ${(t as any).tag}`);
     }
-    return Cbor.encode(new CborMap(entries)).toBuffer();
+    return Cbor.encode(new CborMap(entries));
 }
 
 export interface ImportUtxoOptions {

@@ -78,7 +78,7 @@ export function debugLedgerConfig(network: EraHistoryNetwork | null, magic: numb
     wTrigger(w, trig[0]!);
     const compact = genesisConfig({ network, magic } satisfies QueryEnv);
     const items = genesisItems(compact);
-    const systemStart = Cbor.encode(encodeUtcTime(sh.systemStart)).toBuffer();
+    const systemStart = Cbor.encode(encodeUtcTime(sh.systemStart));
     for (let era = 1; era <= 7; era++) {
         w.array(13).raw(compact).uint(sh.slotsPerKESPeriod).uint(stability).uint(randomness).uint(k).uint(sh.maxKESEvolutions).uint(sh.updateQuorum).uint(BigInt(sh.maxLovelaceSupply));
         w.rational(...reduced(f[0], f[1])).uint(sh.networkId === "Mainnet" ? 1 : 0).raw(systemStart);
@@ -104,7 +104,7 @@ function writeByronConfig(w: CborWriter, network: EraHistoryNetwork, g: any): vo
     w.array(1).setDefinite(Object.keys(g.bootStakeholders ?? {}).map((x) => x.toLowerCase()).sort(), (x) => w.hex(x));
     const heavy = Object.entries((g.heavyDelegation ?? {}) as Record<string, any>).map(([id, c]) => [id.toLowerCase(), c] as const).sort((a, b) => (a[0] < b[0] ? -1 : 1));
     w.array(1); defMap(heavy, (id) => w.hex(id), (c) => { w.array(4).uint(Number(c.omega)).bytes(base64urlDecode(c.issuerPk)).bytes(base64urlDecode(c.delegatePk)).hex(c.cert); });
-    w.raw(Cbor.encode(encodeUtcTime(new Date(Number(g.startTime) * 1000).toISOString())).toBuffer());
+    w.raw(Cbor.encode(encodeUtcTime(new Date(Number(g.startTime) * 1000).toISOString())));
     // an address's base58 bytes are its CBOR [24(bytes [root, attributes, type]), crc]; `Ord Address` compares the root first
     const rootOf = (a: Uint8Array) => { const inner = (((Cbor.parse(a) as CborArray).array[0] as CborTag).data as CborBytes).bytes; return Buffer.from(((Cbor.parse(inner) as CborArray).array[0] as CborBytes).bytes).toString("hex"); };
     const balances = Object.entries((g.nonAvvmBalances ?? {}) as Record<string, string>).map(([a, v]) => { const b = base58Decode(a); return { a: b, root: rootOf(b), v: BigInt(String(v)) }; }).sort((x, y) => (x.root < y.root ? -1 : x.root > y.root ? 1 : 0));

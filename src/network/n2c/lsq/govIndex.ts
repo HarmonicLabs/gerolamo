@@ -116,7 +116,37 @@ export function applyTxBody(f: GovFacts, body: Uint8Array): void {
 /** Apply a stored block (`[eraTag, block]`); Byron blocks carry nothing. */
 export function applyBlock(f: GovFacts, entry: Uint8Array): void {
     const top = items(entry, 0);
-    if (Number(uintAt(entry, top[0]!)) < 2) return;
+    const eraTag = Number(uintAt(entry, top[0]!));
+    if (eraTag < 2) return;
+    if (eraTag >= 8) {
+        // Dijkstra (era tag 8): `[header, [block_transactions, leios, peras]]`; a block
+        // transaction is `[body, wits, aux/nil, is_valid]`, and the sub-transactions of a valid
+        // body (key 23) carry governance too (bug 429).
+        const blockItems = items(entry, top[1]!);
+        if (blockItems.length !== 2) return;
+        const bodyParts = items(entry, blockItems[1]!);
+        if (bodyParts.length < 1) return;
+        const txs = items(entry, bodyParts[0]!);
+        txs.forEach((txStart, i) => {
+            const parts = items(entry, txStart);
+            if (parts.length !== 4) return;
+            if (entry[parts[3]!] !== 0xf5) return; // isValid = true
+            const body = entry.subarray(parts[0]!, parts[0]! + cborItemLength(entry, parts[0]!));
+            if (!body.includes(0x04) && !body.includes(0x14) && !body.includes(0x17) && !body.includes(0x18) && !body.includes(0x19) && !body.includes(0x1a)) return;
+            try { applyTxBody(f, body); } catch (err) { log.warn(`gov index: transaction ${i} not walkable: ${(err as Error).message}`); }
+            // sub-transactions (key 23): their own bodies carry certificates, votes and proposals
+            for (const [k, v] of entries(body, 0)) {
+                if (Number(uintAt(body, k)) !== 23) continue;
+                for (const sub of items(body, v)) {
+                    const sbParts = items(body, sub);
+                    if (sbParts.length < 1) continue;
+                    const sb = body.subarray(sbParts[0]!, sbParts[0]! + cborItemLength(body, sbParts[0]!));
+                    try { applyTxBody(f, sb); } catch (err) { log.warn(`gov index: sub-transaction ${i} not walkable: ${(err as Error).message}`); }
+                }
+            }
+        });
+        return;
+    }
     const block = items(entry, top[1]!);
     const invalid = new Set<number>();
     if (block.length >= 5) for (const s of items(entry, block[4]!)) invalid.add(Number(uintAt(entry, s)));

@@ -33,10 +33,10 @@ afterAll(async () => { setGovFactsSource(null); for (const d of tmp) await rm(d,
 /** A recognisable procedure per action (the answers embed it verbatim). */
 const procedure = (id: string) => new CborWriter().array(4).uint(1_000_000_000).hex("e0" + "10".repeat(28)).array(1).uint(6).array(2).text(`ipfs://${id.slice(0, 8)}`).hex("ab".repeat(32)).finish();
 const facts: GovFacts = { drepAnchor: new Map(), proposal: new Map([PC, UC, TW].map((id) => [id, procedure(id)])), credType: new Map(), ccResign: new Map(), stakeDeposit: new Map() };
-const pp = (raw: Record<string, unknown>) => Cbor.encode(conwayPParamsCbor(raw)).toBuffer();
+const pp = (raw: Record<string, unknown>) => Cbor.encode(conwayPParamsCbor(raw));
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
 const arr = (o: CborObj | undefined): CborObj[] => (o instanceof CborTag ? arr(o.data) : (o as CborArray).array);
-const enc = (o: CborObj | undefined) => hex(Cbor.encode(o!).toBuffer());
+const enc = (o: CborObj | undefined) => hex(Cbor.encode(o!));
 const uint = (o: CborObj | undefined) => Number((o as CborUInt).num);
 const actionId = (o: CborObj | undefined) => { const a = arr(o); return `${hex((a[0] as CborBytes).bytes)}:${uint(a[1])}`; };
 

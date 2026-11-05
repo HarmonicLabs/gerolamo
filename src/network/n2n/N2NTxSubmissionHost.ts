@@ -7,7 +7,7 @@
  * which takes bytes and returns bytes so it can be tested without sockets.
  */
 import { MiniProtocol, Multiplexer, type MultiplexerHeader } from "@harmoniclabs/ouroboros-miniprotocols-ts";
-import { Tx } from "@harmoniclabs/cardano-ledger-ts";
+import { Tx, DijkstraTx } from "@harmoniclabs/cardano-ledger-ts";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { logger } from "../../utils/logger";
 import { encodeRequestTxIds, encodeRequestTxs, hashBytes, hfcEraIndexNow, parseTxSubmissionClientMessages, type HfcEraIndex, type TxIdAnnouncement } from "../txSubmissionCodec";
@@ -143,8 +143,15 @@ function defaultAdmit(): ((bytes: Uint8Array, source: string) => Promise<{ ok: b
 /** The body must parse as a transaction; its id is the body hash. */
 export async function defaultValidate(bytes: Uint8Array): Promise<{ ok: true; hash: Uint8Array } | { ok: false; reason: string }> {
     try {
-        const tx = Tx.fromCbor(bytes);
-        return { ok: true, hash: tx.body.hash.toBuffer() };
+        // Dijkstra mempool transactions are 3-element (or legacy 4 with a true flag); the id is hashTx
+        // over the block form, not the body hash.
+        try {
+            const tx = Tx.fromCbor(bytes);
+            return { ok: true, hash: tx.body.hash.toBuffer() };
+        } catch {
+            const tx = DijkstraTx.fromCbor(bytes);
+            return { ok: true, hash: tx.hashTx() };
+        }
     } catch (err) {
         return { ok: false, reason: err instanceof Error ? err.message : String(err) };
     }

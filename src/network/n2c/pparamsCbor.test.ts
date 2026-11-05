@@ -33,7 +33,7 @@ describe("conwayPParamsCbor", () => {
         };
         const pp = conwayPParamsCbor(raw);
         expect(pp.array.length).toBe(31);
-        const back = Cbor.parse(Cbor.encode(pp).toBuffer()) as CborArray;
+        const back = Cbor.parse(Cbor.encode(pp)) as CborArray;
         expect(back.array.length).toBe(31);
         expect((back.array[0] as CborUInt).num).toBe(44n);
         const a0 = back.array[9] as CborTag;
@@ -43,7 +43,7 @@ describe("conwayPParamsCbor", () => {
         const cm = back.array[15] as any;
         expect(cm.map.map((e: any) => Number(e.k.num))).toEqual([0, 2]);
         expect(Number(cm.map[1].v.array[1].num)).toBe(-900);
-        expect(Buffer.from(Cbor.encode(pp.array[15]!).toBuffer()).toString('hex')).toBe('a2009f03ff029f01390383ff'); // indefinite lists, negative int
+        expect(Buffer.from(Cbor.encode(pp.array[15]!)).toString('hex')).toBe('a2009f03ff029f01390383ff'); // indefinite lists, negative int
         expect((back.array[22] as CborArray).array.length).toBe(5);
         expect((back.array[23] as CborArray).array.length).toBe(10);
         const ref = back.array[30] as CborTag;

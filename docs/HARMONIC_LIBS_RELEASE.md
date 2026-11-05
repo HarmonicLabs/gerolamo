@@ -179,6 +179,23 @@ rules stay enforced. Strict is the default. Never use lenient decoding to judge 
 **Known gap, not in this release:** the Dijkstra balance-interval fields follow an earlier draft of the Dijkstra CDDL
 (reward-account keys); cardano-ledger master keys them by credential. Dijkstra is on no network yet.
 
+### 4.6 `@harmoniclabs/cardano-ledger-ts` 0.6.1 (2026-11-02, not pushed)
+
+The DijkstraNet/Leios overlay surfaces plus decoder strictness driven by live dingo and gouroboros
+data; branch `main` at `f6f911b`, five commits after `origin/main` and no tag.
+Added: Dijkstra protocol parameters keys 34–56 and the Dijkstra genesis (`plutusV4CostModel`
+exactly 251 values at language key 3); `DijkstraEbReferences` / `DijkstraEndorserBlock`
+(canonical ordered map `hash32 → uint32`, 1..17142 references, announcement hash/size over the
+canonical bytes); `DijkstraLeiosCertificate` bitfield/signature and `DijkstraBlock.validate()`
+(body hash/size, certified flag ↔ certificate, zero-transaction certifying bodies, bounds, Peras).
+Changed: Dijkstra `hashTx` is `hashAnnotated` over stored block-form bytes (the legacy helper is
+`dijkstraHashTxParts`); `header_version_info` decodes as `BlockHeaderVersionInfo` (any Word32, not
+the ProtVer cap); goldens refreshed to cardano-ledger master, gouroboros and Dingo musashi.
+Fixed: `vrf_cert` exactly `[bytes .size 64, bytes .size 80]`; Conway inline datum source bytes
+kept through decode/re-encode; a future header major no longer rejected. Sibling suite: 73 suites /
+265 pass, 0 fail (10 skipped, 19 todo). Known gap, unchanged: the Dijkstra balance-interval fields
+follow an earlier CDDL draft (reward-account keys vs credential keys in cardano-ledger master).
+
 ### 4.5 `@harmoniclabs/kes` 0.1.0 (first npm release)
 
 Repository kes-ts, `master` plus one local commit, the KES-agent work and a merge of the README commit `master` gained

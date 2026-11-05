@@ -104,7 +104,7 @@ describe("node-diversity-conformance ledger-rules fixes", () => {
         const utxos = utxoFailures(r.failures).map((f) => dig(f, [0])).filter(Boolean) as CborArray[];
         expect(utxos.length).toBe(1);
         // [0 ValidationTagMismatch, False, [0 PassedUnexpectedly]]
-        expect(Buffer.from(Cbor.encode(utxos[0]!).toBuffer()).toString("hex")).toBe("83" + "00" + "f4" + "8100");
+        expect(Buffer.from(Cbor.encode(utxos[0]!)).toString("hex")).toBe("83" + "00" + "f4" + "8100");
         expect((utxos[0]!.array[1] as CborSimple).simple).toBe(false);
     });
 

@@ -84,7 +84,7 @@ for (const e of enactedRows) {
     const [txHash, idx] = e.id.split(":");
     const [cb] = await (await fetch(`${base}/tx_cbor`, { method: "POST", headers: { ...H, "content-type": "application/json" }, body: JSON.stringify({ _tx_hashes: [txHash] }) })).json() as any[];
     const tx = Cbor.parse(String(cb?.cbor ?? "")) as CborArray;
-    const changes = paramChangesOfProposal(Cbor.encode(tx.array[0]!).toBuffer(), Number(idx));
+    const changes = paramChangesOfProposal(Cbor.encode(tx.array[0]!), Number(idx));
     if (changes && Object.keys(changes).length) { e.payload = { ...e.payload, changes }; payloadFixes.push({ id: e.id, payload: e.payload }); console.log(`  re-decoded ${e.id.slice(0, 12)}… → ${JSON.stringify(changes)}`); }
 }
 console.log(`status changes: ${statusUpdates.length}; chain-enacted actions up to epoch ${target}: ${enactedRows.length}`);

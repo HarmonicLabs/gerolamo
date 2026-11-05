@@ -110,7 +110,7 @@ export async function buildQuerySet(ref: LsqClient, opts: { era?: number; pools?
     const ownerCred = cred(0, owner); // our pool's reward account
     const proposalsAnswer = (await pick([U(31), S([])])).array[0];
     const proposals = proposalsAnswer instanceof CborArray ? proposalsAnswer.array.map((g) => (g as CborArray).array[0]!).slice(0, 2) : [];
-    const sortSet = (xs: CborObj[]) => S([...xs].sort((a, b) => Buffer.compare(Buffer.from(Cbor.encode(a).toBuffer()), Buffer.from(Cbor.encode(b).toBuffer()))));
+    const sortSet = (xs: CborObj[]) => S([...xs].sort((a, b) => Buffer.compare(Buffer.from(Cbor.encode(a)), Buffer.from(Cbor.encode(b)))));
     // cardano-node sorts nothing for us: a set argument must be in the key type's order (Credential: script first)
     const credSet = (xs: CborObj[]) => S([...xs].sort((a, b) => { const ta = Number(((a as CborArray).array[0] as CborUInt).num), tb = Number(((b as CborArray).array[0] as CborUInt).num); return ta !== tb ? tb - ta : Buffer.compare(Buffer.from(((a as CborArray).array[1] as CborBytes).bytes), Buffer.from(((b as CborArray).array[1] as CborBytes).bytes)); }));
     // GetNonMyopicMemberRewards' `Set (Either Coin Credential)` in Haskell order: every Left (coins ascending) before every Right (script credentials first)

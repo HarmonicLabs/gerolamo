@@ -40,7 +40,7 @@ function bytesOf(v: any): Uint8Array | null {
  * cross the boundary (see memory: pass bytes, never CborObj).
  */
 export function byronAddressRoot(addrType: 0 | 1 | 2, spendingTag: number, key: Uint8Array, attributesCbor: Uint8Array): string {
-    const spending = Cbor.encode(new CborArray([new CborUInt(spendingTag), new CborBytes(key)])).toBuffer();
+    const spending = Cbor.encode(new CborArray([new CborUInt(spendingTag), new CborBytes(key)]));
     const head = new Uint8Array([0x83, addrType]); // 3-element array, small uint type
     const all = new Uint8Array(head.length + spending.length + attributesCbor.length);
     all.set(head, 0);
@@ -58,7 +58,7 @@ export function byronAddressAttributesCbor(addr: ByronAddress): Uint8Array {
             const payload = tagged instanceof CborTag ? tagged.data : null;
             if (payload instanceof CborBytes) {
                 const inner = Cbor.parse(payload.bytes);
-                if (inner instanceof CborArray && inner.array[1]) return Cbor.encode(inner.array[1]).toBuffer();
+                if (inner instanceof CborArray && inner.array[1]) return Cbor.encode(inner.array[1]);
             }
         }
     } catch {
@@ -67,9 +67,9 @@ export function byronAddressAttributesCbor(addr: ByronAddress): Uint8Array {
     // Reconstruct from the decoded attributes (mainnet addresses carry none).
     const a: any = addr.attributes ?? {};
     const entries: Array<{ k: CborUInt; v: CborBytes }> = [];
-    if (a.derivationPath instanceof Uint8Array) entries.push({ k: new CborUInt(1), v: new CborBytes(Cbor.encode(new CborBytes(a.derivationPath)).toBuffer()) });
-    if (typeof a.networkMagic === "number") entries.push({ k: new CborUInt(2), v: new CborBytes(Cbor.encode(new CborUInt(BigInt(a.networkMagic))).toBuffer()) });
-    return Cbor.encode(new CborMap(entries)).toBuffer();
+    if (a.derivationPath instanceof Uint8Array) entries.push({ k: new CborUInt(1), v: new CborBytes(Cbor.encode(new CborBytes(a.derivationPath))) });
+    if (typeof a.networkMagic === "number") entries.push({ k: new CborUInt(2), v: new CborBytes(Cbor.encode(new CborUInt(BigInt(a.networkMagic)))) });
+    return Cbor.encode(new CborMap(entries));
 }
 
 export function bootstrapAddressRoot(pubKey: Uint8Array, chainCode: Uint8Array, attributesCbor: Uint8Array): string {
@@ -108,7 +108,7 @@ export function collectShelleyWitnesses(bodyHash: Uint8Array, witnessSet: any): 
 
 /** Byron signing message: `tag ‖ cbor(magic) ‖ cbor(bytes txHash)`. */
 export function byronSignedMessage(tag: 1 | 2, protocolMagic: number, txHash: Uint8Array): Uint8Array {
-    const magic = Cbor.encode(new CborUInt(BigInt(protocolMagic))).toBuffer();
+    const magic = Cbor.encode(new CborUInt(BigInt(protocolMagic)));
     const out = new Uint8Array(1 + magic.length + 2 + txHash.length);
     out[0] = tag;
     out.set(magic, 1);

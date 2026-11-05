@@ -45,7 +45,7 @@ describe("N2NPeerSharingHost", () => {
         expect(resp.peerAddresses).toHaveLength(3);
         expect(resp.peerAddresses[0]).toBeInstanceOf(PeerAddressIPv6);
         expect(resp.peerAddresses[2]).toBeInstanceOf(PeerAddressIPv4);
-        const wire = Cbor.encode(resp.peerAddresses[0]!.toCborObj()).toString();
+        const wire = Buffer.from(Cbor.encode(resp.peerAddresses[0]!.toCborObj())).toString("hex");
         // [1, 0x2a05d014, 0x1cfabc01, 0xe47e2366, 0x1208625a, 3001]
         expect(wire).toBe("86011a2a05d0141a1cfabc011ae47e23661a1208625a190bb9");
         const again = PeerSharingResponse.fromCborObj(resp.toCborObj());

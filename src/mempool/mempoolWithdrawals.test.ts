@@ -49,7 +49,7 @@ function ledger(asked: string[]): MempoolLedgerView {
 function withdrawTx(ix: number, amount: bigint): Uint8Array {
     const body = Cbor.parse(encodeTxBody({ inputs: [{ txHash: Uint8Array.from(Buffer.from(src, "hex")), index: ix }], outputs: [{ address: addrBytes, lovelace: 50_000_000n + amount - FEE }], fee: FEE, certificates: [] })) as CborMap;
     body.map.push({ k: new CborUInt(5), v: new CborMap([{ k: new CborBytes(Uint8Array.of(0xe0, ...keyHash(key.vkey))), v: new CborUInt(amount) }]) });
-    const bytes = Cbor.encode(body).toBuffer();
+    const bytes = Cbor.encode(body);
     return encodeSignedTx(bytes, signTxBody(bytes, [key]));
 }
 

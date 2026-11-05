@@ -22,12 +22,25 @@ export interface TxParts {
     auxiliaryData: Uint8Array | null;
 }
 
-/** Split a serialised transaction into its raw parts (Alonzo+ four-element form; Shelley–Mary three-element). */
-export function splitTx(hash: Uint8Array, bytes: Uint8Array): TxParts {
+/** Split a serialised transaction into its raw parts (Alonzo+ four-element form; Shelley–Mary three-element; Dijkstra block/mempool forms by `era`). */
+export function splitTx(hash: Uint8Array, bytes: Uint8Array, era: number = 7): TxParts {
     const lazy = Cbor.parseLazy(bytes);
     if (!(lazy instanceof LazyCborArray) || lazy.array.length < 3) throw new Error("transaction is not [body, witness_set, …]");
     const [body, witnessSet, third, fourth] = lazy.array;
     let isValid = true, auxiliaryData: Uint8Array | null = null;
+    if (era >= 8) {
+        // Dijkstra `block_transaction = [body, witness_set, auxiliary_data/nil, is_valid]`; a
+        // mempool form is `[body, witness_set, auxiliary_data/nil]` (always valid).
+        if (lazy.array.length === 3) {
+            auxiliaryData = isNull(third!) ? null : third!;
+        } else if (lazy.array.length === 4) {
+            const v = Cbor.parse(fourth!);
+            if (!(v instanceof CborSimple) || typeof v.simple !== "boolean") throw new Error("Dijkstra is_valid is not a boolean");
+            isValid = v.simple;
+            auxiliaryData = isNull(third!) ? null : third!;
+        } else throw new Error(`Dijkstra transaction has ${lazy.array.length} elements`);
+        return { hash, bytes, body: body!, witnessSet: witnessSet!, isValid, auxiliaryData };
+    }
     if (lazy.array.length >= 4) {
         const v = Cbor.parse(third!);
         if (!(v instanceof CborSimple) || typeof v.simple !== "boolean") throw new Error("transaction is_valid is not a boolean");
@@ -66,7 +79,7 @@ function rawArray(elements: Uint8Array[]): Uint8Array {
 
 /** CBOR map with uint keys (ascending) and raw values. */
 function rawUintMap(entries: Array<[number, Uint8Array]>): Uint8Array {
-    const items = entries.flatMap(([k, v]) => [Cbor.encode(new CborUInt(BigInt(k))).toBuffer(), v]);
+    const items = entries.flatMap(([k, v]) => [Cbor.encode(new CborUInt(BigInt(k))), v]);
     return rawCollection(0xa0, 0xbf, entries.length, items);
 }
 
@@ -101,7 +114,7 @@ function build(txs: TxParts[]): { segments: BodySegments; size: number } {
     const invalid: Uint8Array[] = [];
     txs.forEach((t, i) => {
         if (t.auxiliaryData) aux.push([i, t.auxiliaryData]);
-        if (!t.isValid) invalid.push(Cbor.encode(new CborUInt(BigInt(i))).toBuffer());
+        if (!t.isValid) invalid.push(Cbor.encode(new CborUInt(BigInt(i))));
     });
     const segments: BodySegments = { txBodies, witnessSets, auxiliaryData: rawUintMap(aux), invalidTransactions: rawArray(invalid) };
     return { segments, size: txBodies.length + witnessSets.length + segments.auxiliaryData.length + segments.invalidTransactions.length };

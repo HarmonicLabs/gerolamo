@@ -166,7 +166,7 @@ export class LocalStateQueryHost {
         let result: Uint8Array;
         try {
             const r = await this.answer(q);
-            result = r instanceof Uint8Array ? r : Cbor.encode(r).toBuffer();
+            result = r instanceof Uint8Array ? r : Cbor.encode(r);
         } catch (err) {
             if (err instanceof LsqUndecodable || err instanceof LsqUnanswerable) return this.abort(`${err instanceof LsqUndecodable ? "undecodable" : "unanswerable"} query ${describe(q)}: ${err.message}`);
             return this.abort(`query ${describe(q)} failed: ${(err as Error).stack ?? err}`);

@@ -432,7 +432,7 @@ export async function findIntersect(sock: string, magic: number, points: Array<{
     try {
         const out: Array<{ found: boolean; tip: number }> = [];
         for (const p of points) {
-            c.send(5, Cbor.encode(new CborArray([new CborUInt(4), new CborArray([new CborArray([new CborUInt(p.slot), new CborBytes(Uint8Array.from(Buffer.from(p.hash, "hex")))])])])).toBuffer());
+            c.send(5, Cbor.encode(new CborArray([new CborUInt(4), new CborArray([new CborArray([new CborUInt(p.slot), new CborBytes(Uint8Array.from(Buffer.from(p.hash, "hex")))])])])));
             const r = Cbor.parse(await c.recv(5, 30_000)) as CborArray;
             const tag = Number((r.array[0] as CborUInt).num);
             if (tag !== 5 && tag !== 6) throw new Error(`unexpected ChainSync reply ${tag}`);
@@ -441,7 +441,7 @@ export async function findIntersect(sock: string, magic: number, points: Array<{
         }
         return out;
     } finally {
-        try { c.send(5, Cbor.encode(new CborArray([new CborUInt(7)])).toBuffer()); } catch { /* gone */ } // MsgDone, as cardano-cli ends
+        try { c.send(5, Cbor.encode(new CborArray([new CborUInt(7)]))); } catch { /* gone */ } // MsgDone, as cardano-cli ends
         c.close();
     }
 }

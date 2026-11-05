@@ -16,7 +16,7 @@ import { BlockStore } from "../src/storage/blockStore";
 
 const arg = (k: string) => { const i = process.argv.indexOf(`--${k}`); return i > 0 ? process.argv[i + 1] : undefined; };
 const sock = arg("socket")!, magic = Number(arg("magic") ?? 2);
-const hex = (o: any) => Buffer.from(Cbor.encode(o).toBuffer()).toString("hex");
+const hex = (o: any) => Buffer.from(Cbor.encode(o)).toString("hex");
 const c = await openLsq(sock, magic);
 const point = await c.query(new CborArray([new CborUInt(3)])) as CborArray; // GetChainPoint → [slot, hash]
 const tipSlot = (point.array[0] as CborUInt).num;

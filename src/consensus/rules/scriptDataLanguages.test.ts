@@ -25,7 +25,7 @@ describe("script data hash languages", () => {
         if (root.array[0] instanceof CborUInt) root = root.array[1];
         const ws = root.array[2].array[0];
         const ref: any = ws.subCborRef ?? ws.cborRef;
-        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws).toBuffer();
+        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws);
         const models = costModelArrays(raw);
         const actual = String(m.block.transactionBodies[0].scriptDataHash.toString());
         expect(expectedScriptDataHash({ witnessSetBytes: wsBytes, languages: new Set([3] as any), models, alonzoForm: false }).hash).toBe(actual);

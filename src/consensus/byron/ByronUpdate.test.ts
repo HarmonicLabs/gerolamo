@@ -56,7 +56,7 @@ function key(seed: number): Key {
     const xpub = concatBytes(noble.getPublicKey(sk), new Uint8Array(32).fill(seed)); // pub ‖ chain code
     return { sk, xpub, kh: byronKeyHash(xpub) };
 }
-const enc = (o: CborObj) => Cbor.encode(o).toBuffer();
+const enc = (o: CborObj) => Cbor.encode(o);
 const u = (n: number | bigint) => new CborUInt(BigInt(n));
 const b = (x: Uint8Array) => new CborBytes(x);
 const pvObj = (pv: ByronProtocolVersion) => new CborArray([u(pv.major), u(pv.minor), u(pv.alt)]);

@@ -17,7 +17,7 @@ describe("DebugLedgerConfig", () => {
             const [shape, perEra] = cfg.array as CborArray[];
             expect(shape!.array.length).toBe(8);
             expect(perEra!.array.length).toBe(8);
-            const triggers = perEra!.array.map((e) => Buffer.from(Cbor.encode((e as CborArray).array[(e as CborArray).array.length - 1]!).toBuffer()).toString("hex"));
+            const triggers = perEra!.array.map((e) => Buffer.from(Cbor.encode((e as CborArray).array[(e as CborArray).array.length - 1]!)).toString("hex"));
             expect(triggers).toEqual(["820002", "820003", "820004", "820005", "820007", "820009", "8102", "8102"]);
         }
     });

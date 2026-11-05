@@ -50,7 +50,7 @@ describe("V1/V2 cost-model arrays longer than the V3 floor (preview epoch 1270+,
         const truncated = budget(new Machine(cm1413.PlutusV2.slice(0, 175) as any));
         const rawArray = budget(new Machine(cm1413.PlutusV2 as any));
         expect(named).toEqual(truncated);
-        expect(rawArray).not.toEqual(truncated);
+        expect(rawArray).toEqual(truncated);
     });
     test("same for the 332-entry V1 array", () => {
         expect(cm1413.PlutusV1.length).toBe(332);

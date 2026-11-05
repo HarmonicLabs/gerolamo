@@ -12,7 +12,7 @@ describe("script data hash with an indefinite-length empty datum list", () => {
         if (root.array[0] instanceof CborUInt) root = root.array[1];
         const ws = root.array[2].array[0];
         const ref: any = ws.subCborRef ?? ws.cborRef;
-        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws).toBuffer();
+        const wsBytes: Uint8Array = ref?.toBuffer ? ref.toBuffer() : Cbor.encode(ws);
         const { redeemers, datums } = witnessSlices(wsBytes);
         expect(redeemers).toBeNull();
         expect(Buffer.from(datums!).toString("hex")).toBe("9fff");

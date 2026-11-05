@@ -137,9 +137,13 @@ byte-identically, and the body encodes from fields in the Haskell key order;
 and non-reward-account rejection; key/level/duplicate rejections; guard views; certificate
 rejections. ledger-ts suite: 198 pass, the same 5 fail / 3 errors as before the change (pre-existing,
 unrelated: TxWithdrawals.toData, isProtocolParameter, Tx.fromCbor).
-Packaging: version `0.6.0-dijkstra.1`, packed with `scripts/vendor-pack.sh` into
-`vendor/harmoniclabs-cardano-ledger-ts-0.6.0-dijkstra.1.tgz` (nested cbor 2.0.2 kept). The diff
-against the sibling checkout is `docs/parity/dijkstra-ledger-ts.patch`. The copy's dev
+Packaging: version `0.6.1` (`ae9ebc6`, 2026-11-02), packed with `scripts/vendor-pack.sh` into
+`vendor/harmoniclabs-cardano-ledger-ts-0.6.1-dijkstra.tgz` (the plain `0.6.1.tgz` copy is
+byte-identical, sha256 `c63801b0…`). 0.6.1 adds protocol params keys 34–56, the Dijkstra genesis,
+`hashTx` as cardano-ledger's `hashAnnotated` over the stored block-form bytes, `BlockHeaderVersionInfo`,
+strict `vrf_cert` lengths and Leios endorser-block references/certificates; the sibling suite is 73
+suites / 265 pass, 0 fail, and Gerolamo's installed copy is byte-identical to the sibling `dist/`.
+The previous diff is `docs/parity/dijkstra-ledger-ts.patch`. The copy's dev
 dependencies (cbor, plutus-data, plutus-machine, uplc, cardano-costmodels-ts, crypto) were set to
 the versions Gerolamo resolves at runtime: with the older dev copies even the existing Dijkstra
 tests failed.
@@ -151,7 +155,8 @@ Fix: `headerParser` decodes them with `DijkstraHeader` when the switch is on (nu
 as before); `BlockHeaderValidator` treats them as Praos headers (VRF, KES over the header-body
 bytes, opcert); `blockLeader` reads their issuer; the forger writes 12-field headers
 (`false`, `nil`) and the Dijkstra body for era 8 (`dijkstraBlockBodyFromSegments`), and forges
-Dijkstra blocks empty until the mempool learns the era (432). Chain selection's tie-break reader
+Dijkstra blocks empty until the mempool learns the era (432); since the era-8 mempool landed the
+producer includes Dijkstra transactions in block form. Chain selection's tie-break reader
 (`tieBreakInfoOf`) accepts the 12-field body (it returned null, so two Dijkstra forks of equal
 length would never have been compared by VRF); Dijkstra keeps Conway's restricted VRF tie-break.
 Tests: ChainSync parse with and without the switch; a header captured from musashi at slot 566037
@@ -188,9 +193,10 @@ against the balances before the batch); partial withdrawals except in Plutus leg
 Block level: sub-transaction inputs are read, their vkey witnesses verified against their own
 body hash, their required keys and validity interval checked, their outputs visible to later
 transactions of the block and to the next block's overlay.
-Not enforced (reported): the rest of SUBLEDGER (sub-transaction scripts, native and Plutus), the
-guarding redeemer pointers, BLS proof of possession of a pool's key, max pledge leverage and min
-pool margin in the POOL rule.
+Enforced: guarding redeemer pointers (tag 6 at a script guard, `ScriptHashNotFoundForPurpose`,
+`MissingScriptWitnesses`, `MissingGuardingRedeemer`; `checkDijkstraGuarding`).
+Reported, not enforced: the rest of SUBLEDGER (sub-transaction scripts, native and Plutus), BLS
+proof of possession of a pool's key, max pledge leverage and min pool margin in the POOL rule.
 Tests: `dijkstra.test.ts` "Dijkstra transaction rules", `blockRules.test.ts`.
 
 ## 429. Gerolamo: applying Dijkstra blocks
@@ -202,8 +208,8 @@ A phase-2 invalid transaction only loses its collateral, as before. Partial with
 debit the amount. Raw decoders: `govTxDecode` and `certScan` skip the optional BLS slot of an
 11-element pool registration (the key joins the PoolParams encoding, a nil does not).
 Tests: `apply.test.ts` (order, donations), `poolCertBls.test.ts`.
-Open: governance actions and votes inside sub-transactions are not recorded by the governance
-state (it reads the top-level body); the explorer and mini-Blockfrost index only top-level txs.
+Open: the explorer and mini-Blockfrost index only top-level txs (`govIndex` now walks the Dijkstra
+block layout and records top-level and sub-transaction proposals, certs, deposits and votes).
 
 ## 430. Gerolamo: Dijkstra protocol parameters
 
@@ -219,16 +225,24 @@ Tests: `dijkstra.test.ts` "Dijkstra protocol parameters" (musashi genesis: 251-e
 
 The era index of the HFC answers follows `eraIndexAt` (7 once in Dijkstra); queries for era 7 are
 answered by the Conway query code with the Dijkstra pparams encoding; the debug ledger config
-answers Conway → Dijkstra `atVersion 12` with the switch on. Open: Dijkstra-specific query
-result shapes beyond PParams (e.g. pool params with BLS keys from the LMDB store, account
-states) are not specialised.
+answers Conway → Dijkstra `atVersion 12` with the switch on. Dijkstra pool parameters with the
+optional BLS key slot (10-field array) are normalised (margin, relay list) before they are echoed.
+Open: the remaining Dijkstra-specific query result shapes (account states) are not specialised.
 
-## 432. Mempool and transaction submission (open)
+## 432. Mempool and transaction submission (era-8 forms landed)
 
-The validating mempool and LocalTxSubmission still accept Conway transactions only (era index 6).
-With Dijkstra active the producer forges empty blocks (guard in BlockProducer) so it never
-includes a Conway-shaped transaction in a Dijkstra block. Teaching the mempool rules the
-Dijkstra body (and era index 7 on the wire) is the next step.
+The validating mempool picks the transaction form by the ledger era of the tip's protocol parameters
+(protocol 12 → era 8). Dijkstra mempool transactions (`[body, wits, aux]` or the legacy
+`[body, wits, true, aux]`) are parsed with ledger-ts `DijkstraTx`; the whole-transaction id is
+`hashTx` over the canonical block form, the witnesses sign the body hash, and the overlay spends
+sub-transaction inputs and creates sub-transaction outputs by sub-body hash (BlockApplication
+order). The rules are the era-8 block rules (`evaluateTxRules`) plus the mempool measure; the
+SUBLEDGER gaps above are reports. LocalTxSubmission accepts era index 6 or 7 and replies with the
+submitted era; LocalTxMonitor and node-to-node tx-submission carry era index 7 and `hashTx` for
+Dijkstra; `BlockProducer` splits block-form transactions for era 8 and includes mempool
+transactions (bug 432). Tests: `mempool/dijkstraMempool.test.ts` (golden `tx.cbor`, block form,
+hashTx, splitTx, producer body, era-8 rules). Open: full Dijkstra mempool acceptance with a wallet
+signed transaction and the sub-transaction witness/script checks in the mempool.
 
 ## 433. Plutus V4 language
 

@@ -6,16 +6,31 @@
  * The id is blake2b-256 of the body bytes as submitted (not of the whole transaction).
  */
 import { Cbor, CborArray, CborBytes, CborMap, CborTag, CborUInt, type CborObj } from "@harmoniclabs/cbor";
-import { ConwayTx } from "@harmoniclabs/cardano-ledger-ts";
+import { ConwayTx, DijkstraTx } from "@harmoniclabs/cardano-ledger-ts";
 import { blake2b_256 } from "@harmoniclabs/crypto";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { utxoRefOf } from "../consensus/rules/resolvedUtxo";
 
+const concatBytes = (...parts: Uint8Array[]): Uint8Array => {
+    const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+    let o = 0; for (const p of parts) { out.set(p, o); o += p.length; }
+    return out;
+};
+
 export interface MempoolTx {
     bytes: Uint8Array;
-    /** blake2b-256 of the body bytes (hex). */
+    /** Ledger era of the transaction (7 Conway, 8 Dijkstra). */
+    era: number;
+    /** blake2b-256 of the body bytes (hex). Conway tx id; Dijkstra `hashTx` over the block form. */
     txId: string;
     txIdBytes: Uint8Array;
+    /** blake2b-256 of the body bytes (the id witnesses sign; Dijkstra `hashTx` is the block form). */
+    bodyHashBytes: Uint8Array;
+    /** Dijkstra: the canonical `[body, wits, aux, is_valid]` block transaction and its `hashTx`. */
+    blockBytes: Uint8Array;
+    blockTxIdBytes: Uint8Array;
+    /** Dijkstra sub-transactions (`[sub_body, wits, aux]`), empty for Conway. */
+    subTransactions: any[];
     body: any;
     witnessSet: any;
     isValid: boolean;
@@ -71,7 +86,7 @@ function itemSlices(bytes: Uint8Array): Uint8Array[] {
 
 const refsOf = (list: any[] | undefined): string[] => (list ?? []).map((i) => utxoRefOf(i)).filter((r): r is string => !!r);
 
-export function parseMempoolTx(bytes: Uint8Array): MempoolTx {
+export function parseConwayMempoolTx(bytes: Uint8Array): MempoolTx {
     if (bytes[0] !== 0x84) throw new Error("not a 4-element Alonzo+ transaction");
     const parts = itemSlices(bytes);
     if (parts.length !== 4) throw new Error(`transaction has ${parts.length} elements, expected 4`);
@@ -112,7 +127,8 @@ export function parseMempoolTx(bytes: Uint8Array): MempoolTx {
     }
     const body = tx.body;
     return {
-        bytes, txId: toHex(txIdBytes), txIdBytes, body, witnessSet: tx.witnesses, isValid,
+        bytes, era: 7, blockBytes: bytes, blockTxIdBytes: txIdBytes, subTransactions: [], bodyHashBytes: txIdBytes,
+        txId: toHex(txIdBytes), txIdBytes, body, witnessSet: tx.witnesses, isValid,
         bodyBytes, witnessSetBytes, auxBytes,
         wireSize: bytes.length, size: bytes.length - 1,
         outputSlices, collateralReturnSlice, withdrawals, totalCollateral, networkId, auxDataHash, scriptDataHash, currentTreasuryValue,
@@ -121,10 +137,85 @@ export function parseMempoolTx(bytes: Uint8Array): MempoolTx {
 }
 
 /**
- * The transaction inside a node-to-client MsgSubmitTx / MsgReplyNextTx payload: cardano-node
- * sends and expects the hard-fork-wrapped form `[eraIndex, #6.24(bytes)]`; bare transaction
- * bytes (what the ouroboros-miniprotocols-ts client sends) are accepted too.
+ * Dijkstra `mempool_transaction` (`[body, wits, aux]`, or the legacy `[body, wits, true, aux]`):
+ * the body carries sub-transactions; the id is `hashTx` over the block-format transaction
+ * (`[body, wits, aux, is_valid]`), so the id is computed from the canonical block bytes.
  */
+export function parseDijkstraMempoolTx(bytes: Uint8Array): MempoolTx {
+    if (!(bytes[0] === 0x83 || bytes[0] === 0x84)) throw new Error("not a Dijkstra mempool transaction");
+    const parts = itemSlices(bytes);
+    if (parts.length !== 3 && parts.length !== 4) throw new Error(`transaction has ${parts.length} elements, expected 3 or 4`);
+    const mempoolFlag = parts.length === 4;
+    if (mempoolFlag && !(parts[2]!.length === 1 && parts[2]![0] === 0xf5)) throw new Error("Dijkstra legacy mempool flag is not true");
+    const bodyBytes = parts[0]!, witnessSetBytes = parts[1]!;
+    const auxRaw = parts[mempoolFlag ? 3 : 2]!;
+    const auxBytes = auxRaw.length === 1 && auxRaw[0] === 0xf6 ? null : auxRaw;
+    const blockBytes = concatBytes(new Uint8Array([0x84]), bodyBytes, witnessSetBytes, auxBytes ?? new Uint8Array([0xf6]), new Uint8Array([0xf5]));
+    const blockTxIdBytes = new Uint8Array(blake2b_256(blockBytes));
+    const tx: any = DijkstraTx.fromCbor(bytes);
+
+    let totalCollateral: bigint | null = null, networkId: number | null = null, auxDataHash: string | null = null, scriptDataHash: string | null = null, currentTreasuryValue: bigint | null = null;
+    let outputSlices: Uint8Array[] = [], collateralReturnSlice: Uint8Array | null = null;
+    const withdrawals: MempoolTx["withdrawals"] = [];
+    const entries = itemSlices(bodyBytes);
+    for (let k = 0; k + 1 < entries.length; k += 2) {
+        const key = Cbor.parse(entries[k]!);
+        if (!(key instanceof CborUInt)) continue;
+        const v = entries[k + 1]!;
+        const obj = () => Cbor.parse(v);
+        switch (Number(key.num)) {
+            case 1: outputSlices = itemSlices(v); break;
+            case 5: {
+                const o = obj();
+                if (o instanceof CborMap) for (const { k: a, v: q } of o.map) {
+                    if (!(a instanceof CborBytes) || !(q instanceof CborUInt) || a.bytes.length !== 29) continue;
+                    withdrawals.push({ account: a.bytes, amount: q.num, credType: (a.bytes[0]! & 0x10) ? 1 : 0, credHex: toHex(a.bytes.subarray(1)) });
+                }
+                break;
+            }
+            case 7: { const o = obj(); if (o instanceof CborBytes) auxDataHash = toHex(o.bytes); break; }
+            case 11: { const o = obj(); if (o instanceof CborBytes) scriptDataHash = toHex(o.bytes); break; }
+            case 15: { const o = obj(); if (o instanceof CborUInt) networkId = Number(o.num); break; }
+            case 16: collateralReturnSlice = v; break;
+            case 17: { const o = obj(); if (o instanceof CborUInt) totalCollateral = o.num; break; }
+            case 21: { const o = obj(); if (o instanceof CborUInt) currentTreasuryValue = o.num; break; }
+        }
+    }
+    const body = tx.body;
+    const bodyHashBytes = new Uint8Array(blake2b_256(bodyBytes));
+    return {
+        bytes, era: 8, blockBytes, blockTxIdBytes, bodyHashBytes, subTransactions: (body?.subTransactions ?? []) as any[],
+        txId: toHex(blockTxIdBytes), txIdBytes: blockTxIdBytes, body, witnessSet: tx.witnesses, isValid: true,
+        bodyBytes, witnessSetBytes, auxBytes,
+        wireSize: bytes.length, size: blockBytes.length - 1,
+        outputSlices, collateralReturnSlice, withdrawals, totalCollateral, networkId, auxDataHash, scriptDataHash, currentTreasuryValue,
+        inputs: refsOf(body.inputs), collateral: refsOf(body.collateralInputs), refInputs: refsOf(body.refInputs),
+    };
+}
+
+/** Era-aware parse: Dijkstra (era 8+) vs Conway (era 7 and below). Without an era, Conway is tried first. */
+export function parseMempoolTx(bytes: Uint8Array, era?: number): MempoolTx {
+    if (era != null) return era >= 8 ? parseDijkstraMempoolTx(bytes) : parseConwayMempoolTx(bytes);
+    try { return parseConwayMempoolTx(bytes); }
+    catch (err) {
+        if (bytes[0] !== 0x83 && bytes[0] !== 0x84) throw err;
+        return parseDijkstraMempoolTx(bytes);
+    }
+}
+
+/**
+ * The canonical Dijkstra block transaction `[body, wits, aux, is_valid]` from submitted mempool
+ * bytes (`[body, wits, aux]` or `[body, wits, true, aux]`), copying the original slices.
+ */
+export function mempoolToBlockTransactionBytes(bytes: Uint8Array): Uint8Array {
+    const parts = itemSlices(bytes);
+    if (parts.length !== 3 && parts.length !== 4) throw new Error(`Dijkstra transaction has ${parts.length} elements`);
+    const legacy = parts.length === 4 && parts[2]!.length === 1 && parts[2]![0] === 0xf5;
+    const aux = parts[legacy ? 3 : 2]!;
+    return concatBytes(new Uint8Array([0x84]), parts[0]!, parts[1]!, aux, new Uint8Array([0xf5]));
+}
+
+
 export function unwrapHfcTx(obj: CborObj): { era: number | null; bytes: Uint8Array } | null {
     if (obj instanceof CborBytes) return { era: null, bytes: obj.bytes };
     if (obj instanceof CborArray && obj.array.length === 2 && obj.array[0] instanceof CborUInt) {

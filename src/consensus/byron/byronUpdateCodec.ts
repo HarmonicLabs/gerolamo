@@ -416,7 +416,7 @@ export function decodeByronHeaderUpdateFields(rawHeader: Uint8Array, epochSlots:
 // ───────────────────────────── signatures ─────────────────────────────
 
 function network(protocolMagic: number): Uint8Array {
-    return Cbor.encode(new CborUInt(BigInt(protocolMagic))).toBuffer();
+    return Cbor.encode(new CborUInt(BigInt(protocolMagic)));
 }
 
 export function signTagUSProposal(protocolMagic: number): Uint8Array {

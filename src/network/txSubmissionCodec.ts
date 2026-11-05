@@ -13,8 +13,8 @@ import { Cbor, CborArray, CborBytes, type CborObj, CborSimple, CborTag, CborUInt
 import { epochForSlot, getEpochNetwork } from "../utils/epochFromSlotCalculations";
 import { slotAt } from "../pool/slotClock";
 
-/** Hard-fork combinator era index: Byron 0, Shelley 1, Allegra 2, Mary 3, Alonzo 4, Babbage 5, Conway 6. */
-export type HfcEraIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6;
+/** Hard-fork combinator era index: Byron 0, Shelley 1, Allegra 2, Mary 3, Alonzo 4, Babbage 5, Conway 6, Dijkstra 7. */
+export type HfcEraIndex = 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7;
 
 export interface TxIdRequest { kind: "requestTxIds"; blocking: boolean; ack: number; req: number }
 export interface TxRequest { kind: "requestTxs"; ids: Uint8Array[] }
@@ -63,18 +63,18 @@ export function parseTxSubmissionMessages(chunk: Uint8Array): TxSubmissionServer
 /** MsgReplyTxIds = [1, 9f [[eraIndex, hash], size] … ff] */
 export function encodeReplyTxIds(era: HfcEraIndex, entries: Array<{ hash: Uint8Array; size: number }>): Uint8Array {
     const list = entries.map((e) => new CborArray([new CborArray([new CborUInt(BigInt(era)), new CborBytes(e.hash)]), new CborUInt(BigInt(e.size))]));
-    return Cbor.encode(new CborArray([new CborUInt(1n), new CborArray(list, { indefinite: true })])).toBuffer();
+    return Cbor.encode(new CborArray([new CborUInt(1n), new CborArray(list, { indefinite: true })]));
 }
 
 /** MsgReplyTxs = [3, 9f [eraIndex, #6.24(txBytes)] … ff] */
 export function encodeReplyTxs(era: HfcEraIndex, txs: Uint8Array[]): Uint8Array {
     const list = txs.map((t) => new CborArray([new CborUInt(BigInt(era)), new CborTag(24, new CborBytes(t))]));
-    return Cbor.encode(new CborArray([new CborUInt(3n), new CborArray(list, { indefinite: true })])).toBuffer();
+    return Cbor.encode(new CborArray([new CborUInt(3n), new CborArray(list, { indefinite: true })]));
 }
 
 /** MsgInit = [6] */
 export function encodeInit(): Uint8Array {
-    return Cbor.encode(new CborArray([new CborUInt(6n)])).toBuffer();
+    return Cbor.encode(new CborArray([new CborUInt(6n)]));
 }
 
 /** Hard-fork-combinator era index of the current wall-clock epoch (Byron 0 … Babbage 5, Conway 6). */
@@ -137,13 +137,13 @@ export function parseTxSubmissionClientMessages(chunk: Uint8Array): TxSubmission
 
 /** MsgRequestTxIds = [0, blocking, ack, req] */
 export function encodeRequestTxIds(blocking: boolean, ack: number, req: number): Uint8Array {
-    return Cbor.encode(new CborArray([new CborUInt(0n), new CborSimple(blocking), new CborUInt(BigInt(ack)), new CborUInt(BigInt(req))])).toBuffer();
+    return Cbor.encode(new CborArray([new CborUInt(0n), new CborSimple(blocking), new CborUInt(BigInt(ack)), new CborUInt(BigInt(req))]));
 }
 
 /** MsgRequestTxs = [2, 9f [eraIndex, hash] … ff] */
 export function encodeRequestTxs(era: HfcEraIndex, hashes: Uint8Array[]): Uint8Array {
     const list = hashes.map((h) => new CborArray([new CborUInt(BigInt(era)), new CborBytes(h)]));
-    return Cbor.encode(new CborArray([new CborUInt(2n), new CborArray(list, { indefinite: true })])).toBuffer();
+    return Cbor.encode(new CborArray([new CborUInt(2n), new CborArray(list, { indefinite: true })]));
 }
 
 /**

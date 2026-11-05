@@ -53,7 +53,7 @@ function outputCbor(u: any) {
         const script = lang === 0
             ? new CborArray([new CborUInt(0), Cbor.parse(fromHex(u.reference_script.bytes))])
             : new CborArray([new CborUInt(lang), new CborBytes(fromHex(u.reference_script.bytes))]);
-        entries.push({ k: new CborUInt(3), v: new CborTag(24, new CborBytes(Cbor.encode(script).toBuffer())) });
+        entries.push({ k: new CborUInt(3), v: new CborTag(24, new CborBytes(Cbor.encode(script))) });
     }
     return new CborMap(entries);
 }
@@ -64,8 +64,8 @@ const outputs = new CborArray(resolved.map(outputCbor));
 const dir = args.out ?? `/tmp/aiken-sim-${String(args.tx).slice(0, 8)}`;
 mkdirSync(dir, { recursive: true });
 writeFileSync(`${dir}/tx.hex`, cb.cbor);
-writeFileSync(`${dir}/inputs.hex`, toHex(Cbor.encode(inputs).toBuffer()));
-writeFileSync(`${dir}/outputs.hex`, toHex(Cbor.encode(outputs).toBuffer()));
+writeFileSync(`${dir}/inputs.hex`, toHex(Cbor.encode(inputs)));
+writeFileSync(`${dir}/outputs.hex`, toHex(Cbor.encode(outputs)));
 const [zeroTime, zeroSlot, slotLen] = SLOTS[net];
 const proc = Bun.spawnSync(["aiken", "tx", "simulate", `${dir}/tx.hex`, `${dir}/inputs.hex`, `${dir}/outputs.hex`, "--zero-time", String(zeroTime), "--zero-slot", String(zeroSlot), "--slot-length", String(slotLen)], { stdout: "pipe", stderr: "pipe" });
 const out = proc.stdout.toString(), err = proc.stderr.toString();

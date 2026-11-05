@@ -194,7 +194,7 @@ export function poolMetadataHash(fileBytes: Uint8Array): Uint8Array {
 }
 
 export function certificateEnvelope(cert: CborArray): TextEnvelope {
-    return { type: KeyEnvelopeType.certificate, description: "", cborHex: hex(Cbor.encode(cert).toBuffer()) };
+    return { type: KeyEnvelopeType.certificate, description: "", cborHex: hex(Cbor.encode(cert)) };
 }
 
 // ─────────────────────────── transaction ───────────────────────────
@@ -228,8 +228,8 @@ export function encodeTxBody(f: TxBodyFields): Uint8Array {
     ];
     if (f.ttl != null) entries.push({ k: new CborUInt(3n), v: new CborUInt(f.ttl) });
     if (f.certificates.length) entries.push({ k: new CborUInt(4n), v: set(f.certificates) });
-    if (f.auxiliaryData) entries.push({ k: new CborUInt(7n), v: new CborBytes(new Uint8Array(blake2b_256(Cbor.encode(f.auxiliaryData).toBuffer()))) });
-    return Cbor.encode(new CborMap(entries)).toBuffer();
+    if (f.auxiliaryData) entries.push({ k: new CborUInt(7n), v: new CborBytes(new Uint8Array(blake2b_256(Cbor.encode(f.auxiliaryData)))) });
+    return Cbor.encode(new CborMap(entries));
 }
 
 export function txId(bodyBytes: Uint8Array): Uint8Array {
@@ -255,7 +255,7 @@ export function signTxBody(bodyBytes: Uint8Array, keys: KeyPair[]): VkeyWitness[
 /** `[body, {0: #258([[vkey, sig]…])}, true, auxiliary_data | null]` — Conway transaction bytes. */
 export function encodeSignedTx(bodyBytes: Uint8Array, witnesses: VkeyWitness[], auxiliaryData?: CborObj): Uint8Array {
     const ws = new CborMap([{ k: new CborUInt(0n), v: set(witnesses.map((w) => new CborArray([new CborBytes(w.vkey), new CborBytes(w.signature)]))) }]);
-    return Cbor.encode(new CborArray([Cbor.parse(bodyBytes), ws, new CborSimple(true), auxiliaryData ?? new CborSimple(null)])).toBuffer();
+    return Cbor.encode(new CborArray([Cbor.parse(bodyBytes), ws, new CborSimple(true), auxiliaryData ?? new CborSimple(null)]));
 }
 
 export function verifyWitnesses(bodyBytes: Uint8Array, witnesses: VkeyWitness[]): boolean {
@@ -287,7 +287,7 @@ export function buildWithMinFee(fields: Omit<TxBodyFields, "fee"> & { changeInde
 export function decodeTx(txBytes: Uint8Array): { body: Uint8Array; witnesses: VkeyWitness[] } {
     const root = Cbor.parse(txBytes);
     if (!(root instanceof CborArray) || root.array.length < 2) throw new Error("not a transaction");
-    const body = Cbor.encode(root.array[0]!).toBuffer();
+    const body = Cbor.encode(root.array[0]!);
     const ws = root.array[1] as CborMap;
     const witnesses: VkeyWitness[] = [];
     const w0 = ws.map.find((e) => e.k instanceof CborUInt && e.k.num === 0n)?.v as any;

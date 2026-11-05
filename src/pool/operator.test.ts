@@ -107,10 +107,10 @@ describe("message metadata", () => {
         });
         const body = Cbor.parse(built.body) as InstanceType<typeof CborMap>;
         const key7 = body.map.find((e) => e.k instanceof CborUInt && e.k.num === 7n)?.v as InstanceType<typeof CborBytes>;
-        expect(Buffer.from(key7.bytes).toString("hex")).toBe(Buffer.from(blake2b_256(Cbor.encode(aux).toBuffer())).toString("hex"));
+        expect(Buffer.from(key7.bytes).toString("hex")).toBe(Buffer.from(blake2b_256(Cbor.encode(aux))).toString("hex"));
         const tx = Cbor.parse(built.tx) as InstanceType<typeof CborArray>;
         expect(tx.array.length).toBe(4);
-        expect(Buffer.from(Cbor.encode(tx.array[3]!).toBuffer()).toString("hex")).toBe(Buffer.from(Cbor.encode(aux).toBuffer()).toString("hex"));
+        expect(Buffer.from(Cbor.encode(tx.array[3]!)).toString("hex")).toBe(Buffer.from(Cbor.encode(aux)).toString("hex"));
         expect(() => messageMetadata(["x".repeat(65)])).toThrow();
     });
 });

@@ -55,11 +55,11 @@ export function sha3_256(bytes: Uint8Array): Uint8Array {
 }
 
 function cborUInt(n: bigint | number): Uint8Array {
-    return Cbor.encode(new CborUInt(BigInt(n))).toBuffer();
+    return Cbor.encode(new CborUInt(BigInt(n)));
 }
 
 function cborBytes(b: Uint8Array): Uint8Array {
-    return Cbor.encode(new CborBytes(b)).toBuffer();
+    return Cbor.encode(new CborBytes(b));
 }
 
 /** Byron `KeyHash` of a 64-byte XPub, hex. */

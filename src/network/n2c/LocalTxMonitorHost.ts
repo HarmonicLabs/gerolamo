@@ -17,7 +17,7 @@ const PROTO = MiniProtocol.LocalTxMonitor;
 export const GET_MEASURES_MIN_VERSION = 20;
 
 const U = (n: number | bigint) => new CborUInt(typeof n === "bigint" ? n : BigInt(n));
-const enc = (o: CborObj) => Cbor.encode(o).toBuffer();
+const enc = (o: CborObj) => Cbor.encode(o);
 
 /** MsgReplyGetMeasures `[12, txCount, {name: [size, capacity]}]`, names in `Map MeasureName` (text) order. */
 export function replyGetMeasuresBytes(m: MempoolMeasures): Uint8Array {
@@ -136,7 +136,7 @@ export class LocalTxMonitorHost {
                 const txs = this.snapshot?.txs ?? [];
                 if (this.nextIdx >= txs.length) { this.sendBytes(enc(new CborArray([U(6)]))); return; }
                 const t = txs[this.nextIdx++]!;
-                this.sendBytes(enc(new CborArray([U(6), wrapHfcTx(CONWAY_ERA_INDEX, t.bytes)])));
+                this.sendBytes(enc(new CborArray([U(6), wrapHfcTx((t.era ?? 7) >= 8 ? 7 : CONWAY_ERA_INDEX, t.bytes)])));
                 return;
             }
             case 7: {
@@ -174,7 +174,7 @@ async function takeSnapshot(): Promise<MempoolSnapshot> {
     const txs = hs.length ? await store.getTxs(hs.map((h) => h.hash as any)) : [];
     let slot = 0n;
     try { slot = (await getMaxSlot()) + 1n; } catch { /* no chain */ }
-    const list = txs.map((t, i) => { const id = hashBytes(t.hash); return { txId: toHex(id), txIdBytes: id, bytes: t.bytes, measureBytes: t.bytes.length + 3, ticket: i + 1 }; });
+    const list = txs.map((t, i) => { const id = hashBytes(t.hash); return { txId: toHex(id), txIdBytes: id, bytes: t.bytes, era: 7, measureBytes: t.bytes.length + 3, ticket: i + 1 }; });
     const bytes = list.reduce((a, t) => a + t.measureBytes, 0);
     return {
         slot, txs: list, version: 0,

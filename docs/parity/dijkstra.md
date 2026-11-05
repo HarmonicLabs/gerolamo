@@ -268,7 +268,7 @@ parser used by the test harness (value literal ordering checks, free variables),
 evaluator or the flat decoder. The same suite as V3 at protocol 11 fails the two `case` on Data
 programs that need protocol 12, as it should. The 1.63 suite still passes as before.
 
-## 435. Plutus V4 script context (partial)
+## 435. Plutus V4 script context (closed)
 
 `PlutusLedgerApi.V4.Contexts` (677 lines at plutus master) adds guards, sub-transactions,
 direct deposits, balance intervals and required top-level guards to TxInfo; Dijkstra's TxInfo
@@ -283,10 +283,11 @@ sub-transaction redeemers, and the ledger's `guardDijkstraFeaturesForPlutusV1toV
 guards in key 14, required top-level guards in key 24, direct deposits in key 25, account balance
 intervals in key 26 → collect error; a V1..V3 script in a sub-transaction → UnsupportedScriptInSubTx).
 
-Still open: the built-in `Value` data constructor for `txInfoMint` / `ttisMints` / `ttisBurns`
-(the current `valueData` map encoding is unchanged), so a V4 script that pattern-matches mint
-quantities as the V4 built-in Value can still differ from `toBuiltinData`; exact `ttisVotes` union
-tie-breaking against a reference evaluator also remains unmeasured.
+Measured: `ttisVotes` is a right-biased union (a later top-level vote replaces a sub-transaction
+vote for the same voter/action), matching `Semigroup (VotingProcedures era)`. The CIP-0195 built-in
+`Value` constructor is not on the phase-2 Data path: `PlutusLedgerApi.V4.Data.Contexts` uses the
+Data-backed `V3.MintValue` / `V1.Value` maps (`txInfoMint`, `txOutValue`, `ttisMints`, `ttisBurns`),
+so no extra Data constructor is needed for the evaluator's ScriptContext.
 
 ## 436. No regression
 

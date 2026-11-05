@@ -251,8 +251,11 @@ describe("Dijkstra Plutus V4 guard context (bug 435)", () => {
     const script = h(28, 0x11);
     const datum = Cbor.encode(new CborUInt(42));
     const cred = () => new CborArray([u(1), script]);
+    const voter = new CborArray([u(1), h(28, 0x22)]);
+    const action = new CborArray([h(32, 0x33), u(0)]);
+    const votes = (vote: number) => new CborMap([{ k: voter, v: new CborMap([{ k: action, v: new CborArray([u(vote), u(0), new CborSimple(null)]) }]) }]);
     // one sub-transaction (key 23) with its own required top-level guard datum
-    const subBody = new CborMap([{ k: u(24), v: new CborMap([{ k: cred(), v: new CborBytes(datum) }]) }]);
+    const subBody = new CborMap([{ k: u(24), v: new CborMap([{ k: cred(), v: new CborBytes(datum) }]) }, { k: u(19), v: votes(2) }]);
     const subWits = new CborMap([]);
     const body = new CborMap([
         { k: u(0), v: new CborArray([]) },
@@ -260,6 +263,7 @@ describe("Dijkstra Plutus V4 guard context (bug 435)", () => {
         { k: u(2), v: u(1) },
         { k: u(14), v: new CborTag(258, new CborArray([cred()])) },
         { k: u(24), v: new CborMap([{ k: cred(), v: new CborBytes(datum) }]) },
+        { k: u(19), v: votes(0) },
         { k: u(23), v: new CborTag(258, new CborArray([new CborArray([subBody, subWits, new CborSimple(null)])])) },
     ]);
     const wits = new CborMap([{ k: u(5), v: new CborMap([{ k: new CborArray([u(6), u(0)]), v: new CborArray([u(0), new CborArray([u(0), u(0)])]) }]) }]);
@@ -284,5 +288,13 @@ describe("Dijkstra Plutus V4 guard context (bug 435)", () => {
         const sub: any = ctx.subContexts()[0].txInfo(4);
         expect(sub.items[1].tag).toBe(0n); // Just
         expect(sub.items[1].fields[0].v).toBe(0n);
+    });
+    test("ttisVotes is a right-biased union: the top-level vote beats a later sub-transaction vote", () => {
+        const p = ctx.purposeOf({ tag: 6, index: 0 })!;
+        const top: any = (ctx.scriptInfoData(p, 4) as any).fields[1].fields[0];
+        const voteMap: any = top.items[3].items[14]; // TopTxInfoSimplified.ttisVotes
+        expect(voteMap.entries.length).toBe(1);
+        expect(voteMap.entries[0].snd.entries.length).toBe(1); // one governance action
+        expect(voteMap.entries[0].snd.entries[0].snd.tag).toBe(0n); // VoteNo from the top level, not VoteYes/A2 from the sub-tx
     });
 });

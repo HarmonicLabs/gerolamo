@@ -190,7 +190,7 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
         for (const r of c.redeemers) {
             const out: RedeemerOutcome = { tag: r.tag, index: r.index, scriptHash: null, language: null, declared: { mem: r.mem, cpu: r.cpu }, ok: false, subTxIx: c.subTxIx };
             outcomes.push(out);
-            if (c.era >= 8 && r.tag > 6) return { ok: false, error: `redeemer tag ${r.tag} is not supported yet (bug 435)`, redeemers: outcomes };
+            if (c.era >= 8 && r.tag > 6) return { ok: false, error: `redeemer tag ${r.tag} is not supported (Dijkstra Plutus purpose tags are 0..6)`, redeemers: outcomes };
             const p: Purpose | null = c.purposeOf(r);
             if (!p) return { ok: false, error: `redeemer ${r.tag}:${r.index} points to nothing`, redeemers: outcomes };
             const hash = c.scriptHashOf(p);
@@ -204,11 +204,11 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
             // account balance intervals in key 26); a V1..V3 script inside a key-23 sub-transaction is
             // UnsupportedScriptInSubTx (the ledger runs sub-transaction scripts only for Plutus V4).
             if (c.subTxIx !== undefined && script.lang < 4) {
-                return { ok: false, error: `Plutus V${script.lang} script in Dijkstra sub-transaction ${c.subTxIx} is not supported (bug 435)`, collect: true, redeemers: outcomes };
+                return { ok: false, error: `Plutus V${script.lang} script in Dijkstra sub-transaction ${c.subTxIx} is not supported (ledger UnsupportedScriptInSubTx)`, collect: true, redeemers: outcomes };
             }
             const features = c.subTxIx === undefined && script.lang < 4 ? dijkstraOnlyBodyKeys(c) : [];
             if (features.length) {
-                return { ok: false, error: `Plutus V${script.lang} context of a Dijkstra transaction with body keys ${features.join(", ")} is not buildable (bug 435)`, collect: true, redeemers: outcomes };
+                return { ok: false, error: `Plutus V${script.lang} context of a Dijkstra transaction with body keys ${features.join(", ")} is a collect error (ledger guardDijkstraFeaturesForPlutusV1toV3)`, collect: true, redeemers: outcomes };
             }
             const arr = models[script.lang];
             if (!arr) return { ok: false, error: `no cost model for Plutus V${script.lang}`, collect: true, redeemers: outcomes };

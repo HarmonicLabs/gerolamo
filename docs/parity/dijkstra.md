@@ -268,13 +268,25 @@ parser used by the test harness (value literal ordering checks, free variables),
 evaluator or the flat decoder. The same suite as V3 at protocol 11 fails the two `case` on Data
 programs that need protocol 12, as it should. The 1.63 suite still passes as before.
 
-## 435. Plutus V4 script context (open)
+## 435. Plutus V4 script context (partial)
 
 `PlutusLedgerApi.V4.Contexts` (677 lines at plutus master) adds guards, sub-transactions,
 direct deposits, balance intervals and required top-level guards to TxInfo; Dijkstra's TxInfo
-for V1..V3 refuses transactions using these fields. Not ported: phase 2 gives "no verdict"
-(reported, never a failure) for a V4 script, for a V1..V3 script in a transaction with body keys
-23..27, and for a guarding redeemer.
+for V1..V3 refuses transactions using these fields.
+
+Implemented: a top-level guarding redeemer builds `ScriptInfo.GuardingScript ix (Just TopTxInfo)`,
+with the four-field `TopTxInfo` (sub-transaction `TxInfo`s, the datum map from key 24 looked up
+in every sub-transaction and the top level, the top-level starting balance intervals from key 27,
+and the aggregated `TopTxInfoSimplified`), the Plutus V4 `ScriptContext` list with its fourth
+script-hash field, key-23 sub-transaction `TxInfo`s (`txInfoSubTxIx = Just ix`), V4 evaluation of
+sub-transaction redeemers, and the ledger's `guardDijkstraFeaturesForPlutusV1toV3` gate (script
+guards in key 14, required top-level guards in key 24, direct deposits in key 25, account balance
+intervals in key 26 → collect error; a V1..V3 script in a sub-transaction → UnsupportedScriptInSubTx).
+
+Still open: the built-in `Value` data constructor for `txInfoMint` / `ttisMints` / `ttisBurns`
+(the current `valueData` map encoding is unchanged), so a V4 script that pattern-matches mint
+quantities as the V4 built-in Value can still differ from `toBuiltinData`; exact `ttisVotes` union
+tie-breaking against a reference evaluator also remains unmeasured.
 
 ## 436. No regression
 

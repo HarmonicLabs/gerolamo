@@ -17,7 +17,7 @@
 import { blake2b_224, blake2b_256 } from "@harmoniclabs/crypto";
 import { toHex } from "@harmoniclabs/uint8array-utils";
 import { arr, bytesOf, field, intOf, isNull, map, parseCbor, uintOf, type CNode } from "./cbor";
-import { DBytes, DConstr, DInt, DList, DMap, DPair, decodeData, type Data } from "./data";
+import { DBytes, DConstr, DInt, DK, DList, DMap, DPair, decodeData, encodeData, type Data } from "./data";
 import type { ResolvedUtxo } from "../rules/resolvedUtxo";
 
 export class ContextError extends Error {}
@@ -73,6 +73,34 @@ function accountIntervalMap(n: CNode | undefined): Array<[Data, Data]> {
 function requiredGuardMap(n: CNode | undefined): Array<[Data, Uint8Array | null]> {
     return map(n).map(([k, v]) => [guardCred(k), v === undefined || isNull(v) ? null : bytesOf(v)] as [Cred, Uint8Array | null])
         .sort((a, b) => cmpCred(a[0]!, b[0]!)).map(([c, d]) => [credData(c), d] as [Data, Uint8Array | null]);
+}
+
+/** Credential carried by a `Data` credential (Constr 0 key hash / Constr 1 script hash). */
+function credFromData(d: Data): Cred {
+    if (d.k !== DK.Constr) throw new Error("credential key is not a constructor");
+    const f = (d as DConstr).fields;
+    return { script: (d as DConstr).tag === 1n, hash: (f[0] as DBytes).v };
+}
+function dataEq(a: Data, b: Data): boolean { return cmpBytes(encodeData(a), encodeData(b)) === 0; }
+function dMapPairs(d: Data): Array<[Data, Data]> { return d.k === DK.Map ? d.entries.map((e) => [e.fst, e.snd]) : []; }
+function dListItems(d: Data): Data[] { return d.k === DK.List ? d.items : []; }
+/** Union of credential-keyed quantity maps (withdrawals/direct deposits), summing duplicate credentials. */
+function mergeCredMap(list: Array<Data | null | undefined>): Data {
+    const m = new Map<string, [Data, bigint]>();
+    for (const d of list) if (d) for (const [k, v] of dMapPairs(d)) {
+        const q = (v as DInt).v, e = m.get(toHex(encodeData(k)));
+        if (e) e[1] += q; else m.set(toHex(encodeData(k)), [k, q]);
+    }
+    return M([...m.values()].sort((a, b) => cmpBytes(encodeData(a[0]), encodeData(b[0]))).map(([k, q]) => [k, I(q)]));
+}
+/** Union of keyed maps; `laterWins` lets a later sub-transaction/top-level entry replace an earlier one. */
+function mergeDataMap(list: Array<Data | null | undefined>, laterWins = false): Data {
+    const m = new Map<string, [Data, Data]>();
+    for (const d of list) if (d) for (const [k, v] of dMapPairs(d)) {
+        const h = toHex(encodeData(k));
+        if (!m.has(h) || laterWins) m.set(h, [k, v]);
+    }
+    return M([...m.values()].sort((a, b) => cmpBytes(encodeData(a[0]), encodeData(b[0]))));
 }
 
 function gcd(a: bigint, b: bigint): bigint { a = a < 0n ? -a : a; b = b < 0n ? -b : b; while (b) [a, b] = [b, a % b]; return a; }
@@ -162,6 +190,22 @@ function multiAssetOf(n: CNode | undefined): Assets {
     }
     return out;
 }
+
+/** Sum the same asset across sub-transactions and the top level, keeping one sign (mints > 0, burns < 0). */
+function mergeAssets(list: Assets[], positive: boolean): Assets {
+    const sums = new Map<string, Map<string, bigint>>();
+    for (const a of list) for (const [policy, tokens] of a) {
+        let inner = sums.get(policy); if (!inner) { inner = new Map(); sums.set(policy, inner); }
+        for (const [name, q] of tokens) inner.set(name, (inner.get(name) ?? 0n) + q);
+    }
+    const out: Assets = new Map();
+    for (const [policy, tokens] of sums) {
+        const m = new Map<string, bigint>();
+        for (const [name, q] of tokens) if (q !== 0n && (positive ? q > 0n : q < 0n)) m.set(name, q);
+        if (m.size) out.set(policy, m);
+    }
+    return out;
+}
 function valueOf(n: CNode): { coin: bigint; assets: Assets } {
     if (n.t === "u") return { coin: n.v, assets: new Map() };
     const [c, ma] = arr(n);
@@ -240,6 +284,8 @@ export interface ContextInput {
     resolved: Map<string, ResolvedUtxo>;
     /** Slot → POSIX milliseconds (the network's era history). */
     slotToPosixMs: (slot: bigint) => bigint;
+    /** Dijkstra sub-transaction index (key 23); undefined for the top-level transaction. */
+    subTxIx?: number;
 }
 
 export class TxContext {
@@ -259,6 +305,10 @@ export class TxContext {
     readonly guards: Cred[];
     /** Dijkstra key 24: credential -> datum (nil absent). */
     readonly requiredGuards: Array<[Data, Uint8Array | null]>;
+    /** The structured form of key 24, for the V4 guard datum map. */
+    readonly requiredGuardCreds: Array<{ cred: Cred; datum: Uint8Array | null }>;
+    /** Sub-transaction index when this context is a Dijkstra key-23 sub-transaction. */
+    readonly subTxIx: number | undefined;
     readonly datums: Map<string, { hash: Uint8Array; data: Data }>;
     /** Witness-set Plutus scripts by hash (hex): language and the script bytes (CBOR-wrapped flat). */
     readonly witnessScripts = new Map<string, { lang: 1 | 2 | 3 | 4; bytes: Uint8Array }>();
@@ -269,7 +319,7 @@ export class TxContext {
         // private copies: every bytestring of the context is a view into these, never into the block
         input = { ...input, bodyBytes: Uint8Array.from(input.bodyBytes), witnessSetBytes: Uint8Array.from(input.witnessSetBytes) };
         this.input = input;
-        this.era = input.era; this.pv = input.pv;
+        this.era = input.era; this.pv = input.pv; this.subTxIx = input.subTxIx;
         this.txId = blake2b_256(input.bodyBytes);
         this.body = map(parseCbor(input.bodyBytes));
         this.wits = map(parseCbor(input.witnessSetBytes));
@@ -295,6 +345,7 @@ export class TxContext {
         this.proposals = arr(field(this.body, 20));
         this.guards = guardsOf(field(this.body, 14));
         this.requiredGuards = requiredGuardMap(field(this.body, 24));
+        this.requiredGuardCreds = this.requiredGuards.map(([k, d]) => ({ cred: credFromData(k), datum: d }));
         // witness datums by hash (hashed over their bytes as carried)
         this.datums = new Map();
         for (const d of arr(field(this.wits, 4))) {
@@ -399,14 +450,17 @@ export class TxContext {
         return L([addr!, valueData(o.coin, o.assets), datum, o.refScriptHash ? Just(B(o.refScriptHash)) : NOTHING]);
     }
     private posix(slot: bigint): bigint { return this.input.slotToPosixMs(slot); }
-    private validRange(): Data {
-        const lo = field(this.body, 8), hi = field(this.body, 3);
+    private rangeData(lowerMs: bigint | undefined, upperMs: bigint | undefined): Data {
         // Lower bound inclusive. A finite upper bound is exclusive (`strictUpperBound`), except in
         // Alonzo/Babbage when it is the only bound (`PV1.to t`: inclusive); Conway always strict.
-        const lower = lo ? C(0, [C(1, [I(this.posix(uintOf(lo)))]), C(1)]) : C(0, [C(0), C(1)]);
-        const upperClosed = this.era < 7 && !lo;
-        const upper = hi ? C(0, [C(1, [I(this.posix(uintOf(hi)))]), upperClosed ? C(1) : C(0)]) : C(0, [C(2), C(1)]);
+        const lower = lowerMs !== undefined ? C(0, [C(1, [I(lowerMs)]), C(1)]) : C(0, [C(0), C(1)]);
+        const upperClosed = this.era < 7 && lowerMs === undefined;
+        const upper = upperMs !== undefined ? C(0, [C(1, [I(upperMs)]), upperClosed ? C(1) : C(0)]) : C(0, [C(2), C(1)]);
         return C(0, [lower, upper]);
+    }
+    private validRange(): Data {
+        const lo = field(this.body, 8), hi = field(this.body, 3);
+        return this.rangeData(lo ? this.posix(uintOf(lo)) : undefined, hi ? this.posix(uintOf(hi)) : undefined);
     }
     /** V1/V2 `DCert` (Shelley certificates; Conway deposit-carrying (un)registrations map to the plain ones). */
     private dcert(c: CNode): Data {
@@ -525,7 +579,11 @@ export class TxContext {
                 case 3: return C(2, [credData(p.cred)]);                                                                  // WithdrawingScript
                 case 4: return C(4, [this.voterData(p)]);
                 case 5: return C(5, [I(p.ix), this.proposalData(p.proposal)]);
-                case 6: return C(6, [I(p.ix), NOTHING]); // TopTxInfo for guards is not built yet (bug 435)
+                case 6: {
+                    const hash = p.cred.script ? toHex(p.cred.hash) : null;
+                    const top = hash && this.subTxIx === undefined ? this.topTxInfo(hash) : null;
+                    return C(6, [I(p.ix), top === null ? NOTHING : Just(top)]); // GuardingScript ix (Maybe TopTxInfo)
+                }
             }
             return cerr("PlutusPurposeNotSupported in Plutus V4");
         }
@@ -573,7 +631,7 @@ export class TxContext {
         }));
         const treasury = field(this.body, 21), donation = field(this.body, 22);
         return L([
-            B(this.txId), NOTHING, L(inputs), L(refIns), L(outputs), valueData(null, mintAssets), L(certs),
+            B(this.txId), this.subTxIx === undefined ? NOTHING : Just(I(this.subTxIx)), L(inputs), L(refIns), L(outputs), valueData(null, mintAssets), L(certs),
             M(withdrawals), M(deposits), M(intervals), range, L(this.guards.map(credData)),
             M(this.requiredGuards.map(([c, d]) => [c, d === null ? NOTHING : Just(decodeData(d))] as [Data, Data])),
             redeemers, M(datums.map((d) => [B(d.hash), d.data])), 
@@ -582,6 +640,99 @@ export class TxContext {
             treasury ? Just(I(uintOf(treasury))) : NOTHING,
             I(donation ? uintOf(donation) : 0n),
         ]);
+    }
+
+    /** Dijkstra key-23 sub-transactions, in body order (each body/witness set is a slice of the top body bytes). */
+    subContexts(): TxContext[] {
+        const input = this.input;
+        return arr(field(this.body, 23)).map((st, ix) => {
+            const entry = arr(st), body = entry[0]!, wits = entry[1]!;
+            return new TxContext({
+                ...input,
+                bodyBytes: input.bodyBytes.subarray(body.s, body.e),
+                witnessSetBytes: input.bodyBytes.subarray(wits.s, wits.e),
+                subTxIx: ix,
+            });
+        });
+    }
+
+    /**
+     * V4 TopTxInfo for a guarding redeemer at the top level (CIP-118/CIP-0195): the sub-transaction
+     * TxInfos in body order, the datum map from key 24 (looked up for this guard's script hash in
+     * every sub-transaction and the top level), the top-level starting balance intervals (key 27),
+     * and the aggregated TopTxInfoSimplified. Sub-transactions have no top-level guard info.
+     */
+    private topTxInfo(guardingScriptHash: string): Data {
+        const sub = this.subContexts();
+        const batch = [...sub, this];
+        const guard: Cred = { script: true, hash: hx(guardingScriptHash) };
+        const datumPairs: Array<[Uint8Array, Data]> = [];
+        for (const c of batch) {
+            const hit = c.requiredGuardCreds.find((g) => cmpCred(g.cred, guard) === 0);
+            if (hit && hit.datum !== null) datumPairs.push([c.txId, decodeData(hit.datum)]);
+        }
+        datumPairs.sort((a, b) => cmpBytes(a[0], b[0]));
+        const datumMap = M(datumPairs.map(([id, d]) => [B(id), d]));
+        const startingIntervals = M(accountIntervalMap(field(this.body, 27)));
+        const subInfos = sub.map((c) => c.txInfo(4));
+
+        const ids = L([...sub.map((c) => B(c.txId)), B(this.txId)]);
+        const inputs = L(batch.flatMap((c) => c.inputs.map((r) => c.txInInfo(r, 4)).filter((x): x is Data => x !== null)));
+        const refIns = L(batch.flatMap((c) => c.refInputs.map((r) => c.txInInfo(r, 4)).filter((x): x is Data => x !== null)));
+        const outputs = L(batch.flatMap((c) => arr(field(c.body, 1)).map((o, i) => c.txOutV4(outOfCbor(o, scriptHashOf), `output ${i}`))));
+        const mints = valueData(null, mergeAssets(batch.map((c) => multiAssetOf(field(c.body, 9))), true));
+        const burns = valueData(null, mergeAssets(batch.map((c) => multiAssetOf(field(c.body, 9))), false));
+        const certs = L(batch.flatMap((c) => c.certs.map((cert) => c.txCertV4(cert))));
+        const withdrawals = mergeCredMap(batch.map((c) => c.withdrawals.length ? M(c.withdrawals.map((w) => [credData(w.cred), I(w.amount)] as [Data, Data])) : null));
+        const deposits = mergeCredMap(batch.map((c) => {
+            const n = field(c.body, 25);
+            return n ? M(map(n).map(([k, v]) => [credData(rewardCred(bytesOf(k))), I(uintOf(v))] as [Data, Data])) : null;
+        }));
+        let lower: bigint | undefined, upper: bigint | undefined;
+        for (const c of batch) {
+            const lo = field(c.body, 8), hi = field(c.body, 3);
+            if (lo) { const v = c.posix(uintOf(lo)); if (lower === undefined || v > lower) lower = v; }
+            if (hi) { const v = c.posix(uintOf(hi)); if (upper === undefined || v < upper) upper = v; }
+        }
+        const range = this.rangeData(lower, upper);
+        const guards = L(batch.flatMap((c) => c.guards.map(credData)));
+        const requiredCreds: Cred[] = [];
+        for (const c of batch) for (const g of c.requiredGuardCreds) requiredCreds.push(g.cred);
+        requiredCreds.sort(cmpCred);
+        const requiredGuards = L(requiredCreds.filter((g, i) => i === 0 || cmpCred(g, requiredCreds[i - 1]!) !== 0).map(credData));
+        const redeemerHashesMap = new Map<string, Uint8Array>();
+        for (const c of batch) for (const r of c.redeemers) {
+            const p = c.purposeOf(r);
+            if (!p) continue;
+            const h = c.scriptHashOf(p);
+            if (h) redeemerHashesMap.set(h, hx(h));
+        }
+        const redeemerHashes = L([...redeemerHashesMap.values()].sort(cmpBytes).map((b) => B(b)));
+        const datumByHash = new Map<string, { hash: Uint8Array; data: Data }>();
+        for (const c of batch) for (const d of c.datums.values()) datumByHash.set(toHex(d.hash), d);
+        const dataField = M([...datumByHash.values()].sort((a, b) => cmpBytes(a.hash, b.hash)).map((d) => [B(d.hash), d.data]));
+        const voterMap = new Map<string, { voter: Data; actions: Map<string, { key: Data; vote: Data }> }>();
+        for (const c of batch) for (const v of c.voters) {
+            const vd = c.voterData(v), vk = toHex(encodeData(vd));
+            let e = voterMap.get(vk);
+            if (!e) { e = { voter: vd, actions: new Map() }; voterMap.set(vk, e); }
+            for (const b of v.votes) {
+                const key = C(0, [B(b.id[0]), I(b.id[1])]), kk = toHex(encodeData(key));
+                e.actions.set(kk, { key, vote: C(b.vote) });
+            }
+        }
+        const votes = M([...voterMap.entries()].sort((a, b) => cmpBytes(encodeData(a[1].voter), encodeData(b[1].voter))).map(([, e]) => [
+            e.voter,
+            M([...e.actions.entries()].sort((a, b) => cmpBytes(encodeData(a[1].key), encodeData(b[1].key))).map(([, a]) => [a.key, a.vote])),
+        ] as [Data, Data]));
+        const proposals = L(batch.flatMap((c) => c.proposals.map((p) => c.proposalData(p))));
+        const treasuryNode = batch.find((c) => field(c.body, 21) !== undefined);
+        const treasury = treasuryNode ? Just(I(uintOf(field(treasuryNode.body, 21)))) : NOTHING;
+        let donation = 0n;
+        for (const c of batch) { const d = field(c.body, 22); if (d) donation += uintOf(d); }
+        const simplified = L([ids, inputs, refIns, outputs, mints, burns, certs, withdrawals, deposits, range, guards,
+            requiredGuards, redeemerHashes, dataField, votes, proposals, treasury, I(donation)]);
+        return L([L(subInfos), datumMap, startingIntervals, simplified]);
     }
 
 

@@ -242,3 +242,47 @@ describe("bug 168: the slot→POSIX clock of the script context must be the node
         expect(getEpochNetwork()).toBe("preview");
     });
 });
+
+describe("Dijkstra Plutus V4 guard context (bug 435)", () => {
+    const { Cbor, CborArray, CborBytes, CborMap, CborUInt, CborSimple, CborTag } = require("@harmoniclabs/cbor");
+    const { TxContext } = require("./context");
+    const h = (n: number, b: number) => new CborBytes(new Uint8Array(n).fill(b));
+    const u = (n: number) => new CborUInt(BigInt(n));
+    const script = h(28, 0x11);
+    const datum = Cbor.encode(new CborUInt(42));
+    const cred = () => new CborArray([u(1), script]);
+    // one sub-transaction (key 23) with its own required top-level guard datum
+    const subBody = new CborMap([{ k: u(24), v: new CborMap([{ k: cred(), v: new CborBytes(datum) }]) }]);
+    const subWits = new CborMap([]);
+    const body = new CborMap([
+        { k: u(0), v: new CborArray([]) },
+        { k: u(1), v: new CborArray([]) },
+        { k: u(2), v: u(1) },
+        { k: u(14), v: new CborTag(258, new CborArray([cred()])) },
+        { k: u(24), v: new CborMap([{ k: cred(), v: new CborBytes(datum) }]) },
+        { k: u(23), v: new CborTag(258, new CborArray([new CborArray([subBody, subWits, new CborSimple(null)])])) },
+    ]);
+    const wits = new CborMap([{ k: u(5), v: new CborMap([{ k: new CborArray([u(6), u(0)]), v: new CborArray([u(0), new CborArray([u(0), u(0)])]) }]) }]);
+    const ctx = new TxContext({ era: 8, pv: 12, bodyBytes: Cbor.encode(body), witnessSetBytes: Cbor.encode(wits), resolved: new Map(), slotToPosixMs: (s: bigint) => s });
+
+    test("GuardingScript carries Just TopTxInfo with the sub-transaction TxInfo and datum map", () => {
+        const p = ctx.purposeOf({ tag: 6, index: 0 })!;
+        expect(ctx.scriptHashOf(p)).toBe("11".repeat(28));
+        const si: any = ctx.scriptInfoData(p, 4);
+        expect(si.tag).toBe(6n);
+        expect(si.fields[0].v).toBe(0n);
+        const top = si.fields[1].fields[0];
+        expect(top.items.length).toBe(4); // TopTxInfo
+        expect(top.items[0].items.length).toBe(1); // one sub-transaction
+        expect(top.items[1].entries.length).toBe(2); // datum map: sub tx + top tx
+        expect(top.items[2].entries.length).toBe(0); // no starting balance intervals
+        expect(top.items[3].items.length).toBe(18); // Simplified aggregation
+    });
+    test("the sub-transaction TxInfo carries Just its key-23 index; the top-level one carries Nothing", () => {
+        expect((ctx.txInfo(4) as any).items.length).toBe(19);
+        expect((ctx.txInfo(4) as any).items[1].tag).toBe(1n); // Nothing
+        const sub: any = ctx.subContexts()[0].txInfo(4);
+        expect(sub.items[1].tag).toBe(0n); // Just
+        expect(sub.items[1].fields[0].v).toBe(0n);
+    });
+});

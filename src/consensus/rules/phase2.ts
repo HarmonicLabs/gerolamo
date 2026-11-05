@@ -18,9 +18,9 @@
  */
 import { settings } from "../../config/settings";
 import { toHex } from "@harmoniclabs/uint8array-utils";
-import { parseCbor } from "../plutus/cbor";
+import { map, parseCbor } from "../plutus/cbor";
 import { ContextError, TxContext, type Purpose } from "../plutus/context";
-import { DConstr, type Data } from "../plutus/data";
+import { DBytes, DConstr, DList, type Data } from "../plutus/data";
 import { costTable, type Lang } from "../plutus/costs";
 import { applyData, decodeProgram, FlatError, type Program } from "../plutus/flat";
 import { evaluate } from "../plutus/cek";
@@ -56,6 +56,8 @@ export interface RedeemerOutcome {
     reason?: string;
     logs?: string[];
     ms?: number;
+    /** Dijkstra key-23 sub-transaction index when this script is not in the top-level transaction. */
+    subTxIx?: number;
 }
 
 export interface Phase2Result {
@@ -139,15 +141,23 @@ function scriptsOf(ctx: TxContext, resolved: Map<string, ResolvedUtxo>): Map<str
     return out;
 }
 
-/** Body keys only Dijkstra has (14 as credentials, 23..27): their V1..V3 translation is not ported. */
+/**
+ * Dijkstra-only features that make a V1..V3 context a ledger collect error
+ * (`guardDijkstraFeaturesForPlutusV1toV3`): script guards in key 14, required top-level guards
+ * in key 24, direct deposits in key 25 and account balance intervals in key 26. Sub-transaction
+ * (key 23) scripts are handled separately (V1..V3 scripts in a sub-transaction are unsupported).
+ */
 function dijkstraOnlyBodyKeys(ctx: TxContext): number[] {
-    const out: number[] = [];
-    const body: any = (ctx as any).body;
-    for (const e of Array.isArray(body) ? body : []) {
-        const k = Number(e?.[0]?.v ?? -1);
-        if (k >= 23 && k <= 27) out.push(k);
-    }
-    return out;
+    const out = new Set<number>();
+    if (ctx.guards.some((g) => g.script)) out.add(14);
+    if (ctx.requiredGuardCreds.length) out.add(24);
+    const mapField = (k: number) => {
+        for (const [key, v] of ctx.body) if (key.t === "u" && key.v === BigInt(k)) return map(v).length > 0;
+        return false;
+    };
+    if (mapField(25)) out.add(25);
+    if (mapField(26)) out.add(26);
+    return [...out].sort((a, b) => a - b);
 }
 
 
@@ -170,57 +180,69 @@ export function evaluatePhase2Sync(input: Phase2Input): Phase2Result {
         return { ok: false, error: `transaction decoding failed: ${(e as Error).message}`, redeemers: [] };
     }
     const models = costModelArrays(input.params?.raw ?? {});
-    const scripts = scriptsOf(ctx, input.resolved);
     const outcomes: RedeemerOutcome[] = [];
     // collect (the ledger's collectPlutusScriptsWithContext): every redeemer's script, context and arguments
     const jobs: Array<{ out: RedeemerOutcome; term: Program; lang: Lang; arr: ReadonlyArray<number | bigint> }> = [];
-    for (const r of ctx.redeemers) {
-        const out: RedeemerOutcome = { tag: r.tag, index: r.index, scriptHash: null, language: null, declared: { mem: r.mem, cpu: r.cpu }, ok: false };
-        outcomes.push(out);
-        if (ctx.era >= 8 && r.tag > 6) return { ok: false, error: `redeemer tag ${r.tag} is not supported yet (bug 435)`, redeemers: outcomes };
-        const p: Purpose | null = ctx.purposeOf(r);
-        if (!p) return { ok: false, error: `redeemer ${r.tag}:${r.index} points to nothing`, redeemers: outcomes };
-        const hash = ctx.scriptHashOf(p);
-        out.scriptHash = hash;
-        if (!hash) return { ok: false, error: `redeemer ${r.tag}:${r.index} is not for a script-locked item`, redeemers: outcomes };
-        const script = scripts.get(hash);
-        if (!script) return { ok: false, error: `script ${hash.slice(0, 12)}… for redeemer ${r.tag}:${r.index} not found (or not Plutus)`, redeemers: outcomes };
-        out.language = script.lang;
-        // Dijkstra (bug 435): V1..V3 contexts of transactions using Dijkstra-only fields are still
-        // built only for Plutus V4 (its TxInfo handles the top-level Dijkstra fields; sub-transaction
-        // script contexts and the guard TopTxInfo remain open).
-        if (ctx.era >= 8 && script.lang < 4 && dijkstraOnlyBodyKeys(ctx).length) return { ok: false, error: `Plutus V${script.lang} context of a Dijkstra transaction with body keys ${dijkstraOnlyBodyKeys(ctx).join(", ")} is not built yet (bug 435)`, redeemers: outcomes };
-        const arr = models[script.lang];
-        if (!arr) return { ok: false, error: `no cost model for Plutus V${script.lang}`, collect: true, redeemers: outcomes };
-        let prog: Program;
-        try { prog = program(hash, script.lang, pv, script.bytes); }
-        catch (e) { return { ok: false, error: `script ${hash.slice(0, 12)}… does not decode: ${(e as Error).message}`, redeemers: outcomes }; }
-        let term: Program;
-        try {
-            if (script.lang === 4) {
-                const info = ctx.txInfo(4);
-                term = applyData(prog, [new DConstr(0n, [info, r.data, ctx.scriptInfoData(p, 4)])]);
-            } else {
-                const info = ctx.txInfo(script.lang as 1 | 2 | 3);
-                if (script.lang === 3) {
-                    term = applyData(prog, [new DConstr(0n, [info, r.data, ctx.scriptInfoData(p)])]);
-                } else {
-                    const sc = new DConstr(0n, [info, ctx.purposeData(p, script.lang)]);
-                    const args: Data[] = [];
-                    if (p.tag === 0) {
-                        const d = ctx.spendingDatum(p);
-                        if (!d) return { ok: false, error: `no datum for spend redeemer ${r.index}`, redeemers: outcomes };
-                        args.push(d);
-                    }
-                    args.push(r.data, sc);
-                    term = applyData(prog, args);
-                }
+    // Dijkstra executes sub-transactions before the top-level one; both have their own witness sets.
+    const contexts = ctx.era >= 8 ? [...ctx.subContexts(), ctx] : [ctx];
+    for (const c of contexts) {
+        const scripts = scriptsOf(c, input.resolved);
+        for (const r of c.redeemers) {
+            const out: RedeemerOutcome = { tag: r.tag, index: r.index, scriptHash: null, language: null, declared: { mem: r.mem, cpu: r.cpu }, ok: false, subTxIx: c.subTxIx };
+            outcomes.push(out);
+            if (c.era >= 8 && r.tag > 6) return { ok: false, error: `redeemer tag ${r.tag} is not supported yet (bug 435)`, redeemers: outcomes };
+            const p: Purpose | null = c.purposeOf(r);
+            if (!p) return { ok: false, error: `redeemer ${r.tag}:${r.index} points to nothing`, redeemers: outcomes };
+            const hash = c.scriptHashOf(p);
+            out.scriptHash = hash;
+            if (!hash) return { ok: false, error: `redeemer ${r.tag}:${r.index} is not for a script-locked item`, redeemers: outcomes };
+            const script = scripts.get(hash);
+            if (!script) return { ok: false, error: `script ${hash.slice(0, 12)}… for redeemer ${r.tag}:${r.index} not found (or not Plutus)`, redeemers: outcomes };
+            out.language = script.lang;
+            // Dijkstra: V1..V3 contexts can only translate transactions without Dijkstra-only features
+            // (guards in key 14, required top-level guards in key 24, direct deposits in key 25 and
+            // account balance intervals in key 26); a V1..V3 script inside a key-23 sub-transaction is
+            // UnsupportedScriptInSubTx (the ledger runs sub-transaction scripts only for Plutus V4).
+            if (c.subTxIx !== undefined && script.lang < 4) {
+                return { ok: false, error: `Plutus V${script.lang} script in Dijkstra sub-transaction ${c.subTxIx} is not supported (bug 435)`, collect: true, redeemers: outcomes };
             }
-        } catch (e) {
-            if (e instanceof ContextError) return { ok: false, error: `script context: ${e.message}`, collect: true, redeemers: outcomes };
-            return { ok: false, error: `script context build failed: ${(e as Error).message}`, redeemers: outcomes };
+            const features = c.subTxIx === undefined && script.lang < 4 ? dijkstraOnlyBodyKeys(c) : [];
+            if (features.length) {
+                return { ok: false, error: `Plutus V${script.lang} context of a Dijkstra transaction with body keys ${features.join(", ")} is not buildable (bug 435)`, collect: true, redeemers: outcomes };
+            }
+            const arr = models[script.lang];
+            if (!arr) return { ok: false, error: `no cost model for Plutus V${script.lang}`, collect: true, redeemers: outcomes };
+            let prog: Program;
+            try { prog = program(hash, script.lang, pv, script.bytes); }
+            catch (e) { return { ok: false, error: `script ${hash.slice(0, 12)}… does not decode: ${(e as Error).message}`, redeemers: outcomes }; }
+            let term: Program;
+            try {
+                if (script.lang === 4) {
+                    const info = c.txInfo(4);
+                    // Plutus V4 ScriptContext is a List with a fourth field, the script hash (CIP-0195).
+                    term = applyData(prog, [new DList([info, r.data, c.scriptInfoData(p, 4), new DBytes(Buffer.from(hash, "hex"))])]);
+                } else {
+                    const info = c.txInfo(script.lang as 1 | 2 | 3);
+                    if (script.lang === 3) {
+                        term = applyData(prog, [new DConstr(0n, [info, r.data, c.scriptInfoData(p)])]);
+                    } else {
+                        const sc = new DConstr(0n, [info, c.purposeData(p, script.lang)]);
+                        const args: Data[] = [];
+                        if (p.tag === 0) {
+                            const d = c.spendingDatum(p);
+                            if (!d) return { ok: false, error: `no datum for spend redeemer ${r.index}`, redeemers: outcomes };
+                            args.push(d);
+                        }
+                        args.push(r.data, sc);
+                        term = applyData(prog, args);
+                    }
+                }
+            } catch (e) {
+                if (e instanceof ContextError) return { ok: false, error: `script context: ${e.message}`, collect: true, redeemers: outcomes };
+                return { ok: false, error: `script context build failed: ${(e as Error).message}`, redeemers: outcomes };
+            }
+            jobs.push({ out, term, lang: script.lang, arr });
         }
-        jobs.push({ out, term, lang: script.lang, arr });
     }
     // evaluate
     let allOk = true;

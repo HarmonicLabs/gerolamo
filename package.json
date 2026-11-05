@@ -30,18 +30,18 @@
         "@bufbuild/protobuf": "1.10.1",
         "@connectrpc/connect": "1.4.0",
         "@connectrpc/connect-node": "1.4.0",
-        "@harmoniclabs/buildooor": "^0.1.31",
-        "@harmoniclabs/cardano-ledger-ts": "file:vendor/harmoniclabs-cardano-ledger-ts-0.6.0.tgz",
+        "@harmoniclabs/buildooor": "^0.2.10",
+        "@harmoniclabs/cardano-ledger-ts": "file:vendor/harmoniclabs-cardano-ledger-ts-0.6.1.tgz",
         "@harmoniclabs/cardano-math-ts": "^0.0.5",
-        "@harmoniclabs/cbor": "^1.6.6",
+        "@harmoniclabs/cbor": "^2.1.0",
         "@harmoniclabs/crypto": "^0.3.1",
         "@harmoniclabs/kes": "file:vendor/harmoniclabs-kes-0.1.0.tgz",
         "@harmoniclabs/obj-utils": "^1.0.0",
         "@harmoniclabs/mithril-ts": "file:vendor/harmoniclabs-mithril-ts-0.1.1.tgz",
-        "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.5-dev7",
+        "@harmoniclabs/ouroboros-miniprotocols-ts": "^0.0.6-dev0",
         "@harmoniclabs/shared-cardano-mempool-ts": "file:vendor/harmoniclabs-shared-cardano-mempool-ts-0.0.0.tgz",
         "@harmoniclabs/uint8array-utils": "^1.0.4",
-        "@harmoniclabs/uplc": "^1.4.1",
+        "@harmoniclabs/uplc": "^2.0.7",
         "@noble/curves": "1.9.7",
         "@noble/hashes": "1.7.2",
         "@utxorpc/spec": "0.19.2",
@@ -64,6 +64,9 @@
         "@harmoniclabs/plutus-data@1.2.6": "patches/@harmoniclabs%2Fplutus-data@1.2.6.patch"
     },
     "overrides": {
+        "@harmoniclabs/cardano-ledger-ts": {
+            "@harmoniclabs/plutus-machine": "file:vendor/harmoniclabs-plutus-machine-3.0.3.tgz"
+        },
         "@harmoniclabs/cbor@^2": "file:vendor/harmoniclabs-cbor-2.1.0.tgz",
         "@harmoniclabs/plutus-data@^2": "file:vendor/harmoniclabs-plutus-data-2.1.0.tgz",
         "@harmoniclabs/cardano-costmodels-ts": "file:vendor/harmoniclabs-cardano-costmodels-ts-1.7.0.tgz"

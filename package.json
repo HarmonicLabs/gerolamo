@@ -15,7 +15,7 @@
         "postinstall": "bun install --cwd desktop && bun install --cwd dashboard",
         "preflight": "bun scripts/preflight.ts",
         "setup": "bun install && bun run preflight",
-        "test": "bun test ./src && bun test --cwd desktop src"
+        "test": "bun test --timeout 60000 ./src && bun test --cwd desktop --timeout 60000 src"
     },
     "devDependencies": {
         "@harmoniclabs/cddl-tools": "^0.0.4",

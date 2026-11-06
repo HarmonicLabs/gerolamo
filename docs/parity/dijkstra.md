@@ -227,7 +227,7 @@ The era index of the HFC answers follows `eraIndexAt` (7 once in Dijkstra); quer
 answered by the Conway query code with the Dijkstra pparams encoding; the debug ledger config
 answers Conway → Dijkstra `atVersion 12` with the switch on. Dijkstra pool parameters with the
 optional BLS key slot (10-field array) are normalised (margin, relay list) before they are echoed.
-Open: the remaining Dijkstra-specific query result shapes (account states) are not specialised.
+Closed: `GetAccountState` (29) is Conway-only (`CONWAY_ONLY` in `LocalStateQueryHost`) and answers `[treasury, reserves]` as signed Coin from the LMDB pots or the sqlite `reward_pots` mirror; there is no Dijkstra-specific alternate shape. Test: `lsq.test.ts` "query 29 answers [treasury, reserves]".
 
 ## 432. Mempool and transaction submission (era-8 forms landed)
 

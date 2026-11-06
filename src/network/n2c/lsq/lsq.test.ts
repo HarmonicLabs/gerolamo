@@ -9,7 +9,8 @@ import { CborWriter, reduced } from "./cborWriter";
 import { applyTxBody, type GovFacts } from "./govIndex";
 import { parseGovKey } from "./govAdapter";
 import { ledgerTxOutBytes } from "./txOut";
-import { normalizePoolParams } from "./queries";
+import { CborUInt } from "@harmoniclabs/cbor";
+import { answerConwayQuery, normalizePoolParams } from "./queries";
 import { ACQUIRE_POINT_NOT_ON_CHAIN, ACQUIRE_POINT_TOO_OLD, PointView, resolveAcquireTarget } from "./view";
 
 const hex = (b: Uint8Array) => Buffer.from(b).toString("hex");
@@ -157,5 +158,17 @@ describe("acquiring a point of the ledger store", () => {
         expect(at(130, 7)).toEqual({ failure: ACQUIRE_POINT_NOT_ON_CHAIN });
         expect(resolveAcquireTarget(st, { kind: "origin" })).toEqual({ failure: ACQUIRE_POINT_TOO_OLD });
         st.close();
+    });
+});
+
+describe("GetAccountState", () => {
+    test("query 29 answers [treasury, reserves] (signed Coin) from the pots", async () => {
+        const view: any = {
+            point: { slot: 1n, hash: "11".repeat(32), blockNo: 0n, era: 6 },
+            stake: { pots: () => ({ treasury: 500_000_000n, reserves: 123_456n }) },
+            gov: {},
+        };
+        const out = await answerConwayQuery(view, { network: "preview", magic: 2 }, [new CborUInt(29n)]);
+        expect(hex(out)).toBe("821a1dcd65001a0001e240");
     });
 });

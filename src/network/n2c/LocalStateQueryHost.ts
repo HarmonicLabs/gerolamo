@@ -15,7 +15,7 @@ import type { IChainDb } from "@harmoniclabs/ouroboros-miniprotocols-ts/dist/pro
 import { getChainTipFromHeader } from "../../db";
 import { ledgerStakeReads, ledgerUtxoReads } from "../../ledger/nodeLedgerStore";
 import { sql } from "../../sql";
-import { CborBytes, CborTag } from "@harmoniclabs/cbor";
+import { CborBytes, CborNegInt, CborTag } from "@harmoniclabs/cbor";
 import { debugLedgerConfig } from "./lsq/ledgerConfig";
 import { HFC_ERA_NAMES, encodeUtcTime, interpreterFor, networkFromMagic, systemStartFor, type EraHistoryNetwork } from "./eraHistory";
 import { calculatePreProdCardanoEpoch } from "../../utils/epochFromSlotCalculations";
@@ -31,7 +31,7 @@ const PROTO = MiniProtocol.LocalStateQuery;
 /** Payload bytes per mux segment (the header's length field is 16 bits; cardano-node's SDU is 12 288). */
 const SDU = 12_288;
 /** Conway-only queries: cardano-node's decoder fails them for an earlier era (`requireCG`), which ends the connection. */
-const CONWAY_ONLY = new Set([23, 25, 26, 27, 28, 30, 31, 32, 33, 35, 39]);
+const CONWAY_ONLY = new Set([23, 25, 26, 27, 28, 29, 30, 31, 32, 33, 35, 39]);
 
 /**
  * N2C LocalStateQuery server (protocol 7).
@@ -285,6 +285,13 @@ export class LocalStateQueryHost {
                     ? [...sr.pools().keys()].map((id) => [id]).sort((x, y) => (String(x[0]) < String(y[0]) ? -1 : 1))
                     : (await sql`SELECT pool_id FROM pool_params ORDER BY pool_id`.values()) as unknown[][];
                 return new CborTag(258, new CborArray(rows.map((r) => new CborBytes(Uint8Array.from(Buffer.from(String(r[0]), "hex"))))));
+            }
+            case 29: {
+                // GetAccountState: treasury, reserves (signed Coin); sqlite mirrors the LMDB reward_pots row
+                const rows = (await sql`SELECT treasury, reserves FROM reward_pots WHERE id = 1`.values()) as unknown[][];
+                if (!rows.length) throw new LsqUnanswerable("reward pots not initialised");
+                const coin = (v: unknown) => { const n = BigInt(String(v)); return n < 0n ? new CborNegInt(n) : new CborUInt(n); };
+                return new CborArray([coin(rows[0]![0]), coin(rows[0]![1])]);
             }
             default: throw new LsqUnanswerable(`query ${tag(sq[0])} needs the LMDB ledger store (ledgerStore "lmdb" or "dual")`);
         }

@@ -192,7 +192,7 @@ export class HandshakeResponder {
             false, // N2C wire encoding
         );
 
-        this.mplexer.send(accept.toCbor().toBuffer(), handshakeHeader);
+        this.mplexer.send(accept.toCbor(), handshakeHeader);
         this.done = true;
         n2cLogger.info(
             `Handshake Accept version=${chosen} networkMagic=${this.networkMagic} query=${query}`,
@@ -211,7 +211,7 @@ export class HandshakeResponder {
             },
             false,
         );
-        this.mplexer.send(refuse.toCbor().toBuffer(), handshakeHeader);
+        this.mplexer.send(refuse.toCbor(), handshakeHeader);
         this.done = true;
         n2cLogger.info(`Handshake Refuse: ${reason}`);
         this.onRefused?.(reason);

@@ -1,0 +1,74 @@
+# Preprod relay + producer (2026-11-09 readiness plan).
+# Build a frozen image first, then:
+#   docker compose -f docker-compose.preprod.yml up -d
+# Relay data: /home/don/gerolamo-preprod (Mithril import in place).
+# Producer data is a separate copy of the imported chain; pool keys are mounted read-only.
+services:
+  gerolamo-preprod-relay:
+    image: gerolamo:preprod
+    container_name: gerolamo-preprod-relay
+    restart: unless-stopped
+    stop_grace_period: 60s
+    user: "1000:1000"
+    command:
+      - --network
+      - preprod
+      - --port
+      - "3030"
+      - --role
+      - relay
+      - --max-rss-gb
+      - "6"
+      - --keep-snapshot
+      - --
+      - --n2n-ws
+      - --n2n-ws-port
+      - "3014"
+      - --chain-selection
+      - praos
+      - --no-ledger-sql-writes
+      - --n2c
+      - --n2c-socket
+      - /data/node.socket
+    volumes:
+      - /home/don/gerolamo-preprod:/data
+    ports:
+      - "3050:3030"                      # HTTP API / metrics (LAN)
+      - "3011:3001"                      # N2N
+      - "3014:3014"                      # N2N over WebSocket (LAN)
+    mem_limit: 8g
+    cpus: 6
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }
+
+  gerolamo-preprod-producer:
+    image: gerolamo:preprod
+    container_name: gerolamo-preprod-producer
+    restart: unless-stopped
+    stop_grace_period: 60s
+    user: "1000:1000"
+    command:
+      - --network
+      - preprod
+      - --port
+      - "3030"
+      - --role
+      - producer
+      - --max-rss-gb
+      - "6"
+      - --
+      - --chain-selection
+      - praos
+      - --no-ledger-sql-writes
+    volumes:
+      - /home/don/gerolamo-preprod-producer:/data
+      - /home/don/gerolamo-preprod-pool-keys:/keys:ro
+    ports:
+      - "127.0.0.1:3051:3030"            # producer metrics/API, host-local
+      - "3012:3001"                      # producer N2N, LAN only
+    mem_limit: 8g
+    cpus: 6
+    depends_on:
+      - gerolamo-preprod-relay
+    ulimits:
+      nofile: { soft: 65536, hard: 65536 }

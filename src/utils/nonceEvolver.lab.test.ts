@@ -45,6 +45,15 @@ describe("NonceEvolver lab nonce", () => {
         expect(run(bytes(42))).not.toBe(run(bytes(43)));
     });
 
+    test("the first Shelley epoch TICKN uses NeutralNonce for the lab", () => {
+        const firstShelley = Number(firstSlotOfEpoch(4));
+        const ev = new NonceEvolver(genesis);
+        ev.bootstrap(4, toHex(eta0));
+        ev.processBlock(firstShelley + 20, bytes(2), bytes(3));
+        ev.processBlock(firstShelley + 40, bytes(4), bytes(5));
+        expect(ev.tickn().eta0Hex).toBe(ev.snapshot().etaCHex);
+    });
+
     test("a replay from etaV/etaC rebuilds the per-block lab nonce", () => {
         const source = new NonceEvolver(genesis);
         source.bootstrap(epoch, toHex(eta0));

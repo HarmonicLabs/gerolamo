@@ -27,6 +27,7 @@ import {
 import {
     calculatePreProdCardanoEpoch,
     getFirstSlotOfEpoch,
+    shelleyStartEpoch,
 } from "./epochFromSlotCalculations";
 import type { ShelleyGenesisConfig } from "../types/ShelleyGenesisTypes";
 import { logger } from "./logger";
@@ -61,6 +62,8 @@ export class NonceEvolver {
     private nBlocksInEpoch = 0;
     private nBeforeFreeze = 0;
     private lastPrevHash: Uint8Array | null = null;
+    /** First Shelley epoch has no lab nonce to carry into its TICKN. */
+    private labNeutral = false;
     /** Slot the state reflects: every block up to it is in ηv / ηc (bug 342: a peek must not read a state mid-replay). */
     private lastSlot = -1;
     private readonly stabilityWindow: number;
@@ -149,6 +152,9 @@ export class NonceEvolver {
         } else {
             this.etaH = null;
         }
+        // The first Shelley epoch starts with NeutralNonce as its lab nonce; there is no
+        // previous epoch's last block to carry into its first TICKN.
+        this.labNeutral = epoch === Number(shelleyStartEpoch()) && !opts?.etaHHex;
         this.nBlocksInEpoch = opts?.nBlocksInEpoch ?? 0;
         this.nBeforeFreeze = 0;
         this.lastPrevHash = null;
@@ -222,7 +228,7 @@ export class NonceEvolver {
         this.lastPrevHash = prevHash ? new Uint8Array(prevHash) : null;
         // praosStateLabNonce is updated per block, not only at the boundary: TICKN at the end of
         // this epoch must mix in the parent hash of its last applied block.
-        if (prevHash && prevHash.length) this.etaH = prevHashToNonce(prevHash);
+        if (!this.labNeutral && prevHash && prevHash.length) this.etaH = prevHashToNonce(prevHash);
         this.lastSlot = Number(s);
         this.nBlocksInEpoch++;
         return tickns;
@@ -237,7 +243,7 @@ export class NonceEvolver {
             throw new Error("NonceEvolver.tickn: not bootstrapped");
         }
         const nextEpoch = this.epoch + 1;
-        const etaH = this.etaH ?? new Uint8Array(0);
+        const etaH = this.labNeutral ? new Uint8Array(0) : (this.etaH ?? new Uint8Array(0));
         const eta0 = ticknNewEpochNonce(this.etaC, etaH);
         const result: TicknResult = {
             epoch: nextEpoch,
@@ -254,6 +260,7 @@ export class NonceEvolver {
             this.lastPrevHash && this.lastPrevHash.length
                 ? prevHashToNonce(this.lastPrevHash)
                 : null;
+        this.labNeutral = false;
         this.epoch = nextEpoch;
         this.nBlocksInEpoch = 0;
         this.nBeforeFreeze = 0;
@@ -278,7 +285,7 @@ export class NonceEvolver {
         const firstNext = BigInt(getFirstSlotOfEpoch(this.epoch + 1, this.genesis));
         const reached = BigInt(Math.min(Number(currentSlot), this.lastSlot));
         if (isBeforeNonceFreeze(reached, firstNext, this.freezeWindowFor(this.epoch))) return null;
-        const etaH = this.etaH ?? new Uint8Array(0);
+        const etaH = this.labNeutral ? new Uint8Array(0) : (this.etaH ?? new Uint8Array(0));
         return toHex(ticknNewEpochNonce(this.etaC, etaH));
     }
 
@@ -290,6 +297,7 @@ export class NonceEvolver {
         this.lastPrevHash = null;
         this.lastSlot = -1;
         this.etaH = null;
+        this.labNeutral = false;
         logger.debug("NonceEvolver reset (inactive)");
     }
 }

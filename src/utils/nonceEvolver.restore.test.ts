@@ -49,7 +49,8 @@ describe("NonceEvolver restore", () => {
         const lossy = new NonceEvolver(genesis);
         lossy.bootstrap(e, eta0, { etaVHex: snap.etaVHex, etaCHex: snap.etaCHex });
         for (let i = snapshotAt + 1; i < blocks.length; i++) lossy.processBlock(blocks[i]!.slot, blocks[i]!.bnonce, blocks[i]!.prev);
-        expect(lossy.processBlock(first7 + 5, rnd(7), rnd(8))[0]!.eta0Hex === continuous).toBe(snap.etaHHex == null);
+        // ηh is now updated per applied block, so replaying the snapshot's remaining blocks restores it.
+        expect(lossy.processBlock(first7 + 5, rnd(7), rnd(8))[0]!.eta0Hex === continuous).toBe(true);
         void prevHashToNonce;
     });
     test("peekNextEpochNonceHex matches the boundary's TICKN once the candidate is frozen", () => {

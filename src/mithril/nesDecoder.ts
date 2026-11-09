@@ -430,7 +430,11 @@ export function decodeLedgerSnapshot(stateBytes: Uint8Array): LedgerSnapshot {
     const prevPParams = pparamsArr(govArr[4], "govState.prevPParams");
     const fut = arr(govArr[5], "govState.futurePParams");
     const futTag = int(fut[0], "govState.futurePParams.tag");
-    const futurePParams: GovStateDecoded["futurePParams"] = futTag === 0 ? { kind: "none" } : futTag === 1 ? { kind: "definite", pparams: pparamsArr(fut[1], "futurePParams.definite") } : futTag === 2 ? { kind: "potential", pparams: pparamsArr(fut[1], "futurePParams.potential") } : (() => { throw new LedgerSnapshotFormatError(`ledger state: futurePParams tag ${futTag}`); })();
+    const futurePParams: GovStateDecoded["futurePParams"] = futTag === 0 ? { kind: "none" } : futTag === 1 ? { kind: "definite", pparams: pparamsArr(fut[1], "futurePParams.definite") } : futTag === 2 ? (() => {
+        // Conway's PotentialPParams carries StrictMaybe PParams: an empty array is Nothing.
+        if (fut[1] instanceof CborArray && fut[1].array.length === 0) return { kind: "none" as const };
+        return { kind: "potential" as const, pparams: pparamsArr(fut[1], "futurePParams.potential") };
+    })() : (() => { throw new LedgerSnapshotFormatError(`ledger state: futurePParams tag ${futTag}`); })();
     const pulsingArr = arr(govArr[6], "govState.drepPulsing", 2);
     const snap = arr(pulsingArr[0], "drepPulsing.snapshot", 4);
     const ratify = arr(pulsingArr[1], "drepPulsing.ratifyState", 4);

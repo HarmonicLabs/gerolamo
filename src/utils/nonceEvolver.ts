@@ -220,6 +220,9 @@ export class NonceEvolver {
             this.nBeforeFreeze++;
         }
         this.lastPrevHash = prevHash ? new Uint8Array(prevHash) : null;
+        // praosStateLabNonce is updated per block, not only at the boundary: TICKN at the end of
+        // this epoch must mix in the parent hash of its last applied block.
+        if (prevHash && prevHash.length) this.etaH = prevHashToNonce(prevHash);
         this.lastSlot = Number(s);
         this.nBlocksInEpoch++;
         return tickns;

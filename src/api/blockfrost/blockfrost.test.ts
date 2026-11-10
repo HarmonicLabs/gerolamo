@@ -27,6 +27,20 @@ async function call(method: string, path: string, body?: BodyInit, headers: Reco
     return { status: res!.status, body: json, headers: res!.headers };
 }
 const get = (path: string) => call("GET", path);
+describe("/gerolamo/status coverage", () => {
+    test("reports state and history coverage as two separate facts", async () => {
+        const { status, body } = await call("GET", "/gerolamo/status");
+        expect(status).toBe(200);
+        expect(body.coverage).toBeTruthy();
+        expect(typeof body.coverage.stateIndexed).toBe("boolean");
+        expect(typeof body.coverage.historyIndexed).toBe("boolean");
+        expect(body.coverage.txIndexFromSlot === null || typeof body.coverage.txIndexFromSlot === "number").toBe(true);
+        expect(body.coverage.stateIndexedFromSlot === null || typeof body.coverage.stateIndexedFromSlot === "number").toBe(true);
+        // the note must exist for a dApp to render; it cannot be inferred from a boolean alone
+        expect(typeof body.coverage.note).toBe("string");
+    }, 30_000);
+});
+
 const LEADER = poolIdBech32(hex(blake2b_224(new Uint8Array(32).fill(0x99)))); // the forged blocks' issuer
 const UNIT = POLICY + TOKEN;
 // account xpub of entropy 0×16 at m/1852'/1815'/0' (harmoniclabs XPrv)

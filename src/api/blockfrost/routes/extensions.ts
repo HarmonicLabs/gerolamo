@@ -1,9 +1,9 @@
 /** Gerolamo extensions beside the Blockfrost paths (the explorer UI uses them). */
-import { getBlockListRowByHash, getBlockListRowBySlot, getEpochNonce, getMaxSlot, getNetworkSnapshot, getTxByHash, getUtxoByRef, listBlocksDesc } from "../../../db";
+import { getBlockListRowByHash, getBlockListRowBySlot, getEpochNonce, getMaxSlot, getMinSlot, getNetworkSnapshot, getTxByHash, getUtxoByRef, listBlocksDesc } from "../../../db";
 import { epochForSlot } from "../../../utils/epochFromSlotCalculations";
 import { parseStoredTxOut } from "../../../db/minibf/txOutMetadata";
 import { settings } from "../../../config/settings";
-import { resolveLedgerDir } from "../../../ledger/nodeLedgerStore";
+import { ledgerStoreSummary, resolveLedgerDir } from "../../../ledger/nodeLedgerStore";
 import { join } from "node:path";
 import { badRequest, notFound, CORS_HEADERS } from "../http";
 import { route, type Route } from "../router";
@@ -92,6 +92,30 @@ export const extensionRoutes: Route[] = [
         const snap = await getNetworkSnapshot();
         const tipSlot = Number(await getMaxSlot());
         const epoch = Number(epochForSlot(tipSlot, c.net));
-        return { tip: { slot: snap.tipSlot, hash: snap.tipHash, epoch, epoch_nonce: await getEpochNonce(epoch).catch(() => null) }, utxo_count: snap.utxoCount, index: { mb_tx: snap.mbTxCount, mb_cursor_slot: snap.mbCursorSlot, lag_slots: snap.lagSlots } };
+        // Two different coverages, deliberately not merged: the ledger state is complete from its anchor,
+        // while transaction history can only be answered from the oldest indexed block. A dApp that reads
+        // `/addresses/{a}/utxos` is fine at the anchor; one that reads `/txs/{h}` or
+        // `/addresses/{a}/transactions` for older history is not.
+        let stateIndexedFromSlot: number | null = null;
+        try { stateIndexedFromSlot = ledgerStoreSummary()?.anchorSlot ?? null; } catch { /* no ledger store in this build */ }
+        const txIndexFromSlot = await getMinSlot().catch(() => null);
+        return {
+            tip: { slot: snap.tipSlot, hash: snap.tipHash, epoch, epoch_nonce: await getEpochNonce(epoch).catch(() => null) },
+            utxo_count: snap.utxoCount,
+            index: { mb_tx: snap.mbTxCount, mb_cursor_slot: snap.mbCursorSlot, lag_slots: snap.lagSlots },
+            coverage: {
+                stateIndexed: stateIndexedFromSlot != null,
+                stateIndexedFromSlot,
+                historyIndexed: txIndexFromSlot != null && txIndexFromSlot <= 1,
+                txIndexFromSlot,
+                // Slots before txIndexFromSlot answer 404 for tx lookups and address history; that is "not in
+                // this node's index", not "never happened".
+                note: txIndexFromSlot != null && txIndexFromSlot > 1
+                    ? `transaction history is served from slot ${txIndexFromSlot}; older history is not in this node's index`
+                    : txIndexFromSlot != null
+                        ? "transaction history is complete from genesis"
+                        : "no blocks indexed yet"
+            }
+        };
     }),
 ];

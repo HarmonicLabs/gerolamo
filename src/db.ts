@@ -1057,6 +1057,13 @@ export async function blockHashesAbove(slot: bigint | number): Promise<string[]>
     return rows.map((r) => String(r[0]).toLowerCase());
 }
 
+/** Oldest slot the local block index can answer for; null when nothing is indexed yet. */
+export async function getMinSlot(): Promise<number | null> {
+    const result = await sql`SELECT MIN(slot) as min_slot FROM blocks`;
+    const raw = firstScalar(Array.isArray(result) ? result[0] : result);
+    return raw == null ? null : Number(raw);
+}
+
 export async function getMaxSlot(): Promise<bigint> {
     { const bs = primaryBlockStore(); if (bs) return blockReads.getMaxSlot(bs); }
     // Prefer object rows; still tolerate `.values()` array-of-arrays.

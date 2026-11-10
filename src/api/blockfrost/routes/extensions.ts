@@ -7,7 +7,7 @@ import { ledgerStoreSummary, resolveLedgerDir } from "../../../ledger/nodeLedger
 import { join } from "node:path";
 import { badRequest, notFound, CORS_HEADERS } from "../http";
 import { route, type Route } from "../router";
-import { amountOf, assetsOfJson, bfBlock, blockByHeight, tipInfo } from "../chain";
+import { amountOf, assetsOfJson, bfBlock, blockByHeight, mbUnsafe, tipInfo } from "../chain";
 
 export const extensionRoutes: Route[] = [
     // newest first, cursor paging (Blockfrost has no block list)
@@ -98,7 +98,15 @@ export const extensionRoutes: Route[] = [
         // `/addresses/{a}/transactions` for older history is not.
         let stateIndexedFromSlot: number | null = null;
         try { stateIndexedFromSlot = ledgerStoreSummary()?.anchorSlot ?? null; } catch { /* no ledger store in this build */ }
-        const txIndexFromSlot = await getMinSlot().catch(() => null);
+        const txIndexFromSlot = await (async (): Promise<number | null> => {
+            try {
+                const r = await mbUnsafe("SELECT MIN(slot) FROM mb_tx", []);
+                const v = r[0]?.[0];
+                return v == null ? null : Number(v);
+            } catch {
+                return getMinSlot().catch(() => null);
+            }
+        })();
         return {
             tip: { slot: snap.tipSlot, hash: snap.tipHash, epoch, epoch_nonce: await getEpochNonce(epoch).catch(() => null) },
             utxo_count: snap.utxoCount,

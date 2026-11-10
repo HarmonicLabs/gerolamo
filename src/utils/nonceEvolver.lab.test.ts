@@ -10,66 +10,74 @@ const bytes = (seed: number): Uint8Array => {
     for (let i = 0; i < 32; i++) out[i] = (seed * 31 + i * 17) & 0xff;
     return out;
 };
+const hex = (b: Uint8Array) => toHex(b);
 
 describe("NonceEvolver lab nonce", () => {
     setEpochNetwork("preprod");
     const epoch = 6;
     const first = Number(firstSlotOfEpoch(epoch));
-    const next = Number(firstSlotOfEpoch(epoch + 1));
     const eta0 = bytes(1);
 
-    test("the lab nonce is the parent hash of the last applied block", () => {
-        const ev = new NonceEvolver(genesis);
-        ev.bootstrap(epoch, toHex(eta0));
+    test("TICKN uses the carried lab nonce, then stores the closing parent for the next boundary", () => {
+        const carried = prevHashToNonce(bytes(3));
         const lastPrev = bytes(42);
-        ev.processBlock(first + 20, bytes(2), bytes(3));
-        ev.processBlock(first + 40, bytes(4), lastPrev);
-        expect(ev.snapshot().etaHHex).toBe(toHex(prevHashToNonce(lastPrev)));
+        const ev = new NonceEvolver(genesis);
+        ev.bootstrap(epoch, hex(eta0), { etaHHex: hex(carried) });
+        ev.processBlock(first + 20, bytes(2), bytes(4));
+        ev.processBlock(first + 40, bytes(5), lastPrev);
 
-        // TICKN must mix that same last parent hash, not the carried lab nonce.
-        const expected = toHex(ticknNewEpochNonce(
+        // Praos: the nonce for this boundary uses the CARRIED lastEpochBlockNonce.
+        expect(ev.snapshot().etaHHex).toBe(hex(carried));
+        const expected = hex(ticknNewEpochNonce(
             Uint8Array.from(Buffer.from(ev.snapshot().etaCHex, "hex")),
-            prevHashToNonce(lastPrev),
+            carried,
         ));
         expect(ev.tickn().eta0Hex).toBe(expected);
+
+        // The stored lab for the NEXT boundary is the closing epoch's parent hash.
+        expect(ev.snapshot().etaHHex).toBe(hex(prevHashToNonce(lastPrev)));
     });
 
-    test("two chains with the same blocks but different last parents produce different epoch nonces", () => {
-        const run = (lastPrev: Uint8Array): string => {
+    test("two chains with the same blocks but different carried labs produce different epoch nonces", () => {
+        const run = (carried: Uint8Array): string => {
             const ev = new NonceEvolver(genesis);
-            ev.bootstrap(epoch, toHex(eta0));
-            ev.processBlock(first + 20, bytes(2), bytes(3));
-            ev.processBlock(first + 40, bytes(4), lastPrev);
+            ev.bootstrap(epoch, hex(eta0), { etaHHex: hex(carried) });
+            ev.processBlock(first + 20, bytes(2), bytes(4));
+            ev.processBlock(first + 40, bytes(5), bytes(6));
             return ev.tickn().eta0Hex;
         };
-        expect(run(bytes(42))).not.toBe(run(bytes(43)));
+        expect(run(prevHashToNonce(bytes(42)))).not.toBe(run(prevHashToNonce(bytes(43))));
     });
 
     test("the first Shelley epoch TICKN uses NeutralNonce for the lab", () => {
         const firstShelley = Number(firstSlotOfEpoch(4));
         const ev = new NonceEvolver(genesis);
-        ev.bootstrap(4, toHex(eta0));
+        ev.bootstrap(4, hex(eta0));
         ev.processBlock(firstShelley + 20, bytes(2), bytes(3));
         ev.processBlock(firstShelley + 40, bytes(4), bytes(5));
         expect(ev.tickn().eta0Hex).toBe(ev.snapshot().etaCHex);
+        expect(ev.snapshot().etaHHex).toBe(hex(prevHashToNonce(bytes(5))));
     });
 
-    test("a replay from etaV/etaC rebuilds the per-block lab nonce", () => {
+    test("a mid-epoch restore keeps the carried lab and advances it only at TICKN", () => {
+        const carried = prevHashToNonce(bytes(7));
+        const lastPrev = bytes(8);
         const source = new NonceEvolver(genesis);
-        source.bootstrap(epoch, toHex(eta0));
-        source.processBlock(first + 20, bytes(2), bytes(3));
-        source.processBlock(first + 40, bytes(4), bytes(5));
+        source.bootstrap(epoch, hex(eta0), { etaHHex: hex(carried) });
+        source.processBlock(first + 20, bytes(2), bytes(9));
+        source.processBlock(first + 40, bytes(3), lastPrev);
         const snap = source.snapshot();
 
         const restored = new NonceEvolver(genesis);
-        restored.bootstrap(epoch, toHex(eta0), { etaVHex: snap.etaVHex, etaCHex: snap.etaCHex, atSlot: first + 40 });
-        const lastPrev = bytes(6);
-        restored.processBlock(first + 60, bytes(7), lastPrev);
-        expect(restored.snapshot().etaHHex).toBe(toHex(prevHashToNonce(lastPrev)));
+        restored.bootstrap(epoch, hex(eta0), { etaVHex: snap.etaVHex, etaCHex: snap.etaCHex, etaHHex: snap.etaHHex, atSlot: first + 40 });
+        expect(restored.snapshot().etaHHex).toBe(hex(carried));
+        restored.processBlock(first + 60, bytes(10), bytes(11));
+        expect(restored.snapshot().etaHHex).toBe(hex(carried));
         const beforeTickn = restored.snapshot();
-        expect(restored.tickn().eta0Hex).toBe(toHex(ticknNewEpochNonce(
+        expect(restored.tickn().eta0Hex).toBe(hex(ticknNewEpochNonce(
             Uint8Array.from(Buffer.from(beforeTickn.etaCHex, "hex")),
-            prevHashToNonce(lastPrev),
+            carried,
         )));
+        expect(restored.snapshot().etaHHex).toBe(hex(prevHashToNonce(bytes(11))));
     });
 });

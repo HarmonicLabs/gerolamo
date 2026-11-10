@@ -27,6 +27,8 @@ services:
       - --chain-selection
       - praos
       - --no-ledger-sql-writes
+      - --plutus-phase2
+      - report
       - --n2c
       - --n2c-socket
       - /data/node.socket

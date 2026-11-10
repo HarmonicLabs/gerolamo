@@ -5,7 +5,7 @@ import { rationalOf, scriptExecutionFee } from "../../../consensus/rules/ledgerC
 import { assetFingerprint } from "../../../db/minibf/cardanoIds";
 import { REDEEMER_PURPOSES } from "../../../db/minibf/blockFacts";
 import { hex } from "../../../db/minibf/cborWalk";
-import { CborArray, CborBytes, CborMap, CborText, CborUInt, type CborObj } from "@harmoniclabs/cbor";
+import { Cbor, CborArray, CborBytes, CborMap, CborText, CborUInt, type CborObj } from "@harmoniclabs/cbor";
 import { epochForSlot } from "../../../utils/epochFromSlotCalculations";
 import { datumJson, metadataJson, nativeScriptJson, parseCbor, plainJson } from "../cborJson";
 import { badRequest, fromTo, intParam, MSG, notFound, pageOf, paging } from "../http";
@@ -91,11 +91,26 @@ async function redeemerFee(slot: number, mem: bigint, steps: bigint, net: Ctx["n
 
 async function scriptRow(hash: string): Promise<{ type: string; bytes: Uint8Array } | null> {
     const r = await mb`SELECT type, bytes FROM mb_script WHERE hash = ${hash}`;
-    if (r.length) return { type: str(r[0]![0]), bytes: r[0]![1] as Uint8Array };
+    if (r.length) {
+        const type = str(r[0]![0]);
+        return { type, bytes: rawScriptBytes(type, r[0]![1] as Uint8Array) };
+    }
     // not indexed yet: a reference script in the current UTxO set
     const cbor = await getReferenceScriptCborByHash(hash);
     if (!cbor) return null;
-    return { type: "plutusV2", bytes: Uint8Array.from(Buffer.from(cbor, "hex")) };
+    return { type: "plutusV2", bytes: rawScriptBytes("plutusV2", Uint8Array.from(Buffer.from(cbor, "hex"))) };
+}
+
+/** Blockfrost `/scripts/{h}/cbor` is the raw script, not the `[language, bytes]` Script wrapper. */
+export function rawScriptBytes(type: string, bytes: Uint8Array): Uint8Array {
+    if (type === "timelock") return bytes;
+    try {
+        const c = Cbor.parse(bytes);
+        if (c instanceof CborArray && c.array.length === 2 && c.array[0] instanceof CborUInt && c.array[1] instanceof CborBytes) {
+            return c.array[1].bytes;
+        }
+    } catch { /* not a wrapper */ }
+    return bytes;
 }
 
 const hashParam = (c: Ctx, name: string, len: number): string => {

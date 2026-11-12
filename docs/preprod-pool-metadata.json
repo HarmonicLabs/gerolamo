@@ -1,6 +1,6 @@
 {
   "name": "Gerolamo",
-  "description": "Gerolamo Was Here!!!",
+  "description": "Standalone TypeScript Cardano node by Harmonic Labs",
   "ticker": "GERO",
   "homepage": "https://github.com/HarmonicLabs/gerolamo",
   "extended": ""

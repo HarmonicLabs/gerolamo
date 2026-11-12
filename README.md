@@ -50,6 +50,34 @@ line for your distro). Everything else is in the repo: the HarmonicLabs
 libraries that are not on npm yet ship as tarballs in `vendor/`, so no sibling
 checkouts are needed. `bun run test` runs the node and desktop suites.
 
+## Experimental AOT builds (`Gerolamo-AoT`)
+
+Bun AOT is **canary-only** as of 2026-11-12. Stable Bun 1.4.4 accepts `--aot`
+but does not emit machine code. Build with a canary Bun:
+
+```bash
+BUN=/path/to/bun-canary/bun bun run build:aot
+# output: dist/gerolamo-aot (~101 MB)
+```
+
+Local measurements on 2026-11-12:
+
+| Metric | AOT | JIT |
+|---|---:|---:|
+| `--help` startup | **1.62 s** | 2.97 s |
+| `--help` max RSS | **225 MB** | 365 MB |
+| Binary size | **101 MB** | 150 MB |
+| Build time | 2.36 s | ~0.2 s |
+| 12 s node probe | ✅ started and shut down cleanly | ⚠️ started, but compiled JIT could not resolve `explorerWorker.ts` |
+
+The AOT node probe used a fresh empty DB and no ledger: it reported ~**1.35 GB
+RSS** versus ~**347 MB** for JIT. That is not a production sync benchmark, and
+AOT is **not yet proven faster for the node**.
+
+See [docs/AOT.md](docs/AOT.md) for the build script, warnings and benchmark
+caveats. Do not publish or deploy the AOT binary until full sync, Plutus and
+N2N throughput are measured on a stable Bun AOT release.
+
 | Surface | Default |
 |---------|---------|
 | HTTP API | `http://127.0.0.1:3030` |

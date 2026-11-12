@@ -24,7 +24,7 @@ import {
 } from "../src/pool/keystore";
 import {
     addressBech32, baseAddressBytes, bech32Decode, buildWithMinFee, certificateEnvelope, generateKeyPair, keyEnvelopes, keyHash, KeyEnvelopeType, loadSigningKey,
-    marginFromDecimal, poolMetadataHash, poolRegistrationCert, stakeAddressBytes, stakeDelegationCert, stakeRegistrationCert, txEnvelope, txId, type Relay,
+    marginFromDecimal, poolMetadataHash, poolRegistrationCert, poolRetirementCert, stakeAddressBytes, stakeDelegationCert, stakeRegistrationCert, txEnvelope, txId, type Relay,
 } from "../src/pool/operator";
 
 const argv = process.argv.slice(2);
@@ -110,6 +110,40 @@ if (cmd === "keygen") {
     write("node.counter", K.encodeIssueCounter(r.nextCounter));
     K.zeroise(r.kes.skey, cold.skey);
     console.log(`KES rotated: node.cert counter ${r.opcert.cert.counter}, KES period ${r.opcert.cert.kesPeriod} (tip slot ${tipSlot}), ${r.status.remainingPeriods} periods, valid until slot ${r.status.expiresSlot}; old files kept with suffix .${stamp}. Load them without a restart: kill -HUP <producer node pid> (the node logs "credentials reloaded" or why it kept the old ones).`);
+} else if (cmd === "retire") {
+    // Pool retirement (Conway `pool_retirement`, type 3). The pool stops producing at the start of
+    // --epoch (must be greater than the current epoch); the 500 ADA pool deposit is refunded to the
+    // pool's reward account at that boundary. Signed with the payment key and the pool cold key.
+    const { tipSlot, epoch, params, network } = await tipAndParams();
+    const retireEpoch = BigInt(arg("epoch", String(epoch + 2)));
+    if (retireEpoch <= BigInt(epoch)) { console.error(`--epoch ${retireEpoch} must be greater than the current epoch ${epoch}`); process.exit(1); }
+    const pay = loadSigningKey(file("payment.skey"), KeyEnvelopeType.paymentSigning);
+    const cold = loadColdSigningKey(file("cold.skey"));
+    const addrText = readFileSync(file("payment.addr"), "utf8").trim();
+    const addr = bech32Decode(addrText).bytes;
+    const poolId = Uint8Array.from(Buffer.from(poolIdOf(cold.vkey), "hex"));
+    const cert = poolRetirementCert(poolId, retireEpoch);
+    const utxos = await nodeJson<Array<{ tx_hash: string; output_index: number; amount: Array<{ unit: string; quantity: string }> }>>(`/api/v0/addresses/${encodeURIComponent(addrText)}/utxos`);
+    const usable = utxos.filter((u) => u.amount.every((a) => a.unit === "lovelace"));
+    const total = usable.reduce((s, u) => s + BigInt(u.amount.find((a) => a.unit === "lovelace")?.quantity ?? "0"), 0n);
+    if (!usable.length) { console.error(`no lovelace UTxO at ${addrText}`); process.exit(1); }
+    const built = buildWithMinFee({
+        inputs: usable.map((u) => ({ txHash: Uint8Array.from(Buffer.from(u.tx_hash, "hex")), index: u.output_index })),
+        outputs: [{ address: addr, lovelace: total }], changeIndex: 0,
+        ttl: tipSlot + BigInt(arg("ttl", "7200")!), certificates: [cert],
+        minFeeA: BigInt(params.min_fee_a), minFeeB: BigInt(params.min_fee_b), keys: [pay, cold],
+    });
+    writeTextEnvelope(file("tx.retire.signed"), txEnvelope(built.tx));
+    writeTextEnvelope(file(`cert-retire.cert`), certificateEnvelope(cert));
+    const id = Buffer.from(txId(built.body)).toString("hex");
+    console.log(`network ${network} epoch ${epoch} tip ${tipSlot}\npool ${Buffer.from(poolId).toString("hex")}\nretires at start of epoch ${retireEpoch}\ninputs ${usable.length} (${total} lovelace), fee ${built.fee}, change ${total - built.fee}\ntx id ${id}\ntx.retire.signed written (${built.tx.length} bytes)`);
+    if (arg("submit") === "true") {
+        const base = need("node").replace(/\/$/, "");
+        const r = await fetch(base + "/txsubmit", { method: "POST", headers: { "Content-Type": "application/cbor" }, body: built.tx });
+        console.log(`submit: HTTP ${r.status} ${await r.text()}`);
+    } else {
+        console.log(`not submitted (add --submit): curl -X POST --data-binary @<(python3 -c "import json,sys;sys.stdout.buffer.write(bytes.fromhex(json.load(open('${file("tx.retire.signed")}'))['cborHex']))") ${need("node")}/txsubmit`);
+    }
 } else if (cmd === "register") {
     const { tipSlot, epoch, params, network } = await tipAndParams();
     const pay = loadSigningKey(file("payment.skey"), KeyEnvelopeType.paymentSigning);

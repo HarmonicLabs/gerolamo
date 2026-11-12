@@ -111,6 +111,11 @@ export function stakeRegistrationCert(stakeKeyHash: Uint8Array, deposit: bigint)
     return new CborArray([new CborUInt(7n), keyCred(stakeKeyHash), new CborUInt(deposit)]);
 }
 
+/** Conway `pool_retirement` (type 3): the pool retires at the start of `epoch` (must be > current epoch). */
+export function poolRetirementCert(poolId: Uint8Array, epoch: bigint): CborArray {
+    return new CborArray([new CborUInt(3n), new CborBytes(poolId), new CborUInt(epoch)]);
+}
+
 /** `stake_delegation` (type 2). */
 export function stakeDelegationCert(stakeKeyHash: Uint8Array, poolId: Uint8Array): CborArray {
     return new CborArray([new CborUInt(2n), keyCred(stakeKeyHash), new CborBytes(poolId)]);

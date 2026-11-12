@@ -78,7 +78,7 @@ function epochOf(network: ReturnType<typeof normalizeEpochNetwork>, slot: bigint
  * carries the metadata message "Gerolamo was here!" (label 674). Built at forge time from the
  * wallet's largest ada-only UTxO and the epoch's fee parameters; TTL two hours.
  */
-function greetingBuilder(g: { paymentSkeyFile: string; paymentAddress: string }, network: ReturnType<typeof normalizeEpochNetwork>): () => Promise<{ hash: Uint8Array; bytes: Uint8Array } | null> {
+function greetingBuilder(g: { paymentSkeyFile: string; paymentAddress: string; message?: string }, network: ReturnType<typeof normalizeEpochNetwork>): () => Promise<{ hash: Uint8Array; bytes: Uint8Array } | null> {
     let key: KeyPair | null = null;
     return async () => {
         key ??= loadSigningKey(g.paymentSkeyFile, KeyEnvelopeType.paymentSigning);
@@ -101,7 +101,7 @@ function greetingBuilder(g: { paymentSkeyFile: string; paymentAddress: string },
             inputs: [{ txHash: Uint8Array.from(Buffer.from(txHash!, "hex")), index: Number(index) }],
             outputs: [{ address, lovelace: u.lovelace }], changeIndex: 0,
             ttl: tip.slot + 7200n, certificates: [],
-            auxiliaryData: messageMetadata(["Gerolamo was here!"]),
+            auxiliaryData: messageMetadata([g.message ?? "Gerolamo was here!"]),
             minFeeA: BigInt(String(raw.min_fee_a ?? 44)), minFeeB: BigInt(String(raw.min_fee_b ?? 155381)), keys: [key],
         });
         return { hash: txId(built.body), bytes: built.tx };

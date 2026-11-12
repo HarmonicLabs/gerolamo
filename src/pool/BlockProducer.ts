@@ -52,7 +52,7 @@ export interface ProducerKeysConfig {
     kesAgentSocket?: string;
     stateFile?: string;
     dryRun?: boolean;
-    greeting?: { paymentSkeyFile: string; paymentAddress: string };
+    greeting?: { paymentSkeyFile: string; paymentAddress: string; message?: string };
     /**
      * Protocol version written into forged headers. cardano-node writes its own supported
      * version (11.0 on preview, 2026-09-13), the ledger checks only that the major is not above

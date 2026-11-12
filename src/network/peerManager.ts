@@ -159,7 +159,7 @@ export interface ProducerConfig {
      * wallet with the metadata message "Gerolamo was here!" (CIP-20 label 674). Once per
      * network, remembered in `stateFile`.
      */
-    greeting?: { paymentSkeyFile: string; paymentAddress: string };
+    greeting?: { paymentSkeyFile: string; paymentAddress: string; message?: string };
     /** Protocol version written into forged headers (explorer badge); unset = the ledger's. */
     headerProtocolVersion?: { major: number; minor: number };
 }

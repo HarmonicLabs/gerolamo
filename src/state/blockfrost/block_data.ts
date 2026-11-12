@@ -1,6 +1,6 @@
-import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { BlockfrostPluts } from "@harmoniclabs/blockfrost-pluts";
 
-export async function fetchBlockData(api: BlockFrostAPI, blockHash: string) {
+export async function fetchBlockData(api: BlockfrostPluts, blockHash: string) {
     console.log(`Fetching block ${blockHash}...`);
     const block = await api.blocks(blockHash);
     console.log(`Block slot: ${block.slot}, height: ${block.height}`);
@@ -12,7 +12,7 @@ export async function fetchBlockData(api: BlockFrostAPI, blockHash: string) {
     return { block, currentEpoch };
 }
 
-export async function fetchAddresses(api: BlockFrostAPI, blockHash: string) {
+export async function fetchAddresses(api: BlockfrostPluts, blockHash: string) {
     console.log("Fetching addresses affected by block...");
     const addresses = await api.blocksAddressesAll(blockHash);
     console.log(`Found ${addresses.length} addresses affected by block`);

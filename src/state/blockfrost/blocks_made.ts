@@ -1,8 +1,8 @@
-import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { BlockfrostPluts } from "@harmoniclabs/blockfrost-pluts";
 import { sql } from "../../sql";
 
 export async function populateBlocksMade(
-    api: BlockFrostAPI,
+    api: BlockfrostPluts,
     currentEpoch: number,
 ) {
     console.log("Fetching block production data for epoch...");

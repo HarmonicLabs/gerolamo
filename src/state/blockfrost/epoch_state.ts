@@ -1,5 +1,5 @@
 import { sql } from "../../sql";
-import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { BlockfrostPluts } from "@harmoniclabs/blockfrost-pluts";
 import {
     fetchProtocolParameters,
     populateProtocolParams,
@@ -33,7 +33,9 @@ export async function populateEpochState(
         config?: GerolamoConfig;
     } = {},
 ) {
-    const apiConfig: any = { rateLimiter: false };
+    const apiConfig: any = {
+        network: options.config?.network ?? "preprod",
+    };
 
     if (options.projectId) {
         apiConfig.projectId = options.projectId;
@@ -47,7 +49,7 @@ export async function populateEpochState(
         }
     }
 
-    const api = new BlockFrostAPI(apiConfig);
+    const api = new BlockfrostPluts(apiConfig);
 
     console.log(`Populating epoch ${epoch} state...`);
 

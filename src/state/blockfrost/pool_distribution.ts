@@ -1,4 +1,4 @@
-import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { BlockfrostPluts } from "@harmoniclabs/blockfrost-pluts";
 import { sql } from "../../sql";
 
 export async function populatePoolDistribution(
@@ -8,7 +8,7 @@ export async function populatePoolDistribution(
     await sql`INSERT OR REPLACE INTO pool_distr (id, pools, total_active_stake) VALUES (${1}, ${JSON.stringify(pools)}, ${totalActiveStake})`;
 }
 
-export async function fetchPools(api: BlockFrostAPI) {
+export async function fetchPools(api: BlockfrostPluts) {
     console.log("Fetching pool distribution...");
     const pools = await api.poolsAll();
     console.log(`Found ${pools.length} pools`);

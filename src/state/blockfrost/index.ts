@@ -1,6 +1,6 @@
 // Blockfrost-related state management functions
 // This module provides main import functions for ledger state from Blockfrost API
-import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { BlockfrostPluts } from "@harmoniclabs/blockfrost-pluts";
 import {
     fetchProtocolParameters,
     populateProtocolParams,
@@ -37,6 +37,7 @@ export async function importFromBlockfrost(
     },
 ) {
     const apiConfig: any = {
+        network: options?.config?.network ?? "preprod",
         rateLimiter: false,
     };
 
@@ -54,7 +55,7 @@ export async function importFromBlockfrost(
         }
     }
 
-    const api = new BlockFrostAPI(apiConfig);
+    const api = new BlockfrostPluts(apiConfig);
 
     // Fetch all required data from Blockfrost
     const { currentEpoch } = await fetchBlockData(api, blockHash);

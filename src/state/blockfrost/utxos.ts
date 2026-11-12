@@ -1,9 +1,9 @@
-import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { BlockfrostPluts } from "@harmoniclabs/blockfrost-pluts";
 import { sql } from "../../sql";
 import { BACKFILL_UTXO_COLUMNS_SQL } from "../../db";
 
 export async function populateUTxOs(
-    api: BlockFrostAPI,
+    api: BlockfrostPluts,
     stakeDistribution: { stake_address: string }[],
 ) {
     console.log("Fetching complete UTxO set...");

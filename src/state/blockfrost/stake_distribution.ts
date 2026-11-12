@@ -1,4 +1,4 @@
-import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { BlockfrostPluts } from "@harmoniclabs/blockfrost-pluts";
 import { sql } from "../../sql";
 
 export async function populateStakeDistribution(
@@ -15,7 +15,7 @@ export async function populateDelegations(
 }
 
 export async function fetchStakeDistribution(
-    api: BlockFrostAPI,
+    api: BlockfrostPluts,
     epoch: number,
 ) {
     console.log("Fetching epoch stake distribution...");

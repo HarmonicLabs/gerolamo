@@ -1,4 +1,4 @@
-import { BlockFrostAPI } from "@blockfrost/blockfrost-js";
+import { BlockfrostPluts } from "@harmoniclabs/blockfrost-pluts";
 import { sql } from "../../sql";
 
 export async function populateProtocolParams(
@@ -8,11 +8,11 @@ export async function populateProtocolParams(
 }
 
 export async function fetchProtocolParameters(
-    api: BlockFrostAPI,
+    api: BlockfrostPluts,
     epoch: number,
 ) {
     console.log("Fetching protocol parameters...");
-    const protocolParams = await api.epochsParameters(epoch);
+    const protocolParams = await api.epochsParametersRaw(epoch);
     console.log("Protocol parameters fetched");
     return protocolParams;
 }

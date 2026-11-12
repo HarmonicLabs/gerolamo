@@ -34,12 +34,15 @@ export const EPOCH_GEOMETRY: Record<EpochNetwork, EpochGeometry> = {
     // Shelley HF at epoch 208 (slot 208 × 21 600 = 4 492 800), 2020-07-29.
     mainnet: { systemStartUnix: 1_506_203_091n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 4_492_800n, shelleyStartEpoch: 208n, shelleySlotsPerEpoch: 432_000n, stabilityWindow: 129_600n },
     // Confirmed via Blockfrost: /blocks/slot/86400 → epoch 4, epoch_slot 0.
-    preprod: { systemStartUnix: 1_655_769_600n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 86_400n, shelleyStartEpoch: 4n, shelleySlotsPerEpoch: 432_000n, stabilityWindow: 129_600n },
+    // systemStart is the genesis value (2022-06-01T00:00:00Z). Byron slots are 20 s, so slot 86 400
+    // lands at 1 654 041 600 + 86 400 × 20 = 1 655 769 600; chain time is then 1 655 683 200 + slot,
+    // which matches preprod blocks end to end (height 1 000 000 and the tip, 2026-11-12).
+    preprod: { systemStartUnix: 1_654_041_600n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 86_400n, shelleyStartEpoch: 4n, shelleySlotsPerEpoch: 432_000n, stabilityWindow: 129_600n },
     // Preview started in Shelley-era rules (no Byron epochs), 86 400-slot epochs.
     preview: { systemStartUnix: 1_666_656_000n, byronSlotsPerEpoch: 86_400n, shelleyStartSlot: 0n, shelleyStartEpoch: 0n, shelleySlotsPerEpoch: 86_400n, stabilityWindow: 25_920n },
     // any other network (SanchoNet, local testnets): filled from its genesis files and hard-fork
     // history at startup (setCustomEpochGeometry); preprod's numbers until then
-    custom: { systemStartUnix: 1_655_769_600n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 86_400n, shelleyStartEpoch: 4n, shelleySlotsPerEpoch: 432_000n, stabilityWindow: 129_600n },
+    custom: { systemStartUnix: 1_654_041_600n, byronSlotsPerEpoch: 21_600n, shelleyStartSlot: 86_400n, shelleyStartEpoch: 4n, shelleySlotsPerEpoch: 432_000n, stabilityWindow: 129_600n },
 };
 
 let customSet = false;

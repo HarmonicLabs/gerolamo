@@ -38,7 +38,7 @@ describe("explorer endpoints", () => {
         const { status, body } = await get("/blocks?limit=3");
         expect(status).toBe(200);
         expect(body.map((b: any) => [b.slot, b.height])).toEqual([[86400, 6], [21600, 5], [21600, null]]);
-        expect(body[0].time).toBe(1_655_769_600 + 86_400 * 20);
+        expect(body[0].time).toBe(1_655_769_600); // first Shelley slot: genesis + 86 400 × 20 s of Byron
         expect(body[0].epoch).toBe(4);
         expect(body[0].epoch_slot).toBe(0);
         expect(body[0].slot_leader).toMatch(/^pool1[0-9a-z]+$/); // Blockfrost: the bech32 pool id
@@ -75,7 +75,7 @@ describe("explorer endpoints", () => {
 
     test("GET /epochs/{n} from geometry and stored blocks", async () => {
         const e0 = await get("/epochs/0");
-        expect(e0.body).toMatchObject({ epoch: 0, start_time: 1_655_769_600, block_count: 5, first_slot: 0, last_slot: 21599, synced: "complete" });
+        expect(e0.body).toMatchObject({ epoch: 0, start_time: 1_654_041_600, block_count: 5, first_slot: 0, last_slot: 21599, synced: "complete" });
         expect(e0.body.first_block).toBe(h(1));
         expect(e0.body.last_block).toBe(h(5));
         const e4 = await get("/epochs/4");

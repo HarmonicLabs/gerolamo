@@ -56,9 +56,12 @@ describe("slotToUnixTime / slotInEpoch", () => {
         expect(slotInEpoch(4_492_800 + 432_000 + 5, "mainnet")).toBe(5n);
     });
     test("preprod: Byron slots are 20 s until slot 86400; preview is all 1 s", () => {
-        expect(slotToUnixTime(0, "preprod")).toBe(1_655_769_600);
-        expect(slotToUnixTime(86_400, "preprod")).toBe(1_655_769_600 + 86_400 * 20);
-        expect(slotToUnixTime(86_401, "preprod")).toBe(1_655_769_600 + 86_400 * 20 + 1);
+        expect(slotToUnixTime(0, "preprod")).toBe(1_654_041_600); // genesis 2022-06-01T00:00:00Z
+        expect(slotToUnixTime(86_400, "preprod")).toBe(1_655_769_600); // after 86 400 × 20 s of Byron
+        expect(slotToUnixTime(86_401, "preprod")).toBe(1_655_769_601);
+        // real preprod blocks: height 1 000 000 (slot 29 883 443) and the 2026-11-12 tip
+        expect(slotToUnixTime(29_883_443, "preprod")).toBe(1_685_566_643);
+        expect(slotToUnixTime(138_828_387, "preprod")).toBe(1_794_511_587);
         expect(slotToUnixTime(100, "preview")).toBe(1_666_656_000 + 100);
     });
 });

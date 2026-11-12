@@ -10,6 +10,7 @@
         "explorer": "bun scripts/gerolamo-explorer.ts",
         "stream-server": "bun scripts/mithril-stream-server.ts",
         "ui:dev": "bash desktop/scripts/dev-wait.sh",
+        "build:aot": "bash scripts/build-aot.sh",
         "ui:typecheck": "bun run --cwd desktop typecheck",
         "ui:test": "bun test --cwd desktop src",
         "postinstall": "bun install --cwd desktop && bun install --cwd dashboard",

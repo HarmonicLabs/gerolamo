@@ -113,10 +113,35 @@ curl -X POST http://127.0.0.1:3030/txsubmit --data-binary @tx.cbor \
 | GET | `/block/{slot\|hash}` | Raw CBOR hex |
 | GET | `/utxo/{txhash:index}` | UTxO JSON if unspent |
 | POST | `/txsubmit` | Raw CBOR → mempool / hot peers |
-| GET/POST | `/api/v0/*` | Mini-Blockfrost **subset** v0.2.0 |
+| GET/POST | `/api/v0/*` | Mini-Blockfrost-compatible API (local explorer projection) |
+| GET | `/api/v0/gerolamo/status` | State + history coverage, tx-index start slot, index lag |
 
-Mini-BF v0.2.0: health, epochs/latest (+ params if stored), blocks (+ `/txs`), address UTxOs + **transactions**, **tx by hash**, tx UTxOs (unspent only), **mempool** snapshot, tx submit (returns body hash).  
-Tx/address history needs `tx_index` (empty until backfill or forward index). **Not** full Blockfrost. See `docs/gerolamo-vs-dolos-gap.md`.
+Mini-BF: health, epochs/latest (+ params if stored), blocks (+ `/txs`), address UTxOs + **transactions**, **tx by hash**, tx UTxOs (unspent only), **mempool** snapshot, tx submit (returns body hash), assets, pools, scripts/datums/redeemers and metadata.  
+Tx/address history needs the explorer projection (`mb_*`); the API reports its exact coverage. **Not** full Blockfrost. See `docs/gerolamo-vs-dolos-gap.md`.
+
+### Data layers: ledger vs explorer vs block store
+
+| Store | Purpose |
+|---|---|
+| `*.db` (ledger SQLite) | Current authoritative UTxO set, ledger state and node settings |
+| `*.explorer.db` (`mb_*`) | Derived Blockfrost-style read projection: txs, outputs, inputs, address history, assets, pools, scripts, datums, redeemers, metadata |
+| Block store (`db/`) | Raw block/immutable chunks |
+| `/api/v0/*` | Reads the explorer projection, ledger UTxO set and block store |
+
+The explorer DB is **derived**, not consensus state. It can be rebuilt from the block store or a Mithril immutable snapshot without re-verifying blocks or replaying phase 2. A snapshot import contains current UTxO state, but historical `mb_*` rows require the immutable blocks.
+
+```bash
+# Build the historical explorer projection from the local block store.
+bun scripts/explorer-backfill.ts \
+  --db /data/preprod.db \
+  --blocks /data/db \
+  --explorer /data/preprod.explorer.db \
+  --network preprod \
+  --apply
+```
+
+When `historyIndexed` is false in `/api/v0/gerolamo/status`, `/txs` and address-history reads before `txIndexFromSlot` are unavailable. This is an index limitation, not missing chain data. After a complete backfill, stop the writer, swap the backfill DB into `*.explorer.db`, restart, and verify `historyIndexed=true`.
+
 
 ```bash
 # Ops stream (Bun WS)

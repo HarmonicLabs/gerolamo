@@ -116,8 +116,10 @@ curl -X POST http://127.0.0.1:3030/txsubmit --data-binary @tx.cbor \
 | GET/POST | `/api/v0/*` | Mini-Blockfrost-compatible API (local explorer projection) |
 | GET | `/api/v0/gerolamo/status` | State + history coverage, tx-index start slot, index lag |
 
-Mini-BF: health, epochs/latest (+ params if stored), blocks (+ `/txs`), address UTxOs + **transactions**, **tx by hash**, tx UTxOs (unspent only), **mempool** snapshot, tx submit (returns body hash), assets, pools, scripts/datums/redeemers and metadata.  
-Tx/address history needs the explorer projection (`mb_*`); the API reports its exact coverage. **Not** full Blockfrost. See `docs/gerolamo-vs-dolos-gap.md`.
+Mini-BF: health, epochs/latest (+ params if stored), blocks (+ `/txs`), address UTxOs + **transactions**, **tx by hash**, tx UTxOs (unspent only), **mempool** snapshot, tx submit (returns body hash), assets, pools, scripts/datums/redeemers and metadata — **115 route handlers** across `addresses`, `assets`, `core`, `governance`, `pools`, `txs`, `extensions`.  
+Tx/address history needs the explorer projection (`mb_*`); the API reports its exact coverage. Not the full 129-path Blockfrost surface — see `docs/gerolamo-vs-dolos-gap.md`.
+
+UTxO RPC is served alongside it: Query, Submit, Sync and Watch (`src/api/utxorpc/`).
 
 ### Data layers: ledger vs explorer vs block store
 
@@ -372,11 +374,27 @@ Harnesses for the scenarios: `scripts/ndc/`, results and remaining items: `docs/
 
 ---
 
-## Roadmap (blunt)
+## Where the node stands (blunt, 2026-11-13)
 
-**Have:** N2N sync, SQLite soft ledger, HTTP + Mini-BF subset, N2C scaffold, batch hydrate, pure-TS KES.
+**Consensus / sync** — N2N over TCP and WebSocket (browser nodes), full validation (headers, body hashes, peer agreement, transaction rules), Praos chain selection, chunk block store, LMDB ledger, peer governor with hot/warm/cold tiers. Preprod runs on this today.
 
-**Next for data-node parity:** tx/address indexes → richer Mini-BF; canonical `/api/v0/status` (+ optional logs); Lab polish; Mithril WASM verify spike; LSQ breadth only if product needs it.
+**Ledger** — Conway plus the Dijkstra era: governance (DReps, committee, proposals, ratification), rewards, epoch nonces, hard-fork history. Cardano Blueprint ledger vectors **2574/2574** on both the block and mempool paths; ledger-rules corpus 276/277.
+
+**Plutus** — V1–V4 on the phase-2 path, Dijkstra sub-transactions and guard contexts, strict and report modes. One known divergence is open on Preprod (`docs/VALIDATION_STATUS.md`).
+
+**Data / APIs** — Mini-Blockfrost `/api/v0/*`: **115 route handlers** over a full-genesis `mb_*` projection, with `/api/v0/gerolamo/status` reporting state and history coverage separately and honestly. UTxO RPC (Query/Submit/Sync/Watch). N2C with broad LocalStateQuery. HTML dashboard and WS stats.
+
+**Mithril** — full certificate-chain verification in pure TypeScript, snapshot download/import, and snapshot production plus signing.
+
+**Producer / operator** — forging, KES evolution and `kes-agent`, operational-certificate issue and rotation with on-chain counter checks, pool keygen / register / update / retire, VRF proving, configurable first-block greeting.
+
+**Delivery** — Bun single binary, AOT build (~101 MB), Electrobun desktop control center.
+
+**Next, ordered by what actually blocks a pool**
+1. Close the Plutus phase-2 divergence on Preprod block 5,386,017 (V3 redeemer, `is_valid=true` rejected by us, accepted by the chain).
+2. Preprod production: active stake lands 2026-11-22, first block after that.
+3. API breadth only where Gravity asks for it — not for parity's sake.
+4. Deliberately not planned: Kupo / Mesh / MCP servers, Postgres/MySQL metadata backends. Local SQLite is the product.
 
 ---
 

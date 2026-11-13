@@ -148,6 +148,21 @@ async function redeemersJson(t: TxCtx, c: Ctx): Promise<unknown[]> {
         const r = await mb`SELECT purpose, idx, script_hash FROM mb_redeemer WHERE tx_hash = ${tx.hash}`;
         stored = new Map(r.map((x) => [`${x[0]}:${x[1]}`, x[2] == null ? null : String(x[2])]));
     } catch { /* */ }
+    // `redeemer_data_hash` is the redeemer's own data; `datum_hash` is the datum the redeemer
+    // applies to, and only a spending redeemer has one (Koios/Blockfrost semantics). Reading the
+    // spent input's datum from the index; inline data is hashed from its CBOR.
+    const spentDatumHash = async (inputIx: number): Promise<string | null> => {
+        const ref = tx.inputs[inputIx];
+        if (!ref) return null;
+        try {
+            const r = await mb`SELECT datum_hash, inline_datum_cbor FROM mb_tx_out WHERE tx_hash = ${ref.txHash} AND output_index = ${ref.index}`;
+            const row = r[0];
+            if (!row) return null;
+            if (row[0] != null) return String(row[0]);
+            if (row[1] != null) return hex(blake2b_256(new Uint8Array(Buffer.from(String(row[1]), "hex"))));
+            return null;
+        } catch { return null; }
+    };
     const out: unknown[] = [];
     for (const r of [...tx.redeemers].sort((a, b) => a.index - b.index || a.tag - b.tag)) {
         const sh = stored.get(`${r.tag}:${r.index}`) ?? (await redeemerScriptHash(mbSql() as any, tx, r.tag, r.index));
@@ -157,7 +172,7 @@ async function redeemersJson(t: TxCtx, c: Ctx): Promise<unknown[]> {
             purpose: REDEEMER_PURPOSES[r.tag] ?? "spend",
             script_hash: sh ?? "",
             redeemer_data_hash: dh,
-            datum_hash: dh,
+            datum_hash: r.tag === 0 ? await spentDatumHash(r.index) : null,
             unit_mem: r.mem.toString(),
             unit_steps: r.steps.toString(),
             fee: pm && ps ? scriptExecutionFee(r.mem, r.steps, pm, ps).toString() : "0",

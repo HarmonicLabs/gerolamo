@@ -157,6 +157,9 @@ describe("Blockfrost API behaviour on the forged chain", () => {
         expect(u4.outputs.map((o: any) => [o.output_index, o.collateral])).toEqual([[0, false], [1, true]]);
         const r4 = (await get(`/txs/${t4}/redeemers`)).body;
         expect(r4[0]).toMatchObject({ purpose: "spend", script_hash: SCRIPT_HASH, unit_mem: "1000", unit_steps: "200000" });
+        // datum_hash is the datum the redeemer applies to (the spent input's), not the redeemer's own data
+        expect(r4[0].datum_hash).toBe(u4.inputs[0].data_hash);
+        expect(r4[0].datum_hash).not.toBe(r4[0].redeemer_data_hash);
         const u2 = (await get(`/txs/${t2}/utxos`)).body;
         expect(u2.outputs[0].consumed_by_tx).toBe(t3);
         expect(u2.outputs[1].inline_datum).toMatch(/^d879/);

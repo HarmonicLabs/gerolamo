@@ -107,6 +107,20 @@ export const extensionRoutes: Route[] = [
                 return getMinSlot().catch(() => null);
             }
         })();
+        // Complete = no block older than the oldest indexed tx actually carries a transaction.
+        // Comparing to slot 0/1 assumed every network starts at Byron slot 0: on preprod the first
+        // Shelley slot is 86 400 (and the first tx after it), so that test could never pass even with
+        // a full index. Byron blocks have no mb_tx rows, so ask the blocks table instead.
+        const historyIndexed = txIndexFromSlot == null
+            ? false
+            : await (async (): Promise<boolean> => {
+                try {
+                    const r = await mbUnsafe("SELECT COUNT(*) FROM mb_block WHERE slot < ? AND tx_count > 0", [txIndexFromSlot]);
+                    return Number(r[0]?.[0] ?? 1) === 0;
+                } catch {
+                    return txIndexFromSlot <= 1;
+                }
+            })();
         return {
             tip: { slot: snap.tipSlot, hash: snap.tipHash, epoch, epoch_nonce: await getEpochNonce(epoch).catch(() => null) },
             utxo_count: snap.utxoCount,
@@ -114,11 +128,11 @@ export const extensionRoutes: Route[] = [
             coverage: {
                 stateIndexed: stateIndexedFromSlot != null,
                 stateIndexedFromSlot,
-                historyIndexed: txIndexFromSlot != null && txIndexFromSlot <= 1,
+                historyIndexed,
                 txIndexFromSlot,
                 // Slots before txIndexFromSlot answer 404 for tx lookups and address history; that is "not in
                 // this node's index", not "never happened".
-                note: txIndexFromSlot != null && txIndexFromSlot > 1
+                note: !historyIndexed && txIndexFromSlot != null
                     ? `transaction history is served from slot ${txIndexFromSlot}; older history is not in this node's index`
                     : txIndexFromSlot != null
                         ? "transaction history is complete from genesis"

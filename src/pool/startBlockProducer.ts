@@ -44,6 +44,7 @@ export async function startBlockProducer(config: GerolamoConfig): Promise<BlockP
     const era = tip ? eraIndexAt(hfc, BigInt(tip.slot), tableEra - 1) + 1 : tableEra; // ledger era = HFC index + 1
     const node = nodeAdapter({
         network, era, genesis,
+        genesisParentHash: String((config as any).genesisBlockHash ?? ""),
         nonceFor: (e) => consensus.epochNonceFor(e),
         adopt: (b) => consensus.adoptLocalBlock(b),
         mempoolTxs: async () => {

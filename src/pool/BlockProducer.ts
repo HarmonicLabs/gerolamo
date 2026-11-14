@@ -815,6 +815,12 @@ export function nodeAdapter(opts: {
     mempoolSnapshot?: (slot: bigint) => Promise<Array<{ hash: Uint8Array; bytes: Uint8Array }>>;
     greetingTx?: () => Promise<{ hash: Uint8Array; bytes: Uint8Array } | null>;
     dropFromMempool: (hashes: Uint8Array[]) => Promise<void>;
+    /**
+     * Parent a genesis-start chain forges its first block on (a private testnet has no first block to
+     * build on and the producer refuses without a tip). Only used while the chain is empty; a node that
+     * already has a tip never looks at it. Config `genesisBlockHash`; all-zero means unset.
+     */
+    genesisParentHash?: string;
 }): ProducerNode {
     return {
         network: opts.network, era: opts.era, genesis: opts.genesis,
@@ -826,7 +832,15 @@ export function nodeAdapter(opts: {
         },
         tip: async () => {
             const t = await getChainTipFromHeader();
-            if (!t) return null;
+            if (!t) {
+                // Empty chain: a genesis-start devnet forges block 1 on the configured root. The applier
+                // skips its parent check while the store is empty, so the root only has to be stable.
+                const root = (opts.genesisParentHash ?? "").toLowerCase();
+                if (/^[0-9a-f]{64}$/.test(root) && !/^0+$/.test(root)) {
+                    return { slot: 0n, blockNumber: 0n, hashHex: root };
+                }
+                return null;
+            }
             if (t.blockNumber !== t.dbBlockNumber && !tipDriftLogged) { tipDriftLogged = true; logger.warn(`Block producer: this DB counts the tip as block ${t.dbBlockNumber} but its header says ${t.blockNumber}; forging with the header's number`); }
             return { slot: t.slot, blockNumber: t.blockNumber, hashHex: t.hashHex };
         },

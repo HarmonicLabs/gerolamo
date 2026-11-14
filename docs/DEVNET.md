@@ -41,6 +41,18 @@ Three constraints fight each other; this is the combination that satisfies all o
 `systemStart` is set to the time the chain is created; `activeSlotsCoeff = 1.0` means every slot has
 a leader slot, so the first forged block is expected at the epoch-2 boundary, about 20 minutes in.
 
+## The genesis root
+
+A genesis-start chain has no first block, so the producer has no parent to build on and refuses with
+`leader for slot N but not forging: no chain tip`. `config.json` therefore carries a
+`genesisBlockHash`: while the chain is empty the producer forges block 1 on that root, and the applier
+skips its parent check (the store is empty, so there is nothing for the block to extend).
+
+It is an explicit config value, not a derived one. Deriving a Byron genesis block hash correctly is a
+consensus-critical computation and getting it wrong is worse than not having it: the node would forge
+a block its own validator rejects. Any stable 32-byte hex works for a single-node testnet; all zeros
+means "unset" and restores the old behaviour (no forging on an empty chain).
+
 ## Checking it works
 
     curl -s http://127.0.0.1:3052/api/v0/gerolamo/status     # tip slot > 0 means a block exists

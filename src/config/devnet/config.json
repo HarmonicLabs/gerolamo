@@ -51,5 +51,6 @@
     "vrfSkeyFile": "/keys/vrf.skey",
     "opcertFile": "/keys/node.cert",
     "stateFile": "/data/producer-state.json"
-  }
+  },
+  "genesisBlockHash": "85205de98025fee53a3b6fc77b1b4240e268d871b98cc3db7824569f3573904f"
 }

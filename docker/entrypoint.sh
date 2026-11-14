@@ -89,7 +89,14 @@ fi
 
 child=0; stopping=0
 on_term() { stopping=1; [ "$child" -gt 0 ] && kill -TERM "$child" 2>/dev/null; }
+# SIGHUP is the node's topology/credentials reload (cardano-node semantics). The supervisor must not
+# die on it: forward it to the node, which re-reads topology.json and the KES key/opcert in place.
+on_hup() {
+  if [ "$child" -gt 0 ]; then kill -HUP "$child" 2>/dev/null && log "SIGHUP forwarded to the node (reloading topology and credentials)"
+  else log "SIGHUP ignored: no node running yet"; fi
+}
 trap on_term TERM INT
+trap on_hup HUP
 
 while [ "$stopping" = 0 ]; do
   flags=$BUN_FLAGS; prof_until=0

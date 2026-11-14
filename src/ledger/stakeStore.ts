@@ -127,6 +127,25 @@ export class StakeReads {
     }
     snapshotTotals(takenAt: number): { total: bigint; pools: number } | null { const v = this.s.get(SDB.snapTotals, u32(takenAt)); return v && v.length >= 12 ? { total: readU64(v), pools: rdU32(v, 8) } : null; }
     snapshotPoolStake(takenAt: number): Map<string, bigint> { const out = new Map<string, bigint>(); for (const [k, v] of this.s.range(SDB.snapPool, u32(takenAt))) out.set(keyHex(k.subarray(4)), readU64(v)); return out; }
+    /**
+     * The distribution as it stands now: delegated credentials' UTxO + reward balances, over the pools
+     * registered today. Read-only twin of `takeStakeSnapshot`, for a chain whose first epoch has no
+     * boundary behind it — a genesis-start devnet cannot forge its first block otherwise, because the
+     * snapshot it would ask for is the one taken at `taken_at = -1`.
+     */
+    instantDistribution(): { total: bigint; stake: Map<string, bigint> } {
+        const pools = this.pools();
+        const perPool = new Map<string, bigint>();
+        let total = 0n;
+        for (const [cred, pool] of this.allDelegations()) {
+            if (!pools.has(pool)) continue;
+            const stake = this.stakeBalance(cred) + this.rewardBalance(cred);
+            if (stake === 0n) continue;
+            perPool.set(pool, (perPool.get(pool) ?? 0n) + stake);
+            total += stake;
+        }
+        return { total, stake: perPool };
+    }
     snapshotMembers(takenAt: number): Map<string, Array<{ credential: string; stake: bigint }>> {
         const out = new Map<string, Array<{ credential: string; stake: bigint }>>();
         for (const [k, v] of this.s.range(SDB.snapCred, u32(takenAt))) {

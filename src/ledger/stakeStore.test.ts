@@ -41,6 +41,11 @@ describe("stakeStore", () => {
         expect(r.opcert(P1)).toEqual({ counter: 3, slot: 10 });
         expect(r.blocksMade(5).get(P1)).toBe(2);
         expect(r.pool(P1)!.params!.cost).toBe("340");
+        // instant distribution: what a genesis-start chain uses for its first epoch, when the snapshot it
+        // would ask for (taken_at = -1) was never taken. Same numbers the first real snapshot will hold.
+        expect(r.instantDistribution().total).toBe(1000n + 100n + 500n + 7n + 1n);
+        expect(r.instantDistribution().stake.get(P1)).toBe(1600n);
+        expect(r.instantDistribution().stake.get(P2)).toBe(8n);
 
         // block 2 (boundary into epoch 6): snapshot, re-registration pending, retirement, withdrawal
         st.beginBlock(h(2), h(1), 20);

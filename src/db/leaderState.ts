@@ -521,7 +521,19 @@ export async function applyPendingMir(db: SqlClient, epoch: number): Promise<{ c
 export async function poolStakeForEpoch(epoch: number): Promise<PoolStakeDistribution | null> {
     const takenAt = epoch - 1;
     const lr = ledgerStakeReads();
-    if (lr) { const t = lr.snapshotTotals(takenAt); return t ? { takenAt, total: t.total, stake: lr.snapshotPoolStake(takenAt) } : null; }
+    if (lr) {
+        const t = lr.snapshotTotals(takenAt);
+        if (t) return { takenAt, total: t.total, stake: lr.snapshotPoolStake(takenAt) };
+        // A genesis-start chain (devnet, a private testnet) has no boundary behind its first epoch, so the
+        // snapshot the producer asks for was never taken. The instant stake is the genesis distribution
+        // here: without this fallback the first block of such a chain can never be forged, because the
+        // epoch cannot advance until a block applies.
+        if (takenAt < 0) {
+            const inst = lr.instantDistribution();
+            if (inst.total > 0n) return { takenAt, total: inst.total, stake: inst.stake };
+        }
+        return null;
+    }
     const tot = (await sql`SELECT total_active FROM epoch_stake_totals WHERE taken_at = ${takenAt}`.values()) as unknown[][];
     if (!tot.length) return null;
     const rows = (await sql`SELECT pool_id, stake FROM epoch_pool_stake WHERE taken_at = ${takenAt}`.values()) as unknown[][];

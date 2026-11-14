@@ -11,7 +11,7 @@
  * enforced across restarts through `stateFile`; the KES key only evolves
  * forward; nothing about keys is logged.
  */
-import { settingsMessage } from "../config/settings";
+import { settings, settingsMessage } from "../config/settings";
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { ledgerUtxoReads } from "../ledger/nodeLedgerStore";
 import { blockAtSlot, getChainTipFromHeader } from "../db";
@@ -584,6 +584,7 @@ export class BlockProducer {
             leaderSlots: new Set(this.leaderSlots.keys()),
             tip: tip ? { slot: tip.slot, blockNumber: tip.blockNumber, hash: Uint8Array.from(Buffer.from(tip.hashHex, "hex")) } : null,
             lastForgedSlot: this.forgeGuardSlot(),
+            maxTipLagSlots: BigInt(Math.max(1, Math.trunc(settings().forgeTipLagSlots ?? 600))),
         }, { network: this.node.network });
         if (!verdict.forge) { noteForgeEvent("could-not-forge"); this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: verdict.reason }); this.writeState(this.lastForgedSlot); logger.warn(`Block producer: leader for slot ${slot} but not forging: ${verdict.reason}`); return; }
         if (this.cfg.dryRun) { this.outcomes.set(slot.toString(), { outcome: "missed", hash: null, note: "dry run" }); logger.info(`Block producer (dry run): would forge slot ${slot} as block ${verdict.blockNumber} on ${tip!.hashHex.slice(0, 16)}…`); return; }
@@ -847,8 +848,13 @@ export function nodeAdapter(opts: {
         async protocolVersion(epoch) {
             const raw = await readEpochParamsRaw(epoch);
             const major = Number(raw?.protocol_major_ver ?? raw?.protocol_major ?? 0), minor = Number(raw?.protocol_minor_ver ?? raw?.protocol_minor ?? 0);
-            if (!major) throw new Error(`no protocol version for epoch ${epoch}`);
-            return { major, minor };
+            if (major) return { major, minor };
+            // Epoch parameters are stored at boundaries; the first epoch of a genesis-start chain has none.
+            // Its protocol version is the one in the genesis file the chain was created with.
+            const gv = (opts.genesis as unknown as { protocolParams?: { protocolVersion?: { major?: number; minor?: number } } })
+                ?.protocolParams?.protocolVersion;
+            if (gv?.major) return { major: Number(gv.major), minor: Number(gv.minor ?? 0) };
+            throw new Error(`no protocol version for epoch ${epoch}`);
         },
         async maxBlockBodySize(epoch) {
             const raw = await readEpochParamsRaw(epoch);

@@ -52,5 +52,6 @@
     "opcertFile": "/keys/node.cert",
     "stateFile": "/data/producer-state.json"
   },
-  "genesisBlockHash": "85205de98025fee53a3b6fc77b1b4240e268d871b98cc3db7824569f3573904f"
+  "genesisBlockHash": "78b616a6d4a84a47d0a2d2181d86b9cb9b4628202fe90093b2af3188d0b5e3a7",
+  "forgeTipLagSlots": 200000
 }

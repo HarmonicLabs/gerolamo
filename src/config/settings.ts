@@ -110,6 +110,12 @@ export const SETTINGS = {
     tracePlutus: d<number>({ key: "trace.plutus", flag: "trace-plutus", kind: "int", default: 0, describe: "Plutus builtin cost trace: 0 off, 1 summary, 2 every step", was: ["GEROLAMO_PLUTUS_TRACE"], group: "Traces" }),
     tracePlutusBuiltins: d<boolean>({ key: "trace.plutusBuiltins", flag: "trace-plutus-builtins", kind: "bool", default: false, describe: "One log line per Plutus builtin call", was: ["GEROLAMO_PLUTUS_BUILTIN_TRACE"], group: "Traces" }),
     tracePlutusBuiltinsFull: d<boolean>({ key: "trace.plutusBuiltinsFull", flag: "trace-plutus-builtins-full", kind: "bool", default: false, describe: "Do not truncate bytes in the builtin trace", was: ["GEROLAMO_PLUTUS_BUILTIN_TRACE_FULL"], group: "Traces" }),
+    /**
+     * Refuse to forge when the applied tip is further behind the slot clock than this. A private
+     * testnet whose chain starts now but whose clock is backdated (to land inside a real
+     * certificate's KES period) is legitimately thousands of slots "behind" its own first block.
+     */
+    forgeTipLagSlots: d<number>({ key: "forgeTipLagSlots", flag: "forge-tip-lag-slots", kind: "int", default: 600, describe: "Refuse to forge when the tip is more than this many slots behind the clock", group: "Consensus" }),
 } as const;
 
 export type SettingId = keyof typeof SETTINGS;

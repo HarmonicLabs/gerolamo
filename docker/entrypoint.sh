@@ -52,7 +52,10 @@ fi
 rm -f "$D/.write-test"
 mkdir -p "$D/logs"
 log() { echo "[gerolamo-entrypoint $(date -u +%FT%TZ)] $*"; }
-case "$NET" in preview|preprod|mainnet) ;; *) log "--network must be preview, preprod or mainnet (got $NET)"; exit 2;; esac
+# A network name that is not one of the three public ones must have its own bundled genesis
+# (src/config/<net>/): the node then takes slot/epoch geometry from those files (custom testnets).
+case "$NET" in preview|preprod|mainnet) ;;
+  *) [ -f "/app/src/config/$NET/shelley-genesis.json" ] || { log "--network $NET has no bundled genesis (src/config/$NET/)"; exit 2; } ;; esac
 echo "$PORT" > "$D/.http-port" # for the image's HEALTHCHECK
 # liblmdb: the node finds it itself (standard paths, then ldconfig; --lmdb-lib overrides)
 

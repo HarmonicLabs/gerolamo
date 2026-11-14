@@ -1,0 +1,55 @@
+{
+  "network": "testnet",
+  "networkMagic": 42,
+  "role": "producer",
+  "byronGenesisFile": "/data/genesis/byron-genesis.json",
+  "shelleyGenesisFile": "/data/genesis/shelley-genesis.json",
+  "alonzoGenesisFile": "/data/genesis/alonzo-genesis.json",
+  "conwayGenesisFile": "/data/genesis/conway-genesis.json",
+  "cardanoNodeConfigFile": "/data/genesis/node-config.json",
+  "byronGenesisHash": "78b616a6d4a84a47d0a2d2181d86b9cb9b4628202fe90093b2af3188d0b5e3a7",
+  "shelleyGenesisHash": "8f5f84a9a8095a4d6f00e7a2047b7dd3424d93d9c24e1f7a5ffdab77305da91a",
+  "alonzoGenesisHash": "5b03f5cbf272f2c36a5fbf070168f1aec5af1b2dc1ac09e1819c43d1b56cbdfb",
+  "conwayGenesisHash": "69521fa3561ea74272c8644e957f82487c000ea1c90e6dfa66763dbb5143be8e",
+  "topologyFile": "/data/genesis/topology.json",
+  "syncFromTip": false,
+  "syncFromGenesis": true,
+  "ledgerStore": "lmdb",
+  "logLevel": "info",
+  "dbPath": "/data/db",
+  "port": 3030,
+  "unixSocket": false,
+  "n2c": {
+    "enabled": true,
+    "socketPath": "/data/node.socket"
+  },
+  "n2n": {
+    "enabled": true,
+    "host": "0.0.0.0",
+    "port": 3001,
+    "maxConnections": 64,
+    "maxRangeBlocks": 256,
+    "handshakeTimeoutMs": 10000,
+    "idleTimeoutMs": 120000
+  },
+  "logs": {
+    "logToFile": false,
+    "logToConsole": true,
+    "logDirectory": "/data/logs"
+  },
+  "tuiEnabled": false,
+  "snapshot": {
+    "enable": false,
+    "source": "blockfrost"
+  },
+  "peerGovernor": {
+    "enabled": false
+  },
+  "producer": {
+    "coldVkeyFile": "/keys/cold.vkey",
+    "kesSkeyFile": "/keys/kes.skey",
+    "vrfSkeyFile": "/keys/vrf.skey",
+    "opcertFile": "/keys/node.cert",
+    "stateFile": "/data/producer-state.json"
+  }
+}

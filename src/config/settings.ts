@@ -35,7 +35,7 @@ const d = <T>(def: Def<T>): Def<T> => def;
 
 export const SETTINGS = {
     // ---- instance
-    network: d<string>({ key: "networkName", flag: "network", kind: "enum", choices: ["preview", "preprod", "mainnet"], default: "preprod", describe: "Network; picks the bundled config src/config/<network>/config.json", was: ["NETWORK"], group: "Instance" }),
+    network: d<string>({ key: "networkName", flag: "network", kind: "enum", choices: ["preview", "preprod", "mainnet", "devnet"], default: "preprod", describe: "Network; picks the bundled config src/config/<network>/config.json", was: ["NETWORK"], group: "Instance" }),
     config: d<string | null>({ key: null, flag: "config", kind: "path", default: null, describe: "Instance config file merged over the network's bundled config.json", was: ["GEROLAMO_CONFIG_PATH"], group: "Instance" }),
     dbPath: d<string>({ key: "dbPath", flag: "db-path", kind: "path", default: "./.live/test.db", describe: "SQLite database file", was: ["DATABASE_URL", "GEROLAMO_DB_PATH"], group: "Instance" }),
     port: d<number>({ key: "port", flag: "port", kind: "int", default: 3030, describe: "HTTP port (API, /stats, dashboards)", was: ["PORT", "GEROLAMO_PORT"], group: "Instance" }),

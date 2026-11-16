@@ -41,6 +41,27 @@ Three constraints fight each other; this is the combination that satisfies all o
 `systemStart` is set to the time the chain is created; `activeSlotsCoeff = 1.0` means every slot has
 a leader slot, so the first forged block is expected at the epoch-2 boundary, about 20 minutes in.
 
+## The certificate's runway (the constraint that bites)
+
+A KES key can only **evolve 62 times** (`KES_MAX_EVOLUTIONS`, Sum6 = 2^6 periods). A certificate
+issued on a live network declares a period in the thousands (ours: 1071), so on a devnet the current
+period must stay inside `opcert.kesPeriod .. +62`. With `slotsPerKESPeriod = 10` that is a
+**620-second window** — about ten minutes of forging per clock anchor. Past it the producer refuses:
+
+    KES evolution 749 out of range 0..62
+
+`maxKESEvolutions` in the genesis does not help: the limit is in the KES construction, not the config.
+
+Consequences:
+
+- Re-running with a fresh clock (`systemStart` re-anchored to `now − 1075 × slotsPerKESPeriod`) buys
+  another ten minutes. Fine for smoke tests, not for a chain you want to keep.
+- For a long-lived devnet, **generate the pool keys and issue the certificate on the devnet itself**
+  at `kesPeriod = 0` (`generateColdKey` / `generateKesKey` / `generateVrfKey` in `src/pool/keystore.ts`,
+  then an opcert at period 0), and register that pool in the genesis. The repo has no opcert *issuing*
+  helper yet — the signing step (cold key over `[kesVkey, counter, period]`) has to be added or done
+  with cardano-cli.
+
 ## The genesis root
 
 A genesis-start chain has no first block, so the producer has no parent to build on and refuses with

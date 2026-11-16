@@ -138,6 +138,8 @@ export interface GenesisSource {
     conwayGenesisFile?: string;
     byronGenesisHash?: string;
     shelleyGenesisHash?: string;
+    /** The chain's root block hash: the parent of its first block when the chain does not start in Byron. */
+    genesisBlockHash?: string;
 }
 /** A store built from genesis and not promoted yet stands at the origin: the first block's parent as it names it (Byron: the genesis hash). */
 let originPrevHex: string | null = null;
@@ -157,6 +159,7 @@ export async function buildNodeGenesisState(st: LedgerStore, config: GenesisSour
         byron: json(config.byronGenesisFile), shelley: json(config.shelleyGenesisFile), alonzo: json(config.alonzoGenesisFile), conway: json(config.conwayGenesisFile),
         triggers: getHardForkHistory()?.triggers ?? triggersFrom(config as Record<string, unknown>, network),
         byronGenesisHash: config.byronGenesisHash ?? null, shelleyGenesisHash: config.shelleyGenesisHash ?? null, shelleyGenesisBytes: read(config.shelleyGenesisFile),
+        genesisBlockHash: config.genesisBlockHash ?? null,
     });
     for (const w of g.warnings) log.warn(`genesis state: ${w}`);
     const meta = await writeGenesisLedgerState(st, g);

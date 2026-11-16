@@ -218,3 +218,16 @@ describe("a node store from genesis (lmdb mode)", () => {
         setEpochNetwork("preprod");
     });
 });
+
+describe("genesis root of a chain that starts in Shelley (devnet)", () => {
+    test("uses the configured genesisBlockHash as the first block's parent, and ignores the all-zero placeholder", async () => {
+        const base = inputs("preview");
+        const root = "ab".repeat(32);
+        const g = await buildGenesisLedgerState({ ...base, genesisBlockHash: root });
+        expect(g.startEra).toBeGreaterThan(0); // no Byron era at genesis
+        expect(g.firstPrevHash).toBe(root);
+
+        const placeholder = await buildGenesisLedgerState({ ...base, genesisBlockHash: "00".repeat(32) });
+        expect(placeholder.firstPrevHash).toBeNull();
+    });
+});

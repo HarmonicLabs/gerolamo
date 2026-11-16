@@ -73,6 +73,12 @@ export interface GenesisInputs {
     shelleyGenesisHash?: string | null;
     /** The Shelley genesis file's bytes, to check `shelleyGenesisHash` (blake2b-256 of the file). */
     shelleyGenesisBytes?: Uint8Array | null;
+    /**
+     * The chain's root block hash (config `genesisBlockHash`). A chain that starts in Byron names the
+     * Byron genesis hash; one that starts directly in Shelley has no Byron block to name, so the root
+     * is whatever the node was configured to forge its first block on.
+     */
+    genesisBlockHash?: string | null;
 }
 
 export interface GenesisPool { poolId: string; vrf: string; params: { pledge: string; cost: string; marginNum: string; marginDen: string; rewardAccount: string; owners: string[] } }
@@ -150,6 +156,9 @@ export async function buildGenesisLedgerState(inp: GenesisInputs): Promise<Genes
         shelleyGenesisHash ??= actual;
     }
     const byronGenesisHash = inp.byronGenesisHash ? String(inp.byronGenesisHash).toLowerCase() : null;
+    // all zeros is the placeholder the bundled configs carry ("no root configured"), not a hash
+    const rootRaw = inp.genesisBlockHash ? String(inp.genesisBlockHash).toLowerCase() : "";
+    const genesisRootHash = /^[0-9a-f]{64}$/.test(rootRaw) && !/^0+$/.test(rootRaw) ? rootRaw : null;
     if (startEra === 0 && !byronGenesisHash) throw new Error("genesis state: a chain that starts in Byron needs the Byron genesis hash (config byronGenesisHash): it is the first block's parent");
     if (startEra === 0 && !inp.byron) throw new Error("genesis state: a chain that starts in Byron needs the Byron genesis file");
 
@@ -215,7 +224,7 @@ export async function buildGenesisLedgerState(inp: GenesisInputs): Promise<Genes
     for (const u of utxos) utxoTotal += BigInt(u.lovelace ?? 0);
     let rec: GenesisLedgerState["byronRecord"] = null;
     if (startEra === 0) { const st = initialByronLedgerState(byronLedgerConfigFromGenesis(inp.byron)); rec = { core: encodeByronLedgerCore(st), tip: encodeByronLedgerTip(st) }; }
-    return { network: inp.network, startEra, firstPrevHash: startEra === 0 ? byronGenesisHash : null, utxos, utxoTotal, zeroOutputs, avvmReturned, genDelegs, reserves, pools, accounts, byronRecord: rec, shelleyGenesisHash, byronGenesisHash, warnings };
+    return { network: inp.network, startEra, firstPrevHash: startEra === 0 ? byronGenesisHash : genesisRootHash, utxos, utxoTotal, zeroOutputs, avvmReturned, genDelegs, reserves, pools, accounts, byronRecord: rec, shelleyGenesisHash, byronGenesisHash, warnings };
 }
 
 /** `[address bytes, coin]` — the Shelley TxOut of an initial fund. */

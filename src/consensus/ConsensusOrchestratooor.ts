@@ -2963,7 +2963,11 @@ export class ConsensusOrchestrator {
                     this.profile.add("rng.dualv", performance.now() - tDv);
                     if (ledgerStoreBroken() && !v.differences.length) v.differences.push(`ledger store unusable: ${ledgerStoreBroken()}`);
                     if (v.differences.length) {
-                        logger.error(`LEDGER STORE DIVERGENCE (dual run): ${v.differences.length} of ${v.checked} touched UTxO refs differ, e.g. ${v.differences.slice(0, 3).join(" | ")}`);
+                        // `checked` is 0 when the ledger refused the block before anything could be compared;
+                        // saying "1 of 0 refs differ" then reads like corruption and sends the reader hunting
+                        // in the wrong place. Name the refusal when that is what happened.
+                        if (v.checked === 0) logger.error(`LEDGER STORE UNUSABLE (dual run): the ledger refused the block; nothing to compare: ${v.differences.slice(0, 3).join(" | ")}`);
+                        else logger.error(`LEDGER STORE DIVERGENCE (dual run): ${v.differences.length} of ${v.checked} touched UTxO refs differ, e.g. ${v.differences.slice(0, 3).join(" | ")}`);
                         const tipPt = points[points.length - 1]!;
                         this.halted = { slot: tipPt.slot.toString(), hash: tipPt.hash, reason: `ledger store dual-run divergence: ${v.differences[0]}`, since: Date.now() }; // stop applying: the two stores disagree
                     }

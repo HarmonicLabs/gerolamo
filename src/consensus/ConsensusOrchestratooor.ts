@@ -2945,7 +2945,7 @@ export class ConsensusOrchestrator {
                 await sql.begin(async () => {
                     tBody = performance.now();
                     this.profile.add("rng.begin", tBody - tBegin);
-                    appliedTip = await this.profile.timeAsync("rng.blocks.apply", () => this.applyRangeBlocks(points, blocks, fetchedFrom));
+                    appliedTip = await this.profile.timeAsync("rng.blocks.apply", () => this.applyRangeBlocks(points, blocks, fetchedFrom, stillCurrent));
                     const tFl = performance.now();
                     await Promise.all([ledgerFlushDiffs(), flushPrimaryBlockStore()]); // the range's diffs and volatile blocks are durable before its commit (bugs 380, 384)
                     this.profile.add("blk.ldgflush", performance.now() - tFl);
@@ -3101,7 +3101,7 @@ export class ConsensusOrchestrator {
     }
 
     /** Applies the range's blocks; returns the hash of the last block it applied (null: every block was already applied). */
-    private async applyRangeBlocks(points: RangePt[], blocks: BlockFetchBlock[], fetchedFrom: string): Promise<string | null> {
+    private async applyRangeBlocks(points: RangePt[], blocks: BlockFetchBlock[], fetchedFrom: string, stillCurrent?: () => boolean): Promise<string | null> {
         this.profile.add("rng.blocks", blocks.length); // average = blocks per range
         let appliedTip: string | null = null;
         const bodyPolicy = this.resolveBodyPolicy();
@@ -3176,6 +3176,13 @@ export class ConsensusOrchestrator {
                     prevHex = getHeaderPrevHashHex(blockHeader as any).toLowerCase();
                 } catch { /* unknown header shape: the body-hash binding still holds */ }
                 if (prevHex && !expectedPrev.includes(prevHex)) {
+                    // A rollback that landed while this range was being applied re-anchored the scheduler on a
+                    // different chain: the range is stale, not evidence of a discontinuity. Dropping it silently
+                    // is what cardano-node does; throwing reset the primary's ChainSync on every such race.
+                    if (stillCurrent && !stillCurrent()) {
+                        logger.info(`Range ${points[0]!.slot}..${points[points.length - 1]!.slot} from ${fetchedFrom} dropped mid-apply: a rollback superseded it`);
+                        return null;
+                    }
                     throw new Error(
                         `range from ${fetchedFrom} does not extend the applied chain: block ${blockHash.slice(0, 12)}…@${blockSlot} has prev ${prevHex.slice(0, 12)}… but the tip is ${expectedPrev.map((h) => h.slice(0, 12) + "…").join("/")}; nothing applied, re-anchoring on the DB tip`,
                     );

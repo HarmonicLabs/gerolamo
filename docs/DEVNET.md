@@ -56,11 +56,15 @@ Consequences:
 
 - Re-running with a fresh clock (`systemStart` re-anchored to `now − 1075 × slotsPerKESPeriod`) buys
   another ten minutes. Fine for smoke tests, not for a chain you want to keep.
-- For a long-lived devnet, **generate the pool keys and issue the certificate on the devnet itself**
-  at `kesPeriod = 0` (`generateColdKey` / `generateKesKey` / `generateVrfKey` in `src/pool/keystore.ts`,
-  then an opcert at period 0), and register that pool in the genesis. The repo has no opcert *issuing*
-  helper yet — the signing step (cold key over `[kesVkey, counter, period]`) has to be added or done
-  with cardano-cli.
+- For a long-lived devnet, **issue the certificate on the devnet itself** at `kesPeriod = 0`:
+
+      bun scripts/pool-register.ts keygen --dir <devnet-keys> --network preview
+      bun scripts/pool-register.ts opcert  --dir <devnet-keys> --period 0
+
+  `--period` issues without a running node (the chain cannot exist before its own certificate does).
+  Register that pool id and VRF key in the genesis, point the producer at the key directory, and set
+  `slotsPerKESPeriod` large (this devnet uses 129 600 slots): a period-0 certificate then has the full
+  62 periods of runway — **93 days** at one-second slots, instead of ten minutes.
 
 ## The genesis root
 

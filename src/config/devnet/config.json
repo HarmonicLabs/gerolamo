@@ -8,7 +8,7 @@
   "conwayGenesisFile": "/data/genesis/conway-genesis.json",
   "cardanoNodeConfigFile": "/data/genesis/node-config.json",
   "byronGenesisHash": "78b616a6d4a84a47d0a2d2181d86b9cb9b4628202fe90093b2af3188d0b5e3a7",
-  "shelleyGenesisHash": "8f5f84a9a8095a4d6f00e7a2047b7dd3424d93d9c24e1f7a5ffdab77305da91a",
+  "shelleyGenesisHash": "2e8f4ef29901aa0cdc73f0a39a971da122b1cfb9cd139f2b7e2ae60d584e0bc1",
   "alonzoGenesisHash": "5b03f5cbf272f2c36a5fbf070168f1aec5af1b2dc1ac09e1819c43d1b56cbdfb",
   "conwayGenesisHash": "69521fa3561ea74272c8644e957f82487c000ea1c90e6dfa66763dbb5143be8e",
   "topologyFile": "/data/genesis/topology.json",

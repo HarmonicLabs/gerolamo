@@ -76,11 +76,15 @@ if (cmd === "keygen") {
     writeFileSync(file("payment.addr"), addr); writeFileSync(file("stake.addr"), saddr);
     console.log(`pool id      ${poolIdOf(cold.vkey)}\nvrf key hash ${vrfKeyHashOf(vrf.vkey)}\npayment addr ${addr}\nstake addr   ${saddr}\nkeys written to ${dir} (mode 0600). Fund the payment address, then run opcert and register.`);
 } else if (cmd === "opcert") {
-    const { tipSlot, genesis } = await tipAndParams();
+    // --period issues the certificate for a fixed KES period without a node: a devnet certifies at
+    // period 0 before its chain exists, and an offline machine issues for a period read elsewhere.
+    const forcedPeriod = arg("period");
+    const tipSlot = forcedPeriod ? 0n : (await tipAndParams()).tipSlot;
+    const genesis = forcedPeriod ? null : (await tipAndParams()).genesis;
     const cold = loadColdSigningKey(file("cold.skey"));
     const kes = loadKesSigningKey(file("kes.skey"), file("kes.vkey"));
     const counter = readIssueCounter(file("node.counter"));
-    const period = kesPeriodOfSlot(tipSlot, BigInt(genesis.slotsPerKESPeriod));
+    const period = forcedPeriod ? BigInt(forcedPeriod) : kesPeriodOfSlot(tipSlot, BigInt(genesis!.slotsPerKESPeriod));
     const { opcert, nextCounter } = issueOperationalCert(kes.vkey, counter, period, cold);
     writeTextEnvelope(file("node.cert"), encodeOperationalCert(opcert));
     writeTextEnvelope(file("node.counter"), encodeIssueCounter(nextCounter));

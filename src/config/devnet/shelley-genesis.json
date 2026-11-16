@@ -1,6 +1,6 @@
 {
-  "epochLength": 600,
-  "activeSlotsCoeff": 1.0,
+  "epochLength": 20000,
+  "activeSlotsCoeff": 0.5,
   "slotLength": 1,
   "securityParam": 100,
   "genDelegs": {},
@@ -8,7 +8,7 @@
     "00813c32c92aad21770ff8001de0918f598df8c06775f77f8e8839d2a0074a515f7f32bf31a4f41c7417a8136e8152bfb42f06d71b389a6896": 900000000000,
     "609783be7d3c54f11377966dfabc9284cd6c32fca1cd42ef0a4f1cc45b": 900000000000
   },
-  "maxKESEvolutions": 2000,
+  "maxKESEvolutions": 62,
   "maxLovelaceSupply": 2000000000000,
   "networkId": "Testnet",
   "networkMagic": 42,
@@ -36,16 +36,16 @@
     "rho": 0.1,
     "tau": 0.1
   },
-  "slotsPerKESPeriod": 1,
+  "slotsPerKESPeriod": 129600,
   "staking": {
     "pools": {
-      "b419ce757c0e1c50c1127adcb8426b516316aba99b4a655a9bf83dd6": {
+      "5a8d4976e1c23fd617dbf537af4a1f9378f3672b5dfa3d937ca528ae": {
         "cost": 0,
         "margin": 0.0,
         "metadata": null,
         "owners": [],
         "pledge": 0,
-        "publicKey": "b419ce757c0e1c50c1127adcb8426b516316aba99b4a655a9bf83dd6",
+        "publicKey": "5a8d4976e1c23fd617dbf537af4a1f9378f3672b5dfa3d937ca528ae",
         "relays": [],
         "rewardAccount": {
           "credential": {
@@ -53,13 +53,13 @@
           },
           "network": "Testnet"
         },
-        "vrf": "2c3a973ba9ea98b01ecef8cf3c04ccf41852079ea943161001b75fdc881f594c"
+        "vrf": "44783f2a56df6c2602cfc396e52a26bf985c91046708974facc21278805e1eb2"
       }
     },
     "stake": {
-      "074a515f7f32bf31a4f41c7417a8136e8152bfb42f06d71b389a6896": "b419ce757c0e1c50c1127adcb8426b516316aba99b4a655a9bf83dd6"
+      "074a515f7f32bf31a4f41c7417a8136e8152bfb42f06d71b389a6896": "5a8d4976e1c23fd617dbf537af4a1f9378f3672b5dfa3d937ca528ae"
     }
   },
-  "systemStart": "2026-11-14T01:35:52Z",
+  "systemStart": "2026-11-16T16:02:02Z",
   "updateQuorum": 2
 }

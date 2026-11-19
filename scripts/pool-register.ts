@@ -151,12 +151,19 @@ if (cmd === "keygen") {
 } else if (cmd === "register") {
     const { tipSlot, epoch, params, network } = await tipAndParams();
     const pay = loadSigningKey(file("payment.skey"), KeyEnvelopeType.paymentSigning);
-    const stake = loadSigningKey(file("stake.skey"), KeyEnvelopeType.stakeSigning);
+    const registrationOnly = arg("registration-only") === "true";
+    const stake = registrationOnly ? null : loadSigningKey(file("stake.skey"), KeyEnvelopeType.stakeSigning);
     const cold = loadColdSigningKey(file("cold.skey"));
     const vrf = loadVrfSigningKey(file("vrf.skey"));
     const addrText = readFileSync(file("payment.addr"), "utf8").trim();
     const addr = bech32Decode(addrText).bytes;
-    const stakeHash = keyHash(stake.vkey);
+    // --registration-only: the owner is an existing stake key whose signing key we do not hold (the
+    // delegator re-delegates from their own wallet). Otherwise the key in this directory owns the pool
+    // and the transaction also registers and delegates it.
+    const stakeHash = registrationOnly
+        ? Uint8Array.from(Buffer.from(need("owner").replace(/^0x/, ""), "hex"))
+        : keyHash(stake!.vkey);
+    if (registrationOnly && stakeHash.length !== 28) { console.error("--owner must be a 28-byte stake key hash (hex)"); process.exit(2); }
     const poolId = Uint8Array.from(Buffer.from(poolIdOf(cold.vkey), "hex"));
     const keyDeposit = BigInt(params.key_deposit), poolDeposit = BigInt(params.pool_deposit);
     const minPoolCost = BigInt(params.min_pool_cost);
@@ -172,28 +179,28 @@ if (cmd === "keygen") {
     const certs: CborArray[] = [];
     const skipStakeReg = arg("skip-stake-reg") === "true";
     const poolUpdate = arg("pool-update") === "true"; // re-registration of a registered pool: same certificate, no deposit
-    if (!skipStakeReg) certs.push(stakeRegistrationCert(stakeHash, keyDeposit));
+    if (!skipStakeReg && !registrationOnly) certs.push(stakeRegistrationCert(stakeHash, keyDeposit));
     certs.push(poolRegistrationCert({
         operator: poolId, vrfKeyHash: Uint8Array.from(Buffer.from(vrfKeyHashOf(vrf.vkey), "hex")), pledge: BigInt(need("pledge")), cost,
         margin: marginFromDecimal(arg("margin", "0")!), rewardAccount: stakeAddressBytes(networkId, stakeHash), owners: [stakeHash], relays, metadata,
     }));
-    certs.push(stakeDelegationCert(stakeHash, poolId));
+    if (!registrationOnly) certs.push(stakeDelegationCert(stakeHash, poolId));
     // inputs: every lovelace-only UTxO at the payment address
     const utxos = await nodeJson<Array<{ tx_hash: string; output_index: number; amount: Array<{ unit: string; quantity: string }> }>>(`/api/v0/addresses/${encodeURIComponent(addrText)}/utxos`);
     const usable = utxos.filter((u) => u.amount.every((a) => a.unit === "lovelace"));
     const total = usable.reduce((s, u) => s + BigInt(u.amount.find((a) => a.unit === "lovelace")?.quantity ?? "0"), 0n);
-    const deposits = (skipStakeReg ? 0n : keyDeposit) + (poolUpdate ? 0n : poolDeposit);
+    const deposits = (skipStakeReg || registrationOnly ? 0n : keyDeposit) + (poolUpdate ? 0n : poolDeposit);
     if (!usable.length || total <= deposits) { console.error(`payment address holds ${total} lovelace in ${usable.length} UTxO(s); needs more than the deposits ${deposits} plus fee. Fund ${addrText}`); process.exit(1); }
     const built = buildWithMinFee({
         inputs: usable.map((u) => ({ txHash: Uint8Array.from(Buffer.from(u.tx_hash, "hex")), index: u.output_index })),
         outputs: [{ address: addr, lovelace: total - deposits }], changeIndex: 0,
         ttl: tipSlot + BigInt(arg("ttl", "7200")!), certificates: certs,
-        minFeeA: BigInt(params.min_fee_a), minFeeB: BigInt(params.min_fee_b), keys: [pay, stake, cold],
+        minFeeA: BigInt(params.min_fee_a), minFeeB: BigInt(params.min_fee_b), keys: registrationOnly ? [pay, cold] : [pay, stake!, cold],
     });
     writeTextEnvelope(file("tx.signed"), txEnvelope(built.tx));
     for (const [i, c] of certs.entries()) writeTextEnvelope(file(`cert-${i}.cert`), certificateEnvelope(c));
     const id = Buffer.from(txId(built.body)).toString("hex");
-    console.log(`network ${network} epoch ${epoch} tip ${tipSlot}\npool ${Buffer.from(poolId).toString("hex")}\ninputs ${usable.length} (${total} lovelace), deposits ${deposits}, fee ${built.fee}, change ${total - deposits - built.fee}\ncertificates: ${skipStakeReg ? "" : "stake registration, "}pool registration, delegation\ntx id ${id}\ntx.signed written (${built.tx.length} bytes)`);
+    console.log(`network ${network} epoch ${epoch} tip ${tipSlot}\npool ${Buffer.from(poolId).toString("hex")}\ninputs ${usable.length} (${total} lovelace), deposits ${deposits}, fee ${built.fee}, change ${total - deposits - built.fee}\ncertificates: ${registrationOnly ? "pool registration only (the owner delegates separately)" : `${skipStakeReg ? "" : "stake registration, "}pool registration, delegation`}\ntx id ${id}\ntx.signed written (${built.tx.length} bytes)`);
     if (arg("submit") === "true") {
         const base = need("node").replace(/\/$/, "");
         const r = await fetch(base + "/txsubmit", { method: "POST", headers: { "Content-Type": "application/cbor" }, body: built.tx });

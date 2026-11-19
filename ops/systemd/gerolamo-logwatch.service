@@ -1,0 +1,17 @@
+[Unit]
+Description=Gerolamo node log watcher (alerts to alerts.log)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=don
+Group=don
+ExecStart=/usr/bin/bash /home/don/gerolamo/node/node-log-watch.sh
+Restart=always
+RestartSec=15
+StandardOutput=append:/home/don/gerolamo/logs/alerts.log
+StandardError=append:/home/don/gerolamo/logs/alerts.log
+
+[Install]
+WantedBy=multi-user.target

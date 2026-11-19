@@ -1,0 +1,17 @@
+[Unit]
+Description=Gerolamo health watch (stake, forging, KES, disk)
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=don
+Group=don
+ExecStart=/usr/bin/bash /home/don/gerolamo/node/gerolamo-health.sh
+Restart=always
+RestartSec=30
+StandardOutput=append:/home/don/gerolamo/logs/alerts.log
+StandardError=append:/home/don/gerolamo/logs/alerts.log
+
+[Install]
+WantedBy=multi-user.target

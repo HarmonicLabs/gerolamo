@@ -385,3 +385,15 @@ export class RangeMismatch extends Error {
         this.name = "RangeMismatch";
     }
 }
+
+/**
+ * The range no longer extends the applied chain: our tip moved while it was in flight (a rollback,
+ * a slot battle, or a peer on a fork). Nothing is wrong with the peer or the pipeline; the range is
+ * stale and the recovery is to re-anchor and continue. Fatal only when it repeats without progress.
+ */
+export class RangeStale extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "RangeStale";
+    }
+}

@@ -111,7 +111,7 @@ import { type CandidatePoint, CandidateSet, type PeerAgreement, type PeerRole } 
 import { ChainSelDriver, resolveChainSelection, type BigLedgerPeerSource } from "./chainsel/ChainSelDriver";
 import type { Candidate } from "./chainsel/ChainSel";
 import { headPoint } from "./genesis/csj";
-import { RangeHole, RangeMismatch, RangeScheduler, type RangeSchedulerStats } from "./RangeScheduler";
+import { RangeHole, RangeMismatch, RangeStale, RangeScheduler, type RangeSchedulerStats } from "./RangeScheduler";
 import { ValidationPool, resolveWorkerCount } from "./workers/ValidationPool";
 import { getEpochBodyParams, type EpochBodyParams } from "./epochParams";
 import { applyOverlays, gatherShelleyBlockInputs, shelleyBlockOverlay, shelleyBlockReads, type BlockOverlay, type BlockRuleOutcome } from "./rules/blockRules";
@@ -1610,7 +1610,8 @@ export class ConsensusOrchestrator {
                     return;
                 }
                 const hole = err instanceof RangeHole; // our point list skipped blocks: no peer is at fault (bug 385)
-                if (hole) logger.warn(`Range pipeline reset: ${err.message}; re-anchoring the primary's ChainSync on our tip`);
+                const stale = err instanceof RangeStale; // our tip moved under the range: no peer is at fault
+                if (hole || stale) logger.warn(`Range pipeline reset: ${err.message}; re-anchoring the primary's ChainSync on our tip`);
                 else logger.error("Range pipeline failed; resetting and restarting the primary's ChainSync:", err);
                 const primaryKey = this.candidates.primary();
                 const primary = primaryKey ? this.peerByKey(primaryKey) : null;
@@ -3183,7 +3184,7 @@ export class ConsensusOrchestrator {
                         logger.info(`Range ${points[0]!.slot}..${points[points.length - 1]!.slot} from ${fetchedFrom} dropped mid-apply: a rollback superseded it`);
                         return null;
                     }
-                    throw new Error(
+                    throw new RangeStale(
                         `range from ${fetchedFrom} does not extend the applied chain: block ${blockHash.slice(0, 12)}…@${blockSlot} has prev ${prevHex.slice(0, 12)}… but the tip is ${expectedPrev.map((h) => h.slice(0, 12) + "…").join("/")}; nothing applied, re-anchoring on the DB tip`,
                     );
                 }

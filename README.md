@@ -1,5 +1,5 @@
 <p align="center">
-  <img width="200px" src="https://github.com/HarmonicLabs/gerolamo/blob/closeout-demo/assets/gerolamo-logo.svg" align="center"/>
+  <img width="200px" src="assets/gerolamo-logo.svg" align="center"/>
   <h1 align="center">Gerolamo</h1>
   <p align="center">Cardano TypeScript node / relay — Bun runtime</p>
 </p>
